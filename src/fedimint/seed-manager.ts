@@ -63,6 +63,39 @@ export const SEED_PUBLISHED_MARKER_KEY = "chama_seed_published_v1";
 /** Longer recovery timeout — was 5s, far too short on slow networks. */
 export const SEED_RECOVERY_TIMEOUT_MS = 15_000;
 
+/** v0.1.85 Bug G — backoff schedule for retrying a zero-event recovery
+ *  query when we KNOW a seed should exist (marker present). Three
+ *  retries at 1s / 2s / 4s — addresses transient relay flakiness on
+ *  cold-start auto-init without compromising the safety semantics for
+ *  genuinely lost seeds. The initial query already runs once before
+ *  the retry helper engages, so total attempts = 4. */
+export const SEED_RECOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+
+/**
+ * Run `queryFn` up to `delaysMs.length` times, sleeping between attempts.
+ * Returns the first non-empty result, or [] if every attempt was empty.
+ *
+ * Pure: takes the query function and an optional sleep injector so the
+ * retry behavior can be unit-tested without real timers or relays.
+ *
+ * Used by getOrCreateSeed when an initial recovery query returns zero
+ * events AND a seed-published marker exists locally (i.e. we expect
+ * the seed to be on relays — empty result must be transient).
+ */
+export async function queryUntilFound<T>(
+  queryFn: () => Promise<T[]>,
+  delaysMs: number[],
+  sleepFn: (ms: number) => Promise<void> = (ms) =>
+    new Promise((r) => setTimeout(r, ms)),
+): Promise<T[]> {
+  for (let i = 0; i < delaysMs.length; i++) {
+    if (delaysMs[i] > 0) await sleepFn(delaysMs[i]);
+    const events = await queryFn();
+    if (events.length > 0) return events;
+  }
+  return [];
+}
+
 /**
  * v0.1.74 [$$] money-flow instrumentation, gated on
  * localStorage.chama_debug_money === "1". Used to trace the seed
@@ -178,20 +211,44 @@ export async function getOrCreateSeed(
   // negative "no seed exists" result and a fresh-mnemonic generation
   // that displaced the user's real seed on relays.
   mlog("SEED-RECOVERY-START", { pubkey: pubkey.slice(0, 8), timeoutMs: SEED_RECOVERY_TIMEOUT_MS });
-  const existing = await client.queryOnce(
-    {
-      kinds: [CHAMA_SEED_KIND],
-      authors: [pubkey],
-      "#d": [CHAMA_SEED_D_TAG],
-      limit: 4,
-    },
-    SEED_RECOVERY_TIMEOUT_MS
-  );
+  const seedFilter = {
+    kinds: [CHAMA_SEED_KIND],
+    authors: [pubkey],
+    "#d": [CHAMA_SEED_D_TAG],
+    limit: 4,
+  };
+  let existing = await client.queryOnce(seedFilter, SEED_RECOVERY_TIMEOUT_MS);
   mlog("SEED-RECOVERY-RESULT", {
     pubkey: pubkey.slice(0, 8),
     eventCount: existing.length,
     eventIds: existing.map(e => e.id?.slice(0, 8)).join(","),
   });
+
+  // v0.1.85 Bug G — retry-with-backoff for cold-start relay flakiness.
+  // Only retry when we have a marker (we KNOW a seed should exist);
+  // for true first-launch (no marker) zero events is the correct
+  // signal and we should proceed straight to fresh-mnemonic generation
+  // without artificial latency. The retry doesn't loosen the safety
+  // guard — it just gives the relay pool a chance to warm up before
+  // we declare the seed unreachable. After all retries exhaust, the
+  // existing v0.1.74 refuse-fresh logic still kicks in.
+  if (existing.length === 0 && loadSeedPublishedMarker(pubkey)) {
+    mlog("SEED-RECOVERY-RETRY-START", {
+      pubkey: pubkey.slice(0, 8),
+      delaysMs: SEED_RECOVERY_RETRY_DELAYS_MS.join(","),
+    });
+    existing = await queryUntilFound(
+      () => client.queryOnce(seedFilter, SEED_RECOVERY_TIMEOUT_MS),
+      SEED_RECOVERY_RETRY_DELAYS_MS,
+    );
+    mlog("SEED-RECOVERY-RETRY-RESULT", {
+      pubkey: pubkey.slice(0, 8),
+      eventCount: existing.length,
+    });
+    if (existing.length > 0) {
+      console.info("[chama] Fedimint seed recovered on retry (relay pool warmed up)");
+    }
+  }
 
   if (existing.length > 0) {
     // Sort by newest first. Try each event until one decrypts to a valid mnemonic.

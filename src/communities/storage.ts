@@ -31,6 +31,25 @@ export function getUserCommunitySlug(): string {
   }
 }
 
+/** Read the raw stored community slug, returning `null` when the user
+ *  hasn't picked one yet. Use this for UI affordances that should
+ *  distinguish "explicit choice" from "default fallback" — e.g. the
+ *  community pill highlight, where a first-time user should see no
+ *  pill highlighted rather than a misleading default. For resolution
+ *  paths (createEscrow, initFedimint) keep using `getUserCommunitySlug`,
+ *  which guarantees a non-null slug. */
+export function getUserCommunitySlugRaw(): string | null {
+  try {
+    const raw = typeof localStorage !== "undefined"
+      ? localStorage.getItem(COMMUNITY_STORAGE_KEY)
+      : null;
+    if (!raw) return null;
+    return getCommunityBySlug(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Persist the user's community choice. Pass empty string to clear and
  *  revert to the default on next read. */
 export function setUserCommunitySlug(slug: string): void {

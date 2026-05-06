@@ -18,7 +18,7 @@
 //   PR 2 — community + listing schema + BLF resolver + vote labels:
 //     - Community registry lookup (valid/missing/null slug)
 //     - User community storage (default + persistence)
-//     - BLF fallback in resolveFederationForCommunity
+//     - BP fallback in resolveFederationForCommunity (BLF only via opt-in)
 //     - Fulfillment normalization in handleCreate (auto-set per category)
 //     - Vote label dictionary returns the right copy per
 //       (category, fulfillment, role, outcome) tuple
@@ -77,17 +77,28 @@ import {
   COMMUNITY_REGISTRY,
   DEFAULT_COMMUNITY_SLUG,
   getCommunityBySlug,
+  getPickerCommunities,
+  getCustomCommunities,
+  getCustomCommunityBySlug,
+  addCustomCommunity,
+  removeCustomCommunity,
 } from "../communities/registry.js";
 import {
   getUserCommunitySlug,
+  getUserCommunitySlugRaw,
   setUserCommunitySlug,
   COMMUNITY_STORAGE_KEY,
 } from "../communities/storage.js";
 import {
   resolveFederationForCommunity,
   setCustomFederationInvite,
-  DEFAULT_FEDERATION_INVITE,
+  BP_FEDERATION_INVITE,
+  BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
+import {
+  queryUntilFound,
+  SEED_RECOVERY_RETRY_DELAYS_MS,
+} from "../fedimint/seed-manager.js";
 import {
   getVoteLabel,
   defaultFulfillmentFor,
@@ -950,12 +961,15 @@ console.log("\n── EXPIRY ──");
 // ── 14. COMMUNITY REGISTRY + STORAGE ─────────────────────────────────────
 console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 {
-  // Registry shape — load-bearing seeds present
-  assert(COMMUNITY_REGISTRY.length === 4, "Registry has the 4 PR 2 seeds");
+  // v0.1.85: registry pre-seed expanded to 5 entries — sn-cfa, global-usd,
+  // ke-kes (now Afribit-backed), us-blf (new), sv-usd (sunset, hiddenFromPicker).
+  // Permissionless additions live in localStorage and are not counted here.
+  assert(COMMUNITY_REGISTRY.length === 5, "Registry has the 5 v0.1.85 pre-seeds");
   assert(getCommunityBySlug("sn-cfa")?.currency === "XOF", "sn-cfa is XOF");
   assert(getCommunityBySlug("ke-kes")?.currency === "KES", "ke-kes is KES");
   assert(getCommunityBySlug("sv-usd")?.currency === "USD", "sv-usd is USD");
   assert(getCommunityBySlug("global-usd")?.currency === "USD", "global-usd is USD");
+  assert(getCommunityBySlug("us-blf")?.currency === "USD", "us-blf is USD");
   assert(DEFAULT_COMMUNITY_SLUG === "global-usd", "Default community is global-usd");
 
   // Lookup with valid + missing slug
@@ -964,18 +978,53 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug(null) === null, "Null slug returns null");
   assert(getCommunityBySlug(undefined) === null, "Undefined slug returns null");
 
-  // v0.1.82: global-usd was repointed from BLF to BP because BLF
-  // requires Iroh transport unavailable in open-web browsers. Other
-  // seed communities (sn-cfa, ke-kes, sv-usd) keep federationInvite
-  // null and inherit the BLF fallback — when their dedicated
-  // federations come online they'll override.
-  const nonGlobalUseFallback = COMMUNITY_REGISTRY
-    .filter(c => c.slug !== "global-usd")
-    .every(c => c.federationInvite === null);
-  assert(nonGlobalUseFallback,
-    "Non-global v1 communities fall back to BLF (federationInvite null)");
-  assert(getCommunityBySlug("global-usd")?.federationInvite?.startsWith("fed1") === true,
-    "global-usd has explicit federationInvite (browser-reachable BP)");
+  // v0.1.85: every pre-seed now pins federationInvite explicitly. BP for
+  // browser-friendly defaults (sn-cfa, global-usd), Afribit for ke-kes,
+  // BLF for the explicit us-blf entry. sv-usd carries a null invite as
+  // a sunset marker (hidden from picker; resolves on-the-wire to BP).
+  const allPinned = COMMUNITY_REGISTRY
+    .filter(c => !c.hiddenFromPicker)
+    .every(c => typeof c.federationInvite === "string" && c.federationInvite.startsWith("fed1"));
+  assert(allPinned,
+    "Every visible pre-seed pins federationInvite explicitly (no implicit fallback)");
+  assert(getCommunityBySlug("sv-usd")?.hiddenFromPicker === true,
+    "sv-usd is hidden from picker (sunset entry)");
+  assert(getCommunityBySlug("sv-usd")?.federationInvite === null,
+    "sv-usd carries null invite (resolves to BP fallback on-the-wire)");
+
+  // Schema additions: every entry must carry the new fields
+  for (const c of COMMUNITY_REGISTRY) {
+    assert(typeof c.flagEmoji === "string" && c.flagEmoji.length > 0,
+      `${c.slug} has flagEmoji`);
+    assert(c.country === null || typeof c.country === "string",
+      `${c.slug} country is string|null`);
+    assert(typeof c.browserReliable === "boolean",
+      `${c.slug} has browserReliable`);
+    assert(typeof c.hiddenFromPicker === "boolean",
+      `${c.slug} has hiddenFromPicker`);
+  }
+  // Reliability flags reflect transport reality. v0.1.85 smoke-test
+  // discovery: every Fedimint federation we have access to today
+  // shares the same iroh-relay infrastructure, so browser users hit
+  // the same flakiness regardless of which fed they pick. The flag
+  // stays in the schema so individual entries flip back to true once
+  // upstream @fedimint/transport-web lands a fix and we verify per-fed.
+  for (const c of COMMUNITY_REGISTRY) {
+    assert(c.browserReliable === false,
+      `${c.slug} browserReliable=false (universal iroh-relay limitation)`);
+    assert(typeof c.notes === "string" && c.notes.includes("iroh-relay"),
+      `${c.slug} carries the shared iroh-limitation note`);
+  }
+  assert(getCommunityBySlug("ke-kes")?.disambiguator === "Afribit",
+    "ke-kes disambiguator=Afribit (multi-fed-per-country prep)");
+
+  // Picker filter excludes hiddenFromPicker entries
+  const picker = getPickerCommunities();
+  assert(picker.length === 4, "Picker shows 4 visible entries (sv-usd hidden)");
+  assert(!picker.some(c => c.slug === "sv-usd"),
+    "Picker excludes sv-usd");
+  assert(picker.some(c => c.slug === "us-blf"),
+    "Picker includes us-blf");
 
   // Storage roundtrip — defaults to global-usd when nothing set
   (globalThis as any).localStorage.clear();
@@ -998,33 +1047,155 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getUserCommunitySlug() === "global-usd", "Empty string clears, falls to default");
 }
 
-// ── 15. BLF RESOLVER ─────────────────────────────────────────────────────
-console.log("\n── BLF RESOLVER ──");
+// ── 14b. PERMISSIONLESS COMMUNITY ADDITION (v0.1.85) ─────────────────────
+console.log("\n── PERMISSIONLESS COMMUNITY ADDITION ──");
 {
-  // No custom invite, no community: pure BLF fallback
   (globalThis as any).localStorage.clear();
-  assert(resolveFederationForCommunity(null) === DEFAULT_FEDERATION_INVITE,
-    "Null slug → BLF default");
-  assert(resolveFederationForCommunity(undefined) === DEFAULT_FEDERATION_INVITE,
-    "Undefined slug → BLF default");
-  assert(resolveFederationForCommunity("xx-unknown") === DEFAULT_FEDERATION_INVITE,
-    "Unknown slug → BLF default");
 
-  // Known community whose federationInvite is null → still BLF (the
-  // load-bearing v1 invariant: communities without their own federation
-  // are silently backed by BLF, not blocked).
-  assert(resolveFederationForCommunity("sn-cfa") === DEFAULT_FEDERATION_INVITE,
-    "Community with null federationInvite → BLF fallback");
-  assert(resolveFederationForCommunity("ke-kes") === DEFAULT_FEDERATION_INVITE,
-    "ke-kes → BLF fallback");
-  // v0.1.82: global-usd no longer falls back to BLF — its registry
-  // entry has an explicit BP invite for browser reachability. Resolver
-  // returns whatever the registry says.
+  // Empty by default
+  assert(getCustomCommunities().length === 0, "No custom communities initially");
+  assert(getCustomCommunityBySlug("anywhere") === null, "Unknown custom slug → null");
+
+  // Successful add — new entry surfaces in lookups + persists to localStorage
+  const fakeInvite = "fed1qtest_user_added_community_invite_for_persistence_test";
+  const added = addCustomCommunity({
+    slug: "br-brl",
+    displayName: "Brazil · BRL",
+    currency: "brl",
+    country: "BR",
+    flagEmoji: "🇧🇷",
+    federationInvite: fakeInvite,
+    languages: ["pt"],
+  });
+  assert(added.slug === "br-brl", "addCustomCommunity returns the new entry");
+  assert(added.currency === "BRL", "Currency normalized to upper-case");
+  assert(added.notes === "user-added", "User-added entries marked in notes");
+  assert(added.browserReliable === true, "Default browserReliable is true");
+  assert(added.hiddenFromPicker === false, "User-added entries are visible by default");
+
+  assert(getCustomCommunities().length === 1, "One custom community after add");
+  assert(getCustomCommunityBySlug("br-brl")?.federationInvite === fakeInvite,
+    "Custom community persists with full payload");
+  assert(getCommunityBySlug("br-brl")?.flagEmoji === "🇧🇷",
+    "getCommunityBySlug walks pre-seeds AND custom entries");
+
+  // localStorage roundtrip — re-reading from raw storage finds the entry
+  const raw = (globalThis as any).localStorage.getItem("chama_custom_communities");
+  assert(raw && raw.includes("br-brl"), "Persisted to chama_custom_communities key");
+
+  // Slug collision with pre-seed → throws
+  let threwOnPreSeedCollision = false;
+  try {
+    addCustomCommunity({
+      slug: "sn-cfa",
+      displayName: "Hijack",
+      currency: "XOF",
+      country: "SN",
+      flagEmoji: "🇸🇳",
+      federationInvite: fakeInvite,
+    });
+  } catch (e: any) {
+    threwOnPreSeedCollision = /pre-seeded/.test(e.message || "");
+  }
+  assert(threwOnPreSeedCollision, "Pre-seed slug collision rejects with clear error");
+
+  // Invalid invite → throws
+  let threwOnBadInvite = false;
+  try {
+    addCustomCommunity({
+      slug: "xx-test",
+      displayName: "Test",
+      currency: "USD",
+      country: null,
+      flagEmoji: "🌍",
+      federationInvite: "not-a-fed1-invite",
+    });
+  } catch (e: any) {
+    threwOnBadInvite = /fed1/.test(e.message || "");
+  }
+  assert(threwOnBadInvite, "Invalid invite rejects with clear error");
+
+  // Invalid slug shape → throws
+  let threwOnBadSlug = false;
+  try {
+    addCustomCommunity({
+      slug: "Bad Slug!",
+      displayName: "Test",
+      currency: "USD",
+      country: null,
+      flagEmoji: "🌍",
+      federationInvite: fakeInvite,
+    });
+  } catch (e: any) {
+    threwOnBadSlug = /slug/.test(e.message || "");
+  }
+  assert(threwOnBadSlug, "Invalid slug shape rejects with clear error");
+
+  // Update-by-overwrite: re-adding same slug overwrites payload
+  addCustomCommunity({
+    slug: "br-brl",
+    displayName: "Brazil · BRL · Updated",
+    currency: "BRL",
+    country: "BR",
+    flagEmoji: "🇧🇷",
+    federationInvite: fakeInvite,
+  });
+  assert(getCustomCommunities().length === 1, "Re-add same slug overwrites, doesn't duplicate");
+  assert(getCustomCommunityBySlug("br-brl")?.displayName === "Brazil · BRL · Updated",
+    "Re-add updates fields in place");
+
+  // Removal works
+  removeCustomCommunity("br-brl");
+  assert(getCustomCommunities().length === 0, "Custom community removed");
+  assert(getCustomCommunityBySlug("br-brl") === null, "Lookup after remove returns null");
+
+  // Picker integration — custom entries don't appear in pre-seed picker by default
+  // (picker callers compose: pre-seed + custom themselves)
+  assert(getPickerCommunities().every(c => c.notes !== "user-added"),
+    "getPickerCommunities returns only pre-seeds");
+}
+
+// ── 15. BP / BLF RESOLVER ────────────────────────────────────────────────
+// v0.1.85: the universal browser-friendly fallback is BP, not BLF. Every
+// pre-seeded community now has an explicit federationInvite. BLF is
+// reachable only via the us-blf entry, sandbox-mode picker, or a pasted
+// custom invite — never as an ambient fallback.
+console.log("\n── BP / BLF RESOLVER ──");
+{
+  // No custom invite, no community: BP fallback
+  (globalThis as any).localStorage.clear();
+  assert(resolveFederationForCommunity(null) === BP_FEDERATION_INVITE,
+    "Null slug → BP default");
+  assert(resolveFederationForCommunity(undefined) === BP_FEDERATION_INVITE,
+    "Undefined slug → BP default");
+  assert(resolveFederationForCommunity("xx-unknown") === BP_FEDERATION_INVITE,
+    "Unknown slug → BP default");
+
+  // Pre-seeded communities resolve to their pinned invite, not the BP
+  // fallback — the registry now carries the choice explicitly.
+  const snCfaInvite = getCommunityBySlug("sn-cfa")!.federationInvite!;
+  assert(resolveFederationForCommunity("sn-cfa") === snCfaInvite,
+    "sn-cfa → registry-pinned invite");
+  assert(snCfaInvite === BP_FEDERATION_INVITE,
+    "sn-cfa pins BP (browser-friendly fallback)");
+
+  const keKesInvite = getCommunityBySlug("ke-kes")!.federationInvite!;
+  assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
+    "ke-kes → registry-pinned invite");
+  assert(keKesInvite !== BP_FEDERATION_INVITE && keKesInvite !== BLF_FEDERATION_INVITE,
+    "ke-kes pins Afribit (distinct from BP and BLF)");
+
   const globalUsdInvite = getCommunityBySlug("global-usd")!.federationInvite!;
   assert(resolveFederationForCommunity("global-usd") === globalUsdInvite,
-    "global-usd → registry-pinned BP invite (not BLF)");
-  assert(globalUsdInvite !== DEFAULT_FEDERATION_INVITE,
-    "global-usd invite is distinct from BLF");
+    "global-usd → registry-pinned BP invite");
+  assert(globalUsdInvite === BP_FEDERATION_INVITE,
+    "global-usd pins BP");
+
+  const usBlfInvite = getCommunityBySlug("us-blf")!.federationInvite!;
+  assert(resolveFederationForCommunity("us-blf") === usBlfInvite,
+    "us-blf → registry-pinned invite");
+  assert(usBlfInvite === BLF_FEDERATION_INVITE,
+    "us-blf pins BLF (the only opt-in path to BLF as a community)");
 
   // Custom invite override beats community resolution
   const fakeCustomInvite = "fed1qcustom_user_pasted_invite_for_resolver_test";
@@ -1036,8 +1207,8 @@ console.log("\n── BLF RESOLVER ──");
 
   // Cleanup so other tests aren't poisoned
   setCustomFederationInvite("");
-  assert(resolveFederationForCommunity("sn-cfa") === DEFAULT_FEDERATION_INVITE,
-    "After clearing custom invite, falls back to BLF again");
+  assert(resolveFederationForCommunity(null) === BP_FEDERATION_INVITE,
+    "After clearing custom invite, falls back to BP again");
 }
 
 // ── 16. FULFILLMENT NORMALIZATION ────────────────────────────────────────
@@ -2037,6 +2208,340 @@ console.log("\n── PROD ENCRYPTION CYCLE (config flip) ──");
     ENCRYPTION_CONFIG.enabled = origEnabled;
     ENCRYPTION_CONFIG.encryptLock = origEncryptLock;
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// PR — UI shell decisions (v0.1.85 hotfix: picker gate + community-tap)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// These exercise the pure decision functions that drive the App.tsx
+// shell's two recently-broken behaviors:
+//   - Federation picker should not appear for returning users
+//   - Community-pill taps should change federation membership, not just
+//     filter Browse
+//
+// Importing src/ui from the harness is fine because decisions.ts is
+// pure (no React, no DOM) — it's domain logic that happens to sit in
+// the UI directory.
+
+import {
+  decideCommunityTapEffect,
+  shouldShowBrowserSupportBanner,
+} from "../ui/decisions.js";
+// BP_FEDERATION_INVITE / BLF_FEDERATION_INVITE already imported above
+// from federation-config (which re-exports from federation-invites).
+
+// (NOTE: shouldShowFirstTimePicker was retired in v0.1.85 — the on-shell
+// picker is gone; community pills are the primary first-time join
+// surface and Sandbox mode hosts the power-user picker.)
+
+// ── 28. COMMUNITY-PILL TAP EFFECT ───────────────────────────────────────
+console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
+{
+  // "all" is filter-only — never an identity change.
+  const allEffect = decideCommunityTapEffect({
+    slug: "all", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 0,
+  });
+  assert(allEffect.kind === "filter-only",
+    "Tap 'all' → filter-only effect");
+
+  // First-time user (no current invite) tapping a community → switch-silent.
+  // v0.1.85 update: the community pill IS the first-time join, no separate
+  // picker step. The handler dispatches initFedimint (vs switchFederation)
+  // based on whether a fed is already loaded.
+  const firstTime = decideCommunityTapEffect({
+    slug: "sn-cfa", currentInvite: null, balanceMsats: 0,
+  });
+  assert(firstTime.kind === "switch-silent",
+    "First-time user tap → switch-silent (one-tap join, no picker step)");
+  if (firstTime.kind === "switch-silent") {
+    assert(firstTime.targetInvite === BP_FEDERATION_INVITE,
+      "First-time tap on sn-cfa targets BP (its pinned invite)");
+    assert(firstTime.displayName === "Senegal · CFA",
+      "First-time tap carries the community displayName");
+  }
+
+  // Returning user already on the community's federation → identity-only.
+  const sameFed = decideCommunityTapEffect({
+    slug: "sn-cfa", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 0,
+  });
+  assert(sameFed.kind === "identity-only",
+    "Tap a community whose pinned invite matches current → identity-only");
+
+  // Returning user on a different fed, balance == 0 → silent switch.
+  const switchSilent = decideCommunityTapEffect({
+    slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 0,
+  });
+  assert(switchSilent.kind === "switch-silent",
+    "Tap different-fed community with balance=0 → switch-silent");
+  if (switchSilent.kind === "switch-silent") {
+    assert(switchSilent.targetInvite === BLF_FEDERATION_INVITE,
+      "Switch-silent targets the community's pinned invite (us-blf → BLF)");
+    assert(switchSilent.displayName === "US · Bitcoin Life · USD",
+      "Switch-silent carries the community's displayName");
+  }
+
+  // Returning user on a different fed, balance > 0 → destroy-confirm modal.
+  const destroyConfirm = decideCommunityTapEffect({
+    slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 50_000,
+  });
+  assert(destroyConfirm.kind === "destroy-confirm",
+    "Tap different-fed community with balance>0 → destroy-confirm");
+  if (destroyConfirm.kind === "destroy-confirm") {
+    assert(destroyConfirm.targetInvite === BLF_FEDERATION_INVITE,
+      "Destroy-confirm targets the community's pinned invite");
+    assert(destroyConfirm.balanceMsats === 50_000,
+      "Destroy-confirm carries the live balance for the modal copy");
+    assert(destroyConfirm.currentInvite === BP_FEDERATION_INVITE,
+      "Destroy-confirm carries the active invite for cancel-revert");
+  }
+
+  // Custom-invite override is bypassed — community-tap honors the
+  // community's pinned invite even if a custom override is set elsewhere.
+  // (We pass currentInvite as an arbitrary custom string and verify the
+  // target is still the community's pin, not the custom override.)
+  const customOverride = decideCommunityTapEffect({
+    slug: "ke-kes",
+    currentInvite: "fed1qcustom_invite_user_pasted_in_sandbox",
+    balanceMsats: 0,
+  });
+  assert(customOverride.kind === "switch-silent",
+    "Custom-invite override doesn't pin the user — tapping a community switches");
+  if (customOverride.kind === "switch-silent") {
+    const keKesInvite = getCommunityBySlug("ke-kes")!.federationInvite!;
+    assert(customOverride.targetInvite === keKesInvite,
+      "Community-tap target is the community's pin, not the custom override");
+  }
+
+  // Unknown slug → falls through to BP fallback. Edge case: a wire-stale
+  // slug somehow surfacing in the UI. We still treat it as a valid
+  // identity choice (better than a no-op silent failure).
+  const unknownSlug = decideCommunityTapEffect({
+    slug: "xx-unknown", currentInvite: BLF_FEDERATION_INVITE, balanceMsats: 0,
+  });
+  assert(unknownSlug.kind === "switch-silent",
+    "Unknown slug → switch-silent against BP fallback");
+  if (unknownSlug.kind === "switch-silent") {
+    assert(unknownSlug.targetInvite === BP_FEDERATION_INVITE,
+      "Unknown slug targets BP (universal fallback)");
+    assert(unknownSlug.displayName === "xx-unknown",
+      "Unknown slug uses the slug itself as displayName");
+  }
+}
+
+// ── 29. BROWSER SUPPORT BANNER GATE ─────────────────────────────────────
+//
+// One-time-per-account honest disclosure for browser users. v0.1.85
+// hotfix: gate dropped the fedimintJoined requirement so first-time
+// users see the banner BEFORE committing to a federation — that's the
+// right educational moment per Pillar 2.7.
+console.log("\n── BROWSER SUPPORT BANNER GATE ──");
+{
+  // Browser, never dismissed → show (regardless of join state)
+  assert(
+    shouldShowBrowserSupportBanner({
+      isBrowser: true, dismissed: false,
+    }) === true,
+    "Browser user (not yet dismissed) sees the banner",
+  );
+
+  // Native platform — no iroh issue, never show
+  assert(
+    shouldShowBrowserSupportBanner({
+      isBrowser: false, dismissed: false,
+    }) === false,
+    "Native (APK) user does NOT see the banner — iroh transport works there",
+  );
+
+  // Dismissed earlier — never re-show
+  assert(
+    shouldShowBrowserSupportBanner({
+      isBrowser: true, dismissed: true,
+    }) === false,
+    "Once dismissed, the banner stays dismissed across sessions",
+  );
+}
+
+// ── 30. setUserCommunitySlug LOCALSTORAGE ROUNDTRIP ─────────────────────
+//
+// The community-tap handler in App.tsx calls actions.setCommunity(slug),
+// which delegates to setUserCommunitySlug. Confirm the localStorage
+// write side effect explicitly so that "tap → identity stored" is
+// covered as a unit, not implied via section 14.
+console.log("\n── setUserCommunitySlug PERSISTENCE ──");
+{
+  (globalThis as any).localStorage.clear();
+  setUserCommunitySlug("ke-kes");
+  const raw = (globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY);
+  assert(raw === "ke-kes",
+    "setUserCommunitySlug writes the slug to chama_community key");
+  setUserCommunitySlug("sn-cfa");
+  const raw2 = (globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY);
+  assert(raw2 === "sn-cfa",
+    "Subsequent setUserCommunitySlug overwrites the prior value");
+}
+
+// ── 31. getUserCommunitySlugRaw — null for first-timers ─────────────────
+//
+// Bug A from v0.1.85 smoke testing: first-time users were seeing the
+// "Global · USD" pill highlighted because `getUserCommunitySlug` falls
+// back to global-usd when nothing is stored. The Raw variant returns
+// null in that case so the UI can distinguish "explicit choice" from
+// "default fallback" — pill highlight reads from Raw, resolution paths
+// (createEscrow, initFedimint) keep using the non-null helper.
+console.log("\n── getUserCommunitySlugRaw ──");
+{
+  // First-timer: nothing stored → null
+  (globalThis as any).localStorage.clear();
+  assert(getUserCommunitySlugRaw() === null,
+    "First-time user (nothing stored) → null (no pill highlight)");
+  assert(getUserCommunitySlug() === "global-usd",
+    "Resolution path still falls back to global-usd default");
+
+  // After picking: returns the slug
+  setUserCommunitySlug("sn-cfa");
+  assert(getUserCommunitySlugRaw() === "sn-cfa",
+    "After pick: raw returns the explicit slug");
+  assert(getUserCommunitySlug() === "sn-cfa",
+    "Resolution path matches");
+
+  // Stale/invalid stored slug: raw returns null (consistent with the
+  // non-Raw helper's fallback) so the picker doesn't highlight a
+  // nonexistent community.
+  (globalThis as any).localStorage.setItem(COMMUNITY_STORAGE_KEY, "ghost-fed");
+  assert(getUserCommunitySlugRaw() === null,
+    "Unknown stored slug → null (no stale-pill highlight)");
+  assert(getUserCommunitySlug() === "global-usd",
+    "Resolution path falls back to default for stale slug");
+
+  // Cleanup
+  (globalThis as any).localStorage.clear();
+}
+
+// ── 31b. SEED RECOVERY RETRY (v0.1.85 Bug G fix) ────────────────────────
+//
+// queryUntilFound is the retry helper getOrCreateSeed wraps around the
+// recovery-query call. When the initial query (outside the helper)
+// returns zero events AND a seed-published marker exists locally
+// (we KNOW a seed should be there), the caller invokes the helper to
+// retry with backoff before triggering the v0.1.74 refuse-fresh
+// safety guard.
+//
+// Semantics: delays[i] is the sleep duration BEFORE attempt i.
+// delays.length = total attempts. With [1000,2000,4000] the helper
+// sleeps 1s before attempt 1, then runs query → if empty, sleeps 2s
+// before attempt 2 → if empty, sleeps 4s before attempt 3. Tests use
+// a mock sleepFn so the suite runs without real timers.
+console.log("\n── SEED RECOVERY RETRY ──");
+{
+  // First-attempt success — one sleep (1s before attempt), one query.
+  {
+    const sleepCalls: number[] = [];
+    let queryCalls = 0;
+    const result = await queryUntilFound(
+      async () => {
+        queryCalls++;
+        return ["event1"];
+      },
+      [1000, 2000, 4000],
+      async (ms) => { sleepCalls.push(ms); },
+    );
+    assert(result.length === 1 && result[0] === "event1",
+      "Returns the first non-empty result");
+    assert(queryCalls === 1, "Stops after first success");
+    assert(sleepCalls.length === 1 && sleepCalls[0] === 1000,
+      "Sleeps 1s before the first retry attempt");
+  }
+
+  // Second-attempt success — two sleeps (1s, 2s), two queries.
+  {
+    const sleepCalls: number[] = [];
+    let queryCalls = 0;
+    const result = await queryUntilFound(
+      async () => {
+        queryCalls++;
+        return queryCalls < 2 ? [] : ["event-on-retry"];
+      },
+      [1000, 2000, 4000],
+      async (ms) => { sleepCalls.push(ms); },
+    );
+    assert(result.length === 1 && result[0] === "event-on-retry",
+      "Returns events found on second retry attempt");
+    assert(queryCalls === 2, "Stops after first non-empty result");
+    assert(sleepCalls.length === 2
+      && sleepCalls[0] === 1000
+      && sleepCalls[1] === 2000,
+      "Backoff sequence so far: 1s, 2s");
+  }
+
+  // Third-attempt success — three sleeps (1s, 2s, 4s), three queries.
+  {
+    const sleepCalls: number[] = [];
+    let queryCalls = 0;
+    const result = await queryUntilFound(
+      async () => {
+        queryCalls++;
+        return queryCalls < 3 ? [] : ["seed-late"];
+      },
+      [1000, 2000, 4000],
+      async (ms) => { sleepCalls.push(ms); },
+    );
+    assert(result.length === 1, "Recovers on third retry attempt");
+    assert(queryCalls === 3, "Three queries before success");
+    assert(sleepCalls.length === 3
+      && sleepCalls[0] === 1000
+      && sleepCalls[1] === 2000
+      && sleepCalls[2] === 4000,
+      "Full backoff sequence: 1s, 2s, 4s");
+  }
+
+  // All attempts empty — exhausts retries, returns []. This is the
+  // signal that triggers the v0.1.74 refuse-fresh safety guard in
+  // getOrCreateSeed (when a marker exists).
+  {
+    let queryCalls = 0;
+    const result = await queryUntilFound(
+      async () => {
+        queryCalls++;
+        return [];
+      },
+      [1000, 2000, 4000],
+      async () => { /* swallow sleeps */ },
+    );
+    assert(result.length === 0,
+      "Returns empty after exhausting all retries");
+    assert(queryCalls === 3,
+      "Total 3 query attempts (matches delays.length)");
+  }
+
+  // Default retry schedule shape (the constant exported alongside).
+  assert(SEED_RECOVERY_RETRY_DELAYS_MS.length === 3,
+    "Default retry schedule has 3 attempts");
+  assert(SEED_RECOVERY_RETRY_DELAYS_MS[0] === 1000
+    && SEED_RECOVERY_RETRY_DELAYS_MS[1] === 2000
+    && SEED_RECOVERY_RETRY_DELAYS_MS[2] === 4000,
+    "Default retry schedule is 1s / 2s / 4s");
+}
+
+// ── 32. CreateForm derives mintUrl from community (no manual fed input) ─
+//
+// v0.1.85 cleanup: the federation invite input field was removed from
+// CreateForm. Listings now derive mintUrl from the user's current
+// community via resolveFederationForCommunity. This test pins the
+// behavior so a future regression that re-adds a manual fed picker
+// gets caught.
+console.log("\n── CreateForm-derived mintUrl ──");
+{
+  (globalThis as any).localStorage.clear();
+  // sn-cfa pins BP — listings in sn-cfa go to BP.
+  assert(resolveFederationForCommunity("sn-cfa") === BP_FEDERATION_INVITE,
+    "sn-cfa listing → BP invite (community-derived mintUrl)");
+  // us-blf pins BLF — listings in us-blf go to BLF.
+  assert(resolveFederationForCommunity("us-blf") === BLF_FEDERATION_INVITE,
+    "us-blf listing → BLF invite");
+  // Unknown community → BP fallback.
+  assert(resolveFederationForCommunity("xx-unknown") === BP_FEDERATION_INVITE,
+    "Unknown community → BP fallback (no listing stranded)");
 }
 
 // ══════════════════════════════════════════════════════════════════════════

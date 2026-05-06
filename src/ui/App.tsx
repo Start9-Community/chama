@@ -1,3043 +1,55 @@
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
-const QRScanner = lazy(() => import("./QRScanner.js"));
-const QRCode = lazy(() => import("./QRCode.js"));
-import { useEscrow, type FedimintState } from "../hooks/useEscrow.js";
-import { type EscrowState, Role, Outcome, EscrowStatus, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
-import { canVote, getWinner, getSummary } from "../escrow-engine/state-machine.js";
-import {
-  type FederationPreset,
-  CURATED_PRESETS,
-  fetchObserverFederations,
-  mergePresets,
-  COMMUNITY_LEADER_MESSAGE,
-  DEFAULT_FEDERATION_INVITE,
-} from "../fedimint/federation-config.js";
+
+import { useEscrow } from "../hooks/useEscrow.js";
+import { type EscrowState, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
 import { getFederationInvite, getActiveInvite } from "../fedimint/index.js";
-import { COMMUNITY_REGISTRY, getCommunityBySlug } from "../communities/registry.js";
-import { getVoteLabel, categoryAllowsFulfillmentChoice, type Fulfillment } from "../labels/vote-labels.js";
+import { getCommunityBySlug } from "../communities/registry.js";
+import { getUserCommunitySlugRaw } from "../communities/storage.js";
+
+import { T } from "./theme.js";
 import {
-  RAIL_REGISTRY,
-  getRailByKey,
-  railsForCommunity,
-  railAllowsPublicHandle,
-} from "../payments/rail-registry.js";
-import {
-  type SavedHandle,
-  listSavedHandles,
-  addSavedHandle,
-  deleteSavedHandle,
-  setHandleVisibility,
-  getSavedHandlesByRail,
-  maskHandle,
-  handleDisplayForViewer,
-  publicHandleDisplay,
-} from "../payments/saved-handles.js";
+  decideCommunityTapEffect,
+  shouldShowBrowserSupportBanner,
+} from "./decisions.js";
+import { Toast } from "./components/Toast.js";
+import { BottomNav, BOTTOM_NAV_HEIGHT, type Tab } from "./components/BottomNav.js";
+import { BrowserSupportBanner } from "./components/BrowserSupportBanner.js";
 
-// ══════════════════════════════════════════════════════════════════════════
-// DESIGN TOKENS
-// ══════════════════════════════════════════════════════════════════════════
+import { BrowseView } from "./screens/BrowseView.js";
+import { ConnectScreen } from "./screens/ConnectScreen.js";
+import { TradeDetail } from "./screens/TradeDetail.js";
+import { CreateForm } from "./screens/CreateForm.js";
+import { MeScreen } from "./screens/MeScreen.js";
+import { SettingsAdvanced } from "./screens/SettingsAdvanced.js";
 
-const T = {
-  bg: "#0a0a0f", surface: "#111118", card: "#16161f",
-  border: "#1e1e2e", borderHi: "#2a2a3e",
-  text: "#e8e6e0", muted: "#6b6980",
-  accent: "#f7931a", accentDim: "#f7931a33",
-  green: "#22c55e", greenDim: "#22c55e22",
-  red: "#ef4444", redDim: "#ef444422",
-  purple: "#a78bfa", purpleDim: "#a78bfa22",
-  teal: "#2dd4bf", tealDim: "#2dd4bf22",
-  amber: "#fbbf24", amberDim: "#fbbf2422",
-  r: 12, rs: 8,
-  mono: "'JetBrains Mono','SF Mono','Fira Code',monospace",
-  sans: "'DM Sans',-apple-system,sans-serif",
+import { WalletBar } from "./panels/WalletBar.js";
+import { FedimintBar } from "./panels/FedimintBar.js";
+import { DestroyEcashConfirmModal } from "./panels/DestroyEcashConfirmModal.js";
+import { FundWalletModal } from "./panels/FundWalletModal.js";
+import { SavedHandlesPanel } from "./panels/SavedHandlesPanel.js";
+
+const QRScanner = lazy(() => import("./QRScanner.js"));
+
+// View routing — flat enum; the bottom nav highlights based on which
+// "tab family" the current view belongs to (see TAB_FOR_VIEW below).
+type View =
+  | "browse"
+  | "detail"
+  | "create"
+  | "me"
+  | "saved-handles"
+  | "advanced";
+
+const TAB_FOR_VIEW: Record<View, Tab> = {
+  browse: "browse",
+  detail: "browse",
+  create: "create",
+  me: "me",
+  "saved-handles": "me",
+  advanced: "me",
 };
-
-// v0.1.66.33: human-first status vocabulary + three visual modes.
-//   mode "active"   → filled pill, pulsing dot (user action required)
-//   mode "working"  → filled pill, static dot  (system working)
-//   mode "resolved" → outlined pill, no dot    (done)
-// Labels rewritten from system-POV to user-POV: "Funded" ← technically
-// correct but suggests money moved when it hasn't; "Approved" ← vague
-// approval for what; "Expired" ← sounds irreversible when it can heal.
-type StatusMode = "active" | "working" | "resolved";
-const STATUS = {
-  CREATED:   { c: T.teal,   bg: T.tealDim,   l: "Open",            mode: "working"  as StatusMode },
-  LOCKED:    { c: T.purple, bg: T.purpleDim, l: "Sats in escrow",  mode: "working"  as StatusMode },
-  APPROVED:  { c: T.accent, bg: T.accentDim, l: "Ready to claim",  mode: "active"   as StatusMode },
-  CLAIMED:   { c: T.amber,  bg: T.amberDim,  l: "Settling",        mode: "working"  as StatusMode },
-  COMPLETED: { c: T.green,  bg: T.greenDim,  l: "Done",            mode: "resolved" as StatusMode },
-  EXPIRED:   { c: T.red,    bg: T.redDim,    l: "Timed out",       mode: "active"   as StatusMode },
-  CANCELLED: { c: T.muted,  bg: T.surface,   l: "Cancelled",       mode: "resolved" as StatusMode },
-} as Record<string, { c: string; bg: string; l: string; mode: StatusMode }>;
-
-// v0.1.64: brand-pack role colors (from Chama brand README)
-//   Buyer   = Nostr Purple   #BF5AF2
-//   Seller  = Bitcoin Orange #F7931A
-//   Arbiter = Signal Teal    #5AC8FA
-// These are explicit hex rather than T.* tokens so the role
-// palette is isolated from the rest of the design system.
-const ROLE_COLOR = { buyer: "#BF5AF2", seller: "#F7931A", arbiter: "#5AC8FA" };
-const ROLE_ICON  = { buyer: "B", seller: "S", arbiter: "A" };
-const CAT_ICON = { "p2p-trade": "⚡", "bill-pay": "🧾", marketplace: "🏪", lending: "🤝" } as Record<string, string>;
-const CAT_LABEL: Record<string, string> = { "p2p-trade": "⚡ P2P Trade", "bill-pay": "🧾 Bill Pay", marketplace: "🏪 Marketplace", lending: "🤝 Lending", "raw-escrow": "🔧 Raw Escrow" };
-
-// Browse tab category filter pills. `id` matches state.category values
-// (or "all"/"subscription" as cross-cutting filters). Icons match the
-// create-form palette so the two flows feel continuous.
-const BROWSE_CATS: { id: string; l: string; i: string }[] = [
-  { id: "all",          l: "All",          i: "" },
-  { id: "p2p-trade",    l: "P2P Trade",    i: "⚡" },
-  { id: "bill-pay",     l: "Bill Pay",     i: "🧾" },
-  { id: "marketplace",  l: "Marketplace",  i: "🏪" },
-  { id: "lending",      l: "Lending",      i: "🤝" },
-  { id: "subscription", l: "Subscription", i: "🔄" },
-];
-
-const fmtSats = (ms: number) => Math.floor(ms / 1000).toLocaleString();
-
-// v0.1.64: Who receives sats on a REFUND outcome, by category.
-// Mirrors the getWinner() logic in state-machine.ts for the REFUND branch.
-//   marketplace: buyer locks → refund returns to buyer
-//   p2p-trade / bill-pay / lending / raw-escrow: seller locks → refund to seller
-function refundRecipientFor(category: string): "buyer" | "seller" {
-  return category === "marketplace" ? "buyer" : "seller";
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// MICRO COMPONENTS
-// ══════════════════════════════════════════════════════════════════════════
-
-function Badge({ status }: { status: string }) {
-  const s = STATUS[status] || STATUS.CREATED;
-  // v0.1.66.33: pill treatment depends on mode.
-  // Resolved → outlined, no dot. Active → filled, pulsing dot.
-  // Working → filled, static dot.
-  const isResolved = s.mode === "resolved";
-  const isActive = s.mode === "active";
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 5,
-      padding: "3px 10px", borderRadius: 20,
-      background: isResolved ? "transparent" : s.bg,
-      color: s.c,
-      border: isResolved ? `1px solid ${s.c}66` : "1px solid transparent",
-      fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
-      textTransform: "uppercase", fontFamily: T.mono,
-    }}>
-      {!isResolved && (
-        <span style={{
-          width: 6, height: 6, borderRadius: "50%", background: s.c,
-          boxShadow: `0 0 8px ${s.c}66`,
-          animation: isActive ? "pulse 2s ease-in-out infinite" : "none",
-        }} />
-      )}
-      {s.l}
-    </span>
-  );
-}
-
-function Dot({ role, pk, isYou, voted, outcome }: {
-  role: string; pk: string | null; isYou: boolean; voted: boolean; outcome?: string;
-}) {
-  const c = ROLE_COLOR[role as keyof typeof ROLE_COLOR] || T.muted;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-      <div style={{
-        width: 36, height: 36, borderRadius: "50%",
-        background: pk ? `${c}22` : T.surface,
-        border: `1.5px ${pk ? "solid" : "dashed"} ${pk ? c : T.border}`,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 13, fontWeight: 700, color: pk ? c : T.muted,
-        fontFamily: T.mono, position: "relative",
-      }}>
-        {ROLE_ICON[role as keyof typeof ROLE_ICON] || "?"}
-        {voted && (
-          <div style={{
-            position: "absolute", bottom: -2, right: -2,
-            width: 14, height: 14, borderRadius: "50%",
-            background: outcome === "release" ? T.green : T.amber,
-            border: `2px solid ${T.card}`,
-            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 8,
-          }}>
-            {outcome === "release" ? "✓" : "↩"}
-          </div>
-        )}
-      </div>
-      <span style={{ fontSize: 9, color: isYou ? c : T.muted, fontFamily: T.mono, fontWeight: isYou ? 700 : 400 }}>
-        {isYou ? "You" : pk ? pk.slice(0, 6) + "…" : "Empty"}
-      </span>
-    </div>
-  );
-}
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", padding: "12px 14px",
-  background: T.surface, border: `1px solid ${T.border}`,
-  borderRadius: T.rs, color: T.text,
-  fontFamily: T.sans, fontSize: 14, outline: "none", boxSizing: "border-box",
-};
-
-// ══════════════════════════════════════════════════════════════════════════
-// CONNECT SCREEN
-// ══════════════════════════════════════════════════════════════════════════
-
-function SubscriptionTimeline({ subscription, onRelease }: {
-  subscription: any;
-  onRelease: (periodIndex: number) => void;
-}) {
-  const now = Math.floor(Date.now() / 1000);
-  const sub = subscription;
-  if (!sub) return null;
-
-  return (
-    <div style={{
-      background: T.card, border: `1px solid ${T.purple}22`,
-      borderRadius: T.r, padding: 16, marginBottom: 16,
-    }}>
-      <div style={{
-        fontSize: 11, fontWeight: 600, color: T.purple, fontFamily: T.mono,
-        letterSpacing: 1, marginBottom: 12,
-      }}>
-        🔄 SUBSCRIPTION · {sub.releasedCount}/{sub.totalPeriods} RELEASED
-      </div>
-
-      {/* Period blocks */}
-      <div style={{ display: "flex", gap: 3, marginBottom: 12 }}>
-        {sub.periodStatuses.map((status: string, i: number) => {
-          const startTime = sub.periodStartTimes[i];
-          const endTime = startTime + sub.periodDurationSeconds;
-          const isActive = now >= startTime && now < endTime;
-          const isPast = now >= endTime;
-
-          const color = status === "released" ? T.green
-            : status === "disputed" ? T.red
-            : status === "refunded" ? T.amber
-            : isActive ? T.purple
-            : T.border;
-
-          return (
-            <div key={i} style={{
-              flex: 1, height: 28, borderRadius: 4,
-              background: `${color}${status === "released" ? "44" : isActive ? "66" : "22"}`,
-              border: `1px solid ${color}${isActive ? "88" : "33"}`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 8, fontFamily: T.mono, color,
-              fontWeight: isActive ? 700 : 400,
-              animation: isActive ? "pulse 2s ease-in-out infinite" : "none",
-              cursor: (isActive || isPast) && status === "pending" ? "pointer" : "default",
-            }}
-              title={`Period ${i + 1}: ${status}`}
-            >
-              {i + 1}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Legend */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
-        {[
-          { c: T.green, l: "Released" },
-          { c: T.purple, l: "Active" },
-          { c: T.border, l: "Pending" },
-          { c: T.red, l: "Disputed" },
-        ].map(item => (
-          <div key={item.l} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <div style={{ width: 8, height: 8, borderRadius: 2, background: item.c + "66" }} />
-            <span style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>{item.l}</span>
-          </div>
-        ))}
-      </div>
-
-      {/* Active period details + release button */}
-      {sub.periodStatuses.map((status: string, i: number) => {
-        const startTime = sub.periodStartTimes[i];
-        const endTime = startTime + sub.periodDurationSeconds;
-        const isActive = now >= startTime && now < endTime;
-        const canRelease = (isActive || now >= endTime) && status !== "released" && status !== "refunded";
-
-        if (!isActive && status !== "pending") return null;
-        if (!canRelease) return null;
-
-        const remaining = endTime - now;
-        const days = Math.floor(remaining / 86400);
-        const hours = Math.floor((remaining % 86400) / 3600);
-
-        return (
-          <div key={"release-" + i} style={{
-            padding: "12px", background: T.surface,
-            borderRadius: T.rs, border: `1px solid ${T.purple}22`,
-            marginBottom: 8,
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontSize: 11, color: T.purple, fontFamily: T.mono, fontWeight: 600 }}>
-                  Period {i + 1} · {Math.floor(sub.periodAmountMsats / 1000).toLocaleString()} sats
-                </div>
-                {remaining > 0 && (
-                  <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-                    Auto-releases in {days > 0 ? `${days}d ` : ""}{hours}h
-                  </div>
-                )}
-              </div>
-              <button onClick={() => onRelease(i)} style={{
-                padding: "8px 16px", borderRadius: T.rs,
-                background: T.greenDim, border: `1px solid ${T.green}33`,
-                color: T.green, fontFamily: T.mono, fontSize: 10, fontWeight: 600,
-                cursor: "pointer",
-              }}>
-                Release
-              </button>
-            </div>
-          </div>
-        );
-      })}
-
-      {/* Summary */}
-      <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, textAlign: "center" }}>
-        {Math.floor(sub.totalReleasedMsats / 1000).toLocaleString()} / {Math.floor(sub.totalPeriods * sub.periodAmountMsats / 1000).toLocaleString()} sats released
-      </div>
-    </div>
-  );
-}
-
-function NsecLogin({ onSubmit }: { onSubmit: (nsec: string, remember: boolean) => void }) {
-  const isNative = Capacitor.isNativePlatform();
-  const [showNsec, setShowNsec] = useState(isNative); // expanded by default on mobile
-  const [nsecInput, setNsecInput] = useState("");
-  const [remember, setRemember] = useState(isNative); // default remember on native
-
-  if (!showNsec) {
-    return (
-      <div
-        onClick={() => setShowNsec(true)}
-        style={{
-          marginTop: 8, fontSize: 10, color: T.muted,
-          fontFamily: T.mono, cursor: "pointer",
-          transition: "color 0.2s",
-        }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = T.text)}
-        onMouseLeave={(e) => (e.currentTarget.style.color = T.muted)}
-      >
-        or paste nsec (advanced)
-      </div>
-    );
-  }
-
-  const handleSubmit = () => {
-    if (!nsecInput.trim()) return;
-    onSubmit(nsecInput.trim(), remember);
-  };
-
-  return (
-    <div style={{ marginTop: isNative ? 0 : 8, width: "100%", maxWidth: 360 }}>
-      {isNative && (
-        <div style={{
-          fontSize: 10, color: T.muted, fontFamily: T.mono,
-          letterSpacing: 1, marginBottom: 8, textAlign: "center",
-        }}>
-          SIGN IN WITH YOUR KEY
-        </div>
-      )}
-      <input
-        value={nsecInput}
-        onChange={(e) => setNsecInput(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-        placeholder="nsec1... or hex private key"
-        type="password"
-        autoComplete="off"
-        autoCapitalize="off"
-        autoCorrect="off"
-        spellCheck={false}
-        style={{
-          width: "100%", padding: "14px 16px", boxSizing: "border-box",
-          background: T.surface, border: `1px solid ${T.border}`,
-          borderRadius: T.rs, color: T.text,
-          fontFamily: T.mono, fontSize: 12, outline: "none",
-          marginBottom: 8,
-        }}
-      />
-      <label style={{
-        display: "flex", alignItems: "center", gap: 8,
-        fontSize: 10, color: T.muted, fontFamily: T.mono,
-        cursor: "pointer", marginBottom: 10,
-        userSelect: "none" as const,
-      }}>
-        <input
-          type="checkbox"
-          checked={remember}
-          onChange={(e) => setRemember(e.target.checked)}
-          style={{ accentColor: T.accent, width: 14, height: 14, cursor: "pointer" }}
-        />
-        Remember me on this device
-      </label>
-      <button
-        onClick={handleSubmit}
-        disabled={!nsecInput.trim()}
-        style={{
-          width: "100%", padding: "14px",
-          background: nsecInput.trim() ? T.accent : T.surface,
-          border: `1px solid ${nsecInput.trim() ? T.accent : T.border}`,
-          borderRadius: T.rs, color: nsecInput.trim() ? T.bg : T.muted,
-          fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-          cursor: nsecInput.trim() ? "pointer" : "default",
-          letterSpacing: 0.5,
-          transition: "all 0.2s",
-        }}
-      >
-        Sign in
-      </button>
-      <div style={{
-        fontSize: 9, color: T.muted, fontFamily: T.mono,
-        textAlign: "center", marginTop: 10, lineHeight: 1.5,
-      }}>
-        {isNative
-          ? "Your key stays on this device, encrypted in secure storage."
-          : "Your key never leaves this browser."}
-      </div>
-    </div>
-  );
-}
-
-function ConnectScreen({ onConnect, onConnectNIP46, onConnectNsec, loading, error, nip46Uri, nip46Waiting }: {
-  onConnect: () => void;
-  onConnectNIP46: () => void;
-  onConnectNsec: (nsec: string, remember: boolean) => void | Promise<void>;
-  loading: boolean;
-  error: string | null;
-  nip46Uri?: string | null;
-  nip46Waiting?: boolean;
-}) {
-  const isNative = Capacitor.isNativePlatform();
-  const [showAdvanced, setShowAdvanced] = useState(false);
-
-  return (
-    <div style={{
-      display: "flex", flexDirection: "column", alignItems: "center",
-      justifyContent: "center", minHeight: "100vh", padding: "40px 24px",
-      textAlign: "center",
-      background: `radial-gradient(ellipse at 50% 0%, ${T.accent}08 0%, transparent 60%)`,
-    }}>
-      {/* v2.3 wordmark — the "chama." lockup with ring-as-c (SVG, transparent) */}
-      <div style={{ marginBottom: 32 }}>
-        <img
-          src="/icons/chama-wordmark.svg"
-          alt="Chama"
-          style={{
-            display: "block",
-            margin: "0 auto 16px",
-            height: 80,
-            width: "auto",
-            maxWidth: "90%",
-            filter: "drop-shadow(0 0 32px #f7931a22)",
-          }}
-        />
-        <div style={{
-          fontSize: 10, color: T.muted, fontFamily: T.mono,
-          letterSpacing: 3, textTransform: "uppercase",
-        }}>
-          Nostr · Fedimint · SSS
-        </div>
-      </div>
-
-      {/* Friendly tagline */}
-      <div style={{
-        maxWidth: 300, fontSize: 14, color: T.muted, lineHeight: 1.8,
-        fontFamily: T.sans, marginBottom: 32,
-      }}>
-        Pay bills with Bitcoin. Send money home.
-        <br />
-        <span style={{ color: T.text }}>Build your circular economy.</span>
-      </div>
-
-      {error && (
-        <div style={{
-          padding: "10px 16px", borderRadius: T.rs, marginBottom: 16,
-          background: T.redDim, border: `1px solid ${T.red}33`,
-          color: T.red, fontSize: 11, fontFamily: T.mono,
-          maxWidth: 340, wordBreak: "break-word",
-        }}>
-          {error}
-        </div>
-      )}
-
-      {/* NIP-46 QR code display (when waiting for signer) */}
-      {nip46Uri && (
-        <div style={{
-          width: "100%", maxWidth: 340, padding: 20, marginBottom: 16,
-          background: T.purpleDim, border: `1px solid ${T.purple}33`,
-          borderRadius: T.r, textAlign: "center",
-        }}>
-          <div style={{ fontSize: 13, color: T.purple, fontFamily: T.sans, marginBottom: 14, fontWeight: 600 }}>
-            Open your signer app and scan
-          </div>
-          <div style={{
-            display: "flex", justifyContent: "center", marginBottom: 14,
-            padding: 12, background: "#111118", borderRadius: 12,
-          }}>
-            <Suspense fallback={<div style={{ width: 200, height: 200 }} />}>
-              <QRCode data={nip46Uri} size={200} fgColor="#a78bfa" />
-            </Suspense>
-          </div>
-          <a href={nip46Uri} style={{
-            display: "block", padding: "10px 12px", marginBottom: 10,
-            background: T.surface, borderRadius: T.rs, border: `1px solid ${T.border}`,
-            color: T.purple, fontFamily: T.mono, fontSize: 9,
-            wordBreak: "break-all", lineHeight: 1.4, textDecoration: "none",
-            maxHeight: 50, overflow: "hidden",
-          }}>
-            {nip46Uri.slice(0, 60)}...
-          </a>
-          <button onClick={() => navigator.clipboard?.writeText(nip46Uri)} style={{
-            padding: "8px 20px", borderRadius: T.rs,
-            background: T.surface, border: `1px solid ${T.border}`,
-            color: T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer",
-          }}>Copy link</button>
-          {nip46Waiting && (
-            <div style={{
-              marginTop: 12, fontSize: 10, color: T.purple, fontFamily: T.mono,
-              animation: "pulse 2s ease-in-out infinite",
-            }}>
-              Waiting for your signer...
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Main action buttons */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", maxWidth: 320 }}>
-
-        {/* Primary: nsec sign in (native) or Extension (desktop) */}
-        {isNative ? (
-          <NsecLogin onSubmit={onConnectNsec} />
-        ) : (
-          <button
-            onClick={onConnect}
-            disabled={loading}
-            style={{
-              width: "100%", padding: "16px", borderRadius: T.r,
-              background: loading ? T.surface : T.accent,
-              border: "none", color: loading ? T.muted : T.bg,
-              fontFamily: T.sans, fontSize: 15, fontWeight: 700,
-              cursor: loading ? "default" : "pointer",
-              transition: "all 0.2s",
-            }}
-          >
-            {loading ? "Connecting..." : "Sign in with Extension"}
-          </button>
-        )}
-
-        {/* Secondary: NIP-46 signer — desktop only (on native, nsec is the full path) */}
-        {!isNative && !nip46Uri && (
-          <button
-            onClick={onConnectNIP46}
-            disabled={loading}
-            style={{
-              width: "100%", padding: "14px", borderRadius: T.r,
-              background: "transparent",
-              border: `1px solid ${T.border}`,
-              color: T.muted, fontFamily: T.sans, fontSize: 13, fontWeight: 600,
-              cursor: loading ? "default" : "pointer",
-              transition: "all 0.2s",
-            }}
-          >
-            {loading ? "Waiting..." : "Use a signer app"}
-          </button>
-        )}
-
-        {/* Desktop: show nsec option as advanced */}
-        {!isNative && (
-          <>
-            <div
-              onClick={() => setShowAdvanced(!showAdvanced)}
-              style={{
-                fontSize: 11, color: T.muted, fontFamily: T.mono,
-                cursor: "pointer", marginTop: 4, transition: "color 0.2s",
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = T.text)}
-              onMouseLeave={(e) => (e.currentTarget.style.color = T.muted)}
-            >
-              {showAdvanced ? "▲ Hide advanced" : "▼ More sign-in options"}
-            </div>
-            {showAdvanced && <NsecLogin onSubmit={onConnectNsec} />}
-          </>
-        )}
-      </div>
-
-      {/* Footer */}
-      <div style={{
-        marginTop: 40, fontSize: 9, color: T.muted + "66", fontFamily: T.mono,
-        lineHeight: 1.8, maxWidth: 280,
-      }}>
-        Your keys, your coins. No server. No custodian.
-        <br />
-        Powered by community trust + Bitcoin.
-      </div>
-    </div>
-  );
-}
-
-
-// ══════════════════════════════════════════════════════════════════════════
-// WALLET BAR
-// ══════════════════════════════════════════════════════════════════════════
-
-function WalletBar({ pubkey, connectedRelays, relayStatuses, onSignOut }: {
-  pubkey: string; connectedRelays: number; relayStatuses: Map<string, string>;
-  onSignOut?: () => void;
-}) {
-  const [showRelays, setShowRelays] = useState(false);
-  return (
-    <>
-      <div
-        onClick={() => setShowRelays(!showRelays)}
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "10px 16px", background: T.surface,
-          borderBottom: `1px solid ${T.border}`,
-          fontFamily: T.mono, cursor: "pointer",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{
-            width: 8, height: 8, borderRadius: "50%",
-            background: connectedRelays > 0 ? T.green : T.red,
-            boxShadow: `0 0 8px ${connectedRelays > 0 ? T.green : T.red}66`,
-          }} />
-          <span style={{ fontSize: 10, color: T.muted }}>
-            {connectedRelays} relay{connectedRelays !== 1 ? "s" : ""}
-          </span>
-          <span style={{ color: T.border }}>·</span>
-          <span style={{ fontSize: 10, color: T.muted }}>
-            {pubkey.slice(0, 8)}…{pubkey.slice(-4)}
-          </span>
-        </div>
-        <span style={{ fontSize: 10, color: T.muted }}>{showRelays ? "▲" : "▼"}</span>
-      </div>
-
-      {showRelays && (
-        <div style={{
-          padding: "8px 16px", background: T.surface,
-          borderBottom: `1px solid ${T.border}`,
-        }}>
-          {[...relayStatuses.entries()].map(([url, status]) => (
-            <div key={url} style={{
-              display: "flex", alignItems: "center", gap: 8,
-              padding: "4px 0", fontSize: 10, fontFamily: T.mono,
-            }}>
-              <div style={{
-                width: 6, height: 6, borderRadius: "50%",
-                background: status === "connected" ? T.green : status === "connecting" ? T.amber : T.red,
-              }} />
-              <span style={{ color: T.muted }}>{url.replace("wss://", "")}</span>
-              <span style={{ color: status === "connected" ? T.green : T.muted, marginLeft: "auto" }}>
-                {status}
-              </span>
-            </div>
-          ))}
-          {/* v0.1.64: Scan QR removed from WalletBar — re-expose deliberately if needed */}
-          {onSignOut && (
-            <div
-              onClick={() => {
-                if (confirm("Sign out? Your saved key will be removed from this device.")) {
-                  onSignOut();
-                }
-              }}
-              style={{
-                marginTop: 8, padding: "8px 12px",
-                background: T.redDim, border: `1px solid ${T.red}33`,
-                borderRadius: T.rs, fontSize: 10, fontFamily: T.mono,
-                color: T.red, cursor: "pointer", textAlign: "center",
-                fontWeight: 600, letterSpacing: 0.5,
-              }}
-            >
-              Sign out
-            </div>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// TRADE CARD
-// ══════════════════════════════════════════════════════════════════════════
-
-function TradeCard({ state, pubkey, onSelect }: {
-  state: EscrowState; pubkey: string; onSelect: () => void;
-}) {
-  const myRole = state.participants.buyer === pubkey ? "buyer"
-    : state.participants.seller === pubkey ? "seller"
-    : state.participants.arbiter === pubkey ? "arbiter" : null;
-
-  return (
-    <div onClick={onSelect} style={{
-      background: T.card, border: `1px solid ${T.border}`,
-      borderRadius: T.r, padding: 16, cursor: "pointer",
-      transition: "border-color 0.2s",
-    }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-            <span style={{ fontSize: 14, opacity: 0.6 }}>{CAT_ICON[state.category] || "📦"}</span>
-            {state.status === "EXPIRED" && (
-              <span style={{
-                fontSize: 9, padding: "2px 6px", borderRadius: 8,
-                background: T.redDim, color: T.red,
-                fontFamily: T.mono, fontWeight: 600,
-              }}>
-                ⏰ Expired
-              </span>
-            )}
-            {state.subscription && (
-              <span style={{
-                fontSize: 9, padding: "2px 6px", borderRadius: 8,
-                background: T.purpleDim, color: T.purple,
-                fontFamily: T.mono, fontWeight: 600,
-              }}>
-                🔄 {state.subscription.releasedCount}/{state.subscription.totalPeriods}
-              </span>
-            )}
-            <span style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans, lineHeight: 1.3 }}>
-              {state.description}
-            </span>
-            <span style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, opacity: 0.7 }}>
-              {CAT_LABEL[state.category] || state.category}
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: T.accent, fontFamily: T.mono }}>
-              {fmtSats(state.amountMsats)} sats
-            </span>
-            {state.fiatAmount && (
-              <span style={{ fontSize: 12, color: T.muted, fontFamily: T.mono }}>
-                {state.fiatCurrency} {state.fiatAmount.toLocaleString()}
-              </span>
-            )}
-          </div>
-        </div>
-        <Badge status={state.status} />
-      </div>
-
-      <div style={{ display: "flex", gap: 12, marginTop: 12, justifyContent: "center" }}>
-        {([Role.BUYER, Role.SELLER, Role.ARBITER] as Role[]).map(role => (
-          <Dot
-            key={role}
-            role={role}
-            pk={state.participants[role]}
-            isYou={myRole === role}
-            voted={!!state.votes[role]}
-            outcome={state.votes[role]}
-          />
-        ))}
-      </div>
-
-      {/* Compact countdown on card */}
-      {/* Expiry info — what happens when time runs out */}
-      {state.status === "LOCKED" && state.expiresAt && (() => {
-        const now = Math.floor(Date.now() / 1000);
-        const remaining = state.expiresAt - now;
-        const isExpired = remaining <= 0;
-        const isUrgent = remaining > 0 && remaining < 7200;
-        return isExpired ? (
-          <div style={{
-            padding: "12px 16px", borderRadius: T.rs, textAlign: "center",
-            background: T.redDim, border: `1px solid ${T.red}33`, marginBottom: 16,
-          }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.red, fontFamily: T.mono }}>
-              ⏰ TRADE EXPIRED
-            </div>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 4 }}>
-              🛡️ Community arbiter will auto-vote REFUND → sats return to {refundRecipientFor(state.category)}
-            </div>
-          </div>
-        ) : isUrgent ? (
-          <div style={{
-            padding: "8px 12px", borderRadius: T.rs, textAlign: "center",
-            background: T.redDim, border: `1px solid ${T.red}22`,
-            marginBottom: 8, fontSize: 9, color: T.red, fontFamily: T.mono,
-          }}>
-            ⚠️ Expiring soon — settle or the arbiter will auto-refund to {refundRecipientFor(state.category)}
-          </div>
-        ) : null;
-      })()}
-
-      {state.status === "LOCKED" && (
-        <div style={{
-          fontSize: 10, color: T.amber, fontFamily: T.mono,
-          textAlign: "center", marginBottom: 8,
-          padding: "6px 10px", borderRadius: 6,
-          background: T.amberDim || T.surface, border: `1px solid ${T.amber}22`,
-        }}>
-          ⏱️ If expired → arbiter auto-refunds to {refundRecipientFor(state.category)}
-        </div>
-      )}
-
-      {state.expiresAt && state.status !== "COMPLETED" && state.status !== "CANCELLED" && state.status !== "EXPIRED" && state.status !== "APPROVED" && state.status !== "CLAIMED" && (() => {
-        const rem = state.expiresAt - Math.floor(Date.now() / 1000);
-        if (rem <= 0) return <div style={{ fontSize: 9, color: T.red, fontFamily: T.mono, textAlign: "center", marginTop: 8 }}>EXPIRED</div>;
-        const h = Math.floor(rem / 3600);
-        const m = Math.floor((rem % 3600) / 60);
-        const color = rem < 600 ? T.red : rem < 3600 ? T.amber : T.muted;
-        return (
-          <div style={{ fontSize: 9, color, fontFamily: T.mono, textAlign: "center", marginTop: 8 }}>
-            {h > 0 ? `${h}h ${m}m remaining` : `${m}m remaining`}
-          </div>
-        );
-      })()}
-
-      {/* Escrow ID — tap to copy */}
-      <div
-        onClick={(e) => {
-          e.stopPropagation();
-          const id = state.id;
-          if (navigator.clipboard?.writeText) {
-            navigator.clipboard.writeText(id).catch(() => {});
-          } else {
-            const el = document.createElement("input");
-            el.value = id;
-            document.body.appendChild(el);
-            el.select();
-            document.execCommand("copy");
-            document.body.removeChild(el);
-          }
-          const t = e.currentTarget;
-          const orig = t.textContent;
-          t.textContent = "\u2705 Copied!";
-          t.style.color = "#22c55e";
-          setTimeout(() => { t.textContent = orig; t.style.color = ""; }, 1200);
-        }}
-        style={{
-          fontSize: 10, color: "#6b6980", fontFamily: "'JetBrains Mono','SF Mono','Fira Code',monospace",
-          textAlign: "center", marginTop: 8, cursor: "pointer",
-          padding: "4px 8px", borderRadius: 6,
-          transition: "all 0.2s",
-        }}
-      >
-        {state.id} — tap to copy
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// CHAT PANEL
-// ══════════════════════════════════════════════════════════════════════════
-
-function ChatPanel({ state, myRole, onSend }: {
-  state: EscrowState;
-  myRole: Role | null;
-  onSend: (message: string) => void;
-}) {
-  const [msg, setMsg] = useState("");
-  const [sending, setSending] = useState(false);
-  const chatEndRef = { current: null as HTMLDivElement | null };
-
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [state.chatMessages.length]);
-
-  const handleSend = async () => {
-    const text = msg.trim();
-    if (!text || !myRole || sending) return;
-    setSending(true);
-    try {
-      onSend(text);
-      setMsg("");
-    } finally {
-      setTimeout(() => setSending(false), 500);
-    }
-  };
-
-  const roleColor = (role: string) =>
-    role === "buyer" ? "#BF5AF2" : role === "seller" ? "#F7931A" : role === "arbiter" ? "#5AC8FA" : T.muted;
-
-  const roleName = (role: string) =>
-    role === "buyer" ? "Buyer" : role === "seller" ? "Seller" : role === "arbiter" ? "Arbiter" : "Unknown";
-
-  return (
-    <div style={{
-      background: T.card, border: `1px solid ${T.border}`,
-      borderRadius: T.r, marginBottom: 16, overflow: "hidden",
-    }}>
-      {/* Header */}
-      <div style={{
-        padding: "12px 16px",
-        borderBottom: `1px solid ${T.border}`,
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-      }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>
-          TRADE CHAT
-        </div>
-        <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>
-          {state.chatMessages.length} message{state.chatMessages.length !== 1 ? "s" : ""}
-          {" · plaintext"}
-        </div>
-      </div>
-
-      {/* Messages */}
-      <div style={{
-        maxHeight: 240, overflowY: "auto", padding: "12px 16px",
-        display: "flex", flexDirection: "column", gap: 8,
-      }}>
-        {state.chatMessages.length === 0 ? (
-          <div style={{
-            textAlign: "center", padding: "20px 0",
-            color: T.muted, fontFamily: T.mono, fontSize: 11,
-          }}>
-            No messages yet. Say something!
-          </div>
-        ) : (
-          state.chatMessages.map((chat, i) => {
-            const payload = chat.payload as any;
-            const isMe = myRole === payload.senderRole;
-            const color = roleColor(payload.senderRole);
-            return (
-              <div key={chat.raw.id || i} style={{
-                display: "flex", flexDirection: "column",
-                alignItems: isMe ? "flex-end" : "flex-start",
-              }}>
-                <div style={{
-                  fontSize: 9, color, fontFamily: T.mono,
-                  fontWeight: 600, marginBottom: 2,
-                }}>
-                  {isMe ? "You" : roleName(payload.senderRole)}
-                </div>
-                <div style={{
-                  padding: "8px 12px", borderRadius: 12,
-                  background: isMe ? `${color}22` : T.surface,
-                  border: `1px solid ${isMe ? color + "33" : T.border}`,
-                  maxWidth: "80%",
-                }}>
-                  <div style={{
-                    fontSize: 12, color: T.text, fontFamily: T.sans,
-                    lineHeight: 1.4, wordBreak: "break-word",
-                  }}>
-                    {payload.message}
-                  </div>
-                </div>
-                <div style={{
-                  fontSize: 8, color: T.muted, fontFamily: T.mono, marginTop: 2,
-                }}>
-                  {new Date(payload.sentAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </div>
-              </div>
-            );
-          })
-        )}
-        <div ref={el => { chatEndRef.current = el; }} />
-      </div>
-
-      {/* Input bar */}
-      {myRole && (
-        <div style={{
-          padding: "10px 12px",
-          borderTop: `1px solid ${T.border}`,
-          display: "flex", gap: 8,
-        }}>
-          <input
-            value={msg}
-            onChange={e => setMsg(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleSend()}
-            placeholder="Type a message..."
-            style={{
-              flex: 1, padding: "8px 12px",
-              background: T.surface, border: `1px solid ${T.border}`,
-              borderRadius: 20, color: T.text,
-              fontFamily: T.sans, fontSize: 12, outline: "none",
-            }}
-          />
-          <button
-            onClick={handleSend}
-            disabled={!msg.trim() || sending}
-            style={{
-              padding: "8px 16px", borderRadius: 20,
-              background: msg.trim() && !sending ? T.accentDim : T.surface,
-              border: `1px solid ${msg.trim() && !sending ? T.accent + "44" : T.border}`,
-              color: msg.trim() && !sending ? T.accent : T.muted,
-              fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-              cursor: msg.trim() && !sending ? "pointer" : "default",
-              transition: "all 0.2s",
-            }}
-          >
-            Send
-          </button>
-        </div>
-      )}
-
-      {/* Keet link placeholder */}
-      <div style={{
-        padding: "8px 16px",
-        borderTop: `1px solid ${T.border}`,
-        textAlign: "center",
-      }}>
-        <span style={{
-          fontSize: 9, color: T.muted, fontFamily: T.mono,
-        }}>
-          Need encryption? Use{" "}
-          <span style={{ color: T.purple, cursor: "pointer" }}
-            onClick={() => window.open("https://keet.io", "_blank")}>
-            Keet
-          </span>
-          {" "}for private conversations
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// COUNTDOWN TIMER
-// ══════════════════════════════════════════════════════════════════════════
-
-function CountdownTimer({ expiresAt }: { expiresAt: number }) {
-  const [now, setNow] = useState(Math.floor(Date.now() / 1000));
-
-  useEffect(() => {
-    const interval = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const remaining = expiresAt - now;
-  if (remaining <= 0) {
-    // v0.1.66.29: only the outer guard's skip-list keeps this from
-    // showing on resolved trades. As a safety net, call it "Deadline
-    // passed" rather than "EXPIRED" — the word EXPIRED is reserved
-    // for the actual EscrowStatus.EXPIRED terminal state, and having
-    // both renderers shout the same word caused confusion when heal
-    // flipped LOCKED-past-deadline into APPROVED without this label
-    // updating.
-    return (
-      <div style={{
-        padding: "10px 16px", borderRadius: T.rs,
-        background: T.redDim, border: `1px solid ${T.red}44`,
-        textAlign: "center", fontFamily: T.mono, fontSize: 12,
-        color: T.red, fontWeight: 700,
-      }}>
-        DEADLINE PASSED
-      </div>
-    );
-  }
-
-  const hours = Math.floor(remaining / 3600);
-  const mins = Math.floor((remaining % 3600) / 60);
-  const secs = remaining % 60;
-  const timeStr = hours > 0
-    ? `${hours}h ${mins.toString().padStart(2, "0")}m ${secs.toString().padStart(2, "0")}s`
-    : mins > 0
-    ? `${mins}m ${secs.toString().padStart(2, "0")}s`
-    : `${secs}s`;
-
-  const urgent = remaining < 300;  // < 5 min
-  const warning = remaining < 600; // < 10 min
-  const caution = remaining < 3600; // < 1 hour
-
-  const color = warning ? T.red : caution ? T.amber : T.green;
-  const bg = warning ? T.redDim : caution ? T.amberDim : T.greenDim;
-
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", justifyContent: "center",
-      gap: 8, padding: "8px 16px", borderRadius: T.rs,
-      background: bg, border: `1px solid ${color}44`,
-      fontFamily: T.mono, fontSize: 11,
-      animation: urgent ? "pulse 1s ease-in-out infinite" : "none",
-    }}>
-      <span style={{ color: T.muted, fontSize: 9, letterSpacing: 1 }}>EXPIRES IN</span>
-      <span style={{ color, fontWeight: 700, fontSize: 13 }}>{timeStr}</span>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// TRADE DETAIL
-// ══════════════════════════════════════════════════════════════════════════
-
-function TradeDetail({ state, pubkey, onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings }: {
-  state: EscrowState; pubkey: string;
-  onBack: () => void;
-  onVote: (outcome: Outcome) => void;
-  onClaim: () => void;
-  onJoin: (role: Role) => void;
-  /** PR 3: optional savedHandleId names which of the seller's saved
-   *  payment handles to reveal in the LOCK payload. */
-  onLock: (savedHandleId?: string) => Promise<void>;
-  onSendChat: (message: string) => void;
-  onReleasePeriod?: (periodIndex: number) => void | Promise<void>;
-  onOpenSettings?: () => void;
-}) {
-  const [voting, setVoting] = useState(false);
-  const [joining, setJoining] = useState(false);
-  const [locking, setLocking] = useState(false);
-  // PR 3: seller's saved-handle pick to reveal in the LOCK payload.
-  // Empty string = no handle revealed (still allowed for non-fiat trades).
-  const [selectedHandleId, setSelectedHandleId] = useState<string>("");
-  const s = STATUS[state.status] || STATUS.CREATED;
-  const myRole = state.participants.buyer === pubkey ? Role.BUYER
-    : state.participants.seller === pubkey ? Role.SELLER
-    : state.participants.arbiter === pubkey ? Role.ARBITER : null;
-  const voteCheck = myRole ? canVote(state, pubkey) : { canVote: false };
-  const winner = getWinner(state);
-  const iAmWinner = winner?.pubkey === pubkey;
-
-  // Determine who can lock based on category
-  const expectedLocker = state.category === "marketplace" ? Role.BUYER
-    : state.category === "lending" ? Role.SELLER
-    : (state.category === "p2p-trade" || state.category === "bill-pay") ? Role.SELLER
-    : null;
-  const canILock = !expectedLocker || myRole === expectedLocker;
-
-  // Category-aware labels
-  const lockLabel = state.category === "marketplace" ? "Pay for Item"
-    : state.category === "lending" ? "Fund Loan"
-    : state.category === "bill-pay" ? "Lock Sats"
-    : state.category === "p2p-trade" ? "Fund Escrow"
-    : "Lock Sats";
-
-  const handleVote = async (outcome: Outcome) => {
-    setVoting(true);
-    try { onVote(outcome); } finally { setTimeout(() => setVoting(false), 1000); }
-  };
-
-  return (
-    <div style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
-      <button onClick={onBack} style={{
-        background: "none", border: "none", color: T.muted,
-        fontFamily: T.mono, fontSize: 12, cursor: "pointer",
-        padding: "4px 0", marginBottom: 16,
-      }}>
-        ← Back
-      </button>
-
-      {/* Header card */}
-      <div style={{
-        background: T.card, border: `1px solid ${T.border}`,
-        borderRadius: T.r, padding: 20, marginBottom: 16,
-        position: "relative", overflow: "hidden",
-      }}>
-        <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg,${s.c},${s.c}00)` }} />
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-          <Badge status={state.status} />
-          <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-            {state.createdAt ? new Date(state.createdAt * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
-            {" · "}{state.id}
-          </span>
-        </div>
-        <div style={{ fontSize: 16, fontWeight: 600, color: T.text, fontFamily: T.sans, marginBottom: 4, lineHeight: 1.4 }}>
-          {state.description}
-        </div>
-        <div style={{
-          display: "inline-flex", alignItems: "center", gap: 6,
-          padding: "3px 10px", borderRadius: 12, marginBottom: 12,
-          background: T.surface, border: "1px solid " + T.border,
-          fontSize: 10, fontFamily: T.mono, color: T.muted,
-        }}>
-          {CAT_LABEL[state.category] || state.category}
-        </div>
-        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", paddingTop: 12, borderTop: `1px solid ${T.border}` }}>
-          <div>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 2 }}>AMOUNT</div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: T.accent, fontFamily: T.mono }}>
-              {fmtSats(state.amountMsats)} <span style={{ fontSize: 11, color: T.muted }}>sats</span>
-            </div>
-          </div>
-          {state.fiatAmount && (
-            <div>
-              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 2 }}>FIAT</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: T.text, fontFamily: T.mono }}>
-                {state.fiatCurrency} {state.fiatAmount!.toLocaleString()}
-              </div>
-            </div>
-          )}
-          {myRole && (
-            <div>
-              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 2 }}>YOUR ROLE</div>
-              <div style={{ fontSize: 14, fontWeight: 700, fontFamily: T.mono, color: ROLE_COLOR[myRole], textTransform: "capitalize" }}>
-                {myRole}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Subscription timeline */}
-      {state.subscription && (
-        <SubscriptionTimeline
-          subscription={state.subscription}
-          onRelease={async (periodIndex) => {
-            try {
-              await onReleasePeriod?.(periodIndex);
-            } catch (e: any) {
-              console.error("[chama] Period release failed:", e);
-            }
-          }}
-        />
-      )}
-
-      {/* Community arbiter pool indicator */}
-      {state.communityArbiters && state.communityArbiters.length > 0 && (
-        <div style={{
-          marginBottom: 12, padding: "8px 14px", borderRadius: T.rs,
-          background: T.purpleDim, border: `1px solid ${T.purple}22`,
-          display: "flex", alignItems: "center", gap: 8,
-        }}>
-          <span style={{ fontSize: 14 }}>🛡️</span>
-          <span style={{ fontSize: 10, color: T.purple, fontFamily: T.mono }}>
-            Community arbiter pool: {state.communityArbiters.length} backup{state.communityArbiters.length !== 1 ? "s" : ""}
-            {" · "}SSS share encrypted to all
-          </span>
-        </div>
-      )}
-
-      {/* Countdown timer — visible in all non-terminal states */}
-      {/* Expiry policy — visible on all LOCKED trades */}
-      {state.status === "LOCKED" && (() => {
-        const now = Math.floor(Date.now() / 1000);
-        const remaining = state.expiresAt - now;
-        const isExpired = remaining <= 0;
-        const isUrgent = remaining > 0 && remaining < 7200;
-        return (
-          <div style={{ marginBottom: 12 }}>
-            {isExpired ? (
-              <div style={{
-                padding: "14px 16px", borderRadius: 8, textAlign: "center",
-                background: T.redDim, border: `1px solid ${T.red}44`,
-              }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: T.red, fontFamily: T.mono }}>
-                  ⏰ TRADE EXPIRED
-                </div>
-                <div style={{ fontSize: 11, color: T.text, fontFamily: T.sans, marginTop: 6 }}>
-                  🛡️ Community arbiter will auto-vote REFUND
-                </div>
-                <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 4 }}>
-                  Sats will be returned to the {refundRecipientFor(state.category)} automatically
-                </div>
-              </div>
-            ) : (
-              <div style={{
-                padding: "8px 12px", borderRadius: 6, textAlign: "center",
-                background: isUrgent ? T.redDim : T.surface,
-                border: `1px solid ${isUrgent ? T.red + "33" : T.amber + "22"}`,
-              }}>
-                <span style={{
-                  fontSize: 10, fontFamily: T.mono,
-                  color: isUrgent ? T.red : T.amber,
-                }}>
-                  {isUrgent ? "⚠️ Expiring soon! " : "⏱️ "}
-                  If time expires → arbiter auto-refunds to {refundRecipientFor(state.category)}
-                </span>
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-      {/* v0.1.66.29: skip countdown in all post-vote states.
-          APPROVED/CLAIMED/COMPLETED mean consensus is reached —
-          showing an "EXPIRED" banner below a green APPROVED pill
-          confused users and us during v0.1.66.26 heal debug. */}
-      {state.expiresAt
-        && state.status !== "COMPLETED"
-        && state.status !== "CANCELLED"
-        && state.status !== "EXPIRED"
-        && state.status !== "APPROVED"
-        && state.status !== "CLAIMED" && (
-        <div style={{ marginBottom: 16 }}>
-          <CountdownTimer expiresAt={state.expiresAt} />
-        </div>
-      )}
-
-      {/* Participants */}
-      <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 16 }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 16 }}>PARTICIPANTS</div>
-        <div style={{ display: "flex", justifyContent: "space-around" }}>
-          {([Role.BUYER, Role.SELLER, Role.ARBITER] as Role[]).map(role => (
-            <Dot key={role} role={role} pk={state.participants[role]} isYou={myRole === role}
-              voted={!!state.votes[role]} outcome={state.votes[role]} />
-          ))}
-        </div>
-      </div>
-
-      {/* JOIN buttons — show when user is not a participant and slots are open */}
-      {!myRole && state.status === EscrowStatus.CREATED && (
-        <div style={{
-          background: T.card, border: `1px solid ${T.border}`,
-          borderRadius: T.r, padding: 20, marginBottom: 16,
-        }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-            JOIN THIS TRADE
-          </div>
-          <div style={{ display: "flex", gap: 10 }}>
-            {!state.participants.buyer && (
-              <button disabled={joining} onClick={async () => {
-                setJoining(true);
-                try { await onJoin(Role.BUYER); } finally { setJoining(false); }
-              }} style={{
-                flex: 1, padding: "14px", borderRadius: T.rs,
-                background: T.accentDim, border: `1px solid ${T.accent}44`,
-                color: T.accent, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-                cursor: joining ? "default" : "pointer", transition: "all 0.2s",
-              }}>
-                {joining ? "Joining..." : "Join as Buyer"}
-              </button>
-            )}
-            {!state.participants.arbiter && (
-              <button disabled={joining} onClick={async () => {
-                setJoining(true);
-                try { await onJoin(Role.ARBITER); } finally { setJoining(false); }
-              }} style={{
-                flex: 1, padding: "14px", borderRadius: T.rs,
-                background: T.purpleDim, border: `1px solid ${T.purple}44`,
-                color: T.purple, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-                cursor: joining ? "default" : "pointer", transition: "all 0.2s",
-              }}>
-                {joining ? "Joining..." : "Join as Arbiter"}
-              </button>
-            )}
-          </div>
-          {!state.participants.seller && (
-            <button disabled={joining} onClick={async () => {
-              setJoining(true);
-              try { await onJoin(Role.SELLER); } finally { setJoining(false); }
-            }} style={{
-              width: "100%", marginTop: 10, padding: "14px", borderRadius: T.rs,
-              background: T.tealDim, border: `1px solid ${T.teal}44`,
-              color: T.teal, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-              cursor: joining ? "default" : "pointer", transition: "all 0.2s",
-            }}>
-              {joining ? "Joining..." : "Join as Seller"}
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* CREATED — atomic lock surface for the locker.
-          PR 1: there is no FUNDED state and no readiness ceremony.
-          The instant the locker spends from their Fedimint wallet,
-          shares are split and LOCK publishes (CREATED → LOCKED in
-          a single event). For trades where the buyer has not yet
-          published a JOIN ACK, the bridge will refuse to lock —
-          surfaced here as a hint when buyer is missing. */}
-      {state.status === EscrowStatus.CREATED && myRole && canILock && (() => {
-        const fiatCategory = state.category === "p2p-trade"
-          || state.category === "bill-pay"
-          || state.category === "lending";
-        const allHandles = fiatCategory ? listSavedHandles() : [];
-        return (
-        <div style={{
-          background: T.card, border: `1px solid ${T.accent}44`,
-          borderRadius: T.r, padding: 20, marginBottom: 16,
-        }}>
-          <div style={{
-            fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
-            letterSpacing: 1, marginBottom: 12,
-          }}>
-            ATOMIC LOCK
-          </div>
-          <div style={{
-            textAlign: "center", fontFamily: T.mono, fontSize: 12,
-            color: T.accent, marginBottom: 14,
-          }}>
-            {state.participants.buyer
-              ? "Spending from your wallet will split shares and publish LOCK in one step."
-              : "Waiting for buyer to acknowledge the trade…"}
-          </div>
-
-          {/* PR 3: handle reveal picker for fiat categories */}
-          {fiatCategory && (
-            <div style={{ marginBottom: 14 }}>
-              <div style={{
-                fontSize: 10, fontWeight: 600, color: T.muted,
-                fontFamily: T.mono, letterSpacing: 0.5, marginBottom: 6,
-              }}>
-                REVEAL HANDLE TO PARTICIPANTS
-              </div>
-              {allHandles.length === 0 ? (
-                <div style={{
-                  padding: "10px 12px", borderRadius: T.rs,
-                  background: T.surface, border: `1px dashed ${T.border}`,
-                  color: T.muted, fontFamily: T.mono, fontSize: 11,
-                  display: "flex", justifyContent: "space-between", alignItems: "center",
-                }}>
-                  <span>No saved handles. Lock will proceed without one.</span>
-                  {onOpenSettings && (
-                    <button onClick={onOpenSettings} style={{
-                      background: "none", border: "none",
-                      color: T.accent, fontFamily: T.mono, fontSize: 11,
-                      fontWeight: 700, cursor: "pointer", padding: 0,
-                    }}>+ Add</button>
-                  )}
-                </div>
-              ) : (
-                <select
-                  value={selectedHandleId}
-                  onChange={e => setSelectedHandleId(e.target.value)}
-                  style={{ ...inputStyle, color: T.text, background: T.surface }}
-                >
-                  <option value="">— don't reveal a handle —</option>
-                  {allHandles.map(h => {
-                    const rail = getRailByKey(h.rail);
-                    return (
-                      <option key={h.id} value={h.id}>
-                        {(rail?.displayName || h.rail) + " · " + maskHandle(h.handle)}
-                      </option>
-                    );
-                  })}
-                </select>
-              )}
-            </div>
-          )}
-
-          <button
-            disabled={locking || !state.participants.buyer}
-            onClick={async () => {
-              setLocking(true);
-              try {
-                await onLock(selectedHandleId || undefined);
-              } finally {
-                setLocking(false);
-              }
-            }}
-            style={{
-              width: "100%", padding: "16px", borderRadius: T.rs,
-              background: locking || !state.participants.buyer
-                ? T.surface
-                : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
-              border: "none",
-              color: locking || !state.participants.buyer ? T.muted : T.bg,
-              fontFamily: T.mono, fontSize: 14, fontWeight: 800,
-              cursor: locking || !state.participants.buyer ? "default" : "pointer",
-              letterSpacing: 0.5, transition: "all 0.2s",
-            }}
-          >
-            {locking ? "Locking..." : "\u26a1 " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
-          </button>
-          <div style={{
-            textAlign: "center", marginTop: 8,
-            fontSize: 9, color: T.muted, fontFamily: T.mono,
-          }}>
-            Real 2-of-3 Shamir split · ecash spent from your Fedimint wallet
-          </div>
-        </div>
-        );
-      })()}
-
-      {/* PR 3: revealed payment handle for the trade's three participants.
-          Cleartext is shown to participants; non-participants see masked
-          via handleDisplayForViewer (they shouldn't be in this code path
-          on a LOCKED trade since they can't decrypt LOCK content, but the
-          gate is there as defense in depth). */}
-      {state.status === EscrowStatus.LOCKED && state.lock.handle && (
-        <div style={{
-          background: T.card, border: `1px solid ${T.amber}44`,
-          borderRadius: T.r, padding: 16, marginBottom: 16,
-        }}>
-          <div style={{
-            fontSize: 11, fontWeight: 600, color: T.muted,
-            fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
-          }}>
-            PAYMENT HANDLE
-            {state.lock.handle.rail && (
-              <span style={{ color: T.amber, marginLeft: 8 }}>
-                · {getRailByKey(state.lock.handle.rail)?.displayName || state.lock.handle.rail}
-              </span>
-            )}
-          </div>
-          <div style={{
-            fontFamily: T.mono, fontSize: 14, color: T.text,
-            padding: "10px 12px", background: T.surface,
-            borderRadius: T.rs, border: `1px solid ${T.border}`,
-            wordBreak: "break-all" as const,
-          }}>
-            {handleDisplayForViewer(state.lock.handle.value, !!myRole)}
-          </div>
-          <div style={{
-            fontSize: 9, color: T.muted, fontFamily: T.mono,
-            marginTop: 6, lineHeight: 1.4,
-          }}>
-            {myRole
-              ? "Revealed only to the three trade participants via the LOCK event."
-              : "Hidden — only the buyer, seller, and arbiter can see the full handle."}
-          </div>
-        </div>
-      )}
-
-      {/* Vote tally */}
-      {(state.status === EscrowStatus.LOCKED || state.status === EscrowStatus.APPROVED ||
-        state.status === EscrowStatus.CLAIMED || state.status === EscrowStatus.COMPLETED) && (
-        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 16 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 16 }}>STATUS</div>
-          <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
-            <div style={{ textAlign: "center", flex: 1 }}>
-              <div style={{ fontSize: 32, fontWeight: 900, color: T.green, fontFamily: T.mono, lineHeight: 1 }}>
-                {Object.values(state.votes).filter(v => v === Outcome.RELEASE).length}
-              </div>
-              <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginTop: 4 }}>RELEASE ₿</div>
-            </div>
-            <div style={{ width: 1, background: T.border }} />
-            <div style={{ textAlign: "center", flex: 1 }}>
-              <div style={{ fontSize: 32, fontWeight: 900, color: T.amber, fontFamily: T.mono, lineHeight: 1 }}>
-                {Object.values(state.votes).filter(v => v === Outcome.REFUND).length}
-              </div>
-              <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginTop: 4 }}>REFUND ₿</div>
-            </div>
-            {state.resolvedOutcome && (
-              <>
-                <div style={{ width: 1, background: T.border }} />
-                <div style={{ textAlign: "center", flex: 1.2 }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, fontFamily: T.mono, color: state.resolvedOutcome === Outcome.RELEASE ? T.green : T.amber }}>
-                    {state.resolvedOutcome.toUpperCase()} ✓
-                  </div>
-                  <div style={{ fontSize: 9, color: T.muted, marginTop: 4, fontFamily: T.mono }}>DECISION</div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Vote buttons — PR 2: vertical-aware copy from the label dictionary */}
-      {voteCheck.canVote && myRole && (
-        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-          {!state.subscription && (
-            <button disabled={voting} onClick={() => handleVote(Outcome.RELEASE)} style={{
-              flex: 1, padding: "16px", borderRadius: T.rs,
-              background: voting ? T.surface : T.greenDim,
-              border: `1px solid ${T.green}44`, color: T.green,
-              fontFamily: T.mono, fontSize: 14, fontWeight: 700,
-              cursor: voting ? "default" : "pointer", transition: "all 0.2s",
-            }}>
-              ✓ {getVoteLabel(state.category, state.fulfillment, myRole, Outcome.RELEASE)}
-            </button>
-          )}
-          <button disabled={voting} onClick={() => handleVote(Outcome.REFUND)} style={{
-            flex: 1, padding: "16px", borderRadius: T.rs,
-            background: voting ? T.surface : state.subscription ? T.redDim : T.amberDim,
-            border: `1px solid ${state.subscription ? T.red : T.amber}44`,
-            color: state.subscription ? T.red : T.amber,
-            fontFamily: T.mono, fontSize: 14, fontWeight: 700,
-            cursor: voting ? "default" : "pointer", transition: "all 0.2s",
-          }}>
-            {state.subscription
-              ? "🛑 Cancel & Refund Remaining"
-              : "↩ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.REFUND)}
-          </button>
-        </div>
-      )}
-
-      {/* Claim button */}
-      {state.status === EscrowStatus.APPROVED && iAmWinner && !state.subscription && (
-        <button onClick={onClaim} style={{
-          width: "100%", padding: "18px", borderRadius: T.rs,
-          background: `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
-          border: "none", color: T.bg,
-          fontFamily: T.mono, fontSize: 15, fontWeight: 800,
-          cursor: "pointer", letterSpacing: 1,
-          marginBottom: 16,
-          animation: "pulse 2s ease-in-out infinite",
-        }}>
-          ⚡ CLAIM YOUR SATS
-        </button>
-      )}
-
-      {/* Trade chat */}
-      {myRole && (
-        <ChatPanel state={state} myRole={myRole} onSend={onSendChat} />
-      )}
-
-      {/* Event chain */}
-      <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20 }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 16 }}>
-          NOSTR EVENT CHAIN
-        </div>
-        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-          {state.eventChain.length} events · {state.chatMessages.length} chat messages
-        </div>
-        {state.eventChain.map((evt, i) => (
-          <div key={evt.raw.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
-            <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.green }} />
-            <span style={{ fontSize: 11, fontFamily: T.mono, color: T.muted }}>
-              kind:{evt.kind} — {evt.payload.type.replace("escrow:", "")}
-            </span>
-            <span style={{ fontSize: 9, fontFamily: T.mono, color: T.border, marginLeft: "auto" }}>
-              {evt.raw.id.slice(0, 8)}…
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// CREATE FORM
-// ══════════════════════════════════════════════════════════════════════════
-
-function CreateForm({ onCreate, onClose }: {
-  onCreate: (params: any) => void; onClose: () => void;
-}) {
-  const [cat, setCat] = useState("p2p-trade");
-  const [desc, setDesc] = useState("");
-  const [sats, setSats] = useState("");
-  const [fiat, setFiat] = useState("");
-  const [cur, setCur] = useState("USD");
-  const [mint, setMint] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [communityArbiters, setCommunityArbiters] = useState<string[]>([]);
-  const [primaryArbiter, setPrimaryArbiter] = useState<string | null>(null);
-  const [isSubscription, setIsSubscription] = useState(false);
-  const [periods, setPeriods] = useState("3");
-  const [intervalDays, setIntervalDays] = useState("30");
-  // PR 2: community defaults to the user's selected community.
-  // fulfillment is only user-pickable for marketplace; for other
-  // verticals it's auto-set to "service" by handleCreate, so we don't
-  // even render the picker.
-  const [community, setCommunity] = useState<string>(() => {
-    try {
-      const raw = typeof localStorage !== "undefined"
-        ? localStorage.getItem("chama_community") : null;
-      return raw && getCommunityBySlug(raw) ? raw : "global-usd";
-    } catch { return "global-usd"; }
-  });
-  const [fulfillment, setFulfillment] = useState<Fulfillment>("physical");
-
-  const cats = [
-    { id: "p2p-trade", l: "P2P Trade", i: "⚡" },
-    { id: "bill-pay", l: "Bill Pay", i: "🧾" },
-    { id: "marketplace", l: "Marketplace", i: "🏪" },
-    { id: "lending", l: "Lending", i: "🤝" },
-  ];
-
-  const handleSubmit = async () => {
-    if (!desc || !sats || !mint) return;
-    setSubmitting(true);
-    try {
-      const amountMsats = parseInt(sats) * 1000;
-      const params: any = {
-        description: desc,
-        amountMsats: isSubscription ? parseInt(periods) * amountMsats : amountMsats,
-        fiatAmount: fiat ? parseFloat(fiat) : undefined,
-        fiatCurrency: fiat ? cur : undefined,
-        category: cat,
-        community,
-        // For marketplace, ship the user's pick. For non-marketplace,
-        // leave undefined and let handleCreate normalize to "service".
-        fulfillment: cat === "marketplace" ? fulfillment : undefined,
-        mintUrl: mint,
-      };
-      if (isSubscription) {
-        params.subscription = {
-          totalPeriods: parseInt(periods),
-          periodAmountMsats: amountMsats,
-          periodDurationSeconds: parseInt(intervalDays) * 86400,
-        };
-      }
-      await onCreate(params);
-      onClose();
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <span style={{ fontSize: 18, fontWeight: 700, color: T.text, fontFamily: T.sans }}>New trade</span>
-        <button onClick={onClose} style={{ background: "none", border: "none", color: T.muted, fontSize: 20, cursor: "pointer" }}>×</button>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
-        {cats.map(c => (
-          <button key={c.id} onClick={() => setCat(c.id)} style={{
-            padding: "8px 14px", borderRadius: 20,
-            background: cat === c.id ? T.accentDim : T.surface,
-            border: `1px solid ${cat === c.id ? T.accent + "66" : T.border}`,
-            color: cat === c.id ? T.accent : T.muted,
-            fontFamily: T.mono, fontSize: 12, fontWeight: 600,
-            cursor: "pointer", transition: "all 0.2s",
-          }}>
-            {c.i} {c.l}
-          </button>
-        ))}
-      </div>
-
-      {/* PR 2: community selector + fulfillment selector (marketplace only) */}
-      <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>COMMUNITY</div>
-          <select value={community} onChange={e => setCommunity(e.target.value)}
-            style={{ ...inputStyle, color: T.text, background: T.surface }}>
-            {COMMUNITY_REGISTRY.map(c => (
-              <option key={c.slug} value={c.slug}>{c.displayName}</option>
-            ))}
-          </select>
-        </div>
-        {categoryAllowsFulfillmentChoice(cat) && (
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FULFILLMENT</div>
-            <select value={fulfillment} onChange={e => setFulfillment(e.target.value as Fulfillment)}
-              style={{ ...inputStyle, color: T.text, background: T.surface }}>
-              <option value="physical">Physical</option>
-              <option value="service">Service</option>
-              <option value="digital">Digital</option>
-            </select>
-          </div>
-        )}
-      </div>
-
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>DESCRIPTION</div>
-        <input value={desc} onChange={e => setDesc(e.target.value)}
-          placeholder={cat === "bill-pay" ? "Pay my electricity bill" : "What are you trading?"}
-          style={inputStyle} />
-      </div>
-
-      <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>AMOUNT (SATS)</div>
-          <input type="number" value={sats} onChange={e => setSats(e.target.value)} placeholder="100000" style={inputStyle} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FIAT</div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <select value={cur} onChange={e => setCur(e.target.value)}
-              style={{ ...inputStyle, width: 70, padding: "12px 6px", fontSize: 12, color: T.text, background: T.surface }}>
-              {["USD","EUR","GBP","NGN","KES","TZS","XOF","BRL"].map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <input type="number" value={fiat} onChange={e => setFiat(e.target.value)} placeholder="50" style={{ ...inputStyle, flex: 1 }} />
-          </div>
-        </div>
-      </div>
-
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FEDERATION INVITE CODE</div>
-        <input value={mint} onChange={e => setMint(e.target.value)} placeholder="fed11qgq..." style={inputStyle} />
-      </div>
-
-      {/* Subscription toggle */}
-      <div style={{
-        marginBottom: 20, padding: 16,
-        background: isSubscription ? T.purpleDim : T.surface,
-        border: `1px solid ${isSubscription ? T.purple + "33" : T.border}`,
-        borderRadius: T.r, transition: "all 0.3s",
-      }}>
-        <div
-          onClick={() => setIsSubscription(!isSubscription)}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            cursor: "pointer",
-          }}
-        >
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: isSubscription ? T.purple : T.muted, fontFamily: T.mono }}>
-              🔄 SUBSCRIPTION MODE
-            </div>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.sans, marginTop: 2 }}>
-              Periodic release — lock upfront, release in installments
-            </div>
-          </div>
-          <div style={{
-            width: 40, height: 22, borderRadius: 11,
-            background: isSubscription ? T.purple : T.border,
-            padding: 2, transition: "background 0.2s", cursor: "pointer",
-          }}>
-            <div style={{
-              width: 18, height: 18, borderRadius: "50%",
-              background: T.text, transition: "transform 0.2s",
-              transform: isSubscription ? "translateX(18px)" : "translateX(0)",
-            }} />
-          </div>
-        </div>
-
-        {isSubscription && (
-          <div style={{ marginTop: 14 }}>
-            <div style={{ display: "flex", gap: 12 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono, marginBottom: 4 }}>PERIODS</div>
-                <select value={periods} onChange={e => setPeriods(e.target.value)}
-                  style={{ ...inputStyle, fontSize: 12, color: T.text, background: T.surface }}>
-                  {[2,3,4,5,6,7,8,9,10,11,12,24,36,52].map(n => (
-                    <option key={n} value={n}>{n} period{n > 1 ? "s" : ""}</option>
-                  ))}
-                </select>
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono, marginBottom: 4 }}>INTERVAL</div>
-                <select value={intervalDays} onChange={e => setIntervalDays(e.target.value)}
-                  style={{ ...inputStyle, fontSize: 12, color: T.text, background: T.surface }}>
-                  <option value="7">Weekly</option>
-                  <option value="14">Bi-weekly</option>
-                  <option value="30">Monthly</option>
-                  <option value="90">Quarterly</option>
-                </select>
-              </div>
-            </div>
-
-            {sats && (
-              <div style={{
-                marginTop: 10, padding: "10px 12px",
-                background: T.surface, borderRadius: T.rs,
-                border: `1px solid ${T.border}`,
-              }}>
-                <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>SUBSCRIPTION SUMMARY</div>
-                <div style={{ fontSize: 13, color: T.purple, fontFamily: T.mono, fontWeight: 700, marginTop: 4 }}>
-                  {parseInt(periods)} × {parseInt(sats).toLocaleString()} sats = {(parseInt(periods) * parseInt(sats)).toLocaleString()} sats total
-                </div>
-                <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-                  {parseInt(sats).toLocaleString()} sats released every {intervalDays} days
-                  {" · "}Total duration: {Math.round(parseInt(periods) * parseInt(intervalDays) / 30)} months
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      <button onClick={handleSubmit} disabled={!desc || !sats || !mint || submitting} style={{
-        width: "100%", padding: "16px",
-        background: desc && sats && mint && !submitting ? T.accent : T.surface,
-        border: "none", borderRadius: T.rs,
-        color: desc && sats && mint && !submitting ? T.bg : T.muted,
-        fontFamily: T.mono, fontSize: 14, fontWeight: 700,
-        cursor: desc && sats && mint && !submitting ? "pointer" : "default",
-        letterSpacing: 0.5, transition: "all 0.2s",
-      }}>
-        {submitting ? "Publishing…" : "₿ PUBLISH TO RELAYS"}
-      </button>
-      <div style={{ textAlign: "center", marginTop: 10, fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-        kind:38100 CREATE · NIP-44 encrypted · multi-relay
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// LOAD TRADE INPUT
-// ══════════════════════════════════════════════════════════════════════════
-
-function LoadTradeInput({ onLoad }: { onLoad: (id: string) => void }) {
-  const [id, setId] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const handleLoad = async () => {
-    if (!id.trim()) return;
-    setLoading(true);
-    try { await onLoad(id.trim()); } finally { setLoading(false); setId(""); }
-  };
-
-  return (
-    <div style={{
-      display: "flex", gap: 8, marginBottom: 16,
-      padding: 12, background: T.surface,
-      borderRadius: T.r, border: `1px solid ${T.border}`,
-    }}>
-      <input
-        value={id}
-        onChange={e => setId(e.target.value)}
-        onKeyDown={e => e.key === "Enter" && handleLoad()}
-        placeholder="Paste escrow ID to join a trade..."
-        style={{
-          flex: 1, padding: "8px 12px",
-          background: T.card, border: `1px solid ${T.border}`,
-          borderRadius: T.rs, color: T.text,
-          fontFamily: T.mono, fontSize: 11, outline: "none",
-        }}
-      />
-      <button
-        onClick={handleLoad}
-        disabled={!id.trim() || loading}
-        style={{
-          padding: "8px 16px", borderRadius: T.rs,
-          background: id.trim() && !loading ? T.tealDim : T.card,
-          border: `1px solid ${id.trim() && !loading ? T.teal + "44" : T.border}`,
-          color: id.trim() && !loading ? T.teal : T.muted,
-          fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-          cursor: id.trim() && !loading ? "pointer" : "default",
-          transition: "all 0.2s", whiteSpace: "nowrap",
-        }}
-      >
-        {loading ? "Loading..." : "Load"}
-      </button>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// TOAST
-// ══════════════════════════════════════════════════════════════════════════
-
-function Toast({ message, type, onDone }: { message: string; type: "success" | "error" | "info"; onDone: () => void }) {
-  useEffect(() => { const t = setTimeout(onDone, 4000); return () => clearTimeout(t); }, [onDone]);
-  const colors = { success: T.green, error: T.red, info: T.accent };
-  const bgs = { success: T.greenDim, error: T.redDim, info: T.accentDim };
-  return (
-    <div style={{
-      position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)",
-      padding: "10px 20px", borderRadius: T.rs,
-      background: bgs[type], border: `1px solid ${colors[type]}44`,
-      color: colors[type], fontFamily: T.mono, fontSize: 12, fontWeight: 600,
-      zIndex: 9999, animation: "fadeIn 0.3s ease",
-      maxWidth: "90vw", textAlign: "center", wordBreak: "break-word",
-    }}>
-      {type === "success" ? "✓ " : type === "error" ? "\u2717 " : "\u26a1 "}{message}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// SAVED PAYMENT HANDLES — Settings panel (PR 3)
-// ══════════════════════════════════════════════════════════════════════════
-//
-// Add/edit/delete payment handles. Per-handle visibility toggle renders
-// only when rail.allowPublicHandle === true (sensitive rails are locked
-// private — saved-handles.ts enforces the same on writes as defense in
-// depth). Handle preview is masked by default with reveal-on-tap so the
-// owner can audit without exposing PII to a shoulder-surfer.
-
-function SavedHandlesPanel({ communitySlug, onClose }: {
-  communitySlug: string;
-  onClose: () => void;
-}) {
-  const [handles, setHandles] = useState<SavedHandle[]>(() => listSavedHandles());
-  const [revealedIds, setRevealedIds] = useState<Set<string>>(new Set());
-  const [addRail, setAddRail] = useState<string>("");
-  const [addValue, setAddValue] = useState<string>("");
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = () => setHandles(listSavedHandles());
-
-  // Rails available to the user's current community — drives the picker
-  // in the "add" form. The user can always switch communities to see
-  // other rails, but bias the default toward what they'll actually use.
-  const availableRails = railsForCommunity(communitySlug);
-
-  const handleAdd = () => {
-    setError(null);
-    if (!addRail || !addValue.trim()) {
-      setError("Pick a rail and enter a handle");
-      return;
-    }
-    try {
-      addSavedHandle(addRail, addValue.trim());
-      setAddRail("");
-      setAddValue("");
-      refresh();
-    } catch (e: any) {
-      setError(e?.message || "Failed to save");
-    }
-  };
-
-  const handleDelete = (id: string) => {
-    deleteSavedHandle(id);
-    refresh();
-  };
-
-  const handleToggleVisibility = (h: SavedHandle) => {
-    setError(null);
-    const next = h.visibility === "public" ? "private" : "public";
-    const result = setHandleVisibility(h.id, next);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    refresh();
-  };
-
-  const handleReveal = (id: string) => {
-    setRevealedIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-
-  return (
-    <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
-      <div style={{
-        display: "flex", justifyContent: "space-between",
-        alignItems: "center", marginBottom: 20,
-      }}>
-        <span style={{ fontSize: 18, fontWeight: 700, color: T.text, fontFamily: T.sans }}>
-          Payment handles
-        </span>
-        <button onClick={onClose} style={{
-          background: "none", border: "none",
-          color: T.muted, fontSize: 20, cursor: "pointer",
-        }}>×</button>
-      </div>
-
-      <div style={{
-        fontSize: 11, color: T.muted, fontFamily: T.mono,
-        marginBottom: 16, lineHeight: 1.5,
-      }}>
-        Handles are private by default. They're revealed to the three
-        participants of a trade only after lock. Public-by-design rails
-        (Revtag, $cashtag, etc.) can be opted in for profile display.
-      </div>
-
-      {/* Existing handles list */}
-      {handles.length === 0 ? (
-        <div style={{
-          padding: 24, textAlign: "center", borderRadius: T.r,
-          background: T.surface, border: `1px dashed ${T.border}`,
-          color: T.muted, fontFamily: T.mono, fontSize: 12,
-          marginBottom: 20,
-        }}>
-          No saved handles yet. Add one below to auto-fill at trade time.
-        </div>
-      ) : (
-        <div style={{ marginBottom: 24 }}>
-          {handles.map(h => {
-            const rail = getRailByKey(h.rail);
-            const railName = rail?.displayName || h.rail;
-            const allowsPublic = railAllowsPublicHandle(h.rail);
-            const revealed = revealedIds.has(h.id);
-            const display = revealed ? h.handle : maskHandle(h.handle);
-            return (
-              <div key={h.id} style={{
-                background: T.card, border: `1px solid ${T.border}`,
-                borderRadius: T.r, padding: 14, marginBottom: 10,
-              }}>
-                <div style={{
-                  display: "flex", justifyContent: "space-between",
-                  alignItems: "baseline", marginBottom: 8,
-                }}>
-                  <span style={{
-                    fontSize: 12, fontWeight: 700, color: T.text,
-                    fontFamily: T.sans,
-                  }}>{railName}</span>
-                  {allowsPublic ? (
-                    <button
-                      onClick={() => handleToggleVisibility(h)}
-                      style={{
-                        padding: "3px 10px", borderRadius: 12,
-                        background: h.visibility === "public" ? T.greenDim : T.surface,
-                        border: `1px solid ${h.visibility === "public" ? T.green + "66" : T.border}`,
-                        color: h.visibility === "public" ? T.green : T.muted,
-                        fontFamily: T.mono, fontSize: 9, fontWeight: 700,
-                        cursor: "pointer", letterSpacing: 0.3,
-                      }}
-                    >
-                      {h.visibility === "public" ? "PUBLIC" : "PRIVATE"}
-                    </button>
-                  ) : (
-                    <span style={{
-                      padding: "3px 10px", borderRadius: 12,
-                      background: T.surface, border: `1px solid ${T.border}`,
-                      color: T.muted, fontFamily: T.mono, fontSize: 9, fontWeight: 700,
-                      letterSpacing: 0.3,
-                    }}>PRIVATE · LOCKED</span>
-                  )}
-                </div>
-                <div
-                  onClick={() => handleReveal(h.id)}
-                  style={{
-                    fontFamily: T.mono, fontSize: 13, color: T.text,
-                    padding: "8px 10px", background: T.surface,
-                    borderRadius: T.rs, cursor: "pointer",
-                    border: `1px solid ${T.border}`, marginBottom: 8,
-                  }}
-                  title={revealed ? "Tap to mask" : "Tap to reveal"}
-                >
-                  {display}
-                  <span style={{ float: "right", color: T.muted, fontSize: 10 }}>
-                    {revealed ? "🙈 mask" : "👁 reveal"}
-                  </span>
-                </div>
-                <button
-                  onClick={() => handleDelete(h.id)}
-                  style={{
-                    background: "none", border: "none",
-                    color: T.red, fontFamily: T.mono, fontSize: 10,
-                    cursor: "pointer", padding: 0,
-                  }}
-                >Delete</button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Add new handle */}
-      <div style={{
-        background: T.card, border: `1px solid ${T.border}`,
-        borderRadius: T.r, padding: 16,
-      }}>
-        <div style={{
-          fontSize: 11, fontWeight: 600, color: T.muted,
-          fontFamily: T.mono, letterSpacing: 1, marginBottom: 12,
-        }}>
-          ADD HANDLE
-        </div>
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-            RAIL
-          </div>
-          <select
-            value={addRail}
-            onChange={e => { setAddRail(e.target.value); setError(null); }}
-            style={{ ...inputStyle, color: T.text, background: T.surface }}
-          >
-            <option value="">— pick a rail —</option>
-            {availableRails.map(r => (
-              <option key={r.key} value={r.key}>
-                {r.displayName} {r.allowPublicHandle ? "" : "· private only"}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-            HANDLE
-          </div>
-          <input
-            value={addValue}
-            onChange={e => { setAddValue(e.target.value); setError(null); }}
-            placeholder={getRailByKey(addRail)?.placeholder || "Your handle"}
-            style={inputStyle}
-          />
-        </div>
-        {error && (
-          <div style={{
-            color: T.red, fontFamily: T.mono, fontSize: 11,
-            marginBottom: 10,
-          }}>{error}</div>
-        )}
-        <button
-          onClick={handleAdd}
-          disabled={!addRail || !addValue.trim()}
-          style={{
-            width: "100%", padding: "12px", borderRadius: T.rs,
-            background: !addRail || !addValue.trim() ? T.surface : T.accentDim,
-            border: `1px solid ${!addRail || !addValue.trim() ? T.border : T.accent + "44"}`,
-            color: !addRail || !addValue.trim() ? T.muted : T.accent,
-            fontFamily: T.mono, fontSize: 12, fontWeight: 700,
-            cursor: !addRail || !addValue.trim() ? "default" : "pointer",
-          }}
-        >
-          Save handle
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// FEDIMINT BAR — compact balance + fund button
-// ══════════════════════════════════════════════════════════════════════════
-
-function FedimintBar({ fedimint, onFund, onInit }: {
-  fedimint: FedimintState; onFund: () => void; onInit: () => void;
-}) {
-  const sats = Math.floor(fedimint.balanceMsats / 1000);
-
-  // PR 5: presets-aware display name. Source of truth is the runtime
-  // federationId, not the (sometimes-stale) federationName string. Falls
-  // back to "Custom federation (xxxxxxxx)" with the first 8 hex chars of
-  // fed_id so users can distinguish multiple custom feds at a glance.
-  const [pillPresets, setPillPresets] = useState<FederationPreset[]>(CURATED_PRESETS);
-  useEffect(() => {
-    let cancelled = false;
-    const ctrl = new AbortController();
-    fetchObserverFederations(ctrl.signal).then((observerList) => {
-      if (cancelled || observerList.length === 0) return;
-      setPillPresets(mergePresets(CURATED_PRESETS, observerList));
-    });
-    return () => { cancelled = true; ctrl.abort(); };
-  }, []);
-
-  let displayName: string;
-  if (!fedimint.joined) {
-    displayName = fedimint.busy ? "Connecting wallet..." : "No federation";
-  } else {
-    const matched = fedimint.federationId
-      ? pillPresets.find((p) => p.federationId === fedimint.federationId)
-      : null;
-    if (matched) {
-      displayName = matched.name;
-    } else if (fedimint.federationId) {
-      displayName = `Custom federation (${fedimint.federationId.slice(0, 8)})`;
-    } else {
-      displayName = fedimint.federationName;
-    }
-  }
-
-  // PR 5: warn pill state when the last health probe failed.
-  const healthFailed = fedimint.joined && fedimint.lastHealthOk === false;
-  const dotColor = healthFailed
-    ? T.amber
-    : fedimint.joined ? T.green : fedimint.busy ? T.amber : T.muted;
-  const dotGlow = !healthFailed && fedimint.joined ? `0 0 8px ${T.green}66` : "none";
-
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", justifyContent: "space-between",
-      padding: "12px 16px", background: T.surface,
-      borderBottom: `1px solid ${T.border}`, fontFamily: T.mono,
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-        <div
-          title={healthFailed ? "Federation unreachable — receives will be refused" : undefined}
-          style={{
-            width: 8, height: 8, borderRadius: "50%",
-            background: dotColor,
-            boxShadow: dotGlow,
-            animation: fedimint.busy ? "pulse 1.2s infinite" : "none",
-            flexShrink: 0,
-          }}
-        />
-        <span style={{
-          fontSize: 10, color: T.muted,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>
-          {displayName}
-        </span>
-        {fedimint.joined && (
-          <>
-            <span style={{ color: T.border }}>{String.fromCharCode(183)}</span>
-            <span style={{ fontSize: 13, color: T.accent, fontWeight: 800, letterSpacing: -0.3 }}>
-              {sats.toLocaleString()} sats
-            </span>
-          </>
-        )}
-      </div>
-      {fedimint.joined ? (
-        <button onClick={onFund} style={{
-          padding: "6px 16px", borderRadius: 20,
-          background: `linear-gradient(135deg, ${T.accent}, ${T.accent}cc)`,
-          border: "none",
-          color: T.bg, fontFamily: T.sans, fontSize: 11, fontWeight: 700,
-          cursor: "pointer", letterSpacing: 0.3,
-          boxShadow: `0 2px 8px ${T.accent}33`,
-        }}>
-          Wallet
-        </button>
-      ) : !fedimint.busy && fedimint.initialized && (
-        <button onClick={onInit} style={{
-          padding: "6px 16px", borderRadius: 20,
-          background: T.surface, border: `1px solid ${T.border}`,
-          color: T.muted, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
-          cursor: "pointer",
-        }}>
-          Retry
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// SWITCH FEDERATION PANEL — power-user advanced action (PR 5)
-// ══════════════════════════════════════════════════════════════════════════
-//
-// Renders inside the Advanced section of the wallet area when the user is
-// already joined to a federation. Lets the user pick a different
-// federation (curated, observer, or custom invite) and commit the switch
-// via actions.switchFederation.
-//
-// Promoted from DevModePanel in PR 5: the localStorage.chama_dev_fed_switch
-// gate has been dropped — the v0.1.76 balance guard is the safety. In v2
-// the user-facing surface for federation choice will move into the
-// community picker (community switch implies federation rebind), so this
-// panel is the transitional home.
-// ══════════════════════════════════════════════════════════════════════════
-
-function SwitchFederationPanel({
-  fedimint,
-  onSwitch,
-}: {
-  fedimint: FedimintState;
-  onSwitch: (inviteCode: string, opts?: { force?: boolean }) => Promise<void>;
-}) {
-  const [presets, setPresets] = useState<FederationPreset[]>(CURATED_PRESETS);
-  const [selectedInvite, setSelectedInvite] = useState<string>(DEFAULT_FEDERATION_INVITE);
-  const [customInvite, setCustomInvite] = useState<string>("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState<{ name: string; invite: string } | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const ctrl = new AbortController();
-    fetchObserverFederations(ctrl.signal).then((observerList) => {
-      if (cancelled) return;
-      if (observerList.length > 0) {
-        setPresets(mergePresets(CURATED_PRESETS, observerList));
-      }
-    });
-    return () => { cancelled = true; ctrl.abort(); };
-  }, []);
-
-  const selectedPreset = presets.find((p) => p.inviteCode === selectedInvite) || presets[0];
-  const customTrimmed = customInvite.trim();
-  const customValid = customTrimmed.startsWith("fed1");
-
-  const requestPresetSwitch = () => {
-    if (!selectedPreset) return;
-    setConfirming({ name: selectedPreset.name, invite: selectedPreset.inviteCode });
-  };
-  const requestCustomSwitch = () => {
-    if (!customValid) return;
-    setConfirming({
-      name: `Custom federation (${customTrimmed.slice(4, 12)}…)`,
-      invite: customTrimmed,
-    });
-  };
-
-  const doSwitch = async (target: { name: string; invite: string }, force: boolean) => {
-    setBusy(true);
-    setErr(null);
-    try {
-      await onSwitch(target.invite, force ? { force: true } : undefined);
-      setConfirming(null);
-      setCustomInvite("");
-    } catch (e: any) {
-      setErr(e?.message || "Switch failed");
-      // Keep dialog open so the user can re-confirm with force if the
-      // refusal was the balance guard.
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const refusalCode = (err && /SWITCH_REFUSED_NONZERO_BALANCE/i.test(err)) ? "balance" : null;
-
-  return (
-    <div style={{
-      marginTop: 14, paddingTop: 12, borderTop: `1px dashed ${T.border}`,
-    }}>
-      <div style={{
-        fontSize: 10, fontWeight: 600, color: T.muted, fontFamily: T.mono,
-        letterSpacing: 1, marginBottom: 8,
-      }}>
-        SWITCH FEDERATION
-      </div>
-      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 10, lineHeight: 1.5 }}>
-        Currently on: <span style={{ color: T.text }}>{fedimint.federationName}</span>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        <select
-          value={selectedInvite}
-          onChange={(e) => setSelectedInvite(e.target.value)}
-          disabled={busy}
-          style={{
-            flex: 1, padding: "8px 10px", borderRadius: T.rs,
-            background: T.surface, border: `1px solid ${T.border}`,
-            color: T.text, fontFamily: T.mono, fontSize: 11,
-            cursor: busy ? "not-allowed" : "pointer",
-          }}
-        >
-          <optgroup label="Curated">
-            {presets.filter((p) => p.source === "curated").map((p) => (
-              <option key={p.inviteCode} value={p.inviteCode}>{p.name}</option>
-            ))}
-          </optgroup>
-          {presets.some((p) => p.source === "observer") && (
-            <optgroup label="Public (fedimint-observer)">
-              {presets.filter((p) => p.source === "observer").map((p) => (
-                <option key={p.inviteCode} value={p.inviteCode}>{p.name}</option>
-              ))}
-            </optgroup>
-          )}
-        </select>
-        <button
-          disabled={busy || !selectedPreset || selectedPreset.inviteCode === fedimint.federationId}
-          onClick={requestPresetSwitch}
-          style={{
-            padding: "8px 14px", borderRadius: T.rs,
-            background: T.surface, border: `1px solid ${T.border}`,
-            color: T.text, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-            cursor: busy ? "not-allowed" : "pointer", whiteSpace: "nowrap",
-          }}
-        >
-          {busy ? "Switching…" : "Switch"}
-        </button>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-        <input
-          type="text"
-          placeholder="…or paste custom fed1 invite"
-          value={customInvite}
-          onChange={(e) => setCustomInvite(e.target.value)}
-          disabled={busy}
-          style={{ ...inputStyle, flex: 1, marginBottom: 0 }}
-        />
-        <button
-          disabled={busy || !customValid}
-          onClick={requestCustomSwitch}
-          style={{
-            padding: "8px 14px", borderRadius: T.rs,
-            background: T.surface, border: `1px solid ${T.border}`,
-            color: customValid ? T.text : T.muted,
-            fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-            cursor: busy || !customValid ? "not-allowed" : "pointer", whiteSpace: "nowrap",
-          }}
-        >
-          Switch
-        </button>
-      </div>
-
-      {err && !confirming && (
-        <div style={{
-          marginTop: 8, padding: 8, borderRadius: T.rs,
-          background: T.redDim, border: `1px solid ${T.red}44`,
-          color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.4,
-        }}>
-          {err}
-        </div>
-      )}
-
-      {confirming && (
-        <div style={{
-          position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          padding: 20, zIndex: 1000,
-        }}>
-          <div style={{
-            maxWidth: 420, width: "100%", padding: 20, borderRadius: T.r,
-            background: T.card, border: `1px solid ${T.border}`,
-          }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: T.text, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-              CONFIRM FEDERATION SWITCH
-            </div>
-            <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 16 }}>
-              Switch from <strong>{fedimint.federationName}</strong> to{" "}
-              <strong>{confirming.name}</strong>?
-            </div>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 16 }}>
-              This wipes the local Fedimint wallet's OPFS file and re-joins
-              the new federation. Any ecash on the current federation will
-              be stranded until you switch back. Your Nostr-backed seed
-              and trade history survive.
-            </div>
-
-            {err && (
-              <div style={{
-                marginBottom: 16, padding: 10, borderRadius: T.rs,
-                background: T.redDim, border: `1px solid ${T.red}44`,
-                color: T.red, fontFamily: T.mono, fontSize: 11, lineHeight: 1.5,
-              }}>
-                {err}
-                {refusalCode === "balance" && (
-                  <div style={{ marginTop: 8, color: T.amber }}>
-                    Click <strong>Switch and destroy ecash</strong> to override.
-                    This permanently destroys the balance held under this fed.
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                onClick={() => { setConfirming(null); setErr(null); }}
-                disabled={busy}
-                style={{
-                  flex: 1, padding: "10px 14px", borderRadius: T.rs,
-                  background: T.surface, border: `1px solid ${T.border}`,
-                  color: T.text, fontFamily: T.mono, fontSize: 12, fontWeight: 700,
-                  cursor: busy ? "not-allowed" : "pointer",
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => doSwitch(confirming, refusalCode === "balance")}
-                disabled={busy}
-                style={{
-                  flex: 1, padding: "10px 14px", borderRadius: T.rs,
-                  background: refusalCode === "balance" ? T.red : T.accent,
-                  border: "none",
-                  color: refusalCode === "balance" ? "#fff" : "#000",
-                  fontFamily: T.mono, fontSize: 12, fontWeight: 700,
-                  cursor: busy ? "not-allowed" : "pointer",
-                }}
-              >
-                {busy ? "Switching…"
-                  : refusalCode === "balance" ? "Switch and destroy ecash"
-                  : "Switch federation"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// FEDERATION JOIN PANEL — onboarding for non-joined users
-// ══════════════════════════════════════════════════════════════════════════
-
-function FederationJoinPanel({
-  fedimint, showAdvanced, onToggleAdvanced,
-  customInviteInput, onCustomInviteChange, onJoinPreset, onJoinCustom, onResetLocal,
-}: {
-  fedimint: FedimintState;
-  showAdvanced: boolean;
-  onToggleAdvanced: () => void;
-  customInviteInput: string;
-  onCustomInviteChange: (v: string) => void;
-  onJoinPreset: (preset: FederationPreset) => void;
-  onJoinCustom: () => void;
-  onResetLocal: () => void;
-}) {
-  const showResetHint =
-    !!fedimint.error &&
-    /no modification allowed|different seed|already installed|SEED_MISMATCH_RESET_NEEDED|stale local state/i.test(fedimint.error);
-  const [presets, setPresets] = useState<FederationPreset[]>(CURATED_PRESETS);
-  const [observerLoading, setObserverLoading] = useState(false);
-  const [observerError, setObserverError] = useState<string | null>(null);
-  const [selectedInvite, setSelectedInvite] = useState<string>(DEFAULT_FEDERATION_INVITE);
-
-  // Fetch the live observer list once on mount, merge in after curated
-  useEffect(() => {
-    let cancelled = false;
-    const ctrl = new AbortController();
-    setObserverLoading(true);
-    fetchObserverFederations(ctrl.signal).then((observerList) => {
-      if (cancelled) return;
-      if (observerList.length === 0) {
-        setObserverError("Couldn't reach fedimint-observer — showing curated list only.");
-      } else {
-        setPresets(mergePresets(CURATED_PRESETS, observerList));
-      }
-      setObserverLoading(false);
-    });
-    return () => { cancelled = true; ctrl.abort(); };
-  }, []);
-
-  const selectedPreset = presets.find((p) => p.inviteCode === selectedInvite) || presets[0];
-
-  return (
-    <div style={{
-      margin: 16, padding: 20,
-      background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r,
-    }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 10 }}>
-        FEDIMINT WALLET
-      </div>
-      <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.5, marginBottom: 14 }}>
-        Chama locks ecash into 2-of-3 Shamir shares. To trade, join a federation that mints the ecash.
-      </div>
-
-      {/* Picker dropdown */}
-      <div style={{
-        padding: 12, marginBottom: 10, borderRadius: T.rs,
-        background: T.surface, border: `1px solid ${T.border}`,
-      }}>
-        <label style={{
-          display: "block", fontSize: 10, fontWeight: 600,
-          color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 6,
-        }}>
-          CHOOSE A FEDERATION {observerLoading && <span style={{ color: T.amber }}>· loading…</span>}
-        </label>
-        <select
-          value={selectedInvite}
-          onChange={(e) => setSelectedInvite(e.target.value)}
-          style={{
-            ...inputStyle,
-            appearance: "none",
-            cursor: "pointer",
-            marginBottom: 8,
-          }}
-        >
-          <optgroup label="Curated">
-            {presets.filter((p) => p.source === "curated").map((p) => (
-              <option key={p.inviteCode} value={p.inviteCode}>{p.name}</option>
-            ))}
-          </optgroup>
-          {presets.some((p) => p.source === "observer") && (
-            <optgroup label="Public (fedimint-observer)">
-              {presets.filter((p) => p.source === "observer").map((p) => (
-                <option key={p.inviteCode} value={p.inviteCode}>{p.name}</option>
-              ))}
-            </optgroup>
-          )}
-        </select>
-
-        {selectedPreset?.description && (
-          <div style={{
-            fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
-            marginBottom: 10,
-          }}>
-            {selectedPreset.description}
-          </div>
-        )}
-
-        <button
-          disabled={fedimint.busy || !selectedPreset}
-          onClick={() => selectedPreset && onJoinPreset(selectedPreset)}
-          style={{
-            width: "100%", padding: "10px 16px", borderRadius: T.rs,
-            background: fedimint.busy ? T.surface : T.accent,
-            border: `1px solid ${T.accent}`,
-            color: fedimint.busy ? T.muted : "#000",
-            fontFamily: T.mono, fontSize: 12, fontWeight: 800,
-            cursor: fedimint.busy ? "not-allowed" : "pointer",
-          }}
-        >
-          {fedimint.busy ? "Loading WASM…" : `Join ${selectedPreset?.name || "federation"}`}
-        </button>
-
-        {observerError && (
-          <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 8, lineHeight: 1.5 }}>
-            {observerError}
-          </div>
-        )}
-      </div>
-
-      {/* Community Leader messaging */}
-      <div style={{
-        padding: 12, marginBottom: 10, borderRadius: T.rs,
-        background: T.accentDim, border: `1px solid ${T.accent}33`,
-        fontSize: 11, color: T.text, fontFamily: T.sans, lineHeight: 1.55,
-      }}>
-        <strong style={{ color: T.accent }}>Community Leader tip:</strong>{" "}
-        {COMMUNITY_LEADER_MESSAGE}
-        {" "}Already using Fedi? Your balance stays in Fedi — Chama's wallet is
-        separate and you can top it up with a Lightning invoice.
-      </div>
-
-      <button
-        onClick={onToggleAdvanced}
-        style={{
-          background: "none", border: "none", color: T.muted,
-          fontFamily: T.mono, fontSize: 10, cursor: "pointer", padding: 0,
-        }}
-      >
-        {showAdvanced ? "▲" : "▼"} Advanced — paste a custom invite
-      </button>
-
-      {showAdvanced && (
-        <div style={{ marginTop: 12 }}>
-          <input
-            type="text"
-            placeholder="fed1…"
-            value={customInviteInput}
-            onChange={(e) => onCustomInviteChange(e.target.value)}
-            style={{ ...inputStyle, marginBottom: 8 }}
-          />
-          <button
-            disabled={fedimint.busy || !customInviteInput.trim()}
-            onClick={onJoinCustom}
-            style={{
-              width: "100%", padding: "8px 16px", borderRadius: T.rs,
-              background: T.surface, border: `1px solid ${T.border}`,
-              color: customInviteInput.trim() ? T.text : T.muted,
-              fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-              cursor: fedimint.busy || !customInviteInput.trim() ? "not-allowed" : "pointer",
-            }}
-          >
-            Join custom federation
-          </button>
-        </div>
-      )}
-
-      {fedimint.error && (
-        <div style={{
-          marginTop: 12, padding: 10, borderRadius: T.rs,
-          background: T.redDim, border: `1px solid ${T.red}44`,
-          color: T.red, fontFamily: T.mono, fontSize: 10,
-        }}>
-          {fedimint.error}
-        </div>
-      )}
-
-      {/* Reset local wallet — escape hatch for stuck IndexedDB state */}
-      <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px dashed ${T.border}` }}>
-        {showResetHint && (
-          <div style={{
-            fontSize: 10, color: T.amber, fontFamily: T.mono,
-            marginBottom: 8, lineHeight: 1.5,
-          }}>
-            Looks like stale local wallet state. Reset to clear it — your
-            Nostr-backed seed is safe and will be restored automatically.
-          </div>
-        )}
-        {/* v0.1.76 fund-loss protection: data layer refuses with a
-            clear error if there's a balance. window.confirm dropped
-            because it was a speedbump users clicked through. */}
-        <button
-          onClick={() => onResetLocal()}
-          style={{
-            background: "none",
-            border: `1px solid ${T.border}`,
-            color: T.muted,
-            fontFamily: T.mono, fontSize: 9, fontWeight: 700,
-            padding: "6px 10px", borderRadius: T.rs,
-            cursor: "pointer", letterSpacing: 0.5,
-          }}
-        >
-          ↺ Reset local wallet
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// FUND WALLET MODAL — Lightning invoice to top up
-// ══════════════════════════════════════════════════════════════════════════
-
-// ══════════════════════════════════════════════════════════════════════════
-// DESTROY ECASH CONFIRM MODAL — v0.1.82+ federation drift guard
-// ══════════════════════════════════════════════════════════════════════════
-//
-// Surfaces when initFedimint refuses with RECONCILE_REFUSED_NONZERO_BALANCE.
-// User picked federation B but the OPFS holds sats on federation A. Confirm
-// = wipe + rejoin B (sats destroyed). Cancel = revert preference to A.
-// ══════════════════════════════════════════════════════════════════════════
-
-function DestroyEcashConfirmModal({
-  targetLabel,
-  balanceMsats,
-  onCancel,
-  onConfirm,
-}: {
-  targetLabel: string;
-  balanceMsats: number;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const sats = Math.floor(balanceMsats / 1000);
-  return (
-    <div style={{
-      position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
-      display: "flex", alignItems: "center", justifyContent: "center",
-      padding: 20, zIndex: 1100,
-    }}>
-      <div style={{
-        maxWidth: 440, width: "100%", padding: 20, borderRadius: T.r,
-        background: T.card, border: `1px solid ${T.red}66`,
-      }}>
-        <div style={{
-          fontSize: 11, fontWeight: 700, color: T.red, fontFamily: T.mono,
-          letterSpacing: 1, marginBottom: 12,
-        }}>
-          ⚠ FUNDS AT RISK
-        </div>
-        <div style={{
-          fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55,
-          marginBottom: 16,
-        }}>
-          Switching to <strong>{targetLabel}</strong> will permanently destroy{" "}
-          <strong>{sats > 0 ? `${sats.toLocaleString()} sats` : "an unknown balance"}</strong>{" "}
-          held in your current wallet. Fedimint ecash is bearer cash — once
-          the local wallet is wiped, those sats cannot be recovered from
-          the federation.
-        </div>
-        <div style={{
-          fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
-          marginBottom: 16,
-        }}>
-          To preserve them: cancel, withdraw the balance via Lightning, then
-          retry the switch.
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={onCancel}
-            style={{
-              flex: 1, padding: "10px 14px", borderRadius: T.rs,
-              background: T.accent, border: "none",
-              color: "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            Cancel — keep my sats
-          </button>
-          <button
-            onClick={onConfirm}
-            style={{
-              flex: 1, padding: "10px 14px", borderRadius: T.rs,
-              background: T.red, border: "none",
-              color: "#fff", fontFamily: T.mono, fontSize: 12, fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            Switch and destroy
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpendNotes, balanceMsats }: {
-  onClose: () => void;
-  onCreateInvoice: (amountSats: number, description: string) => Promise<string>;
-  onPayInvoice: (bolt11: string) => Promise<void>;
-  onSpendNotes: (amountMsats: number) => Promise<string>;
-  balanceMsats: number;
-}) {
-  const [tab, setTab] = useState<"receive" | "send">("receive");
-  const [amountSats, setAmountSats] = useState("10000");
-  const [description, setDescription] = useState("Chama top-up");
-  const [invoice, setInvoice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
-  const [sendType, setSendType] = useState<"lightning" | "ecash">("lightning");
-  const [bolt11Input, setBolt11Input] = useState("");
-  const [ecashOutput, setEcashOutput] = useState<string | null>(null);
-
-  // Receive-confirmation tracking.
-  //   balanceAtInvoice: balance snapshot at invoice generation time
-  //   expectedMsats:    msats we're waiting for (amountSats * 1000)
-  //   invoiceExpiresAt: unix seconds when the invoice is stale
-  //   received:         true once balance has gone up by >= expectedMsats
-  const [balanceAtInvoice, setBalanceAtInvoice] = useState<number | null>(null);
-  const [expectedMsats, setExpectedMsats] = useState<number>(0);
-  const [invoiceExpiresAt, setInvoiceExpiresAt] = useState<number | null>(null);
-  const [received, setReceived] = useState(false);
-  const [nowTick, setNowTick] = useState(() => Math.floor(Date.now() / 1000));
-
-  // Tick every second while an invoice is showing so the countdown updates.
-  useEffect(() => {
-    if (!invoice || received) return;
-    const id = setInterval(() => setNowTick(Math.floor(Date.now() / 1000)), 1000);
-    return () => clearInterval(id);
-  }, [invoice, received]);
-
-  // Detect payment: watch balance delta against the pre-invoice snapshot.
-  // NOTE: `received` intentionally NOT in deps — we only flip it to true
-  // here, and including it would recreate this effect on the flip, firing
-  // its cleanup on the next effect in the chain. See v0.1.62 bug notes.
-  useEffect(() => {
-    if (!invoice || received || balanceAtInvoice === null) return;
-    const delta = balanceMsats - balanceAtInvoice;
-    if (delta >= expectedMsats && expectedMsats > 0) {
-      setReceived(true);
-      if (typeof navigator !== "undefined" && navigator.vibrate) {
-        navigator.vibrate([40, 30, 40, 30, 120]);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [balanceMsats, balanceAtInvoice, expectedMsats, invoice]);
-
-  // Auto-close: once `received` flips true, schedule the reset. Separate
-  // effect so its setTimeout isn't cancelled by the detect effect re-running.
-  useEffect(() => {
-    if (!received) return;
-    const t = setTimeout(() => {
-      setInvoice(null);
-      setBalanceAtInvoice(null);
-      setExpectedMsats(0);
-      setInvoiceExpiresAt(null);
-      setReceived(false);
-    }, 3500);
-    return () => clearTimeout(t);
-  }, [received]);
-
-  const handleGenerate = async () => {
-    const n = parseInt(amountSats, 10);
-    if (!n || n <= 0) { setErr("Enter a valid sats amount"); return; }
-    setBusy(true); setErr(null);
-    try {
-      const bolt11 = await onCreateInvoice(n, description || "Chama top-up");
-      // Snapshot balance + expected amount so the watcher effect knows
-      // what "received" looks like. Fedimint invoices default to 1 day
-      // expiry on the federation side; we show a local 10-minute hint
-      // so users don't stare at a QR that the gateway has already
-      // forgotten about.
-      setBalanceAtInvoice(balanceMsats);
-      setExpectedMsats(n * 1000);
-      setInvoiceExpiresAt(Math.floor(Date.now() / 1000) + 600);
-      setReceived(false);
-      setInvoice(bolt11);
-    } catch (e: any) {
-      setErr(e.message || "Failed to create invoice");
-    } finally { setBusy(false); }
-  };
-
-  const handlePayInvoice = async () => {
-    if (!bolt11Input.trim()) { setErr("Paste a Lightning invoice"); return; }
-    setBusy(true); setErr(null); setSuccess(null);
-    try {
-      await onPayInvoice(bolt11Input.trim());
-      setSuccess("Payment sent!"); setBolt11Input("");
-    } catch (e: any) {
-      setErr(e.message || "Payment failed");
-    } finally { setBusy(false); }
-  };
-
-  const handleSpendAll = async () => {
-    if (balanceMsats <= 0) { setErr("No balance to send"); return; }
-    setBusy(true); setErr(null);
-    try { setEcashOutput(await onSpendNotes(balanceMsats)); }
-    catch (e: any) { setErr(e.message || "Failed"); }
-    finally { setBusy(false); }
-  };
-
-  const handleSpendAmount = async () => {
-    const n = parseInt(amountSats, 10);
-    if (!n || n <= 0) { setErr("Enter a valid sats amount"); return; }
-    setBusy(true); setErr(null);
-    try { setEcashOutput(await onSpendNotes(n * 1000)); }
-    catch (e: any) { setErr(e.message || "Failed"); }
-    finally { setBusy(false); }
-  };
-
-  const copyText = (text: string) => {
-    navigator.clipboard?.writeText(text).catch(() => {});
-  };
-
-  const tabBtn = (t: "receive" | "send", label: string) => (
-    <button onClick={() => { setTab(t); setErr(null); setSuccess(null); setInvoice(null); setEcashOutput(null); }} style={{
-      flex: 1, padding: "8px 0", borderRadius: T.rs, border: "none",
-      background: tab === t ? T.accent : T.surface,
-      color: tab === t ? "#000" : T.muted,
-      fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
-    }}>{label}</button>
-  );
-
-  return (
-    <div onClick={onClose} style={{
-      position: "fixed", inset: 0, background: "#000a", zIndex: 9998,
-      display: "flex", alignItems: "center", justifyContent: "center",
-      padding: 16, animation: "fadeIn 0.2s ease",
-    }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        background: T.card, border: `1px solid ${T.borderHi}`, borderRadius: T.r,
-        padding: 24, maxWidth: 420, width: "100%",
-      }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: T.text, fontFamily: T.sans }}>Wallet</div>
-          <button onClick={onClose} style={{
-            background: "none", border: "none", color: T.muted,
-            fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
-          }}>{String.fromCharCode(215)}</button>
-        </div>
-
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-          {tabBtn("receive", "\u26a1 Receive")}
-          {tabBtn("send", "\u2197 Send")}
-        </div>
-
-        {/* RECEIVE */}
-        {tab === "receive" && !invoice && (<>
-          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>AMOUNT (SATS)</div>
-          <input type="number" value={amountSats} onChange={(e) => setAmountSats(e.target.value)} style={{ ...inputStyle, marginBottom: 12 }} />
-          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>DESCRIPTION</div>
-          <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} style={{ ...inputStyle, marginBottom: 16 }} />
-          <button disabled={busy} onClick={handleGenerate} style={{
-            width: "100%", padding: "12px 16px", borderRadius: T.rs,
-            background: busy ? T.surface : T.accent, border: `1px solid ${T.accent}`,
-            color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,
-            cursor: busy ? "not-allowed" : "pointer",
-          }}>{busy ? "Generating..." : "\u26a1 Generate Lightning invoice"}</button>
-        </>)}
-
-        {tab === "receive" && invoice && received && (
-          <div style={{
-            padding: "32px 16px", textAlign: "center",
-            background: T.greenDim, border: `1px solid ${T.green}66`,
-            borderRadius: T.r, animation: "fadeIn 0.3s ease",
-          }}>
-            <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
-              Payment received
-            </div>
-            <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
-              +{(expectedMsats / 1000).toLocaleString()} sats
-            </div>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
-              Balance updated · closing…
-            </div>
-          </div>
-        )}
-        {tab === "receive" && invoice && !received && (<>
-          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 8, letterSpacing: 1, textAlign: "center" }}>SCAN OR COPY TO PAY</div>
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-            <Suspense fallback={<div style={{ width: 200, height: 200, background: T.surface, borderRadius: T.rs }} />}>
-              <QRCode data={invoice} size={200} fgColor="#a78bfa" />
-            </Suspense>
-          </div>
-          {/* Waiting indicator + countdown */}
-          {(() => {
-            const remaining = invoiceExpiresAt ? Math.max(0, invoiceExpiresAt - nowTick) : 0;
-            const mins = Math.floor(remaining / 60);
-            const secs = remaining % 60;
-            const expired = invoiceExpiresAt !== null && remaining === 0;
-            return (
-              <div style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                gap: 8, marginBottom: 12, padding: "6px 12px",
-                borderRadius: T.rs,
-                background: expired ? T.redDim : T.surface,
-                border: `1px solid ${expired ? T.red + "44" : T.border}`,
-              }}>
-                {!expired && (
-                  <div style={{
-                    width: 8, height: 8, borderRadius: "50%",
-                    background: T.accent, animation: "pulse 1.4s ease-in-out infinite",
-                  }} />
-                )}
-                <span style={{
-                  fontSize: 10, fontFamily: T.mono,
-                  color: expired ? T.red : T.muted, letterSpacing: 0.5,
-                }}>
-                  {expired
-                    ? "Invoice expired — generate a new one"
-                    : `Waiting for payment · ${mins}:${secs.toString().padStart(2, "0")}`}
-                </span>
-              </div>
-            );
-          })()}
-          <div style={{ padding: 8, marginBottom: 12, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 8, color: T.muted, wordBreak: "break-all", maxHeight: 60, overflowY: "auto", textAlign: "center" }}>{invoice}</div>
-          <button onClick={() => copyText(invoice)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.accentDim, border: `1px solid ${T.accent}44`, color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>Copy invoice</button>
-          <button onClick={() => {
-            setInvoice(null);
-            setBalanceAtInvoice(null);
-            setExpectedMsats(0);
-            setInvoiceExpiresAt(null);
-          }} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>New invoice</button>
-        </>)}
-
-        {/* SEND */}
-        {tab === "send" && !ecashOutput && (<>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <button onClick={() => setSendType("lightning")} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: sendType === "lightning" ? `1px solid ${T.accent}` : `1px solid ${T.border}`, background: sendType === "lightning" ? T.accentDim : T.surface, color: sendType === "lightning" ? T.accent : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Lightning</button>
-            <button onClick={() => setSendType("ecash")} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: sendType === "ecash" ? `1px solid ${T.amber}` : `1px solid ${T.border}`, background: sendType === "ecash" ? T.amberDim : T.surface, color: sendType === "ecash" ? T.amber : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Ecash</button>
-          </div>
-
-          {sendType === "lightning" && (<>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>PASTE LIGHTNING INVOICE</div>
-            <textarea value={bolt11Input} onChange={(e) => setBolt11Input(e.target.value)} placeholder="lnbc1..." rows={3} style={{ ...inputStyle, resize: "vertical" as const, marginBottom: 12, minHeight: 60 }} />
-            <button disabled={busy} onClick={handlePayInvoice} style={{ width: "100%", padding: "12px 16px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 12, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{busy ? "Sending..." : "\u26a1 Pay invoice"}</button>
-          </>)}
-
-          {sendType === "ecash" && (<>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>AMOUNT (SATS)</div>
-            <input type="number" value={amountSats} onChange={(e) => setAmountSats(e.target.value)} style={{ ...inputStyle, marginBottom: 12 }} />
-            <div style={{ display: "flex", gap: 8 }}>
-              <button disabled={busy} onClick={handleSpendAmount} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`, color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{busy ? "Creating..." : "Create ecash"}</button>
-              <button disabled={busy} onClick={handleSpendAll} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{`Send ALL (${Math.floor(balanceMsats / 1000)} sats)`}</button>
-            </div>
-          </>)}
-        </>)}
-
-        {tab === "send" && ecashOutput && (<>
-          <div style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, marginBottom: 8, letterSpacing: 1, textAlign: "center" }}>ECASH NOTES \u2014 COPY AND SEND TO RECIPIENT</div>
-          <div style={{ padding: 8, marginBottom: 12, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 8, color: T.text, wordBreak: "break-all", maxHeight: 100, overflowY: "auto" }}>{ecashOutput}</div>
-          <button onClick={() => copyText(ecashOutput)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.amberDim, border: `1px solid ${T.amber}44`, color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>Copy ecash notes</button>
-          <button onClick={() => setEcashOutput(null)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Done</button>
-        </>)}
-
-        {success && <div style={{ marginTop: 12, padding: 10, borderRadius: T.rs, background: T.greenDim, border: `1px solid ${T.green}44`, color: T.green, fontFamily: T.mono, fontSize: 10 }}>{success}</div>}
-        {err && <div style={{ marginTop: 12, padding: 10, borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}44`, color: T.red, fontFamily: T.mono, fontSize: 10 }}>{err}</div>}
-      </div>
-    </div>
-  );
-}
-
-// MAIN APP
-// ══════════════════════════════════════════════════════════════════════════
 
 export default function App() {
   // Toast state needs to be declared before the hook since we pass
@@ -3063,13 +75,13 @@ export default function App() {
         t({
           message: p.viaWatchdog
             ? "Claimed! " + sats + " sats arrived."
-            : "Claimed! Ecash redeemed to your wallet.",
+            : "Claimed! Ecash redeemed to your Lightning wallet.",
           type: "success",
         });
       } else if (p.phase === "timeout") {
         t({
           message:
-            "Still pending on the federation. Your sats will appear once settled — check the wallet.",
+            "Still pending on the federation. Your sats will appear once settled — check back shortly.",
           type: "info",
         });
       } else if (p.phase === "failure") {
@@ -3078,41 +90,60 @@ export default function App() {
     },
   });
 
-  const [view, setView] = useState<"list" | "detail" | "create" | "settings">("list");
+  const [view, setView] = useState<View>("browse");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [tab, setTab] = useState<"browse" | "mine">("browse");
   const [browseCategory, setBrowseCategory] = useState<string>("all");
-  // PR 2: Browse community filter. "all" shows every community; the
-  // user's selected community is the default narrowing — they can
-  // widen back to "all" for arbitrage/cross-community discovery.
-  const [browseCommunity, setBrowseCommunity] = useState<string>(actions.getCommunity());
+  // First-time users have no stored community → "all" so no pill is
+  // highlighted and Browse shows everything. Returning users land on
+  // their picked community.
+  const [browseCommunity, setBrowseCommunity] = useState<string>(
+    () => getUserCommunitySlugRaw() ?? "all",
+  );
   const [nip46Uri, setNip46Uri] = useState<string | null>(null);
   const [loginSuccess, setLoginSuccess] = useState(false);
   const [nip46Waiting, setNip46Waiting] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
-  // Keep toastRef in sync with setToast so the hook's claim-progress callback
-  // can dispatch toasts without depending on setToast directly.
   toastRef.current = setToast;
   const [showFundModal, setShowFundModal] = useState(false);
-  const [showAdvancedFederation, setShowAdvancedFederation] = useState(false);
-  const [customInviteInput, setCustomInviteInput] = useState("");
   const [autoLoginChecked, setAutoLoginChecked] = useState(false);
   const [showQRScanner, setShowQRScanner] = useState(false);
-  // PR 5 (v0.1.82+): destroy-confirm modal triggered when initFedimint
-  // refuses with RECONCILE_REFUSED_NONZERO_BALANCE. Carries the user's
-  // attempted action so we can re-invoke it with { force: true } on
-  // confirm, or revert preference back to the active invite on cancel.
   const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<{
     invite: string;
     label: string;
     balanceMsats: number;
     activeInvite: string;
   } | null>(null);
-  // PR 5 (v0.1.82+): auto-init guard. Fires once per connect cycle to
-  // restore the user's last-joined federation without prompting them
-  // to re-pick on every reload. First-time users (no chama_active_invite)
-  // skip auto-init and see the FederationJoinPanel as before.
   const [autoInitDone, setAutoInitDone] = useState(false);
+  // v0.1.85 honest browser-support disclosure. Dismissal is scoped
+  // per-pubkey (Bug E from smoke testing) so a power user with multiple
+  // identities sees the educational banner once per identity, not once
+  // per browser. This matches Pillar 2.7's "educate at every
+  // opportunity" — a new npub on the same browser is a new user from
+  // Chama's perspective.
+  const [browserBannerDismissed, setBrowserBannerDismissed] = useState<boolean>(false);
+  useEffect(() => {
+    if (!pubkey) {
+      setBrowserBannerDismissed(false);
+      return;
+    }
+    try {
+      if (typeof localStorage === "undefined") return;
+      const key = `chama_browser_support_dismissed_${pubkey}`;
+      setBrowserBannerDismissed(localStorage.getItem(key) === "1");
+    } catch {
+      setBrowserBannerDismissed(false);
+    }
+  }, [pubkey]);
+  const dismissBrowserBanner = () => {
+    setBrowserBannerDismissed(true);
+    if (!pubkey) return;
+    try {
+      if (typeof localStorage !== "undefined") {
+        const key = `chama_browser_support_dismissed_${pubkey}`;
+        localStorage.setItem(key, "1");
+      }
+    } catch { /* no-op */ }
+  };
 
   // Auto-login: on native platforms, check for saved nsec in secure storage
   useEffect(() => {
@@ -3134,23 +165,22 @@ export default function App() {
   }, [autoLoginChecked, connected, loading, actions]);
 
   // PR 5 (v0.1.82+): auto-init Fedimint after connect when there's a
-  // record of a previously-joined federation. Without this, the user
-  // gets the federation picker on every reload — and clicking the
-  // wrong one used to silently destroy notes (the v0.1.81 reproduction
-  // that triggered this PR). With auto-init, the picker only renders
-  // for first-time users (no chama_active_invite); everyone else lands
-  // on their saved fed silently. The reconciliation balance guard in
-  // initFedimint covers the edge case where chama_federation_invite
+  // record of a previously-joined federation. The reconciliation balance
+  // guard in initFedimint covers the edge case where chama_federation_invite
   // and chama_active_invite have drifted.
+  //
+  // v0.1.85: also require an explicit community-pick. Without this, stale
+  // active-invite leftovers in localStorage could auto-join a "first-time"
+  // user against a fed they never deliberately picked, producing the
+  // inconsistent first-time experience Jetty saw in 3-profile testing.
   useEffect(() => {
     if (!connected || autoInitDone) return;
     if (fedimint.joined || fedimint.busy || fedimint.initialized) return;
     const activeInvite = getActiveInvite();
-    if (!activeInvite) return;  // first-time user — let them pick
+    const pickedCommunity = getUserCommunitySlugRaw();
+    if (!activeInvite || !pickedCommunity) return;  // first-time → let them pick
     setAutoInitDone(true);
     actions.initFedimint().catch((e: any) => {
-      // The reconciliation guard may throw — surface via the same
-      // destroy-confirm modal the manual join handlers use.
       if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
         setPendingDestroyConfirm({
           invite: e.desiredInvite,
@@ -3164,9 +194,6 @@ export default function App() {
     });
   }, [connected, autoInitDone, fedimint.joined, fedimint.busy, fedimint.initialized, actions]);
 
-  // Split trades into Browse (public, my federation, open) and My trades
-  // (anything I'm a participant in). Both share the hide-after-7-days rule
-  // for terminal states.
   const now = Math.floor(Date.now() / 1000);
   const HIDE_AFTER = 7 * 86400;
   const myFederationInvite = fedimint.joined ? getFederationInvite() : null;
@@ -3185,15 +212,12 @@ export default function App() {
     s.participants.arbiter === pubkey;
 
   const myTrades = visibleTrades.filter(isParticipant);
-  // Category filter — "subscription" is cross-cutting, others match s.category.
+
   const matchesBrowseCategory = (s: EscrowState) => {
     if (browseCategory === "all") return true;
     if (browseCategory === "subscription") return s.subscription !== null;
     return s.category === browseCategory;
   };
-  // PR 2: community filter. "all" disables the filter; otherwise match
-  // the listing's community slug. Pre-PR-2 listings (community === null)
-  // only show under "all" — they have no slug to match against.
   const matchesBrowseCommunity = (s: EscrowState) => {
     if (browseCommunity === "all") return true;
     return s.community === browseCommunity;
@@ -3206,18 +230,9 @@ export default function App() {
     matchesBrowseCategory(s) &&
     matchesBrowseCommunity(s)
   );
-  // Legacy name kept for any stragglers — points at My trades.
-  const escrowList = myTrades;
   const selected = selectedId ? escrows.get(selectedId) : null;
 
   // v0.1.66.32: refetch on tap when local state may be stale.
-  // Navigation is instant from cache; if the local snapshot is
-  // missing or non-truly-terminal, fire loadEscrow in the
-  // background so onStateUpdate can re-render the detail view
-  // when fresh data arrives. Fixes the "tap into a trade on a
-  // device that hasn't seen recent events shows stale state"
-  // bug (e.g. APK cold-start past the savedIds reload cap, or
-  // a trade joined on another device since last sync).
   const openEscrow = (id: string) => {
     setSelectedId(id);
     setView("detail");
@@ -3237,7 +252,7 @@ export default function App() {
   const handleCreate = async (params: any) => {
     try {
       setToast({ message: "Signing event with NIP-07...", type: "info" });
-      const { escrowId, state } = await actions.createEscrow(params);
+      const { escrowId } = await actions.createEscrow(params);
       setToast({ message: `Trade published! ${escrowId}`, type: "success" });
       setView("detail");
       setSelectedId(escrowId);
@@ -3248,42 +263,184 @@ export default function App() {
     }
   };
 
+  const handleSignOut = async () => {
+    if (Capacitor.isNativePlatform()) {
+      try { await Preferences.remove({ key: "chama_saved_nsec" }); } catch {}
+    }
+    delete (window as any).__chama_connect_nsec;
+    window.location.reload();
+  };
+
+  // Community pill tap → identity + federation effect. Per PHILOSOPHY.md
+  // §2.3, tapping a community is "I'm in this community now": updates
+  // chama_community localStorage, filters Browse, and switches/joins the
+  // backing federation. v0.1.85 reality: this is also THE first-time join
+  // — no separate picker step. Decision logic is pure
+  // (decideCommunityTapEffect); this handler dispatches the side effects
+  // and handles failure-revert so a flaky federation can't strand the
+  // user with no working client.
+  const handleSelectCommunity = async (slug: string) => {
+    // Capture previous state BEFORE any mutation so we can revert on
+    // switch failure. We track the RAW community (null for first-timers)
+    // separately from the resolution-flavored fallback — without that
+    // distinction, the revert path would write "global-usd" to
+    // localStorage for a first-timer whose first switch failed,
+    // permanently parking them on a community they never picked
+    // (Bug A regression seen in v0.1.85 smoke testing).
+    const previousInvite = getActiveInvite();
+    const previousCommunityRaw = getUserCommunitySlugRaw();
+    const previousCommunityName = previousCommunityRaw
+      ? (getCommunityBySlug(previousCommunityRaw)?.displayName ?? previousCommunityRaw)
+      : "your previous community";
+
+    const effect = decideCommunityTapEffect({
+      slug,
+      currentInvite: previousInvite,
+      balanceMsats: fedimint.balanceMsats ?? 0,
+    });
+
+    if (effect.kind === "filter-only") {
+      setBrowseCommunity("all");
+      return;
+    }
+
+    // All non-filter cases update identity (community + Browse filter)
+    // and clear any earlier custom-invite override so future
+    // resolutions honor the community's pinned invite.
+    actions.setCommunity(effect.slug);
+    setBrowseCommunity(effect.slug);
+    actions.setCustomInvite("");
+
+    if (effect.kind === "identity-only") return;
+
+    if (effect.kind === "switch-silent") {
+      try {
+        setToast({ message: `Switching to ${effect.displayName}…`, type: "info" });
+        if (fedimint.federationId) {
+          await actions.switchFederation(effect.targetInvite);
+        } else {
+          await actions.initFedimint(effect.targetInvite);
+        }
+        setToast({ message: `On ${effect.displayName}.`, type: "success" });
+      } catch (e: any) {
+        if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE"
+          || e?.code === "SWITCH_REFUSED_NONZERO_BALANCE") {
+          // Race: balance was zero at decision time, became non-zero
+          // before the switch landed. Surface the modal anyway.
+          setPendingDestroyConfirm({
+            invite: effect.targetInvite,
+            label: effect.displayName,
+            balanceMsats: e.balanceMsats || 0,
+            activeInvite: e.previousActiveInvite || previousInvite || "",
+          });
+          return;
+        }
+
+        // Switch failed for a non-balance reason (iroh unreachable,
+        // timeout, etc.). Revert identity AND attempt to re-join the
+        // previous federation so we don't strand the user. If revert
+        // also fails, surface a retry CTA — the FedimintBar Reconnect
+        // button is the recovery path.
+        //
+        // For first-timers (previousCommunityRaw === null) we revert by
+        // CLEARING the community + setting browseCommunity back to
+        // "all" — never write "global-usd" to localStorage on their
+        // behalf. They land back in the same first-time state they
+        // started in and can try a different pill.
+        console.warn("[chama] community-tap switch failed, reverting:", e);
+        if (previousCommunityRaw) {
+          actions.setCommunity(previousCommunityRaw);
+          setBrowseCommunity(previousCommunityRaw);
+        } else {
+          actions.setCommunity("");  // clears localStorage
+          setBrowseCommunity("all");
+        }
+
+        if (!previousInvite) {
+          // First-time user with a failed init — nothing to revert to.
+          setToast({
+            message: `Couldn't reach ${effect.displayName}. Try another community.`,
+            type: "error",
+          });
+          return;
+        }
+        try {
+          await actions.switchFederation(previousInvite);
+          setToast({
+            message: `Couldn't reach ${effect.displayName}. Stayed on ${previousCommunityName}.`,
+            type: "error",
+          });
+        } catch (revertErr: any) {
+          console.error("[chama] revert also failed:", revertErr);
+          // Both switch and revert failed — restore the previous invite
+          // as the custom override so the FedimintBar Reconnect button
+          // (which calls initFedimint() with no args) attempts the right
+          // fed instead of falling through to the BP default.
+          actions.setCustomInvite(previousInvite);
+          setToast({
+            message: `Couldn't reach ${effect.displayName}. Tap Reconnect in the Chama bar to retry ${previousCommunityName}.`,
+            type: "error",
+          });
+        }
+      }
+      return;
+    }
+
+    // effect.kind === "destroy-confirm" — funds at risk, surface modal.
+    setPendingDestroyConfirm({
+      invite: effect.targetInvite,
+      label: effect.displayName,
+      balanceMsats: effect.balanceMsats,
+      activeInvite: effect.currentInvite,
+    });
+  };
+
+  // BrowseView's first-time "advanced: paste custom invite" affordance.
+  // First-time users (no chama_active_invite) tap this to join via a
+  // pasted fed1 invite that isn't a registry community. Sandbox mode is
+  // the canonical home for this; the inline affordance just makes it
+  // discoverable for first-timers who'd otherwise be stuck.
+  const handlePasteCustomInvite = async (invite: string) => {
+    const trimmed = invite.trim();
+    if (!trimmed.startsWith("fed1")) {
+      setToast({ message: "Invite must start with fed1...", type: "error" });
+      return;
+    }
+    try {
+      actions.setCustomInvite(trimmed);
+      setToast({ message: "Joining custom federation...", type: "info" });
+      if (fedimint.federationId) {
+        await actions.switchFederation(trimmed);
+      } else {
+        await actions.initFedimint(trimmed);
+      }
+      setToast({ message: "Joined custom federation!", type: "success" });
+    } catch (e: any) {
+      if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
+        setPendingDestroyConfirm({
+          invite: trimmed,
+          label: `custom federation (${trimmed.slice(4, 12)}…)`,
+          balanceMsats: e.balanceMsats || 0,
+          activeInvite: e.previousActiveInvite || "",
+        });
+      } else {
+        setToast({ message: e?.message || "Join failed", type: "error" });
+      }
+    }
+  };
+
+  const switchTab = (t: Tab) => {
+    if (t === "browse") setView("browse");
+    else if (t === "create") setView("create");
+    else if (t === "me") setView("me");
+  };
+
   // ── Not connected → show connect screen ──
   if (!connected) {
     return (
       <div style={{ background: T.bg, color: T.text, minHeight: "100vh", fontFamily: T.sans }}>
-        <style>{`
-          @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800;900&display=swap');
-          @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-          @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-          *{box-sizing:border-box;margin:0;padding:0}
-          input::placeholder{color:${T.muted}88}
-          input:focus,select:focus{border-color:${T.accent}66!important}
-        `}</style>
-        {loginSuccess && (
-          <div style={{
-            position: "fixed", inset: 0, zIndex: 9999,
-            display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center",
-            background: T.bg,
-            animation: "fadeIn 0.3s ease-out",
-          }}>
-            <div style={{
-              width: 80, height: 80, borderRadius: "50%",
-              background: T.greenDim, border: "2px solid " + T.green,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              marginBottom: 20, animation: "fadeIn 0.4s ease-out",
-            }}>
-              <span style={{ fontSize: 36 }}>&#x2713;</span>
-            </div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: T.green, fontFamily: T.mono, marginBottom: 8 }}>
-              Connected!
-            </div>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
-              Signer authenticated via Nostr
-            </div>
-          </div>
-        )}
+        <style>{globalCss}</style>
+        {loginSuccess && <LoginSuccessSplash />}
         {showQRScanner && (
           <Suspense fallback={null}>
             <QRScanner
@@ -3310,14 +467,12 @@ export default function App() {
           onConnect={actions.connect}
           onConnectNIP46={async () => {
             try {
-              if (nip46Waiting) return; // prevent double-click
+              if (nip46Waiting) return;
               setNip46Waiting(true);
               const { createNostrConnectSession } = await import("../escrow-engine/nip46-signer.js");
               const session = await createNostrConnectSession();
               setNip46Uri(session.uri);
-              // Now wait for the bunker to connect (async, non-blocking UI)
               const result = await session.waitForConnection();
-              // Connected! Store the signer and trigger normal connect flow
               (window as any).__chama_nip46_signer = result.signer;
               (window as any).__chama_nip46_pubkey = result.pubkey;
               setNip46Uri(null);
@@ -3354,21 +509,16 @@ export default function App() {
   }
 
   // ── Connected → main app ──
-  return (
-    <div style={{ background: T.bg, color: T.text, minHeight: "100vh", fontFamily: T.sans, maxWidth: 520, margin: "0 auto" }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800;900&display=swap');
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-        @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-        *{box-sizing:border-box;margin:0;padding:0}
-        input::placeholder{color:${T.muted}88}
-        input:focus,select:focus{border-color:${T.accent}66!important}
-        ::-webkit-scrollbar{width:4px}
-        ::-webkit-scrollbar-track{background:transparent}
-        ::-webkit-scrollbar-thumb{background:${T.border};border-radius:4px}
-      `}</style>
+  const activeTab = TAB_FOR_VIEW[view];
 
-      {/* Toast */}
+  return (
+    <div style={{
+      background: T.bg, color: T.text, minHeight: "100vh",
+      fontFamily: T.sans, maxWidth: 520, margin: "0 auto",
+      paddingBottom: BOTTOM_NAV_HEIGHT,
+    }}>
+      <style>{globalCss}</style>
+
       {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
 
       {/* Header */}
@@ -3396,150 +546,45 @@ export default function App() {
         </div>
       </div>
 
-      {/* Wallet bar */}
+      {/* Identity bar (relays + npub). Sign out lives in Me → Settings. */}
       <WalletBar
         pubkey={pubkey!}
         connectedRelays={connectedRelays}
         relayStatuses={relayStatuses}
-        onSignOut={async () => {
-          if (Capacitor.isNativePlatform()) {
-            try { await Preferences.remove({ key: "chama_saved_nsec" }); } catch {}
-          }
-          // Clear the nsec from memory and reload the app
-          delete (window as any).__chama_connect_nsec;
-          window.location.reload();
-        }}
       />
 
-      {/* Fedimint wallet bar */}
+      {/* Chama (Fedimint) bar. showReconnect is true for users who have
+          a reconnect target (picked community or active invite) so the
+          Reconnect CTA appears after a failed switch+revert; first-time
+          users (no community yet) don't see it because their join path
+          is community pills, not Reconnect. */}
       <FedimintBar
         fedimint={fedimint}
+        showReconnect={getUserCommunitySlugRaw() !== null || getActiveInvite() !== null}
         onFund={() => setShowFundModal(true)}
         onInit={() => actions.initFedimint().catch(
           (e: any) => setToast({ message: e.message || "Federation join failed", type: "error" })
         )}
       />
 
-      {/* PR 5: post-join Advanced area — federation switch lives here.
-          The pre-join FederationJoinPanel below has its own Advanced
-          toggle for the custom-invite first-join flow. */}
-      {fedimint.joined && (
-        <div style={{
-          margin: "0 16px 12px", padding: "12px 16px",
-          background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r,
-        }}>
-          <button
-            onClick={() => setShowAdvancedFederation(!showAdvancedFederation)}
-            style={{
-              background: "none", border: "none", color: T.muted,
-              fontFamily: T.mono, fontSize: 10, cursor: "pointer", padding: 0,
-            }}
-          >
-            {showAdvancedFederation ? "▲" : "▼"} Advanced — switch or reset wallet
-          </button>
-          {showAdvancedFederation && (
-            <SwitchFederationPanel
-              fedimint={fedimint}
-              onSwitch={async (inviteCode: string, opts) => {
-                try {
-                  setToast({ message: "Switching federation…", type: "info" });
-                  await actions.switchFederation(inviteCode, opts);
-                  setToast({ message: "Federation switch complete", type: "success" });
-                } catch (e: any) {
-                  setToast({ message: e?.message || "Switch failed", type: "error" });
-                  throw e;
-                }
-              }}
-            />
-          )}
-        </div>
+      {/* Honest browser-support disclosure — one-time-per-account. Fires
+          for ALL browser users regardless of join state, so first-time
+          users encounter it before committing to a federation (the right
+          educational moment per Pillar 2.7). */}
+      {shouldShowBrowserSupportBanner({
+        isBrowser: !Capacitor.isNativePlatform(),
+        dismissed: browserBannerDismissed,
+      }) && (
+        <BrowserSupportBanner onDismiss={dismissBrowserBanner} />
       )}
 
-      {/* Federation onboarding panel (only if not joined) */}
-      {!fedimint.joined && (
-        <FederationJoinPanel
-          fedimint={fedimint}
-          showAdvanced={showAdvancedFederation}
-          onToggleAdvanced={() => setShowAdvancedFederation(!showAdvancedFederation)}
-          customInviteInput={customInviteInput}
-          onCustomInviteChange={setCustomInviteInput}
-          onJoinPreset={async (preset) => {
-            try {
-              setToast({ message: `Joining ${preset.name} (WASM warming up)…`, type: "info" });
-              // If the user picked something other than BLF, save it as custom
-              if (preset.inviteCode !== DEFAULT_FEDERATION_INVITE) {
-                actions.setCustomInvite(preset.inviteCode);
-              }
-              // PR 5: if a wallet is already in memory pointing somewhere,
-              // route through switchFederation (which has its own balance
-              // guard). For cold-start joins, initFedimint's reconcile
-              // guard catches the same drift case.
-              if (fedimint.federationId) {
-                await actions.switchFederation(preset.inviteCode);
-              } else {
-                await actions.initFedimint(preset.inviteCode);
-              }
-              setToast({ message: `Joined ${preset.name}! You can now fund and trade.`, type: "success" });
-            } catch (e: any) {
-              if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
-                setPendingDestroyConfirm({
-                  invite: preset.inviteCode,
-                  label: preset.name,
-                  balanceMsats: e.balanceMsats || 0,
-                  activeInvite: e.previousActiveInvite,
-                });
-              } else {
-                setToast({ message: e.message || "Join failed", type: "error" });
-              }
-            }
-          }}
-          onJoinCustom={async () => {
-            const invite = customInviteInput.trim();
-            if (!invite.startsWith("fed1")) {
-              setToast({ message: "Invite must start with fed1...", type: "error" });
-              return;
-            }
-            try {
-              actions.setCustomInvite(invite);
-              setToast({ message: "Joining custom federation...", type: "info" });
-              if (fedimint.federationId) {
-                await actions.switchFederation(invite);
-              } else {
-                await actions.initFedimint(invite);
-              }
-              setToast({ message: "Joined custom federation!", type: "success" });
-            } catch (e: any) {
-              if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
-                setPendingDestroyConfirm({
-                  invite,
-                  label: `custom federation (${invite.slice(4, 12)}…)`,
-                  balanceMsats: e.balanceMsats || 0,
-                  activeInvite: e.previousActiveInvite,
-                });
-              } else {
-                setToast({ message: e.message || "Join failed", type: "error" });
-              }
-            }
-          }}
-          onResetLocal={async () => {
-            try {
-              setToast({ message: "Resetting local wallet…", type: "info" });
-              await actions.resetLocalWallet();
-              setToast({
-                message: "Local wallet reset. Try joining again.",
-                type: "success",
-              });
-            } catch (e: any) {
-              setToast({
-                message: e.message || "Reset failed",
-                type: "error",
-              });
-            }
-          }}
-        />
-      )}
+      {/* The first-time onboarding picker no longer renders in the shell.
+          Community pills in BrowseView are the primary first-time join
+          surface (one-tap = identity + fed init). Power users still get
+          the picker via Me → Settings → Advanced → Sandbox mode (which
+          surfaces SwitchFederationPanel + custom-invite paste). */}
 
-      {/* Fund wallet modal */}
+      {/* Fund Chama modal */}
       {showFundModal && (
         <FundWalletModal
           onClose={() => setShowFundModal(false)}
@@ -3552,22 +597,14 @@ export default function App() {
         />
       )}
 
-      {/* PR 5 (v0.1.82+): destroy-confirm modal for federation drift.
-          Surfaced when initFedimint refuses with
-          RECONCILE_REFUSED_NONZERO_BALANCE — i.e. the user asked to
-          join a federation that differs from the OPFS-bound one AND
-          the local wallet holds sats. */}
+      {/* Federation drift confirm */}
       {pendingDestroyConfirm && (
         <DestroyEcashConfirmModal
           targetLabel={pendingDestroyConfirm.label}
           balanceMsats={pendingDestroyConfirm.balanceMsats}
           onCancel={() => {
-            // Revert preference back to the active invite so the next
-            // attempt doesn't immediately re-trigger the refusal.
             actions.setCustomInvite(pendingDestroyConfirm.activeInvite);
             setPendingDestroyConfirm(null);
-            // Re-init against the active invite so the user lands on
-            // the wallet that actually has their funds.
             actions.initFedimint(pendingDestroyConfirm.activeInvite).catch((e: any) =>
               setToast({ message: e?.message || "Re-init failed", type: "error" })
             );
@@ -3586,22 +623,18 @@ export default function App() {
         />
       )}
 
-      {/* Content */}
+      {/* Content — routed by view */}
       {view === "detail" && selected ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
           <TradeDetail
             state={selected}
             pubkey={pubkey!}
-            onBack={() => { setView("list"); setSelectedId(null); }}
+            onBack={() => { setView("browse"); setSelectedId(null); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
               (e: any) => setToast({ message: e.message, type: "error" })
             )}
             onClaim={() => {
-              // Toast dispatch now happens through the hook's onClaimProgress
-              // callback (wired at useEscrow init). We still await the action
-              // to absorb any thrown error so it doesn't become an unhandled
-              // rejection — the hook already reported it as a "failure" phase.
               actions.claimAndRedeem(selectedId!).catch((e: any) => {
                 console.debug("[chama] Claim action threw (already toasted):", e?.message);
               });
@@ -3641,209 +674,142 @@ export default function App() {
                 setToast({ message: e.message || "Lock failed", type: "error" });
               }
             }}
-            onOpenSettings={() => setView("settings")}
+            onOpenSettings={() => setView("saved-handles")}
           />
         </div>
       ) : view === "create" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
           <CreateForm
             onCreate={handleCreate}
-            onClose={() => setView("list")}
+            onClose={() => setView("browse")}
           />
         </div>
-      ) : view === "settings" ? (
+      ) : view === "me" ? (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          <MeScreen
+            pubkey={pubkey!}
+            myTrades={myTrades}
+            onOpenTrade={openEscrow}
+            onOpenSavedHandles={() => setView("saved-handles")}
+            onOpenAdvanced={() => setView("advanced")}
+            onSignOut={handleSignOut}
+          />
+        </div>
+      ) : view === "saved-handles" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
           <SavedHandlesPanel
             communitySlug={actions.getCommunity()}
-            onClose={() => setView("list")}
+            onClose={() => setView("me")}
+          />
+        </div>
+      ) : view === "advanced" ? (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          <SettingsAdvanced
+            fedimint={fedimint}
+            onBack={() => setView("me")}
+            onSwitchFederation={async (inviteCode, opts) => {
+              try {
+                setToast({ message: "Joining federation…", type: "info" });
+                // Dispatch: init for first-time join (no fed loaded yet),
+                // switch when already joined. Mirrors the community-tap
+                // handler's logic so Sandbox works pre-join.
+                if (fedimint.federationId) {
+                  await actions.switchFederation(inviteCode, opts);
+                } else {
+                  await actions.initFedimint(inviteCode, opts);
+                }
+                setToast({ message: "Federation join complete", type: "success" });
+              } catch (e: any) {
+                setToast({ message: e?.message || "Join failed", type: "error" });
+                throw e;
+              }
+            }}
+            onResetLocalWallet={async () => {
+              try {
+                setToast({ message: "Resetting local Chama…", type: "info" });
+                await actions.resetLocalWallet();
+                setToast({ message: "Local Chama reset.", type: "success" });
+              } catch (e: any) {
+                setToast({ message: e.message || "Reset failed", type: "error" });
+              }
+            }}
           />
         </div>
       ) : (
-        <div style={{ padding: 16 }}>
-          {/* Tabs: Browse | My trades */}
-          <div style={{
-            display: "flex", gap: 4, marginBottom: 14,
-            padding: 4, background: T.surface,
-            borderRadius: 24, border: `1px solid ${T.border}`,
-          }}>
-            {(["browse", "mine"] as const).map(t => {
-              const active = tab === t;
-              const count = t === "browse" ? browseList.length : myTrades.length;
-              const label = t === "browse" ? "Browse" : "My trades";
-              return (
-                <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  style={{
-                    flex: 1, padding: "9px 12px", borderRadius: 20,
-                    background: active ? T.card : "transparent",
-                    border: "none",
-                    color: active ? T.text : T.muted,
-                    fontFamily: T.sans, fontSize: 12, fontWeight: 700,
-                    cursor: "pointer", transition: "all 0.15s",
-                    boxShadow: active ? `0 1px 3px ${T.bg}88` : "none",
-                    letterSpacing: 0.2,
-                  }}
-                >
-                  {label}
-                  <span style={{
-                    marginLeft: 6, fontSize: 10, color: T.muted, fontFamily: T.mono,
-                  }}>
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Browse category filter pills — only on Browse tab */}
-          {tab === "browse" && (
-            <div style={{
-              display: "flex", gap: 6, marginBottom: 12,
-              overflowX: "auto",
-              // Hide native scrollbar for a cleaner look; content still scrolls
-              scrollbarWidth: "none" as const,
-              WebkitOverflowScrolling: "touch" as const,
-              paddingBottom: 2,
-            }}>
-              {BROWSE_CATS.map(c => {
-                const active = browseCategory === c.id;
-                return (
-                  <button
-                    key={c.id}
-                    onClick={() => setBrowseCategory(c.id)}
-                    style={{
-                      flexShrink: 0,
-                      padding: "7px 13px", borderRadius: 18,
-                      background: active ? T.accentDim : T.surface,
-                      border: `1px solid ${active ? T.accent + "66" : T.border}`,
-                      color: active ? T.accent : T.muted,
-                      fontFamily: T.mono, fontSize: 11, fontWeight: 600,
-                      cursor: "pointer", transition: "all 0.15s",
-                      whiteSpace: "nowrap" as const,
-                      letterSpacing: 0.2,
-                    }}
-                  >
-                    {c.i ? c.i + " " : ""}{c.l}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {/* PR 2: Browse community filter pills */}
-          {tab === "browse" && (
-            <div style={{
-              display: "flex", gap: 6, marginBottom: 12,
-              overflowX: "auto",
-              scrollbarWidth: "none" as const,
-              WebkitOverflowScrolling: "touch" as const,
-              paddingBottom: 2,
-            }}>
-              {[{ slug: "all", displayName: "All communities" }, ...COMMUNITY_REGISTRY].map(c => {
-                const active = browseCommunity === c.slug;
-                return (
-                  <button
-                    key={c.slug}
-                    onClick={() => setBrowseCommunity(c.slug)}
-                    style={{
-                      flexShrink: 0,
-                      padding: "7px 13px", borderRadius: 18,
-                      background: active ? T.tealDim : T.surface,
-                      border: `1px solid ${active ? T.teal + "66" : T.border}`,
-                      color: active ? T.teal : T.muted,
-                      fontFamily: T.mono, fontSize: 11, fontWeight: 600,
-                      cursor: "pointer", transition: "all 0.15s",
-                      whiteSpace: "nowrap" as const,
-                      letterSpacing: 0.2,
-                    }}
-                  >
-                    {c.displayName}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {/* + New trade · Settings */}
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
-            <button onClick={() => setView("settings")} style={{
-              padding: "8px 14px", borderRadius: 20,
-              background: T.surface, border: `1px solid ${T.border}`,
-              color: T.muted, fontFamily: T.mono, fontSize: 12, fontWeight: 700,
-              cursor: "pointer",
-            }}>
-              ⚙ Settings
-            </button>
-            <button onClick={() => setView("create")} style={{
-              padding: "8px 16px", borderRadius: 20,
-              background: T.accentDim, border: `1px solid ${T.accent}44`,
-              color: T.accent, fontFamily: T.mono, fontSize: 12, fontWeight: 700,
-              cursor: "pointer",
-            }}>
-              + New trade
-            </button>
-          </div>
-
-          {/* Load-by-ID stays on My trades (power-user path) */}
-          {tab === "mine" && (
-            <LoadTradeInput onLoad={async (id) => {
-              try {
-                setToast({ message: "Loading from relays...", type: "info" });
-                const state = await actions.loadEscrow(id);
-                if (state) {
-                  setToast({ message: "Trade loaded!", type: "success" });
-                  setSelectedId(id);
-                  setView("detail");
-                } else {
-                  setToast({ message: "Trade not found on relays", type: "error" });
-                }
-              } catch (e: any) {
-                setToast({ message: e.message || "Failed to load", type: "error" });
+        <BrowseView
+          browseCategory={browseCategory}
+          setBrowseCategory={setBrowseCategory}
+          browseCommunity={browseCommunity}
+          onSelectCommunity={handleSelectCommunity}
+          browseList={browseList}
+          fedimintJoined={fedimint.joined}
+          isFirstTime={getUserCommunitySlugRaw() === null}
+          onPasteCustomInvite={handlePasteCustomInvite}
+          pubkey={pubkey!}
+          onOpenEscrow={openEscrow}
+          onLoadById={async (id) => {
+            try {
+              setToast({ message: "Loading from relays...", type: "info" });
+              const state = await actions.loadEscrow(id);
+              if (state) {
+                setToast({ message: "Trade loaded!", type: "success" });
+                setSelectedId(id);
+                setView("detail");
+              } else {
+                setToast({ message: "Trade not found on relays", type: "error" });
               }
-            }} />
-          )}
-
-          {(() => {
-            const list = tab === "browse" ? browseList : myTrades;
-            if (list.length === 0) {
-              const emptyCopy = tab === "browse"
-                ? (fedimint.joined
-                    ? "No open listings in this federation yet. Be the first — tap + New trade."
-                    : "Join a federation to see open listings.")
-                : "No trades yet. Create one or load by escrow ID.";
-              return (
-                <div style={{
-                  textAlign: "center", padding: "48px 16px",
-                  color: T.muted, fontFamily: T.mono, fontSize: 12, lineHeight: 1.6,
-                }}>
-                  {emptyCopy}
-                </div>
-              );
+            } catch (e: any) {
+              setToast({ message: e.message || "Failed to load", type: "error" });
             }
-            return (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {list.map((s, i) => (
-                  <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
-                    <TradeCard state={s} pubkey={pubkey!} onSelect={() => openEscrow(s.id)} />
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-
-          <div style={{
-            marginTop: 24, padding: 16, background: T.surface,
-            borderRadius: T.r, border: `1px solid ${T.border}`, textAlign: "center",
-          }}>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.8 }}>
-              Events: kinds 38100–38108 · 2-of-3 SSS<br />
-              NIP-44 encrypted · state from relay replay<br />
-              Non-custodial · no server in the path
-            </div>
-          </div>
-        </div>
+          }}
+        />
       )}
+
+      <BottomNav active={activeTab} onSelect={switchTab} />
     </div>
   );
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// Helpers — global CSS + login splash
+// ══════════════════════════════════════════════════════════════════════════
+
+const globalCss = `
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800;900&display=swap');
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  *{box-sizing:border-box;margin:0;padding:0}
+  input::placeholder{color:${T.muted}88}
+  input:focus,select:focus{border-color:${T.accent}66!important}
+  ::-webkit-scrollbar{width:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:${T.border};border-radius:4px}
+`;
+
+function LoginSuccessSplash() {
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      background: T.bg,
+      animation: "fadeIn 0.3s ease-out",
+    }}>
+      <div style={{
+        width: 80, height: 80, borderRadius: "50%",
+        background: T.greenDim, border: "2px solid " + T.green,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        marginBottom: 20, animation: "fadeIn 0.4s ease-out",
+      }}>
+        <span style={{ fontSize: 36 }}>✓</span>
+      </div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: T.green, fontFamily: T.mono, marginBottom: 8 }}>
+        Connected!
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
+        Signer authenticated via Nostr
+      </div>
+    </div>
+  );
+}
+

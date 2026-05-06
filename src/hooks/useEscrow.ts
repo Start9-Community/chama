@@ -52,7 +52,7 @@ import {
   resolveFederationForCommunity,
   setCustomFederationInvite,
   hasCustomFederation,
-  DEFAULT_FEDERATION_NAME,
+  BP_FEDERATION_NAME,
   getOrCreateSeed,
   clearSeedCache,
   isTestnetMode,
@@ -193,7 +193,7 @@ export interface UseEscrowActions {
   /**
    * Initialize the Fedimint WASM wallet and join a federation.
    * If no invite code is provided, uses the stored custom invite (if any)
-   * or falls back to the community-default (which falls back to BLF).
+   * or falls back to the community-default (which falls back to BP).
    * Idempotent: safe to call multiple times.
    *
    * v0.1.82+: throws `RECONCILE_REFUSED_NONZERO_BALANCE` if the OPFS-bound
@@ -308,7 +308,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       initialized: false,
       joined: false,
       federationId: null,
-      federationName: hasCustomFederation() ? "Custom federation" : DEFAULT_FEDERATION_NAME,
+      federationName: hasCustomFederation() ? "Custom federation" : BP_FEDERATION_NAME,
       isCustom: hasCustomFederation(),
       balanceMsats: 0,
       busy: false,
@@ -626,7 +626,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         initialized: false,
         joined: false,
         federationId: null,
-        federationName: hasCustomFederation() ? "Custom federation" : DEFAULT_FEDERATION_NAME,
+        federationName: hasCustomFederation() ? "Custom federation" : BP_FEDERATION_NAME,
         isCustom: hasCustomFederation(),
         balanceMsats: 0,
         busy: false,
@@ -1318,7 +1318,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         initialized: true,
         joined: true,
         federationId,
-        federationName: usingCustom ? "Custom federation" : DEFAULT_FEDERATION_NAME,
+        federationName: usingCustom ? "Custom federation" : BP_FEDERATION_NAME,
         isCustom: usingCustom,
         balanceMsats,
         busy: false,
@@ -1339,7 +1339,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     setCustomFederationInvite(inviteCode);
     updateFedimint({
       isCustom: !!inviteCode.trim(),
-      federationName: inviteCode.trim() ? "Custom federation" : DEFAULT_FEDERATION_NAME,
+      federationName: inviteCode.trim() ? "Custom federation" : BP_FEDERATION_NAME,
     });
   }, [updateFedimint]);
 
@@ -1464,7 +1464,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       }
       fedimintRef.current = null;
       bridgeRef.current = null;
-      clearSeedCache();
+      // NOTE: do NOT clearSeedCache() here. The Fedimint seed is per-pubkey
+      // (encrypted to the user's own Nostr identity), not per-federation —
+      // it survives a fed switch unchanged. Clearing it forces the next
+      // initFedimint to re-query Nostr for the seed, which races against
+      // post-teardown relay warmup and trips the v0.1.74 seed-safety
+      // guard. v0.1.85 smoke testing showed this caused a 100% federation-
+      // switch failure rate (every community-pill tap re-fetched the seed
+      // from cold relays). The cache stays valid through the switch.
       healthRef.current = { ok: null, at: null };
       // Clear the active-invite record now; initFedimint(trimmed) below
       // will write the new one once the join succeeds.
@@ -1474,8 +1481,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       await resetLocalFedimintWallet();
 
       // Step 3 — persist the new invite as the custom override so future
-      // reloads stay on this fed (matches the one-time onJoinPreset flow
-      // for non-default presets in FederationJoinPanel).
+      // reloads stay on this fed (mirrors the picker's non-default-preset
+      // flow now living in Sandbox via SwitchFederationPanel).
       setCustomFederationInvite(trimmed);
 
       // Step 4 — clear React state so initFedimint can rebuild from scratch.

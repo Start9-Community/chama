@@ -1,0 +1,121 @@
+import { T } from "../theme.js";
+
+export function SubscriptionTimeline({ subscription, onRelease }: {
+  subscription: any;
+  onRelease: (periodIndex: number) => void;
+}) {
+  const now = Math.floor(Date.now() / 1000);
+  const sub = subscription;
+  if (!sub) return null;
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.purple}22`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 600, color: T.purple, fontFamily: T.mono,
+        letterSpacing: 1, marginBottom: 12,
+      }}>
+        🔄 SUBSCRIPTION · {sub.releasedCount}/{sub.totalPeriods} RELEASED
+      </div>
+
+      {/* Period blocks */}
+      <div style={{ display: "flex", gap: 3, marginBottom: 12 }}>
+        {sub.periodStatuses.map((status: string, i: number) => {
+          const startTime = sub.periodStartTimes[i];
+          const endTime = startTime + sub.periodDurationSeconds;
+          const isActive = now >= startTime && now < endTime;
+          const isPast = now >= endTime;
+
+          const color = status === "released" ? T.green
+            : status === "disputed" ? T.red
+            : status === "refunded" ? T.amber
+            : isActive ? T.purple
+            : T.border;
+
+          return (
+            <div key={i} style={{
+              flex: 1, height: 28, borderRadius: 4,
+              background: `${color}${status === "released" ? "44" : isActive ? "66" : "22"}`,
+              border: `1px solid ${color}${isActive ? "88" : "33"}`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 8, fontFamily: T.mono, color,
+              fontWeight: isActive ? 700 : 400,
+              animation: isActive ? "pulse 2s ease-in-out infinite" : "none",
+              cursor: (isActive || isPast) && status === "pending" ? "pointer" : "default",
+            }}
+              title={`Period ${i + 1}: ${status}`}
+            >
+              {i + 1}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+        {[
+          { c: T.green, l: "Released" },
+          { c: T.purple, l: "Active" },
+          { c: T.border, l: "Pending" },
+          { c: T.red, l: "Disputed" },
+        ].map(item => (
+          <div key={item.l} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <div style={{ width: 8, height: 8, borderRadius: 2, background: item.c + "66" }} />
+            <span style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>{item.l}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Active period details + release button */}
+      {sub.periodStatuses.map((status: string, i: number) => {
+        const startTime = sub.periodStartTimes[i];
+        const endTime = startTime + sub.periodDurationSeconds;
+        const isActive = now >= startTime && now < endTime;
+        const canRelease = (isActive || now >= endTime) && status !== "released" && status !== "refunded";
+
+        if (!isActive && status !== "pending") return null;
+        if (!canRelease) return null;
+
+        const remaining = endTime - now;
+        const days = Math.floor(remaining / 86400);
+        const hours = Math.floor((remaining % 86400) / 3600);
+
+        return (
+          <div key={"release-" + i} style={{
+            padding: "12px", background: T.surface,
+            borderRadius: T.rs, border: `1px solid ${T.purple}22`,
+            marginBottom: 8,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 11, color: T.purple, fontFamily: T.mono, fontWeight: 600 }}>
+                  Period {i + 1} · {Math.floor(sub.periodAmountMsats / 1000).toLocaleString()} sats
+                </div>
+                {remaining > 0 && (
+                  <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+                    Auto-releases in {days > 0 ? `${days}d ` : ""}{hours}h
+                  </div>
+                )}
+              </div>
+              <button onClick={() => onRelease(i)} style={{
+                padding: "8px 16px", borderRadius: T.rs,
+                background: T.greenDim, border: `1px solid ${T.green}33`,
+                color: T.green, fontFamily: T.mono, fontSize: 10, fontWeight: 600,
+                cursor: "pointer",
+              }}>
+                Release
+              </button>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Summary */}
+      <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, textAlign: "center" }}>
+        {Math.floor(sub.totalReleasedMsats / 1000).toLocaleString()} / {Math.floor(sub.totalPeriods * sub.periodAmountMsats / 1000).toLocaleString()} sats released
+      </div>
+    </div>
+  );
+}

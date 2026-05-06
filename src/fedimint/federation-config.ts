@@ -2,31 +2,49 @@
 // Chama — Federation Configuration
 // ══════════════════════════════════════════════════════════════════════════
 //
-// Default Fedimint federation for new users. Advanced users can override
-// this at runtime by pasting a custom invite code in the federation
-// onboarding screen.
+// Per PHILOSOPHY.md §2.5, browser users can only reach federations whose
+// guardians expose WebSocket endpoints. BP guardians do; BLF's iroh-only
+// transport does not (reliably, today). The universal fallback is
+// therefore BP — the browser-friendly choice — and BLF is one explicit
+// option among others, opt-in via registry entry, sandbox-mode picker,
+// or pasted custom invite.
+//
+// The federation invite/name CONSTANTS live in ./federation-invites.ts
+// so the community registry can import them without forming a circular
+// dep (this module needs registry's getCommunityBySlug at function-call
+// time; registry needs the invite strings at top-level array
+// construction time — putting them in a third file breaks the cycle).
+// We re-export them here for back-compat with downstream consumers.
 //
 // If you don't already have a Fedimint wallet, the easiest way to manage
 // your ecash balance on mobile is the Fedi app: https://www.fedi.xyz/
 
-/**
- * Bitcoin Life Federation — the default community federation for Chama.
- * Beginner users join this federation automatically on first launch.
- */
-export const DEFAULT_FEDERATION_NAME = "Bitcoin Life Federation";
+import {
+  BP_FEDERATION_NAME,
+  BP_FEDERATION_INVITE,
+  BLF_FEDERATION_NAME,
+  BLF_FEDERATION_INVITE,
+} from "./federation-invites.js";
 
-export const DEFAULT_FEDERATION_INVITE =
-  "fed11qgqyj3mfwfhksw309ajrwvmxvenxgvpkvyursenxxvur2c3sv4jkxdfcxf3kgdmyvs6nzcehvc6xzctzxumrxdmr89jnwdtpv5enqwtpxqmrsvfh89skxv34qqqjpzytwrkr28r8mjas4ej467utd7excr7fapj7ukgc4ugacm6nu2u73k7ram";
+export {
+  BP_FEDERATION_NAME,
+  BP_FEDERATION_INVITE,
+  BLF_FEDERATION_NAME,
+  BLF_FEDERATION_INVITE,
+};
 
 /**
  * localStorage key for a user-supplied custom invite code.
- * If present, takes precedence over DEFAULT_FEDERATION_INVITE.
+ * If present, takes precedence over the universal BP fallback.
  */
 export const CUSTOM_INVITE_STORAGE_KEY = "chama_federation_invite";
 
 /**
- * Resolve the federation invite code to use at runtime.
- * Custom user invite wins, otherwise fall back to the BLF default.
+ * Resolve the federation invite code to use at runtime, community-blind.
+ * Custom user invite wins; otherwise fall back to BP — the universal
+ * browser-friendly default. Community-aware callers should prefer
+ * `resolveFederationForCommunity(slug)` so a community-pinned invite
+ * (e.g. ke-kes → Afribit) is honored.
  */
 export function getFederationInvite(): string {
   try {
@@ -39,7 +57,7 @@ export function getFederationInvite(): string {
   } catch {
     // localStorage unavailable (SSR, etc.) — fall through to default
   }
-  return DEFAULT_FEDERATION_INVITE;
+  return BP_FEDERATION_INVITE;
 }
 
 /**
@@ -120,20 +138,21 @@ export function clearActiveInvite(): void {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// COMMUNITY-AWARE RESOLUTION (PR 2)
+// COMMUNITY-AWARE RESOLUTION
 // ══════════════════════════════════════════════════════════════════════════
 //
 // Per PHILOSOPHY.md §2.3: communities are the user-facing layer; federations
 // are the technical layer that backs them. A community whose registry entry
-// has federationInvite === null falls back to BLF — "no user is locked out
-// by federation availability." This resolver is the single seam where that
-// fallback decision happens, so wallet bootstrap can stay community-aware
-// without knowing about BLF directly.
+// has federationInvite === null falls back to BP — the universal browser-
+// friendly default. Per §2.5, BLF's iroh-only transport is unreachable
+// from browsers; pinning the universal fallback to BP keeps first-time
+// browser users on a working federation. BLF remains opt-in via the
+// `us-blf` registry entry, sandbox-mode picker, or pasted custom invite.
 //
 // Precedence (highest first):
 //   1. User's pasted custom invite (the manual-override escape hatch)
 //   2. The community's federationInvite (when the registry has one)
-//   3. BLF default
+//   3. BP fallback
 //
 import { getCommunityBySlug } from "../communities/registry.js";
 
@@ -144,7 +163,7 @@ import { getCommunityBySlug } from "../communities/registry.js";
  * - Otherwise, look up the community in the registry. If the entry has a
  *   non-null federationInvite, use it.
  * - Otherwise (community null/unknown, or its federationInvite is null),
- *   fall back to BLF.
+ *   fall back to BP.
  */
 export function resolveFederationForCommunity(slug: string | null | undefined): string {
   // 1. Manual override beats everything — same precedence as
@@ -167,8 +186,8 @@ export function resolveFederationForCommunity(slug: string | null | undefined): 
     return community.federationInvite;
   }
 
-  // 3. BLF fallback. Per the philosophy, this is the universal floor.
-  return DEFAULT_FEDERATION_INVITE;
+  // 3. BP fallback. Browser-friendly universal default per §2.5.
+  return BP_FEDERATION_INVITE;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -209,20 +228,28 @@ export interface FederationPreset {
 }
 
 /**
- * Curated federation list. Intentionally minimal: only the Bitcoin Life
- * Federation default lives here. Private federations are NOT baked into
- * this file — instead, Community Leaders surface their federations
- * organically via the arbiter / community-leader form (see roadmap for
- * kind-38109 community federation announcements published to Nostr).
+ * Curated federation list. Intentionally minimal: BP (the universal
+ * browser-friendly fallback) and BLF (an explicit opt-in option, not
+ * the default). Private federations are NOT baked into this file —
+ * Community Leaders surface their federations organically via the
+ * permissionless community-add primitive (see addCustomCommunity in
+ * src/communities/registry.ts; v1.5 will publish kind:38112 community
+ * claims to Nostr for cross-client discovery).
  *
  * The wider public federation list is fetched live from
  * observer.fedimint.org at runtime — see `fetchObserverFederations()`.
  */
 export const CURATED_PRESETS: FederationPreset[] = [
   {
-    name: DEFAULT_FEDERATION_NAME,
-    inviteCode: DEFAULT_FEDERATION_INVITE,
-    description: "Default for new users. Safe starting point.",
+    name: BP_FEDERATION_NAME,
+    inviteCode: BP_FEDERATION_INVITE,
+    description: "Browser-friendly default. Safe starting point.",
+    source: "curated",
+  },
+  {
+    name: BLF_FEDERATION_NAME,
+    inviteCode: BLF_FEDERATION_INVITE,
+    description: "Best on the mobile app — limited browser support today.",
     source: "curated",
   },
 ];
