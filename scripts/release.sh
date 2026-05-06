@@ -1,30 +1,26 @@
 #!/bin/bash
-# scripts/release.sh
-# Stages everything, opens vim for commit message, then runs the full deploy chain.
-
 set -e
 
-# Stage all changes
+# Stage all changes first so npm version includes them in its commit
 git add -A
 
-# Show what's about to be committed (sanity check)
-git status
+# Bump version first — without --git-tag-version we let our own commit handle git
+npm version patch --no-git-tag-version
 
-# Open vim for commit message — script PAUSES here until you :wq
-git commit
+# Now read the new version and commit everything together
+NEW_VERSION=$(node -p "require('./package.json').version")
+COMMIT_MSG="${1:-v$NEW_VERSION}"
+# If a message was passed, prepend the version to it for clarity
+if [ -n "$1" ]; then
+  COMMIT_MSG="v$NEW_VERSION: $1"
+fi
 
-# Push the commit
+git commit -m "$COMMIT_MSG"
+git tag "v$NEW_VERSION"
 git push
+git push --tags
 
-# Bump version (creates commit + tag automatically)
-npm version patch
-
-# Push the version commit and the new tag
-git push && git push --tags
-
-# Build and deploy
 npm run build
 npx cap sync android
 scp -r -i ~/.ssh/.id_satoshi_market dist/* satoshi@satoshimarket.app:~/chama-dist/
-
-echo "✅ Deployed $(node -p "require('./package.json').version")"
+echo "Deployed $NEW_VERSION"
