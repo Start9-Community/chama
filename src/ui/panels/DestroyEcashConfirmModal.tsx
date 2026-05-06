@@ -39,7 +39,7 @@ export function DestroyEcashConfirmModal({
           <strong>{sats > 0 ? `${sats.toLocaleString()} sats` : "an unknown balance"}</strong>{" "}
           held in your current Chama. Fedimint ecash is bearer cash — once
           your local Chama is wiped, those sats cannot be recovered from
-          the federation.
+          the Chama.
         </div>
         <div style={{
           fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,

@@ -7,15 +7,18 @@ import { LoadTradeInput } from "../components/LoadTradeInput.js";
 
 // Browse tab content — category filter pills + community pills + card list.
 // Per PHILOSOPHY.md §2.3, the community pills are the user's identity
-// affordance, not just a filter chip: tapping one updates chama_community,
-// switches/joins the backing federation, and filters Browse. The shell
-// (App.tsx) handles all of that via `onSelectCommunity`. v0.1.85 also
-// surfaces a small "advanced: paste custom invite" affordance for first-
-// time users who need to reach a federation that isn't in the registry —
-// the canonical home for that is Sandbox, but a discoverable hint here
-// avoids stranding pre-join users. v0.2.0 will add federation-aware
-// muting (amber tint for non-matching listings) and absorb the
-// listing-tap → federation-derivation logic.
+// affordance: tapping one updates chama_community, switches/joins the
+// backing federation, and filters Browse. The shell (App.tsx) handles
+// all of that via `onSelectCommunity`. v0.1.85 also surfaces a small
+// "advanced: paste custom invite" affordance for first-time users who
+// need to reach a federation that isn't in the registry — the
+// canonical home for that is Sandbox, but a discoverable hint here
+// avoids stranding pre-join users.
+//
+// v0.1.87: the synthetic "All communities" pill is gone. Per Pillar 2.1
+// every user has a home community from first signin onward; there is no
+// community-less state. v0.2.0 will add the matching/non-matching
+// two-section amber layout that supersedes the old "All" filter.
 export function BrowseView({
   browseCategory, setBrowseCategory,
   browseCommunity, onSelectCommunity,
@@ -73,10 +76,13 @@ export function BrowseView({
         })}
       </div>
 
-      {/* Community filter pills — pre-seeds + picker-visible only.
-          On-the-wire listings on hidden slugs (e.g. sv-usd) still render
-          via the COMMUNITY_REGISTRY-backed lookup elsewhere, but the
-          picker doesn't surface them. */}
+      {/* Community pills. v0.1.87: the synthetic "All communities" pill
+          was removed per the "every user has a home" doctrine
+          (PHILOSOPHY.md §2.1) — there is no community-less state.
+          Tapping a pill is an identity choice; v0.2.0 adds the amber
+          two-section layout that surfaces non-matching listings without
+          needing an "all" filter. On-the-wire listings on hidden slugs
+          (e.g. sv-usd) still resolve via getCommunityBySlug elsewhere. */}
       <div style={{
         display: "flex", gap: 6, marginBottom: 12,
         overflowX: "auto",
@@ -84,9 +90,7 @@ export function BrowseView({
         WebkitOverflowScrolling: "touch" as const,
         paddingBottom: 2,
       }}>
-        {[{ slug: "all", displayName: "All communities", flagEmoji: "🌐" },
-          ...pickerCommunities.map(c => ({ slug: c.slug, displayName: c.displayName, flagEmoji: c.flagEmoji }))
-        ].map(c => {
+        {pickerCommunities.map(c => {
           const active = browseCommunity === c.slug;
           return (
             <button
@@ -170,8 +174,8 @@ export function BrowseView({
           color: T.muted, fontFamily: T.mono, fontSize: 12, lineHeight: 1.6,
         }}>
           {fedimintJoined
-            ? "No open listings in this federation yet. Tap Create below to publish one."
-            : "Join a federation to see open listings."}
+            ? "No open listings in this community yet. Tap Create below to publish one."
+            : "Pick a community above to see open listings."}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>

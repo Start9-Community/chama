@@ -5,17 +5,20 @@ import { Preferences } from "@capacitor/preferences";
 import { useEscrow } from "../hooks/useEscrow.js";
 import { type EscrowState, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
 import { getFederationInvite, getActiveInvite } from "../fedimint/index.js";
-import { getCommunityBySlug } from "../communities/registry.js";
+import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
 
 import { T } from "./theme.js";
 import {
   decideCommunityTapEffect,
+  decideAutoInitTarget,
   shouldShowBrowserSupportBanner,
 } from "./decisions.js";
 import { Toast } from "./components/Toast.js";
 import { BottomNav, BOTTOM_NAV_HEIGHT, type Tab } from "./components/BottomNav.js";
 import { BrowserSupportBanner } from "./components/BrowserSupportBanner.js";
+import { useBrowserBanner } from "./hooks/useBrowserBanner.js";
+import { useFederationCommands } from "./hooks/useFederationCommands.js";
 
 import { BrowseView } from "./screens/BrowseView.js";
 import { ConnectScreen } from "./screens/ConnectScreen.js";
@@ -67,7 +70,7 @@ export default function App() {
         t({ message: "Claiming… reconstructing ecash.", type: "info" });
       } else if (p.phase === "watching") {
         t({
-          message: "Claim submitted. Waiting for the federation (up to 2 min)…",
+          message: "Claim submitted. Waiting for your Chama (up to 2 min)…",
           type: "info",
         });
       } else if (p.phase === "success") {
@@ -81,7 +84,7 @@ export default function App() {
       } else if (p.phase === "timeout") {
         t({
           message:
-            "Still pending on the federation. Your sats will appear once settled — check back shortly.",
+            "Still pending on your Chama. Your sats will appear once settled — check back shortly.",
           type: "info",
         });
       } else if (p.phase === "failure") {
@@ -93,11 +96,15 @@ export default function App() {
   const [view, setView] = useState<View>("browse");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [browseCategory, setBrowseCategory] = useState<string>("all");
-  // First-time users have no stored community → "all" so no pill is
-  // highlighted and Browse shows everything. Returning users land on
-  // their picked community.
+  // Per the "every user has a home" doctrine (§2.1, locked for v0.2.0):
+  // every user — first-time or returning — gets a community from the
+  // moment they sign in. v0.1.87 retired the synthetic "All communities"
+  // pill, so browseCommunity is always a real slug. First-time users
+  // start on DEFAULT_COMMUNITY_SLUG; community-pill taps mutate from
+  // there. v0.2.0 will replace this filter with the matching/non-
+  // matching two-section amber layout.
   const [browseCommunity, setBrowseCommunity] = useState<string>(
-    () => getUserCommunitySlugRaw() ?? "all",
+    () => getUserCommunitySlugRaw() ?? DEFAULT_COMMUNITY_SLUG,
   );
   const [nip46Uri, setNip46Uri] = useState<string | null>(null);
   const [loginSuccess, setLoginSuccess] = useState(false);
@@ -114,36 +121,11 @@ export default function App() {
     activeInvite: string;
   } | null>(null);
   const [autoInitDone, setAutoInitDone] = useState(false);
-  // v0.1.85 honest browser-support disclosure. Dismissal is scoped
-  // per-pubkey (Bug E from smoke testing) so a power user with multiple
-  // identities sees the educational banner once per identity, not once
-  // per browser. This matches Pillar 2.7's "educate at every
-  // opportunity" — a new npub on the same browser is a new user from
-  // Chama's perspective.
-  const [browserBannerDismissed, setBrowserBannerDismissed] = useState<boolean>(false);
-  useEffect(() => {
-    if (!pubkey) {
-      setBrowserBannerDismissed(false);
-      return;
-    }
-    try {
-      if (typeof localStorage === "undefined") return;
-      const key = `chama_browser_support_dismissed_${pubkey}`;
-      setBrowserBannerDismissed(localStorage.getItem(key) === "1");
-    } catch {
-      setBrowserBannerDismissed(false);
-    }
-  }, [pubkey]);
-  const dismissBrowserBanner = () => {
-    setBrowserBannerDismissed(true);
-    if (!pubkey) return;
-    try {
-      if (typeof localStorage !== "undefined") {
-        const key = `chama_browser_support_dismissed_${pubkey}`;
-        localStorage.setItem(key, "1");
-      }
-    } catch { /* no-op */ }
-  };
+  // Browser-support banner state lives in a dedicated hook so the
+  // per-pubkey scoping (Bug E from v0.1.85 smoke testing) stays
+  // testable in isolation and App.tsx stays an orchestrator.
+  const { dismissed: browserBannerDismissed, dismiss: dismissBrowserBanner } =
+    useBrowserBanner(pubkey);
 
   // Auto-login: on native platforms, check for saved nsec in secure storage
   useEffect(() => {
@@ -164,32 +146,56 @@ export default function App() {
     })();
   }, [autoLoginChecked, connected, loading, actions]);
 
-  // PR 5 (v0.1.82+): auto-init Fedimint after connect when there's a
-  // record of a previously-joined federation. The reconciliation balance
-  // guard in initFedimint covers the edge case where chama_federation_invite
-  // and chama_active_invite have drifted.
+  // Auto-init Fedimint after connect. v0.1.87 wires the
+  // sticky-community decision via decideAutoInitTarget — refresh
+  // always lands the user on their home community's federation,
+  // unless an in-flight trade with funds at risk forces preserving
+  // the OPFS-bound fed so the trade can resume.
   //
-  // v0.1.85: also require an explicit community-pick. Without this, stale
-  // active-invite leftovers in localStorage could auto-join a "first-time"
-  // user against a fed they never deliberately picked, producing the
-  // inconsistent first-time experience Jetty saw in 3-profile testing.
+  // Note on inputs at boot: hasCurrentEscrow and balanceMsats are
+  // both unknowable before initFedimint completes (escrows haven't
+  // streamed yet, the WASM client isn't open). For v0.1.87 we pass
+  // conservative defaults (false / 0); the v0.1.74 reconciliation
+  // guard in initFedimint catches the race where balance is actually
+  // non-zero and the home fed differs from the OPFS-bound one. v0.2.0
+  // will tighten this once the recovery-banner / one-trade-at-a-time
+  // gates are in place.
   useEffect(() => {
     if (!connected || autoInitDone) return;
     if (fedimint.joined || fedimint.busy || fedimint.initialized) return;
-    const activeInvite = getActiveInvite();
-    const pickedCommunity = getUserCommunitySlugRaw();
-    if (!activeInvite || !pickedCommunity) return;  // first-time → let them pick
+
+    const target = decideAutoInitTarget({
+      activeInvite: getActiveInvite(),
+      homeCommunity: getUserCommunitySlugRaw(),
+      hasCurrentEscrow: false,
+      balanceMsats: 0,
+    });
+
+    if (target.kind === "skip") return;
     setAutoInitDone(true);
-    actions.initFedimint().catch((e: any) => {
+
+    // Both use-active and use-home dispatch through initFedimint(invite).
+    // The v0.1.74 reconciliation guard inside initFedimint handles the
+    // case where the desired invite differs from the OPFS-bound one
+    // AND a non-zero balance is detected — it throws
+    // RECONCILE_REFUSED_NONZERO_BALANCE and we surface the modal.
+    const failureLabel =
+      target.kind === "use-home"
+        ? (getCommunityBySlug(target.slug)?.displayName ?? target.slug)
+        : "your previous community";
+    actions.initFedimint(target.invite).catch((e: any) => {
       if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
         setPendingDestroyConfirm({
           invite: e.desiredInvite,
-          label: "your preferred federation",
+          label: failureLabel,
           balanceMsats: e.balanceMsats || 0,
           activeInvite: e.previousActiveInvite,
         });
       } else {
-        setToast({ message: e?.message || "Auto-rejoin failed", type: "error" });
+        setToast({
+          message: e?.message || "Couldn't reconnect. Try again?",
+          type: "error",
+        });
       }
     });
   }, [connected, autoInitDone, fedimint.joined, fedimint.busy, fedimint.initialized, actions]);
@@ -218,10 +224,8 @@ export default function App() {
     if (browseCategory === "subscription") return s.subscription !== null;
     return s.category === browseCategory;
   };
-  const matchesBrowseCommunity = (s: EscrowState) => {
-    if (browseCommunity === "all") return true;
-    return s.community === browseCommunity;
-  };
+  const matchesBrowseCommunity = (s: EscrowState) =>
+    s.community === browseCommunity;
 
   const browseList = visibleTrades.filter(s =>
     !isParticipant(s) &&
@@ -271,163 +275,17 @@ export default function App() {
     window.location.reload();
   };
 
-  // Community pill tap → identity + federation effect. Per PHILOSOPHY.md
-  // §2.3, tapping a community is "I'm in this community now": updates
-  // chama_community localStorage, filters Browse, and switches/joins the
-  // backing federation. v0.1.85 reality: this is also THE first-time join
-  // — no separate picker step. Decision logic is pure
-  // (decideCommunityTapEffect); this handler dispatches the side effects
-  // and handles failure-revert so a flaky federation can't strand the
-  // user with no working client.
-  const handleSelectCommunity = async (slug: string) => {
-    // Capture previous state BEFORE any mutation so we can revert on
-    // switch failure. We track the RAW community (null for first-timers)
-    // separately from the resolution-flavored fallback — without that
-    // distinction, the revert path would write "global-usd" to
-    // localStorage for a first-timer whose first switch failed,
-    // permanently parking them on a community they never picked
-    // (Bug A regression seen in v0.1.85 smoke testing).
-    const previousInvite = getActiveInvite();
-    const previousCommunityRaw = getUserCommunitySlugRaw();
-    const previousCommunityName = previousCommunityRaw
-      ? (getCommunityBySlug(previousCommunityRaw)?.displayName ?? previousCommunityRaw)
-      : "your previous community";
-
-    const effect = decideCommunityTapEffect({
-      slug,
-      currentInvite: previousInvite,
-      balanceMsats: fedimint.balanceMsats ?? 0,
-    });
-
-    if (effect.kind === "filter-only") {
-      setBrowseCommunity("all");
-      return;
-    }
-
-    // All non-filter cases update identity (community + Browse filter)
-    // and clear any earlier custom-invite override so future
-    // resolutions honor the community's pinned invite.
-    actions.setCommunity(effect.slug);
-    setBrowseCommunity(effect.slug);
-    actions.setCustomInvite("");
-
-    if (effect.kind === "identity-only") return;
-
-    if (effect.kind === "switch-silent") {
-      try {
-        setToast({ message: `Switching to ${effect.displayName}…`, type: "info" });
-        if (fedimint.federationId) {
-          await actions.switchFederation(effect.targetInvite);
-        } else {
-          await actions.initFedimint(effect.targetInvite);
-        }
-        setToast({ message: `On ${effect.displayName}.`, type: "success" });
-      } catch (e: any) {
-        if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE"
-          || e?.code === "SWITCH_REFUSED_NONZERO_BALANCE") {
-          // Race: balance was zero at decision time, became non-zero
-          // before the switch landed. Surface the modal anyway.
-          setPendingDestroyConfirm({
-            invite: effect.targetInvite,
-            label: effect.displayName,
-            balanceMsats: e.balanceMsats || 0,
-            activeInvite: e.previousActiveInvite || previousInvite || "",
-          });
-          return;
-        }
-
-        // Switch failed for a non-balance reason (iroh unreachable,
-        // timeout, etc.). Revert identity AND attempt to re-join the
-        // previous federation so we don't strand the user. If revert
-        // also fails, surface a retry CTA — the FedimintBar Reconnect
-        // button is the recovery path.
-        //
-        // For first-timers (previousCommunityRaw === null) we revert by
-        // CLEARING the community + setting browseCommunity back to
-        // "all" — never write "global-usd" to localStorage on their
-        // behalf. They land back in the same first-time state they
-        // started in and can try a different pill.
-        console.warn("[chama] community-tap switch failed, reverting:", e);
-        if (previousCommunityRaw) {
-          actions.setCommunity(previousCommunityRaw);
-          setBrowseCommunity(previousCommunityRaw);
-        } else {
-          actions.setCommunity("");  // clears localStorage
-          setBrowseCommunity("all");
-        }
-
-        if (!previousInvite) {
-          // First-time user with a failed init — nothing to revert to.
-          setToast({
-            message: `Couldn't reach ${effect.displayName}. Try another community.`,
-            type: "error",
-          });
-          return;
-        }
-        try {
-          await actions.switchFederation(previousInvite);
-          setToast({
-            message: `Couldn't reach ${effect.displayName}. Stayed on ${previousCommunityName}.`,
-            type: "error",
-          });
-        } catch (revertErr: any) {
-          console.error("[chama] revert also failed:", revertErr);
-          // Both switch and revert failed — restore the previous invite
-          // as the custom override so the FedimintBar Reconnect button
-          // (which calls initFedimint() with no args) attempts the right
-          // fed instead of falling through to the BP default.
-          actions.setCustomInvite(previousInvite);
-          setToast({
-            message: `Couldn't reach ${effect.displayName}. Tap Reconnect in the Chama bar to retry ${previousCommunityName}.`,
-            type: "error",
-          });
-        }
-      }
-      return;
-    }
-
-    // effect.kind === "destroy-confirm" — funds at risk, surface modal.
-    setPendingDestroyConfirm({
-      invite: effect.targetInvite,
-      label: effect.displayName,
-      balanceMsats: effect.balanceMsats,
-      activeInvite: effect.currentInvite,
-    });
-  };
-
-  // BrowseView's first-time "advanced: paste custom invite" affordance.
-  // First-time users (no chama_active_invite) tap this to join via a
-  // pasted fed1 invite that isn't a registry community. Sandbox mode is
-  // the canonical home for this; the inline affordance just makes it
-  // discoverable for first-timers who'd otherwise be stuck.
-  const handlePasteCustomInvite = async (invite: string) => {
-    const trimmed = invite.trim();
-    if (!trimmed.startsWith("fed1")) {
-      setToast({ message: "Invite must start with fed1...", type: "error" });
-      return;
-    }
-    try {
-      actions.setCustomInvite(trimmed);
-      setToast({ message: "Joining custom federation...", type: "info" });
-      if (fedimint.federationId) {
-        await actions.switchFederation(trimmed);
-      } else {
-        await actions.initFedimint(trimmed);
-      }
-      setToast({ message: "Joined custom federation!", type: "success" });
-    } catch (e: any) {
-      if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
-        setPendingDestroyConfirm({
-          invite: trimmed,
-          label: `custom federation (${trimmed.slice(4, 12)}…)`,
-          balanceMsats: e.balanceMsats || 0,
-          activeInvite: e.previousActiveInvite || "",
-        });
-      } else {
-        setToast({ message: e?.message || "Join failed", type: "error" });
-      }
-    }
-  };
+  // Community-pill tap and custom-invite-paste handlers live in their
+  // own hook so the orchestrator stays an orchestrator. The hook
+  // encapsulates the dispatch + revert logic; decision logic
+  // (decideCommunityTapEffect) lives in src/ui/decisions.ts.
+  const { handleSelectCommunity, handlePasteCustomInvite } = useFederationCommands({
+    fedimint,
+    actions,
+    setToast,
+    setBrowseCommunity,
+    setPendingDestroyConfirm,
+  });
 
   const switchTab = (t: Tab) => {
     if (t === "browse") setView("browse");
@@ -563,7 +421,7 @@ export default function App() {
         showReconnect={getUserCommunitySlugRaw() !== null || getActiveInvite() !== null}
         onFund={() => setShowFundModal(true)}
         onInit={() => actions.initFedimint().catch(
-          (e: any) => setToast({ message: e.message || "Federation join failed", type: "error" })
+          (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
         )}
       />
 
@@ -613,7 +471,7 @@ export default function App() {
             const target = pendingDestroyConfirm;
             setPendingDestroyConfirm(null);
             try {
-              setToast({ message: "Switching federation…", type: "info" });
+              setToast({ message: "Switching Chama…", type: "info" });
               await actions.initFedimint(target.invite, { force: true });
               setToast({ message: `Joined ${target.label}!`, type: "success" });
             } catch (e: any) {
@@ -663,7 +521,7 @@ export default function App() {
             }}
             onLock={async (savedHandleId?: string) => {
               if (!fedimint.joined) {
-                setToast({ message: "Join a federation first (scroll up).", type: "error" });
+                setToast({ message: "Join a Chama first — tap a community pill.", type: "error" });
                 return;
               }
               try {
@@ -709,7 +567,7 @@ export default function App() {
             onBack={() => setView("me")}
             onSwitchFederation={async (inviteCode, opts) => {
               try {
-                setToast({ message: "Joining federation…", type: "info" });
+                setToast({ message: "Joining Chama…", type: "info" });
                 // Dispatch: init for first-time join (no fed loaded yet),
                 // switch when already joined. Mirrors the community-tap
                 // handler's logic so Sandbox works pre-join.
@@ -718,7 +576,7 @@ export default function App() {
                 } else {
                   await actions.initFedimint(inviteCode, opts);
                 }
-                setToast({ message: "Federation join complete", type: "success" });
+                setToast({ message: "Joined!", type: "success" });
               } catch (e: any) {
                 setToast({ message: e?.message || "Join failed", type: "error" });
                 throw e;

@@ -68,7 +68,7 @@ export function SettingsAdvanced({
               Sandbox mode
             </div>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 4, lineHeight: 1.5 }}>
-              Reveals power-user surfaces: federation switching, custom invite
+              Reveals power-user surfaces: Chama switching, custom invite
               paste, OPFS reset. Off by default.
               {isDev && (
                 <span style={{ color: T.amber, display: "block", marginTop: 4 }}>
@@ -103,7 +103,7 @@ export function SettingsAdvanced({
               fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
               letterSpacing: 1, marginBottom: 8,
             }}>
-              FEDERATION
+              CHAMA
             </div>
             {/* SwitchFederationPanel renders for both joined and pre-join
                 states — the shell's onSwitchFederation handler dispatches

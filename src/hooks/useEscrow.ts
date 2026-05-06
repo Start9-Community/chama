@@ -62,6 +62,7 @@ import {
   getActiveInvite,
   setActiveInvite,
   clearActiveInvite,
+  deriveCreateFedTags,
 } from "../fedimint/index.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
@@ -668,34 +669,40 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   const createEscrow = useCallback(async (params: Parameters<EscrowClient["createEscrow"]>[0]) => {
     const client = requireClient();
 
-    // v0.1.72 federation gates ─────────────────────────────────────────
-    // Probe the locker's federation at create time. The captured prefix
-    // gets embedded in the CREATE event; participants can then verify
-    // they're on the same federation before joining/locking/claiming.
+    // v0.1.87 fix (item 9): the federation probe is INFORMATIONAL, not
+    // gating. Pre-v0.1.87 a probe failure stripped both fedPrefix and
+    // fed from the CREATE event, which cascaded into buyers filtering
+    // the listing out. Per Pillar 2.3 ("federation follows the
+    // listing"), every listing must carry enough federation context
+    // for buyers to resolve regardless of seller-side probe outcome.
     //
-    // If the probe fails (federation unreachable, wallet not joined,
-    // etc.) we proceed WITHOUT the tags. The trade will work, but
-    // participants won't have the gate as a safety net. This is the
-    // same as pre-.72 behavior, so it's a graceful degradation.
-    let probedFedPrefix: string | undefined;
-    let probedFed: string | undefined;
+    // The deriveCreateFedTags helper returns:
+    //   - fed (federation ID hex) — populated from cached client state
+    //     even when the probe fails. Buyers always have enough to
+    //     resolve.
+    //   - fedPrefix (10-char ecash-derived prefix) — only when the
+    //     probe round-trips a 1-sat OOB note. Used by buyers for an
+    //     early-warning toast on JOIN; its absence falls back to the
+    //     LOCK gate, which is the load-bearing money-move defense.
+    let probeResult: { prefix: string; fed: string | null } | null = null;
+    let cachedFedId: string | null = null;
     if (fedimintRef.current) {
+      cachedFedId = fedimintRef.current.getFederationId();
       try {
-        const probe = await fedimintRef.current.probeFederation();
-        probedFedPrefix = probe.prefix;
-        probedFed = probe.fed ?? undefined;
+        probeResult = await fedimintRef.current.probeFederation();
       } catch (e) {
         console.warn(
-          "[chama] CREATE: federation probe failed, trade will be created without fed tags:",
+          "[chama] CREATE: federation probe failed; publishing with fed tag only (fedPrefix omitted):",
           e instanceof Error ? e.message : e
         );
       }
     }
+    const fedTags = deriveCreateFedTags({ cachedFedId, probeResult });
 
     const result = await client.createEscrow({
       ...params,
-      fedPrefix: probedFedPrefix,
-      fed: probedFed,
+      fedPrefix: fedTags.fedPrefix,
+      fed: fedTags.fed,
     });
     saveEscrowId(result.escrowId);
     vibrate([40, 20, 40, 20, 80]); // Celebratory haptic

@@ -23,7 +23,7 @@ import { BP_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
 // are the primary first-time join surface; the picker is a Sandbox-only
 // power-user escape hatch.
 //
-// Tapping a community pill (other than "All communities") must:
+// Tapping a community pill must:
 //   1. Update the user's chama_community localStorage
 //   2. Filter Browse to that community
 //   3. Switch (or first-time init) the backing federation client
@@ -34,10 +34,11 @@ import { BP_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
 // a direct identity choice that should take precedence over an earlier
 // sandbox-mode override.
 //
-// "All communities" is filter-only — does NOT change identity.
+// v0.1.87: the synthetic "All communities" pill (and the filter-only
+// effect kind it produced) was removed. Per Pillar 2.1 every user has
+// a home community, so there is no community-less state to filter from.
 //
 // Effect kinds:
-//   - filter-only      — slug === "all"
 //   - identity-only    — currentInvite === targetInvite (already on the
 //                        right fed; just update community + filter)
 //   - switch-silent    — needs to (re-)init/switch the client. Used for
@@ -49,7 +50,6 @@ import { BP_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
 //                        existing fund-loss-guard modal.
 
 export type CommunityTapEffect =
-  | { kind: "filter-only" }
   | { kind: "identity-only"; slug: string }
   | {
       kind: "switch-silent";
@@ -76,10 +76,6 @@ export interface CommunityTapInputs {
 }
 
 export function decideCommunityTapEffect(inputs: CommunityTapInputs): CommunityTapEffect {
-  if (inputs.slug === "all") {
-    return { kind: "filter-only" };
-  }
-
   const community = getCommunityBySlug(inputs.slug);
   // Community-tap honors the community's pinned invite (or BP fallback).
   // We bypass any custom-invite override on purpose.
@@ -114,6 +110,75 @@ export function decideCommunityTapEffect(inputs: CommunityTapInputs): CommunityT
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Auto-init target on app load (sticky-community routing)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Per Pillar 2.1's "every user has a home" doctrine + the v0.1.87
+// sticky-community design: a refresh always lands the user on their
+// home community's federation, EXCEPT when an in-flight trade with
+// funds at risk requires preserving the OPFS-bound fed so the trade
+// can resume. The decision tree:
+//
+//   1. In-flight trade with balance > 0 → use-active
+//      (Funds at stake; preserve the fed they live on. Refresh during
+//      an active trade is a recovery scenario, not a navigation one.)
+//
+//   2. Home community known (with or without active invite) → use-home
+//      (Sticky-community: even if the user session-time-switched to
+//      another fed via listing-tap, refresh re-anchors to home. If
+//      hasCurrentEscrow is true but balance is zero, the trade
+//      post-claimed or recovered out-of-band — preserving the active
+//      fed in that case strands the user on something they no longer
+//      need.)
+//
+//   3. Else (no home, no in-flight-with-balance) → skip
+//      (Truly first-time user; community pills are the join surface.)
+//
+// Pure: the helper reads no localStorage and no fedimint state. The
+// shell collects the inputs and dispatches based on the result.
+
+export type AutoInitTarget =
+  | { kind: "skip" }
+  | { kind: "use-active"; invite: string }
+  | { kind: "use-home"; invite: string; slug: string };
+
+export interface AutoInitInputs {
+  /** chama_active_invite — the OPFS-bound invite, or `null` if none. */
+  activeInvite: string | null;
+  /** chama_community — the user's home community slug, or `null` for
+   *  a truly first-time user. */
+  homeCommunity: string | null;
+  /** True iff the user is a participant (buyer or seller) in a
+   *  non-terminal escrow per the local replay. Arbiter-only
+   *  participation does not count for this gate. */
+  hasCurrentEscrow: boolean;
+  /** Live OPFS balance from fedimint state. */
+  balanceMsats: number;
+}
+
+export function decideAutoInitTarget(inputs: AutoInitInputs): AutoInitTarget {
+  if (
+    inputs.hasCurrentEscrow
+    && inputs.balanceMsats > 0
+    && inputs.activeInvite
+  ) {
+    return { kind: "use-active", invite: inputs.activeInvite };
+  }
+
+  if (inputs.homeCommunity) {
+    const community = getCommunityBySlug(inputs.homeCommunity);
+    // Honor the community's pinned invite (or BP fallback) — bypass
+    // any pasted-custom-invite override the user might have set in
+    // Sandbox. Sticky-community is intentionally rigid: refresh =
+    // come home.
+    const homeInvite = community?.federationInvite ?? BP_FEDERATION_INVITE;
+    return { kind: "use-home", invite: homeInvite, slug: inputs.homeCommunity };
+  }
+
+  return { kind: "skip" };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Browser-support honesty banner
 // ──────────────────────────────────────────────────────────────────────────
 //
@@ -138,4 +203,64 @@ export function shouldShowBrowserSupportBanner(inputs: BrowserBannerInputs): boo
   if (!inputs.isBrowser) return false;
   if (inputs.dismissed) return false;
   return true;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Counterparty display name
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Used by the v0.2.0 recovery banner ("Your trade with [counterparty]
+// didn't finish") and the arbiter-attention warning copy ("Trade
+// between [npub-A] and [npub-B]"). Pure function — given the raw npub
+// + a "fetch counterparty kind:0" toggle state + the kind:0 name (if
+// any), it returns the right string for the surface.
+//
+// Privacy default: truncated npub. The full name only appears when the
+// user has explicitly opted into kind:0 fetching (Me → Nostr Profile,
+// v0.2.0) AND the counterparty has self-published a kind:0 with a name
+// field. Both conditions must hold; either alone falls back to the
+// truncated npub. This honors the buyer/seller's right to use Chama
+// without surfacing their broader Nostr identity to other Chama
+// participants who haven't asked to fetch it.
+//
+// The kind:0 fetcher itself ships in v0.2.1 — for v0.2.0 the helper is
+// callable with `kind0Name: null` and renders truncated npubs across
+// the board. Wiring the fetcher in later doesn't change this contract.
+
+const TRUNCATED_NPUB_HEAD = 8;
+const TRUNCATED_NPUB_TAIL = 4;
+
+export interface CounterpartyDisplayInputs {
+  /** The counterparty's hex pubkey or bech32 npub (string is opaque to
+   *  this helper — we just take the head/tail for truncation). */
+  npub: string;
+  /** Whether the user has enabled "fetch counterparty kind:0" in Me →
+   *  Nostr Profile. v0.2.0 surfaces this toggle but doesn't fetch yet;
+   *  v0.2.1 wires the fetcher. */
+  fetchKind0Enabled: boolean;
+  /** The counterparty's self-published kind:0 name, if known. `null`
+   *  when fetch is disabled, when the counterparty hasn't published
+   *  kind:0, or when their kind:0 lacks a name field. */
+  kind0Name: string | null;
+}
+
+export function displayCounterpartyName(inputs: CounterpartyDisplayInputs): string {
+  if (
+    inputs.fetchKind0Enabled
+    && typeof inputs.kind0Name === "string"
+    && inputs.kind0Name.trim().length > 0
+  ) {
+    return inputs.kind0Name.trim();
+  }
+  // Truncated npub fallback. The 8/4 split is wide enough that two
+  // distinct npubs are visually distinguishable in the recovery banner
+  // and arbiter warnings without leaking more than necessary.
+  if (inputs.npub.length <= TRUNCATED_NPUB_HEAD + TRUNCATED_NPUB_TAIL + 1) {
+    return inputs.npub;
+  }
+  return (
+    inputs.npub.slice(0, TRUNCATED_NPUB_HEAD)
+    + "…"
+    + inputs.npub.slice(-TRUNCATED_NPUB_TAIL)
+  );
 }

@@ -36,7 +36,7 @@ export function FedimintBar({ fedimint, onFund, onInit, showReconnect }: {
 
   let displayName: string;
   if (!fedimint.joined) {
-    displayName = fedimint.busy ? "Connecting Chama..." : "No federation";
+    displayName = fedimint.busy ? "Connecting Chama..." : "No Chama";
   } else {
     const matched = fedimint.federationId
       ? pillPresets.find((p) => p.federationId === fedimint.federationId)
@@ -44,7 +44,7 @@ export function FedimintBar({ fedimint, onFund, onInit, showReconnect }: {
     if (matched) {
       displayName = matched.name;
     } else if (fedimint.federationId) {
-      displayName = `Custom federation (${fedimint.federationId.slice(0, 8)})`;
+      displayName = `Custom Chama (${fedimint.federationId.slice(0, 8)})`;
     } else {
       displayName = fedimint.federationName;
     }
@@ -64,7 +64,7 @@ export function FedimintBar({ fedimint, onFund, onInit, showReconnect }: {
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div
-          title={healthFailed ? "Federation unreachable — receives will be refused" : undefined}
+          title={healthFailed ? "Chama unreachable — receives will be refused" : undefined}
           style={{
             width: 8, height: 8, borderRadius: "50%",
             background: dotColor,

@@ -99,6 +99,7 @@ import {
   queryUntilFound,
   SEED_RECOVERY_RETRY_DELAYS_MS,
 } from "../fedimint/seed-manager.js";
+import { deriveCreateFedTags } from "../fedimint/create-fed-tags.js";
 import {
   getVoteLabel,
   defaultFulfillmentFor,
@@ -2226,7 +2227,9 @@ console.log("\n── PROD ENCRYPTION CYCLE (config flip) ──");
 
 import {
   decideCommunityTapEffect,
+  decideAutoInitTarget,
   shouldShowBrowserSupportBanner,
+  displayCounterpartyName,
 } from "../ui/decisions.js";
 // BP_FEDERATION_INVITE / BLF_FEDERATION_INVITE already imported above
 // from federation-config (which re-exports from federation-invites).
@@ -2238,12 +2241,10 @@ import {
 // ── 28. COMMUNITY-PILL TAP EFFECT ───────────────────────────────────────
 console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
 {
-  // "all" is filter-only — never an identity change.
-  const allEffect = decideCommunityTapEffect({
-    slug: "all", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 0,
-  });
-  assert(allEffect.kind === "filter-only",
-    "Tap 'all' → filter-only effect");
+  // v0.1.87: the "All communities" pill (and its filter-only effect)
+  // are gone — every user has a home, so every tap is an identity
+  // choice. The decision function returns one of three kinds:
+  // identity-only / switch-silent / destroy-confirm.
 
   // First-time user (no current invite) tapping a community → switch-silent.
   // v0.1.85 update: the community pill IS the first-time join, no separate
@@ -2329,6 +2330,113 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
   }
 }
 
+// ── 28b. AUTO-INIT TARGET (sticky-community routing, v0.1.87) ──────────
+//
+// decideAutoInitTarget drives the App.tsx auto-init useEffect. Per
+// PHILOSOPHY.md §2.1 "every user has a home" doctrine, refresh always
+// lands the user on their home community's federation — except when
+// an in-flight trade with funds at risk requires preserving the
+// OPFS-bound fed so the trade can resume.
+//
+// Decision tree:
+//   1. hasCurrentEscrow && balanceMsats > 0 && activeInvite → use-active
+//   2. else with homeCommunity set → use-home
+//   3. else → skip
+console.log("\n── AUTO-INIT TARGET ──");
+{
+  // 1) In-flight trade with funds at stake → preserve active fed.
+  const inFlight = decideAutoInitTarget({
+    activeInvite: BLF_FEDERATION_INVITE,
+    homeCommunity: "sn-cfa",
+    hasCurrentEscrow: true,
+    balanceMsats: 50_000,
+  });
+  assert(inFlight.kind === "use-active",
+    "currentEscrow + balance>0 → use-active (preserves in-flight fed)");
+  if (inFlight.kind === "use-active") {
+    assert(inFlight.invite === BLF_FEDERATION_INVITE,
+      "use-active carries the OPFS-bound active invite");
+  }
+
+  // 2) currentEscrow recorded but balance is zero → trade post-claimed
+  //    or recovered out-of-band. Strands the user if we preserve. Use-home.
+  const claimedOrRecovered = decideAutoInitTarget({
+    activeInvite: BLF_FEDERATION_INVITE,
+    homeCommunity: "sn-cfa",
+    hasCurrentEscrow: true,
+    balanceMsats: 0,
+  });
+  assert(claimedOrRecovered.kind === "use-home",
+    "currentEscrow + balance==0 → use-home (no funds to preserve)");
+  if (claimedOrRecovered.kind === "use-home") {
+    assert(claimedOrRecovered.slug === "sn-cfa",
+      "use-home carries the home community slug");
+    assert(claimedOrRecovered.invite === BP_FEDERATION_INVITE,
+      "use-home invite is the home community's pinned invite (sn-cfa → BP)");
+  }
+
+  // 3) Returning user, no active trade → sticky-community.
+  const steady = decideAutoInitTarget({
+    activeInvite: BLF_FEDERATION_INVITE,
+    homeCommunity: "ke-kes",
+    hasCurrentEscrow: false,
+    balanceMsats: 0,
+  });
+  assert(steady.kind === "use-home",
+    "No active trade + home set → use-home (sticky-community)");
+  if (steady.kind === "use-home") {
+    const keKesInvite = getCommunityBySlug("ke-kes")!.federationInvite!;
+    assert(steady.invite === keKesInvite,
+      "Sticky-community lands on home's pinned invite even if active differs");
+  }
+
+  // 4) Returning user already on home's fed → still use-home (idempotent).
+  const alreadyHome = decideAutoInitTarget({
+    activeInvite: BP_FEDERATION_INVITE,
+    homeCommunity: "sn-cfa",
+    hasCurrentEscrow: false,
+    balanceMsats: 0,
+  });
+  assert(alreadyHome.kind === "use-home",
+    "Already on home fed → still use-home (idempotent dispatch)");
+
+  // 5) Orphan ecash without an active trade. v0.1.87 falls to use-home;
+  //    the data-layer reconciliation guard catches the balance>0 conflict
+  //    and surfaces the destroy-confirm modal. v0.2.0's recovery banner
+  //    will intercept this state before sticky-community fires.
+  const orphan = decideAutoInitTarget({
+    activeInvite: BLF_FEDERATION_INVITE,
+    homeCommunity: "sn-cfa",
+    hasCurrentEscrow: false,
+    balanceMsats: 50_000,
+  });
+  assert(orphan.kind === "use-home",
+    "Balance>0 without currentEscrow → use-home (data-layer guard handles conflict)");
+
+  // 6) Truly first-time user — no home, no anything → skip, let pills run.
+  const firstTime = decideAutoInitTarget({
+    activeInvite: null,
+    homeCommunity: null,
+    hasCurrentEscrow: false,
+    balanceMsats: 0,
+  });
+  assert(firstTime.kind === "skip",
+    "First-time user (no home, no active) → skip");
+
+  // 7) Sandbox-style user — active invite without a community pick.
+  //    Per the user's spec ("else with home → use-home; else skip"),
+  //    no-home + active falls through to skip. Sandbox users reconnect
+  //    manually or by tapping a community pill.
+  const sandboxNoHome = decideAutoInitTarget({
+    activeInvite: BLF_FEDERATION_INVITE,
+    homeCommunity: null,
+    hasCurrentEscrow: false,
+    balanceMsats: 0,
+  });
+  assert(sandboxNoHome.kind === "skip",
+    "Sandbox user with active invite but no home → skip (manual reconnect)");
+}
+
 // ── 29. BROWSER SUPPORT BANNER GATE ─────────────────────────────────────
 //
 // One-time-per-account honest disclosure for browser users. v0.1.85
@@ -2360,6 +2468,119 @@ console.log("\n── BROWSER SUPPORT BANNER GATE ──");
     }) === false,
     "Once dismissed, the banner stays dismissed across sessions",
   );
+}
+
+// ── 29b. COUNTERPARTY DISPLAY NAME (v0.1.87 / v0.2.0+v0.2.1 helper) ─────
+//
+// Used by the v0.2.0 recovery banner ("Your trade with [counterparty]
+// didn't finish") and the arbiter-attention warnings ("Trade between
+// [npub-A] and [npub-B]"). Pure function: returns the kind:0 name only
+// when the user has opted in AND the counterparty has self-published
+// a usable kind:0 name. v0.2.0 ships the helper with kind0Name=null
+// across the board (no fetcher yet); v0.2.1 wires the fetcher.
+console.log("\n── COUNTERPARTY DISPLAY NAME ──");
+{
+  const npubA = "1c6abd8a7f3e9b22d45c1f0a8e7b6c5d4f3e2a1b0c9d8e7f6a5b4c3d2e1f0987";
+
+  // Default: truncated npub regardless of name presence when toggle off.
+  const defaultDisplay = displayCounterpartyName({
+    npub: npubA, fetchKind0Enabled: false, kind0Name: "Alice",
+  });
+  assert(defaultDisplay === "1c6abd8a…0987",
+    "Toggle off → truncated npub even if a kind:0 name is supplied");
+
+  // Toggle on but kind0Name is null (v0.2.0 default before fetcher ships).
+  const noFetcherYet = displayCounterpartyName({
+    npub: npubA, fetchKind0Enabled: true, kind0Name: null,
+  });
+  assert(noFetcherYet === "1c6abd8a…0987",
+    "Toggle on but no kind:0 name → truncated npub fallback");
+
+  // Both conditions met → render the name.
+  const happyPath = displayCounterpartyName({
+    npub: npubA, fetchKind0Enabled: true, kind0Name: "Alice from Dakar",
+  });
+  assert(happyPath === "Alice from Dakar",
+    "Toggle on + kind:0 name present → render the name");
+
+  // Empty/whitespace-only kind:0 name → fall back (don't render whitespace).
+  const emptyName = displayCounterpartyName({
+    npub: npubA, fetchKind0Enabled: true, kind0Name: "   ",
+  });
+  assert(emptyName === "1c6abd8a…0987",
+    "Whitespace-only kind:0 name doesn't render — falls back to npub");
+
+  // Name with surrounding whitespace gets trimmed (defensive against
+  // sloppy kind:0 publishers).
+  const trimsName = displayCounterpartyName({
+    npub: npubA, fetchKind0Enabled: true, kind0Name: "  Bob  ",
+  });
+  assert(trimsName === "Bob", "kind:0 name is trimmed before render");
+
+  // Short pubkey (shorter than the truncation window) — return as-is
+  // so we don't produce a degenerate "ab…cd" of an 8-char string.
+  const shortNpub = displayCounterpartyName({
+    npub: "abcd1234", fetchKind0Enabled: false, kind0Name: null,
+  });
+  assert(shortNpub === "abcd1234",
+    "Short npub passes through unchanged (no truncation degeneracy)");
+}
+
+// ── 29c. CREATE FED TAGS — probe-decoupled (v0.1.87 item 9) ─────────────
+//
+// Per Pillar 2.3 ("federation follows the listing"), every CREATE
+// event must carry enough federation context for buyers to resolve
+// regardless of seller-side probe outcome. deriveCreateFedTags is
+// the pure derivation: probe-success contributes both fedPrefix and
+// fed; probe-failure still surfaces fed via the cached client state;
+// truly disconnected (no client) yields neither tag.
+console.log("\n── CREATE FED TAGS (probe-decoupled) ──");
+{
+  // Probe success → both tags present.
+  const probeOk = deriveCreateFedTags({
+    cachedFedId: "abcdef0123456789",
+    probeResult: { prefix: "fed1abcdef", fed: "abcdef0123456789" },
+  });
+  assert(probeOk.fedPrefix === "fed1abcdef",
+    "Probe-success → fedPrefix populated");
+  assert(probeOk.fed === "abcdef0123456789",
+    "Probe-success → fed populated");
+
+  // Probe FAILED but client knows its fed ID → fed survives, fedPrefix
+  // omitted. This is the load-bearing fix for item 9: pre-v0.1.87 a
+  // probe failure stripped fed too, cascading into buyer-side filtering.
+  const probeFail = deriveCreateFedTags({
+    cachedFedId: "abcdef0123456789",
+    probeResult: null,
+  });
+  assert(probeFail.fed === "abcdef0123456789",
+    "Probe-fail with cached fed ID → fed tag survives");
+  assert(probeFail.fedPrefix === undefined,
+    "Probe-fail → fedPrefix omitted (no ecash to derive prefix from)");
+
+  // No client + no probe (truly disconnected) → neither tag.
+  // Listing still gets community + mintUrl from upstream params, so
+  // it's resolvable; this branch just means the probe-derived
+  // safety nets are absent.
+  const noClient = deriveCreateFedTags({
+    cachedFedId: null,
+    probeResult: null,
+  });
+  assert(noClient.fed === undefined,
+    "No client, no probe → no fed tag");
+  assert(noClient.fedPrefix === undefined,
+    "No client, no probe → no fedPrefix tag");
+
+  // Probe with null fed (edge case where the WASM probe returned a
+  // prefix but couldn't capture the fed ID) — fallback to cachedFedId.
+  const probePartial = deriveCreateFedTags({
+    cachedFedId: "abcdef0123456789",
+    probeResult: { prefix: "fed1abcdef", fed: null },
+  });
+  assert(probePartial.fedPrefix === "fed1abcdef",
+    "Partial probe still surfaces fedPrefix");
+  assert(probePartial.fed === "abcdef0123456789",
+    "Partial probe falls back to cachedFedId for fed");
 }
 
 // ── 30. setUserCommunitySlug LOCALSTORAGE ROUNDTRIP ─────────────────────

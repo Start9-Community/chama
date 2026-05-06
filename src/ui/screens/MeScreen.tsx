@@ -67,7 +67,7 @@ export function MeScreen({
         borderRadius: T.r, padding: 0, marginBottom: 16, overflow: "hidden",
       }}>
         <SettingsRow label="Payment handles" hint="Saved handles for fast trade-time fill" onClick={onOpenSavedHandles} />
-        <SettingsRow label="Advanced" hint="Sandbox mode and federation tools" onClick={onOpenAdvanced} />
+        <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
         <SettingsRow label="Sign out" hint={null} onClick={onSignOut} danger />
       </div>
 

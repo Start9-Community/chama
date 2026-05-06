@@ -51,7 +51,7 @@ export function SwitchFederationPanel({
   const requestCustomSwitch = () => {
     if (!customValid) return;
     setConfirming({
-      name: `Custom federation (${customTrimmed.slice(4, 12)}…)`,
+      name: `Custom Chama (${customTrimmed.slice(4, 12)}…)`,
       invite: customTrimmed,
     });
   };
@@ -80,10 +80,10 @@ export function SwitchFederationPanel({
         fontSize: 10, fontWeight: 600, color: T.muted, fontFamily: T.mono,
         letterSpacing: 1, marginBottom: 8,
       }}>
-        SWITCH FEDERATION
+        SWITCH CHAMA
       </div>
       <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 10, lineHeight: 1.5 }}>
-        Currently on: <span style={{ color: T.text }}>{fedimint.federationName}</span>
+        Now on: <span style={{ color: T.text }}>{fedimint.federationName}</span>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -170,7 +170,7 @@ export function SwitchFederationPanel({
             background: T.card, border: `1px solid ${T.border}`,
           }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: T.text, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-              CONFIRM FEDERATION SWITCH
+              CONFIRM CHAMA SWITCH
             </div>
             <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 16 }}>
               Switch from <strong>{fedimint.federationName}</strong> to{" "}
@@ -178,9 +178,9 @@ export function SwitchFederationPanel({
             </div>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 16 }}>
               This wipes your local Chama's OPFS file and re-joins the new
-              federation. Any ecash on the current federation will be
-              stranded until you switch back. Your Nostr-backed seed and
-              trade history survive.
+              one. Any ecash on the current Chama will be stranded until
+              you switch back. Your Nostr-backed seed and trade history
+              survive.
             </div>
 
             {err && (
@@ -226,7 +226,7 @@ export function SwitchFederationPanel({
               >
                 {busy ? "Switching…"
                   : refusalCode === "balance" ? "Switch and destroy ecash"
-                  : "Switch federation"}
+                  : "Switch Chama"}
               </button>
             </div>
           </div>

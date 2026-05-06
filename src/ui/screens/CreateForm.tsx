@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
-import { getCommunityBySlug, getPickerCommunities } from "../../communities/registry.js";
+import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
+import { getUserCommunitySlug } from "../../communities/storage.js";
 import { resolveFederationForCommunity } from "../../fedimint/federation-config.js";
 import { T, inputStyle } from "../theme.js";
 
@@ -16,18 +17,20 @@ export function CreateForm({ onCreate, onClose }: {
   const [isSubscription, setIsSubscription] = useState(false);
   const [periods, setPeriods] = useState("3");
   const [intervalDays, setIntervalDays] = useState("30");
-  const [community, setCommunity] = useState<string>(() => {
-    try {
-      const raw = typeof localStorage !== "undefined"
-        ? localStorage.getItem("chama_community") : null;
-      return raw && getCommunityBySlug(raw) ? raw : "global-usd";
-    } catch { return "global-usd"; }
-  });
   const [fulfillment, setFulfillment] = useState<Fulfillment>("physical");
 
-  // v0.1.85: render only picker-visible communities (sv-usd hidden);
-  // listings resolve federation from community via the registry.
-  const pickerCommunities = getPickerCommunities();
+  // v0.1.87: the community selector dropdown was removed. Per the
+  // locked v0.2.0 design ("listings publish into seller's current
+  // community"), CreateForm publishes into whatever community the
+  // user is currently on. If they want to list elsewhere, they tap
+  // a different community pill in Browse first — that's the v0.2.0
+  // multi-community workflow primitive. Read once at form-open;
+  // subsequent community switches require a fresh form.
+  const community = (() => {
+    const slug = getUserCommunitySlug();
+    return getCommunityBySlug(slug) ? slug : DEFAULT_COMMUNITY_SLUG;
+  })();
+  const homeCommunity = getCommunityBySlug(community);
 
   const cats = [
     { id: "p2p-trade", l: "P2P Trade", i: "⚡" },
@@ -91,28 +94,37 @@ export function CreateForm({ onCreate, onClose }: {
         ))}
       </div>
 
-      <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>COMMUNITY</div>
-          <select value={community} onChange={e => setCommunity(e.target.value)}
+      {/* Read-only community context. Listings publish into the
+          seller's current community (locked v0.2.0 design). To list
+          elsewhere, tap a different community pill in Browse first. */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "10px 12px", marginBottom: 16,
+        background: T.surface, border: `1px solid ${T.border}`,
+        borderRadius: T.rs,
+      }}>
+        <span style={{ fontSize: 18, lineHeight: 1 }}>
+          {homeCommunity?.flagEmoji ?? "🌐"}
+        </span>
+        <span style={{ flex: 1, fontSize: 12, color: T.text, fontFamily: T.sans }}>
+          Listing in <strong>{homeCommunity?.displayName ?? community}</strong>
+        </span>
+        <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5 }}>
+          YOUR COMMUNITY
+        </span>
+      </div>
+
+      {categoryAllowsFulfillmentChoice(cat) && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FULFILLMENT</div>
+          <select value={fulfillment} onChange={e => setFulfillment(e.target.value as Fulfillment)}
             style={{ ...inputStyle, color: T.text, background: T.surface }}>
-            {pickerCommunities.map(c => (
-              <option key={c.slug} value={c.slug}>{c.flagEmoji} {c.displayName}</option>
-            ))}
+            <option value="physical">Physical</option>
+            <option value="service">Service</option>
+            <option value="digital">Digital</option>
           </select>
         </div>
-        {categoryAllowsFulfillmentChoice(cat) && (
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FULFILLMENT</div>
-            <select value={fulfillment} onChange={e => setFulfillment(e.target.value as Fulfillment)}
-              style={{ ...inputStyle, color: T.text, background: T.surface }}>
-              <option value="physical">Physical</option>
-              <option value="service">Service</option>
-              <option value="digital">Digital</option>
-            </select>
-          </div>
-        )}
-      </div>
+      )}
 
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>DESCRIPTION</div>
