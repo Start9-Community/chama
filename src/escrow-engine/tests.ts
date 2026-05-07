@@ -42,6 +42,7 @@ import {
   EscrowEventKind,
   Role,
   Outcome,
+  type EscrowState,
   type ParsedEscrowEvent,
   type CreatePayload,
   type JoinPayload,
@@ -2230,6 +2231,13 @@ import {
   decideAutoInitTarget,
   shouldShowBrowserSupportBanner,
   displayCounterpartyName,
+  canOfferSubscription,
+  hasActiveBuyerSellerCommitment,
+  findActiveTrade,
+  shouldShowRecoveryBanner,
+  identifyStrandedEcashSource,
+  decideListingTapEffect,
+  decideArbiterWarning,
 } from "../ui/decisions.js";
 // BP_FEDERATION_INVITE / BLF_FEDERATION_INVITE already imported above
 // from federation-config (which re-exports from federation-invites).
@@ -2413,20 +2421,31 @@ console.log("\n── AUTO-INIT TARGET ──");
   assert(orphan.kind === "use-home",
     "Balance>0 without currentEscrow → use-home (data-layer guard handles conflict)");
 
-  // 6) Truly first-time user — no home, no anything → skip, let pills run.
+  // 6) Truly first-time user — v0.2.0 item 6: no home AND no active →
+  //    use-default (BP + global-usd). Pre-v0.2.0 this fell to "skip"
+  //    and stranded users in "No Chama" limbo per Pillar 2.1's
+  //    "every user has a home" doctrine.
   const firstTime = decideAutoInitTarget({
     activeInvite: null,
     homeCommunity: null,
     hasCurrentEscrow: false,
     balanceMsats: 0,
   });
-  assert(firstTime.kind === "skip",
-    "First-time user (no home, no active) → skip");
+  assert(firstTime.kind === "use-default",
+    "First-time user (no home, no active) → use-default (v0.2.0 item 6)");
+  if (firstTime.kind === "use-default") {
+    assert(firstTime.defaultCommunity === "global-usd",
+      "First-time default community is global-usd");
+    assert(firstTime.invite === BP_FEDERATION_INVITE,
+      "First-time default invite is BP (browser-friendly fallback)");
+    assert(firstTime.reason === "first-time-npub",
+      "First-time use-default carries the 'first-time-npub' reason");
+  }
 
   // 7) Sandbox-style user — active invite without a community pick.
-  //    Per the user's spec ("else with home → use-home; else skip"),
-  //    no-home + active falls through to skip. Sandbox users reconnect
-  //    manually or by tapping a community pill.
+  //    No-home + active still falls to skip (we don't know which
+  //    community the user intended; manual reconnect is the right
+  //    path). The use-default branch is gated on !activeInvite.
   const sandboxNoHome = decideAutoInitTarget({
     activeInvite: BLF_FEDERATION_INVITE,
     homeCommunity: null,
@@ -2742,6 +2761,472 @@ console.log("\n── SEED RECOVERY RETRY ──");
     && SEED_RECOVERY_RETRY_DELAYS_MS[1] === 2000
     && SEED_RECOVERY_RETRY_DELAYS_MS[2] === 4000,
     "Default retry schedule is 1s / 2s / 4s");
+}
+
+// ── 31c. canOfferSubscription (v0.2.0 item 7 — graduated trust gate) ────
+//
+// Subscription mode is invisible until the seller has accumulated
+// enough positive ratings. v1 threshold: 5+ positive, 0 negative.
+// In v0.2.0 with no rating events being published yet, the aggregator
+// returns null universally and the gate returns false for everyone.
+// When ratings ship in v0.2.1+, the gate naturally opens.
+console.log("\n── canOfferSubscription ──");
+{
+  // No ratings yet (v0.2.0 universal default) → gate closed.
+  assert(canOfferSubscription({ ratings: null }) === false,
+    "null ratings → false (no graduation signal yet)");
+
+  // Below threshold → gate closed.
+  assert(
+    canOfferSubscription({ ratings: { count: 4, positive: 4, negative: 0 } }) === false,
+    "4 positive < threshold of 5 → false",
+  );
+
+  // Threshold met cleanly → gate open.
+  assert(
+    canOfferSubscription({ ratings: { count: 5, positive: 5, negative: 0 } }) === true,
+    "5 positive + 0 negative → true (graduated)",
+  );
+
+  // Any negative disqualifies, even with many positives.
+  assert(
+    canOfferSubscription({ ratings: { count: 10, positive: 9, negative: 1 } }) === false,
+    "Any negative rating disqualifies (v1 placeholder is strict)",
+  );
+}
+
+// ── 31d. hasActiveBuyerSellerCommitment + findActiveTrade (item 3) ──────
+//
+// The one-trade-at-a-time hard gate: any non-terminal escrow where
+// the user is buyer or seller blocks Create + Fund. Arbiter status
+// does NOT trigger the block (it triggers the soft/hard arbiter
+// warnings instead, per item 10).
+console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
+{
+  const me = "me_pubkey_aaaa";
+  const other = "other_pubkey_bbbb";
+  const arb = "arbiter_pubkey_cccc";
+
+  // Helper to build a minimal EscrowState shape for these tests.
+  const escrow = (overrides: Partial<EscrowState>): EscrowState => ({
+    id: "test-id",
+    status: EscrowStatus.LOCKED,
+    description: "test",
+    amountMsats: 1_000_000,
+    category: "p2p-trade",
+    fulfillment: "service",
+    community: "sn-cfa",
+    mintUrl: BP_FEDERATION_INVITE,
+    participants: { buyer: null, seller: null, arbiter: null },
+    initiator: { pubkey: me, role: Role.SELLER },
+    communityArbiters: [],
+    subscription: null,
+    votes: {},
+    resolvedOutcome: null,
+    resolvedMajority: null,
+    fees: { platformBps: 50, platformPubkey: me, arbiterFeeMsats: 0 },
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    createdAt: Math.floor(Date.now() / 1000),
+    eventChain: [],
+    chatMessages: [],
+    lock: { handle: null },
+    ...overrides,
+  } as EscrowState);
+
+  // No escrows → no commitment.
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [], userPubkey: me }) === false,
+    "Empty escrows → no commitment",
+  );
+  assert(
+    findActiveTrade({ escrows: [], userPubkey: me }) === null,
+    "Empty escrows → no active trade",
+  );
+
+  // User as buyer, LOCKED → commitment.
+  const asBuyer = escrow({
+    id: "as-buyer",
+    status: EscrowStatus.LOCKED,
+    participants: { buyer: me, seller: other, arbiter: arb },
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [asBuyer], userPubkey: me }) === true,
+    "User as buyer in LOCKED escrow → commitment",
+  );
+  assert(
+    findActiveTrade({ escrows: [asBuyer], userPubkey: me })?.id === "as-buyer",
+    "findActiveTrade returns the LOCKED escrow",
+  );
+
+  // User as arbiter only → NO commitment (arbiter status doesn't block).
+  const asArbiter = escrow({
+    id: "as-arbiter",
+    status: EscrowStatus.LOCKED,
+    participants: { buyer: other, seller: "third", arbiter: me },
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [asArbiter], userPubkey: me }) === false,
+    "User as arbiter only → NO commitment (item 10 governs that path)",
+  );
+
+  // Terminal escrow → no commitment regardless of role.
+  const completed = escrow({
+    id: "completed",
+    status: EscrowStatus.COMPLETED,
+    participants: { buyer: me, seller: other, arbiter: arb },
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [completed], userPubkey: me }) === false,
+    "COMPLETED escrow doesn't count as commitment",
+  );
+  const cancelled = escrow({
+    id: "cancelled",
+    status: EscrowStatus.CANCELLED,
+    participants: { buyer: me, seller: other, arbiter: arb },
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [cancelled], userPubkey: me }) === false,
+    "CANCELLED escrow doesn't count as commitment",
+  );
+
+  // EXPIRED counts as active (per types.ts: transient healing state,
+  // not truly terminal).
+  const expired = escrow({
+    id: "expired",
+    status: EscrowStatus.EXPIRED,
+    participants: { buyer: me, seller: other, arbiter: arb },
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [expired], userPubkey: me }) === true,
+    "EXPIRED still counts (transient healing state, not truly terminal)",
+  );
+
+  // Multiple actives → findActiveTrade returns most recent by createdAt.
+  const older = escrow({
+    id: "older",
+    createdAt: 1000,
+    participants: { buyer: me, seller: other, arbiter: arb },
+  });
+  const newer = escrow({
+    id: "newer",
+    createdAt: 2000,
+    participants: { buyer: me, seller: other, arbiter: arb },
+  });
+  assert(
+    findActiveTrade({ escrows: [older, newer], userPubkey: me })?.id === "newer",
+    "findActiveTrade picks the most recent active trade",
+  );
+}
+
+// ── 31e. shouldShowRecoveryBanner + identifyStrandedEcashSource (item 2)─
+//
+// When the user's OPFS holds a balance but no in-flight trade
+// claims it, that's a recovery state. The banner replaces Browse
+// and forces resolution before any commitment can be created.
+// identifyStrandedEcashSource walks the local replay to find the
+// most recent CLAIM event the user signed; the escrow that CLAIM
+// lives on is the source of the orphan ecash.
+console.log("\n── shouldShowRecoveryBanner + identifyStrandedEcashSource ──");
+{
+  // shouldShowRecoveryBanner: only when balance > 0 AND no active trade.
+  assert(
+    shouldShowRecoveryBanner({ balanceMsats: 50_000, hasCurrentEscrow: false }) === true,
+    "Balance > 0 + no active trade → show banner",
+  );
+  assert(
+    shouldShowRecoveryBanner({ balanceMsats: 0, hasCurrentEscrow: false }) === false,
+    "Zero balance → no banner",
+  );
+  assert(
+    shouldShowRecoveryBanner({ balanceMsats: 50_000, hasCurrentEscrow: true }) === false,
+    "Balance > 0 but active trade exists → no banner (active trade owns the funds)",
+  );
+
+  // identifyStrandedEcashSource: find the most recent CLAIM signed by user.
+  const me = "me_pubkey_dddd";
+  const other = "other_pubkey_eeee";
+  const arb = "arb_pubkey_ffff";
+
+  const escrow = (overrides: Partial<EscrowState>): EscrowState => ({
+    id: "test-id",
+    status: EscrowStatus.COMPLETED,
+    description: "test",
+    amountMsats: 1_000_000,
+    category: "p2p-trade",
+    fulfillment: "service",
+    community: "sn-cfa",
+    mintUrl: BP_FEDERATION_INVITE,
+    participants: { buyer: me, seller: other, arbiter: arb },
+    initiator: { pubkey: me, role: Role.BUYER },
+    communityArbiters: [],
+    subscription: null,
+    votes: {},
+    resolvedOutcome: null,
+    resolvedMajority: null,
+    fees: { platformBps: 50, platformPubkey: me, arbiterFeeMsats: 0 },
+    expiresAt: 0,
+    createdAt: 1000,
+    eventChain: [],
+    chatMessages: [],
+    lock: { handle: null },
+    ...overrides,
+  } as EscrowState);
+
+  const claimEvent = (pubkey: string, timestamp: number) => ({
+    raw: {} as any,
+    payload: {} as any,
+    escrowId: "test-id",
+    prevEventId: null,
+    kind: EscrowEventKind.CLAIM,
+    pubkey,
+    timestamp,
+  });
+
+  // No CLAIM events → null (banner falls back to "unknown counterparty").
+  assert(
+    identifyStrandedEcashSource({ escrows: [], userPubkey: me }) === null,
+    "No escrows → null (generic withdraw fallback)",
+  );
+
+  // CLAIM signed by user → return source.
+  const claimed = escrow({
+    id: "claimed",
+    description: "Pay my electric bill",
+    amountMsats: 80_000_000,
+    eventChain: [claimEvent(me, 5000)] as any,
+  });
+  const found = identifyStrandedEcashSource({ escrows: [claimed], userPubkey: me });
+  assert(found !== null, "User-signed CLAIM → source identified");
+  if (found) {
+    assert(found.escrowId === "claimed", "Source escrow id matches");
+    assert(found.counterpartyPubkey === other,
+      "Counterparty is the other non-arbiter participant");
+    assert(found.role === Role.BUYER,
+      "Role reflects the user's position in the trade");
+    assert(found.amountMsats === 80_000_000,
+      "Amount carries through for the withdraw CTA");
+    assert(found.description === "Pay my electric bill",
+      "Description carries through for the banner identity card");
+  }
+
+  // CLAIM signed by someone else → not the source (privacy: don't
+  // surface a counterparty for trades the user wasn't winner on).
+  const otherWon = escrow({
+    id: "other-won",
+    eventChain: [claimEvent(other, 6000)] as any,
+  });
+  assert(
+    identifyStrandedEcashSource({ escrows: [otherWon], userPubkey: me }) === null,
+    "CLAIM signed by someone else → null (not the user's stranded ecash)",
+  );
+
+  // Multiple user-CLAIMs → most recent timestamp wins.
+  const olderClaim = escrow({
+    id: "older",
+    eventChain: [claimEvent(me, 1000)] as any,
+  });
+  const newerClaim = escrow({
+    id: "newer",
+    eventChain: [claimEvent(me, 9000)] as any,
+  });
+  const mostRecent = identifyStrandedEcashSource({
+    escrows: [olderClaim, newerClaim],
+    userPubkey: me,
+  });
+  assert(mostRecent?.escrowId === "newer",
+    "Most recent CLAIM by timestamp wins");
+}
+
+// ── 31f. decideListingTapEffect (items 1 + 4) ───────────────────────────
+//
+// Federation-follows-listing dispatch. Per Q1 confirmation: re-init
+// happens at LISTING-TAP time, not Fund-CTA time. The detail screen
+// always opens on the right fed; State B's past-tense narration
+// reflects the switch that already happened.
+console.log("\n── decideListingTapEffect ──");
+{
+  // Matching fed → State A render, no client work.
+  const matching = decideListingTapEffect({
+    listing: { mintUrl: BP_FEDERATION_INVITE, community: "sn-cfa" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+  });
+  assert(matching.kind === "matching",
+    "Listing on user's current fed → matching (State A)");
+
+  // Different fed, balance == 0 → silent switch.
+  const switchSilent = decideListingTapEffect({
+    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+  });
+  assert(switchSilent.kind === "switch-silent",
+    "Different fed + balance==0 → switch-silent (State B path)");
+  if (switchSilent.kind === "switch-silent") {
+    assert(switchSilent.targetInvite === BLF_FEDERATION_INVITE,
+      "Target invite matches the listing's fed");
+    assert(switchSilent.displayName === "US · Bitcoin Life · USD",
+      "Display name carries community name for narration");
+  }
+
+  // Different fed, balance > 0 → destroy-confirm modal.
+  const destroyConfirm = decideListingTapEffect({
+    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 50_000,
+  });
+  assert(destroyConfirm.kind === "destroy-confirm",
+    "Different fed + balance>0 → destroy-confirm (Pillar 2.1)");
+
+  // No current invite (truly disconnected) → switch-silent (caller
+  // dispatches initFedimint vs switchFederation based on whether a
+  // client is loaded).
+  const noClient = decideListingTapEffect({
+    listing: { mintUrl: BP_FEDERATION_INVITE, community: "sn-cfa" },
+    currentInvite: null,
+    balanceMsats: 0,
+  });
+  assert(noClient.kind === "switch-silent",
+    "No current invite → switch-silent (no fund to preserve)");
+
+  // mintUrl missing/stale → falls back to community-derived invite.
+  // Defense-in-depth for pre-v0.1.87 listings without probe data.
+  const fallback = decideListingTapEffect({
+    listing: { mintUrl: "", community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+  });
+  assert(fallback.kind === "switch-silent",
+    "Missing mintUrl falls back to community-derived invite");
+  if (fallback.kind === "switch-silent") {
+    assert(fallback.targetInvite === BLF_FEDERATION_INVITE,
+      "Community-derived fallback resolves to us-blf's pinned invite");
+  }
+}
+
+// ── 31g. decideArbiterWarning (item 10) ─────────────────────────────────
+//
+// Arbiter status doesn't hard-block Create — instead, fire one of two
+// warnings. Hard wins over soft; within tier, most recent escrow wins.
+console.log("\n── decideArbiterWarning ──");
+{
+  const me = "me_arbiter_aaaa";
+  const buyer = "buyer_pubkey_bbbb";
+  const seller = "seller_pubkey_cccc";
+
+  const arbEscrow = (overrides: Partial<EscrowState>): EscrowState => ({
+    id: "arb-test",
+    status: EscrowStatus.LOCKED,
+    description: "test",
+    amountMsats: 1_000_000,
+    category: "p2p-trade",
+    fulfillment: "service",
+    community: "sn-cfa",
+    mintUrl: BP_FEDERATION_INVITE,
+    participants: { buyer, seller, arbiter: me },
+    initiator: { pubkey: seller, role: Role.SELLER },
+    communityArbiters: [],
+    subscription: null,
+    votes: {},
+    resolvedOutcome: null,
+    resolvedMajority: null,
+    fees: { platformBps: 50, platformPubkey: seller, arbiterFeeMsats: 0 },
+    expiresAt: 0,
+    createdAt: 1000,
+    eventChain: [],
+    chatMessages: [],
+    lock: { handle: null },
+    ...overrides,
+  } as EscrowState);
+
+  // No arbiter escrows → none.
+  assert(
+    decideArbiterWarning({ escrows: [], userPubkey: me }).kind === "none",
+    "No arbiter responsibility → none",
+  );
+
+  // LOCKED, no votes → soft.
+  const noVotes = arbEscrow({ id: "soft1" });
+  const soft = decideArbiterWarning({ escrows: [noVotes], userPubkey: me });
+  assert(soft.kind === "soft",
+    "LOCKED with no votes → soft warning (happy-path may never need arbiter)");
+  if (soft.kind === "soft") {
+    assert(soft.escrowId === "soft1", "Soft carries the escrow id");
+    assert(soft.counterpartyA === buyer, "Soft counterpartyA is the buyer");
+    assert(soft.counterpartyB === seller, "Soft counterpartyB is the seller");
+  }
+
+  // LOCKED with both votes disagreeing → hard.
+  const disputed = arbEscrow({
+    id: "hard1",
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND },
+  });
+  const hard = decideArbiterWarning({ escrows: [disputed], userPubkey: me });
+  assert(hard.kind === "hard",
+    "LOCKED with disagreeing votes → hard warning (tiebreaker pending)");
+  if (hard.kind === "hard") {
+    assert(hard.escrowId === "hard1", "Hard carries the escrow id");
+  }
+
+  // Hard wins over soft when both present.
+  const mixedSoft = arbEscrow({ id: "soft2", createdAt: 5000 });
+  const mixedHard = arbEscrow({
+    id: "hard2",
+    createdAt: 1000,
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND },
+  });
+  const mixed = decideArbiterWarning({
+    escrows: [mixedSoft, mixedHard],
+    userPubkey: me,
+  });
+  assert(mixed.kind === "hard",
+    "Hard always wins over soft, even when soft is more recent");
+  if (mixed.kind === "hard") {
+    assert(mixed.escrowId === "hard2",
+      "Hard winner is the disputed escrow regardless of relative timestamps");
+  }
+
+  // Within hard tier, most recent wins.
+  const olderHard = arbEscrow({
+    id: "old-hard",
+    createdAt: 1000,
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND },
+  });
+  const newerHard = arbEscrow({
+    id: "new-hard",
+    createdAt: 5000,
+    votes: { [Role.BUYER]: Outcome.REFUND, [Role.SELLER]: Outcome.RELEASE },
+  });
+  const mostRecentHard = decideArbiterWarning({
+    escrows: [olderHard, newerHard],
+    userPubkey: me,
+  });
+  assert(
+    mostRecentHard.kind === "hard"
+      && mostRecentHard.escrowId === "new-hard",
+    "Within hard tier, most recent createdAt wins",
+  );
+
+  // Non-LOCKED arbiter trade → not surfaced (settled or terminal).
+  const completed = arbEscrow({
+    id: "done",
+    status: EscrowStatus.COMPLETED,
+  });
+  assert(
+    decideArbiterWarning({ escrows: [completed], userPubkey: me }).kind === "none",
+    "Arbiter on COMPLETED escrow → no warning (settled)",
+  );
+
+  // Both votes agree → state machine should have moved to APPROVED;
+  // a stuck-at-LOCKED-with-agreeing-votes is defensive-only soft.
+  const agreeStuck = arbEscrow({
+    id: "agree-stuck",
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.RELEASE },
+  });
+  assert(
+    decideArbiterWarning({ escrows: [agreeStuck], userPubkey: me }).kind === "soft",
+    "LOCKED with agreeing votes → soft (defensive — no tiebreaker needed)",
+  );
 }
 
 // ── 32. CreateForm derives mintUrl from community (no manual fed input) ─

@@ -1,13 +1,52 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Chama — Me screen (v0.2.0 Phase 6 skeleton population)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// Consolidates: profile, ratings, Nostr Profile sub-section, settings
+// entries, trade history. Per the v0.2.0 brief Me is fully accessible
+// during active trades — users may need to update LN address, fetch
+// counterparty kind:0, or check ratings/history as part of resolving
+// recovery / arbitration.
+//
+// Ratings: minimal aggregator (count + %positive). v0.2.0 universally
+// renders the "no ratings yet" placeholder because no rating events
+// are being published until v0.2.1; the surface ships now to teach
+// the user that reputation is the primitive.
+//
+// Nostr Profile: deliberately minimal. The kind:0 toggle (default off,
+// privacy-preserving) opts into fetching counterparty names; v0.2.1
+// wires the actual fetcher. Read-only display of the user's own kind:0
+// is similarly v0.2.1+ territory. v0.2.0 ships the toggle + the
+// "Chama doesn't manage your Nostr profile" educational copy so the
+// doctrine is visible from day one.
+
+import { useState, useEffect } from "react";
 import { type EscrowState } from "../../escrow-engine/types.js";
+import { type AggregateRatings } from "../decisions.js";
 import { T } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 
-// Top-level Me — profile + entries to Saved handles + Advanced + a
-// trade history list. v0.2.0 will expand this into ratings, Nostr
-// Profile sub-section, etc. v0.1.85 gives it a structural home.
+const KIND0_TOGGLE_KEY_PREFIX = "chama_fetch_kind0_enabled_";
+
+function readKind0Toggle(pubkey: string): boolean {
+  try {
+    if (typeof localStorage === "undefined") return false;
+    return localStorage.getItem(KIND0_TOGGLE_KEY_PREFIX + pubkey) === "1";
+  } catch { return false; }
+}
+
+function writeKind0Toggle(pubkey: string, on: boolean): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (on) localStorage.setItem(KIND0_TOGGLE_KEY_PREFIX + pubkey, "1");
+    else localStorage.removeItem(KIND0_TOGGLE_KEY_PREFIX + pubkey);
+  } catch { /* no-op */ }
+}
+
 export function MeScreen({
   pubkey,
   myTrades,
+  ratings,
   onOpenTrade,
   onOpenSavedHandles,
   onOpenAdvanced,
@@ -15,12 +54,17 @@ export function MeScreen({
 }: {
   pubkey: string;
   myTrades: EscrowState[];
+  /** Aggregate rating data. v0.2.0 always null (no rating events yet);
+   *  v0.2.1 wires the aggregator. */
+  ratings: AggregateRatings | null;
   onOpenTrade: (id: string) => void;
   onOpenSavedHandles: () => void;
   onOpenAdvanced: () => void;
   onSignOut: () => void;
 }) {
   const npubShort = pubkey.slice(0, 8) + "…" + pubkey.slice(-4);
+  const [kind0On, setKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
+  useEffect(() => { writeKind0Toggle(pubkey, kind0On); }, [pubkey, kind0On]);
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -61,7 +105,109 @@ export function MeScreen({
         </div>
       </div>
 
-      {/* Sub-page entries */}
+      {/* Ratings — minimal v0.2.0 surface. Per Pillar 2.6 reputation
+          is the backbone primitive; the surface ships even before
+          rating events do, so users learn the model through
+          encountering it. */}
+      <div style={{
+        background: T.card, border: `1px solid ${T.border}`,
+        borderRadius: T.r, padding: 20, marginBottom: 16,
+      }}>
+        <div style={{
+          fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+          letterSpacing: 1, marginBottom: 12,
+        }}>
+          RATINGS
+        </div>
+        {ratings && ratings.count > 0 ? (
+          <div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+              <span style={{ fontSize: 28, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
+                {ratings.count}
+              </span>
+              <span style={{ fontSize: 12, color: T.muted, fontFamily: T.mono }}>
+                rating{ratings.count !== 1 ? "s" : ""}
+              </span>
+              <span style={{ flex: 1 }} />
+              <span style={{
+                fontSize: 16, fontWeight: 700,
+                color: ratings.positive >= ratings.count - ratings.negative ? T.green : T.amber,
+                fontFamily: T.mono,
+              }}>
+                {Math.round((ratings.positive / Math.max(ratings.count, 1)) * 100)}%
+              </span>
+              <span style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
+                positive
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: T.muted, fontFamily: T.sans, lineHeight: 1.55 }}>
+            No ratings yet — complete your first trade to start building
+            reputation. Ratings unlock graduated capabilities like
+            recurring payments.
+          </div>
+        )}
+      </div>
+
+      {/* Nostr Profile sub-section */}
+      <div style={{
+        background: T.card, border: `1px solid ${T.border}`,
+        borderRadius: T.r, padding: 20, marginBottom: 16,
+      }}>
+        <div style={{
+          fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+          letterSpacing: 1, marginBottom: 12,
+        }}>
+          NOSTR PROFILE
+        </div>
+
+        {/* Toggle: fetch counterparty kind:0 */}
+        <div
+          onClick={() => setKind0On(!kind0On)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            cursor: "pointer", marginBottom: 14,
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+              Show counterparty names
+            </div>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 4, lineHeight: 1.5 }}>
+              Off (default): trades show truncated npubs only. On: Chama
+              fetches the counterparty's self-published Nostr profile name.
+              Privacy default is npub-only.
+            </div>
+          </div>
+          <div style={{
+            width: 40, height: 22, borderRadius: 11,
+            background: kind0On ? T.accent : T.border,
+            padding: 2, transition: "background 0.2s",
+            flexShrink: 0, marginLeft: 12,
+          }}>
+            <div style={{
+              width: 18, height: 18, borderRadius: "50%",
+              background: T.bg, transition: "transform 0.2s",
+              transform: kind0On ? "translateX(18px)" : "translateX(0)",
+            }} />
+          </div>
+        </div>
+
+        {/* Educational copy — Chama doesn't manage profiles */}
+        <div style={{
+          fontSize: 11, color: T.muted, fontFamily: T.sans, lineHeight: 1.55,
+          padding: "10px 12px",
+          background: T.surface, border: `1px solid ${T.border}`,
+          borderRadius: T.rs,
+        }}>
+          Chama doesn't manage your Nostr profile. Use a Nostr client
+          (Damus, Primal, Amethyst) to set your name and picture — it'll
+          show up here automatically once the fetcher ships.
+        </div>
+      </div>
+
+      {/* Settings sub-page entries */}
       <div style={{
         background: T.card, border: `1px solid ${T.border}`,
         borderRadius: T.r, padding: 0, marginBottom: 16, overflow: "hidden",

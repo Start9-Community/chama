@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { type EscrowState } from "../../escrow-engine/types.js";
-import { getPickerCommunities } from "../../communities/registry.js";
+import { getPickerCommunities, getCommunityBySlug } from "../../communities/registry.js";
 import { T, BROWSE_CATS, inputStyle } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
@@ -8,21 +8,20 @@ import { LoadTradeInput } from "../components/LoadTradeInput.js";
 // Browse tab content — category filter pills + community pills + card list.
 // Per PHILOSOPHY.md §2.3, the community pills are the user's identity
 // affordance: tapping one updates chama_community, switches/joins the
-// backing federation, and filters Browse. The shell (App.tsx) handles
-// all of that via `onSelectCommunity`. v0.1.85 also surfaces a small
-// "advanced: paste custom invite" affordance for first-time users who
-// need to reach a federation that isn't in the registry — the
-// canonical home for that is Sandbox, but a discoverable hint here
-// avoids stranding pre-join users.
+// backing federation. v0.1.87 retired the "All communities" pill and
+// the per-community filter — pills are identity-only now.
 //
-// v0.1.87: the synthetic "All communities" pill is gone. Per Pillar 2.1
-// every user has a home community from first signin onward; there is no
-// community-less state. v0.2.0 will add the matching/non-matching
-// two-section amber layout that supersedes the old "All" filter.
+// v0.2.0 item 4: two-section layout per chama_browse_amber_tint_sorted.
+// Matching listings (on the user's active fed) render first as normal
+// cards; non-matching listings render below an "N LISTINGS ON OTHER
+// FEDERATIONS" divider with amber tint. Tapping a non-matching listing
+// triggers the listing-tap dispatch in App.tsx (silent re-init when
+// balance==0; destroy-confirm modal when balance>0).
 export function BrowseView({
   browseCategory, setBrowseCategory,
   browseCommunity, onSelectCommunity,
-  browseList, fedimintJoined, pubkey,
+  matchingListings, nonMatchingListings,
+  fedimintJoined, pubkey,
   isFirstTime, onPasteCustomInvite,
   onOpenEscrow, onLoadById,
 }: {
@@ -30,7 +29,8 @@ export function BrowseView({
   setBrowseCategory: (s: string) => void;
   browseCommunity: string;
   onSelectCommunity: (slug: string) => void;
-  browseList: EscrowState[];
+  matchingListings: EscrowState[];
+  nonMatchingListings: EscrowState[];
   fedimintJoined: boolean;
   pubkey: string;
   isFirstTime: boolean;
@@ -42,8 +42,53 @@ export function BrowseView({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [customInviteInput, setCustomInviteInput] = useState("");
 
+  const totalListings = matchingListings.length + nonMatchingListings.length;
+  const homeCommunity = getCommunityBySlug(browseCommunity);
+
   return (
     <div style={{ padding: 16 }}>
+      {/* v0.2.0 item 4 header: "N listings · M on your Chama" with the
+          user's flag pill for identity affordance. */}
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        marginBottom: 14,
+      }}>
+        <div style={{
+          fontSize: 12, color: T.muted, fontFamily: T.mono,
+        }}>
+          {totalListings === 0
+            ? "No listings yet"
+            : (
+              <>
+                <span style={{ color: T.text, fontWeight: 700 }}>{totalListings}</span>
+                {totalListings === 1 ? " listing" : " listings"}
+                {matchingListings.length > 0 && (
+                  <>
+                    {" · "}
+                    <span style={{ color: T.text, fontWeight: 700 }}>{matchingListings.length}</span>
+                    {" on your Chama"}
+                  </>
+                )}
+              </>
+            )}
+        </div>
+        {homeCommunity && (
+          <span
+            title={homeCommunity.displayName}
+            style={{
+              padding: "4px 10px", borderRadius: 14,
+              background: T.surface, border: `1px solid ${T.border}`,
+              fontFamily: T.mono, fontSize: 11,
+              display: "flex", alignItems: "center", gap: 6,
+              color: T.text,
+            }}
+          >
+            <span style={{ fontSize: 14, lineHeight: 1 }}>{homeCommunity.flagEmoji}</span>
+            {homeCommunity.displayName}
+          </span>
+        )}
+      </div>
+
       {/* Category filter pills */}
       <div style={{
         display: "flex", gap: 6, marginBottom: 12,
@@ -168,23 +213,66 @@ export function BrowseView({
 
       <LoadTradeInput onLoad={onLoadById} />
 
-      {browseList.length === 0 ? (
+      {totalListings === 0 ? (
         <div style={{
           textAlign: "center", padding: "48px 16px",
           color: T.muted, fontFamily: T.mono, fontSize: 12, lineHeight: 1.6,
         }}>
           {fedimintJoined
-            ? "No open listings in this community yet. Tap Create below to publish one."
+            ? "No open listings yet. Tap Create below to publish one."
             : "Pick a community above to see open listings."}
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {browseList.map((s, i) => (
-            <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
-              <TradeCard state={s} pubkey={pubkey} onSelect={() => onOpenEscrow(s.id)} />
+        <>
+          {/* Matching listings — normal styling */}
+          {matchingListings.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+              {matchingListings.map((s, i) => (
+                <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
+                  <TradeCard
+                    state={s}
+                    pubkey={pubkey}
+                    onSelect={() => onOpenEscrow(s.id)}
+                  />
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+
+          {/* "N LISTINGS ON OTHER FEDERATIONS" divider + amber-tinted
+              non-matching cards. Tap → listing-tap dispatch handles
+              the silent switch (or destroy-confirm modal). */}
+          {nonMatchingListings.length > 0 && (
+            <>
+              <div style={{
+                display: "flex", alignItems: "center", gap: 10,
+                margin: "16px 0 12px",
+              }}>
+                <div style={{ flex: 1, height: 1, background: T.border }} />
+                <div style={{
+                  fontSize: 9, color: T.muted, fontFamily: T.mono,
+                  letterSpacing: 1.2, textTransform: "uppercase",
+                  whiteSpace: "nowrap" as const,
+                }}>
+                  {nonMatchingListings.length} listing{nonMatchingListings.length !== 1 ? "s" : ""} on other federations
+                </div>
+                <div style={{ flex: 1, height: 1, background: T.border }} />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {nonMatchingListings.map((s, i) => (
+                  <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
+                    <TradeCard
+                      state={s}
+                      pubkey={pubkey}
+                      onSelect={() => onOpenEscrow(s.id)}
+                      variant="non-matching"
+                    />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </>
       )}
 
       <div style={{

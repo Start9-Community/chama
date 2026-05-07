@@ -3,20 +3,28 @@ import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 
 import { useEscrow } from "../hooks/useEscrow.js";
-import { type EscrowState, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
-import { getFederationInvite, getActiveInvite } from "../fedimint/index.js";
+import { type EscrowState, EscrowStatus, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
+import { getActiveInvite } from "../fedimint/index.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
 
 import { T } from "./theme.js";
 import {
-  decideCommunityTapEffect,
   decideAutoInitTarget,
+  decideListingTapEffect,
+  decideArbiterWarning,
+  canOfferSubscription,
   shouldShowBrowserSupportBanner,
+  shouldShowRecoveryBanner,
+  hasActiveBuyerSellerCommitment,
+  findActiveTrade,
+  identifyStrandedEcashSource,
 } from "./decisions.js";
 import { Toast } from "./components/Toast.js";
 import { BottomNav, BOTTOM_NAV_HEIGHT, type Tab } from "./components/BottomNav.js";
 import { BrowserSupportBanner } from "./components/BrowserSupportBanner.js";
+import { ActiveTradePill } from "./components/ActiveTradePill.js";
+import { RecoveryBanner } from "./screens/RecoveryBanner.js";
 import { useBrowserBanner } from "./hooks/useBrowserBanner.js";
 import { useFederationCommands } from "./hooks/useFederationCommands.js";
 
@@ -119,13 +127,68 @@ export default function App() {
     label: string;
     balanceMsats: number;
     activeInvite: string;
+    /** v0.2.0 item 1: when set, navigate to this escrow's detail
+     *  after the switch confirms. Used by listing-tap dispatch when
+     *  balance > 0 forces destroy-confirm before the silent switch
+     *  to the listing's fed can happen. */
+    navigateToEscrowAfter?: string;
   } | null>(null);
   const [autoInitDone, setAutoInitDone] = useState(false);
+  // v0.2.0 item 1: brief inline overlay during silent re-init triggered
+  // by listing-tap. Sub-second on a healthy fed; modal-free.
+  const [switchingToCommunity, setSwitchingToCommunity] = useState<{ displayName: string } | null>(null);
+
+  // v0.2.0 item 8: when the user picks "Withdraw via Lightning" from the
+  // destroy-confirm modal, we stash the pending switch here. The
+  // withdraw-watcher useEffect (below the actions setup) auto-dispatches
+  // the switch once balance reaches zero. Per Q4: if the user closes the
+  // FundWalletModal before draining, drop this state — explicit
+  // abandonment.
+  const [pendingSwitchAfterWithdraw, setPendingSwitchAfterWithdraw] = useState<{
+    invite: string;
+    label: string;
+    navigateToEscrowAfter?: string;
+  } | null>(null);
   // Browser-support banner state lives in a dedicated hook so the
   // per-pubkey scoping (Bug E from v0.1.85 smoke testing) stays
   // testable in isolation and App.tsx stays an orchestrator.
   const { dismissed: browserBannerDismissed, dismiss: dismissBrowserBanner } =
     useBrowserBanner(pubkey);
+
+  // v0.2.0 item 8: post-withdraw auto-switch. When the user chose
+  // "Withdraw via Lightning" from the destroy-confirm modal, we wait
+  // for balance to drain to zero, then dispatch the originally-
+  // attempted federation switch. If they close the FundWalletModal
+  // without draining, the state is dropped (handled in onClose
+  // below — see showFundModal wiring).
+  useEffect(() => {
+    if (!pendingSwitchAfterWithdraw) return;
+    if ((fedimint.balanceMsats ?? 0) > 0) return;
+    // Balance reached zero — dispatch the switch.
+    const target = pendingSwitchAfterWithdraw;
+    setPendingSwitchAfterWithdraw(null);
+    setShowFundModal(false);
+    (async () => {
+      try {
+        setToast({ message: `Switching to ${target.label}…`, type: "info" });
+        if (fedimint.federationId) {
+          await actions.switchFederation(target.invite);
+        } else {
+          await actions.initFedimint(target.invite);
+        }
+        setToast({ message: `Joined ${target.label}!`, type: "success" });
+        if (target.navigateToEscrowAfter) {
+          setSelectedId(target.navigateToEscrowAfter);
+          setView("detail");
+        }
+      } catch (e: any) {
+        setToast({
+          message: e?.message || `Couldn't switch to ${target.label}. Try again.`,
+          type: "error",
+        });
+      }
+    })();
+  }, [pendingSwitchAfterWithdraw, fedimint.balanceMsats, fedimint.federationId, actions]);
 
   // Auto-login: on native platforms, check for saved nsec in secure storage
   useEffect(() => {
@@ -174,15 +237,25 @@ export default function App() {
     if (target.kind === "skip") return;
     setAutoInitDone(true);
 
-    // Both use-active and use-home dispatch through initFedimint(invite).
-    // The v0.1.74 reconciliation guard inside initFedimint handles the
-    // case where the desired invite differs from the OPFS-bound one
-    // AND a non-zero balance is detected — it throws
+    // v0.2.0 item 6: when target.kind === "use-default" we also persist
+    // the assigned community to localStorage so subsequent reloads land
+    // in the use-home branch — first-time-default fires exactly once
+    // per npub, not on every refresh.
+    if (target.kind === "use-default") {
+      actions.setCommunity(target.defaultCommunity);
+    }
+
+    // All branches dispatch through initFedimint(invite). The v0.1.74
+    // reconciliation guard inside initFedimint handles the case where
+    // the desired invite differs from the OPFS-bound one AND a
+    // non-zero balance is detected — it throws
     // RECONCILE_REFUSED_NONZERO_BALANCE and we surface the modal.
     const failureLabel =
       target.kind === "use-home"
         ? (getCommunityBySlug(target.slug)?.displayName ?? target.slug)
-        : "your previous community";
+        : target.kind === "use-default"
+          ? (getCommunityBySlug(target.defaultCommunity)?.displayName ?? target.defaultCommunity)
+          : "your previous community";
     actions.initFedimint(target.invite).catch((e: any) => {
       if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
         setPendingDestroyConfirm({
@@ -202,8 +275,6 @@ export default function App() {
 
   const now = Math.floor(Date.now() / 1000);
   const HIDE_AFTER = 7 * 86400;
-  const myFederationInvite = fedimint.joined ? getFederationInvite() : null;
-
   const visibleTrades = [...escrows.values()]
     .filter(s => {
       if (["CREATED", "LOCKED", "APPROVED"].includes(s.status)) return true;
@@ -219,31 +290,117 @@ export default function App() {
 
   const myTrades = visibleTrades.filter(isParticipant);
 
+  // v0.2.0 item 3: one-trade-at-a-time. Hard-block applies to buyer/
+  // seller commitments; arbiter status triggers warnings (item 10),
+  // not blocks. activeTrade drives the pill's tap target.
+  const activeTrade = pubkey
+    ? findActiveTrade({ escrows: escrows.values(), userPubkey: pubkey })
+    : null;
+  const hasActiveCommitment = pubkey
+    ? hasActiveBuyerSellerCommitment({ escrows: escrows.values(), userPubkey: pubkey })
+    : false;
+
+  // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND no
+  // active trade — orphan ecash from a previous trade that didn't
+  // finish cleanly. The banner intercepts Browse + Create routes;
+  // Me/Settings stay accessible (per the brief, users may need to
+  // update LN address / fetch counterparty kind:0 / check history
+  // as part of resolving the recovery itself).
+  const showRecoveryBanner = shouldShowRecoveryBanner({
+    balanceMsats: fedimint.balanceMsats ?? 0,
+    hasCurrentEscrow: hasActiveCommitment,
+  });
+  const strandedSource = pubkey && showRecoveryBanner
+    ? identifyStrandedEcashSource({ escrows: escrows.values(), userPubkey: pubkey })
+    : null;
+
+  // v0.2.0 item 10: arbiter attention warning. Computed once at App
+  // level and threaded into the Create wizard. Fires alongside the
+  // buyer/seller hard-block; in practice the hard-block takes priority
+  // (a buyer/seller on a non-terminal trade can't reach Create at all).
+  const arbiterWarning = pubkey
+    ? decideArbiterWarning({ escrows: escrows.values(), userPubkey: pubkey })
+    : { kind: "none" as const };
+
+  // v0.2.0 item 7: graduated trust gate for subscription mode. v0.2.0
+  // ships with the aggregator returning null (no rating events being
+  // published yet) → gate is closed for everyone. v0.2.1 wires the
+  // aggregator and the gate naturally opens for qualifying sellers.
+  const userCanSubscribe = canOfferSubscription({ ratings: null });
+
   const matchesBrowseCategory = (s: EscrowState) => {
     if (browseCategory === "all") return true;
     if (browseCategory === "subscription") return s.subscription !== null;
     return s.category === browseCategory;
   };
-  const matchesBrowseCommunity = (s: EscrowState) =>
-    s.community === browseCommunity;
 
-  const browseList = visibleTrades.filter(s =>
-    !isParticipant(s) &&
-    s.status === "CREATED" &&
-    (myFederationInvite ? s.mintUrl === myFederationInvite : false) &&
-    matchesBrowseCategory(s) &&
-    matchesBrowseCommunity(s)
+  // v0.2.0 item 4: browse two-section layout. matchingListings render
+  // first as normal cards; nonMatchingListings render below an
+  // "N LISTINGS ON OTHER FEDERATIONS" divider with amber tint per
+  // chama_browse_amber_tint_sorted spec. The community-pill filter
+  // is gone (along with the "All" pill in v0.1.87) — pills are
+  // identity-only now; Browse shows everything fed-routed.
+  //
+  // Match predicate: listing's mintUrl === user's active fed invite.
+  // Pre-PR-A listings without mintUrl fall through to non-matching
+  // (the listing-tap dispatch handles them via community-derived
+  // fallback — see decideListingTapEffect).
+  const myActiveInvite = fedimint.joined ? getActiveInvite() : null;
+  const visibleListings = visibleTrades.filter(s =>
+    !isParticipant(s)
+    && s.status === EscrowStatus.CREATED
+    && matchesBrowseCategory(s)
   );
+  const matchingListings = visibleListings.filter(s =>
+    !!myActiveInvite && s.mintUrl === myActiveInvite
+  );
+  const nonMatchingListings = visibleListings.filter(s =>
+    !myActiveInvite || s.mintUrl !== myActiveInvite
+  );
+  // browseCommunity drives pill highlighting; it no longer filters
+  // (the pill is identity-only post-v0.1.87). matchesBrowseCommunity
+  // helper retired with the filter.
+  void browseCommunity;
   const selected = selectedId ? escrows.get(selectedId) : null;
 
   // v0.1.66.32: refetch on tap when local state may be stale.
+  // v0.2.0 item 1: federation-follows-listing dispatch. When the user
+  // taps a listing, we silently re-init to the listing's fed BEFORE
+  // the detail screen renders. The detail screen always opens on the
+  // right fed, so every action (Fund, payment-handle preview, lock
+  // timing, etc.) is coherent regardless of where the user came from.
+  // State A vs State B narration is computed inside TradeDetail via
+  // decideTradeDetailFraming — always-true post-switch is fine because
+  // the framing compares listing.fed against home.fed, not against
+  // active.fed.
   const openEscrow = (id: string) => {
-    setSelectedId(id);
-    setView("detail");
     const local = escrows.get(id);
-    const shouldRefetch =
-      !local || !TRULY_TERMINAL_STATES.has(local.status);
-    if (shouldRefetch) {
+
+    // No local copy yet — the listing may have come from a relay
+    // refetch race. Fall through to the legacy refetch path; the
+    // post-fetch render will see the local copy and the user can
+    // re-tap if a switch is needed. Edge case; rare in practice.
+    if (!local) {
+      setSelectedId(id);
+      setView("detail");
+      actions.loadEscrow(id).catch((e: any) => {
+        console.debug(
+          "[chama] background refetch on openEscrow failed:",
+          e?.message || e,
+        );
+      });
+      return;
+    }
+
+    const effect = decideListingTapEffect({
+      listing: { mintUrl: local.mintUrl, community: local.community },
+      currentInvite: getActiveInvite(),
+      balanceMsats: fedimint.balanceMsats ?? 0,
+    });
+
+    // Always background-refetch so the detail screen sees fresh state
+    // by the time it renders. Mirrors the pre-v0.2.0 behavior.
+    if (!TRULY_TERMINAL_STATES.has(local.status)) {
       actions.loadEscrow(id).catch((e: any) => {
         console.debug(
           "[chama] background refetch on openEscrow failed:",
@@ -251,6 +408,61 @@ export default function App() {
         );
       });
     }
+
+    if (effect.kind === "matching") {
+      setSelectedId(id);
+      setView("detail");
+      return;
+    }
+
+    if (effect.kind === "switch-silent") {
+      setSwitchingToCommunity({ displayName: effect.displayName });
+      (async () => {
+        try {
+          if (fedimint.federationId) {
+            await actions.switchFederation(effect.targetInvite);
+          } else {
+            await actions.initFedimint(effect.targetInvite);
+          }
+          setSelectedId(id);
+          setView("detail");
+        } catch (e: any) {
+          if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE"
+            || e?.code === "SWITCH_REFUSED_NONZERO_BALANCE") {
+            // Race: balance was zero at decision time, became non-zero
+            // before the switch landed. Surface the modal with the
+            // navigate-after target so confirm-then-navigate still works.
+            setPendingDestroyConfirm({
+              invite: effect.targetInvite,
+              label: effect.displayName,
+              balanceMsats: e.balanceMsats || 0,
+              activeInvite: e.previousActiveInvite || getActiveInvite() || "",
+              navigateToEscrowAfter: id,
+            });
+          } else {
+            setToast({
+              message: e?.message || `Couldn't switch to ${effect.displayName}. Try again.`,
+              type: "error",
+            });
+          }
+        } finally {
+          setSwitchingToCommunity(null);
+        }
+      })();
+      return;
+    }
+
+    // destroy-confirm — funds at risk on user's current fed, surface
+    // the modal. After confirm, the switch happens AND we navigate to
+    // the listing detail (per v0.2.0 spec the listing-tap user intent
+    // carries through the modal).
+    setPendingDestroyConfirm({
+      invite: effect.targetInvite,
+      label: effect.displayName,
+      balanceMsats: effect.balanceMsats,
+      activeInvite: effect.currentInvite,
+      navigateToEscrowAfter: id,
+    });
   };
 
   const handleCreate = async (params: any) => {
@@ -445,7 +657,14 @@ export default function App() {
       {/* Fund Chama modal */}
       {showFundModal && (
         <FundWalletModal
-          onClose={() => setShowFundModal(false)}
+          onClose={() => {
+            setShowFundModal(false);
+            // v0.2.0 item 8 + Q4: closing the modal before balance
+            // drains = explicit abandonment. Drop the pending switch
+            // so we don't unexpectedly switch later if they happen to
+            // drain via another path.
+            setPendingSwitchAfterWithdraw(null);
+          }}
           onCreateInvoice={(amountSats, desc) =>
             actions.createFundingInvoice(amountSats * 1000, desc)
           }
@@ -460,6 +679,21 @@ export default function App() {
         <DestroyEcashConfirmModal
           targetLabel={pendingDestroyConfirm.label}
           balanceMsats={pendingDestroyConfirm.balanceMsats}
+          onWithdraw={() => {
+            // v0.2.0 item 8: stash the pending switch so the shell can
+            // dispatch it once balance reaches zero, then open
+            // FundWalletModal-Send-LN. The withdraw-watcher useEffect
+            // below ties the two together. Per Q4: cancel of the
+            // withdraw modal = explicit abandonment, drop the pending
+            // switch entirely.
+            setPendingSwitchAfterWithdraw({
+              invite: pendingDestroyConfirm.invite,
+              label: pendingDestroyConfirm.label,
+              navigateToEscrowAfter: pendingDestroyConfirm.navigateToEscrowAfter,
+            });
+            setPendingDestroyConfirm(null);
+            setShowFundModal(true);
+          }}
           onCancel={() => {
             actions.setCustomInvite(pendingDestroyConfirm.activeInvite);
             setPendingDestroyConfirm(null);
@@ -474,11 +708,46 @@ export default function App() {
               setToast({ message: "Switching Chama…", type: "info" });
               await actions.initFedimint(target.invite, { force: true });
               setToast({ message: `Joined ${target.label}!`, type: "success" });
+              // v0.2.0 item 1: when the destroy-confirm was triggered by
+              // a listing-tap, carry the user's intent through and open
+              // the listing detail after the switch confirms.
+              if (target.navigateToEscrowAfter) {
+                setSelectedId(target.navigateToEscrowAfter);
+                setView("detail");
+              }
             } catch (e: any) {
               setToast({ message: e?.message || "Switch failed", type: "error" });
             }
           }}
         />
+      )}
+
+      {/* v0.2.0 item 1: switching overlay during silent re-init when
+          user taps a non-matching listing. Sub-second on a healthy
+          fed; the overlay just covers the WASM tearDown + init gap
+          so the listing detail's Fund button doesn't fire against
+          the wrong client. */}
+      {switchingToCommunity && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9990,
+          background: "rgba(10,10,15,0.85)",
+          display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center",
+          gap: 14,
+        }}>
+          <div style={{
+            width: 36, height: 36, borderRadius: "50%",
+            border: `2px solid ${T.accent}`,
+            borderTopColor: "transparent",
+            animation: "spin 0.8s linear infinite",
+          }} />
+          <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans }}>
+            Switching to <strong>{switchingToCommunity.displayName}</strong>…
+          </div>
+          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5 }}>
+            no Lightning round-trip · sub-second
+          </div>
+        </div>
       )}
 
       {/* Content — routed by view */}
@@ -487,6 +756,7 @@ export default function App() {
           <TradeDetail
             state={selected}
             pubkey={pubkey!}
+            homeCommunity={getUserCommunitySlugRaw()}
             onBack={() => { setView("browse"); setSelectedId(null); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
@@ -524,6 +794,16 @@ export default function App() {
                 setToast({ message: "Join a Chama first — tap a community pill.", type: "error" });
                 return;
               }
+              // v0.2.0 item 3: hard-block Fund when the user has another
+              // active commitment. The active-trade pill at the top of
+              // the detail screen offers the navigation back to it.
+              if (hasActiveCommitment && activeTrade && activeTrade.id !== selectedId!) {
+                setToast({
+                  message: "Finish your active trade first — Chama is one trade at a time.",
+                  type: "error",
+                });
+                return;
+              }
               try {
                 setToast({ message: "Spending ecash & splitting shares...", type: "info" });
                 await actions.lockAndPublish(selectedId!, { savedHandleId });
@@ -537,16 +817,51 @@ export default function App() {
         </div>
       ) : view === "create" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          <CreateForm
-            onCreate={handleCreate}
-            onClose={() => setView("browse")}
-          />
+          {/* Active-trade pill on Create — visible alongside the
+              gate card so the user understands *why* Create is
+              blocked (per Q2). Browse keeps the pill for research-
+              while-waiting; Create swaps the form for the gate. */}
+          {activeTrade && (
+            <ActiveTradePill
+              trade={activeTrade}
+              onTap={() => openEscrow(activeTrade.id)}
+            />
+          )}
+          {showRecoveryBanner ? (
+            <RecoveryBanner
+              balanceMsats={fedimint.balanceMsats ?? 0}
+              source={strandedSource}
+              fetchKind0Enabled={false}
+              onWithdraw={() => setShowFundModal(true)}
+            />
+          ) : hasActiveCommitment && activeTrade ? (
+            <CreateBlockedCard
+              trade={activeTrade}
+              onGoToTrade={() => openEscrow(activeTrade.id)}
+            />
+          ) : (
+            <CreateForm
+              onCreate={handleCreate}
+              onClose={() => setView("browse")}
+              arbiterWarning={arbiterWarning}
+              onGoToArbiterTrade={(escrowId) => openEscrow(escrowId)}
+              canOfferSubscription={userCanSubscribe}
+              userPubkey={pubkey ?? null}
+            />
+          )}
         </div>
       ) : view === "me" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
+          {activeTrade && (
+            <ActiveTradePill
+              trade={activeTrade}
+              onTap={() => openEscrow(activeTrade.id)}
+            />
+          )}
           <MeScreen
             pubkey={pubkey!}
             myTrades={myTrades}
+            ratings={null /* v0.2.0: no rating events yet; v0.2.1 wires the aggregator */}
             onOpenTrade={openEscrow}
             onOpenSavedHandles={() => setView("saved-handles")}
             onOpenAdvanced={() => setView("advanced")}
@@ -555,6 +870,12 @@ export default function App() {
         </div>
       ) : view === "saved-handles" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
+          {activeTrade && (
+            <ActiveTradePill
+              trade={activeTrade}
+              onTap={() => openEscrow(activeTrade.id)}
+            />
+          )}
           <SavedHandlesPanel
             communitySlug={actions.getCommunity()}
             onClose={() => setView("me")}
@@ -562,6 +883,12 @@ export default function App() {
         </div>
       ) : view === "advanced" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
+          {activeTrade && (
+            <ActiveTradePill
+              trade={activeTrade}
+              onTap={() => openEscrow(activeTrade.id)}
+            />
+          )}
           <SettingsAdvanced
             fedimint={fedimint}
             onBack={() => setView("me")}
@@ -594,33 +921,51 @@ export default function App() {
           />
         </div>
       ) : (
-        <BrowseView
-          browseCategory={browseCategory}
-          setBrowseCategory={setBrowseCategory}
-          browseCommunity={browseCommunity}
-          onSelectCommunity={handleSelectCommunity}
-          browseList={browseList}
-          fedimintJoined={fedimint.joined}
-          isFirstTime={getUserCommunitySlugRaw() === null}
-          onPasteCustomInvite={handlePasteCustomInvite}
-          pubkey={pubkey!}
-          onOpenEscrow={openEscrow}
-          onLoadById={async (id) => {
-            try {
-              setToast({ message: "Loading from relays...", type: "info" });
-              const state = await actions.loadEscrow(id);
-              if (state) {
-                setToast({ message: "Trade loaded!", type: "success" });
-                setSelectedId(id);
-                setView("detail");
-              } else {
-                setToast({ message: "Trade not found on relays", type: "error" });
-              }
-            } catch (e: any) {
-              setToast({ message: e.message || "Failed to load", type: "error" });
-            }
-          }}
-        />
+        <>
+          {activeTrade && (
+            <ActiveTradePill
+              trade={activeTrade}
+              onTap={() => openEscrow(activeTrade.id)}
+            />
+          )}
+          {showRecoveryBanner ? (
+            <RecoveryBanner
+              balanceMsats={fedimint.balanceMsats ?? 0}
+              source={strandedSource}
+              fetchKind0Enabled={false}
+              onWithdraw={() => setShowFundModal(true)}
+            />
+          ) : (
+            <BrowseView
+              browseCategory={browseCategory}
+              setBrowseCategory={setBrowseCategory}
+              browseCommunity={browseCommunity}
+              onSelectCommunity={handleSelectCommunity}
+              matchingListings={matchingListings}
+              nonMatchingListings={nonMatchingListings}
+              fedimintJoined={fedimint.joined}
+              isFirstTime={getUserCommunitySlugRaw() === null}
+              onPasteCustomInvite={handlePasteCustomInvite}
+              pubkey={pubkey!}
+              onOpenEscrow={openEscrow}
+              onLoadById={async (id) => {
+                try {
+                  setToast({ message: "Loading from relays...", type: "info" });
+                  const state = await actions.loadEscrow(id);
+                  if (state) {
+                    setToast({ message: "Trade loaded!", type: "success" });
+                    setSelectedId(id);
+                    setView("detail");
+                  } else {
+                    setToast({ message: "Trade not found on relays", type: "error" });
+                  }
+                } catch (e: any) {
+                  setToast({ message: e.message || "Failed to load", type: "error" });
+                }
+              }}
+            />
+          )}
+        </>
       )}
 
       <BottomNav active={activeTab} onSelect={switchTab} />
@@ -636,6 +981,7 @@ const globalCss = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800;900&display=swap');
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
   *{box-sizing:border-box;margin:0;padding:0}
   input::placeholder{color:${T.muted}88}
   input:focus,select:focus{border-color:${T.accent}66!important}
@@ -643,6 +989,63 @@ const globalCss = `
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:${T.border};border-radius:4px}
 `;
+
+// v0.2.0 item 3: Create-block gate. When the user is buyer/seller in a
+// non-terminal escrow, Create renders this gate-card instead of the
+// form. The active-trade pill above (separately rendered) provides
+// the navigation; this card explains the why and offers a redundant
+// CTA for users who don't see the pill or want explicit confirmation.
+function CreateBlockedCard({
+  trade,
+  onGoToTrade,
+}: {
+  trade: EscrowState;
+  onGoToTrade: () => void;
+}) {
+  return (
+    <div style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
+      <div style={{
+        background: T.purpleDim, border: `1px solid ${T.purple}66`,
+        borderRadius: T.r, padding: 24,
+        textAlign: "center" as const,
+      }}>
+        <div style={{ fontSize: 36, marginBottom: 12 }}>⏳</div>
+        <div style={{
+          fontSize: 16, fontWeight: 700, color: T.text, fontFamily: T.sans,
+          marginBottom: 12,
+        }}>
+          Finish your active trade first
+        </div>
+        <div style={{
+          fontSize: 13, color: T.text, fontFamily: T.sans,
+          lineHeight: 1.55, marginBottom: 16,
+        }}>
+          Chama is one trade at a time, on purpose. Patience is the
+          feature — a good trade is one where both users felt safe and
+          left a positive rating, not one that completed at high
+          frequency.
+        </div>
+        <button
+          onClick={onGoToTrade}
+          style={{
+            padding: "12px 20px", borderRadius: T.rs,
+            background: T.purple, border: "none",
+            color: T.bg, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+            cursor: "pointer", letterSpacing: 0.3,
+          }}
+        >
+          Go to active trade ›
+        </button>
+        <div style={{
+          fontSize: 10, color: T.muted, fontFamily: T.mono,
+          marginTop: 12, lineHeight: 1.5,
+        }}>
+          {trade.description}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function LoginSuccessSplash() {
   return (

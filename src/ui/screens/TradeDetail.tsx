@@ -17,6 +17,7 @@ import {
   T, STATUS, ROLE_COLOR, CAT_LABEL,
   fmtSats, refundRecipientFor, inputStyle,
 } from "../theme.js";
+import { decideTradeDetailFraming } from "../decisions.js";
 import { Badge } from "../components/Badge.js";
 import { Dot } from "../components/Dot.js";
 import { CountdownTimer } from "../components/CountdownTimer.js";
@@ -24,9 +25,14 @@ import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 
 export function TradeDetail({
-  state, pubkey, onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings,
+  state, pubkey, homeCommunity,
+  onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings,
 }: {
   state: EscrowState; pubkey: string;
+  /** User's home community slug — drives State A vs State B subtitle
+   *  on CREATED listings (item 1, listing-detail half). For LOCKED+
+   *  trades the subtitle reflects trade status, not framing. */
+  homeCommunity: string | null;
   onBack: () => void;
   onVote: (outcome: Outcome) => void;
   onClaim: () => void;
@@ -36,6 +42,16 @@ export function TradeDetail({
   onReleasePeriod?: (periodIndex: number) => void | Promise<void>;
   onOpenSettings?: () => void;
 }) {
+  // v0.2.0 item 1: State A/B framing for CREATED listings. By the time
+  // the detail screen renders, the silent re-init has already landed
+  // the user on the listing's fed (the openEscrow dispatch in
+  // App.tsx handles that). State B's narration is past-tense:
+  // "Running on BLF · we switched you in for this trade."
+  const framing = decideTradeDetailFraming({
+    listingMintUrl: state.mintUrl,
+    listingCommunity: state.community,
+    homeCommunity,
+  });
   const [voting, setVoting] = useState(false);
   const [joining, setJoining] = useState(false);
   const [locking, setLocking] = useState(false);
@@ -125,6 +141,45 @@ export function TradeDetail({
           )}
         </div>
       </div>
+
+      {/* v0.2.0 item 1: State A vs State B narration. Only fires on
+          CREATED listings (the funding moment); LOCKED+ trades have
+          a clearer status surface elsewhere and don't need the
+          home/listing-fed framing. */}
+      {state.status === EscrowStatus.CREATED && framing.kind === "state-a" && (
+        <div style={{
+          padding: "8px 12px", marginBottom: 12,
+          fontSize: 11, color: T.muted, fontFamily: T.mono,
+          textAlign: "center" as const, lineHeight: 1.5,
+        }}>
+          {framing.sameFedSameCommunity
+            ? "Same community as your Chama"
+            : "Same federation as your Chama · cross-community trade"}
+        </div>
+      )}
+      {state.status === EscrowStatus.CREATED && framing.kind === "state-b" && (
+        <div style={{
+          padding: 14, marginBottom: 12,
+          background: T.surface, border: `1px solid ${T.amber}33`,
+          borderRadius: T.rs,
+        }}>
+          <div style={{
+            fontSize: 11, fontWeight: 700, color: T.amber, fontFamily: T.mono,
+            letterSpacing: 1, marginBottom: 8,
+          }}>
+            CROSS-FEDERATION
+          </div>
+          <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 6 }}>
+            Running on {framing.listingFlagEmoji} <strong>{framing.listingCommunityName}</strong> ·
+            we switched you in for this trade.
+          </div>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
+            Your home is on {framing.homeFlagEmoji} {framing.homeCommunityName}. No funds
+            moved on Lightning — fresh Chama on the listing's federation.
+            Switching back is just another tap.
+          </div>
+        </div>
+      )}
 
       {/* Subscription timeline */}
       {state.subscription && (
@@ -450,34 +505,75 @@ export function TradeDetail({
         </div>
       )}
 
-      {/* Vote buttons — vertical-aware copy from the label dictionary */}
-      {voteCheck.canVote && myRole && (
-        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-          {!state.subscription && (
-            <button disabled={voting} onClick={() => handleVote(Outcome.RELEASE)} style={{
+      {/* Vote buttons — vertical-aware copy from the label dictionary.
+          v0.2.0 item 9: when the user is the arbiter, the vote
+          buttons mirror role colors per Pillar 5.2 — purple for
+          "side with buyer," orange for "side with seller." Buyer
+          and seller voting on their own experience keep the
+          green/amber semantics (happy path / refund).
+
+          Color derivation: RELEASE flows sats to the role that
+          didn't lock. For marketplace, buyer locks → RELEASE goes
+          to seller. For other verticals, seller locks → RELEASE
+          goes to buyer. The arbiter's button color reflects who
+          actually receives the sats on each vote, removing the
+          ambiguity that otherwise sits in the highest-stakes UI
+          interaction in the product. */}
+      {voteCheck.canVote && myRole && (() => {
+        const isArbiter = myRole === Role.ARBITER;
+        const isMarketplace = state.category === "marketplace";
+        // Who wins on RELEASE / REFUND
+        const releaseWinner = isMarketplace ? "seller" : "buyer";
+        const refundWinner = isMarketplace ? "buyer" : "seller";
+
+        const arbiterReleaseColor = ROLE_COLOR[releaseWinner];
+        const arbiterRefundColor = ROLE_COLOR[refundWinner];
+
+        const releaseBg = isArbiter ? `${arbiterReleaseColor}22` : T.greenDim;
+        const releaseBorder = isArbiter ? `${arbiterReleaseColor}66` : `${T.green}44`;
+        const releaseText = isArbiter ? arbiterReleaseColor : T.green;
+
+        const refundBg = isArbiter
+          ? `${arbiterRefundColor}22`
+          : state.subscription ? T.redDim : T.amberDim;
+        const refundBorder = isArbiter
+          ? `${arbiterRefundColor}66`
+          : `${state.subscription ? T.red : T.amber}44`;
+        const refundText = isArbiter
+          ? arbiterRefundColor
+          : state.subscription ? T.red : T.amber;
+
+        return (
+          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+            {!state.subscription && (
+              <button disabled={voting} onClick={() => handleVote(Outcome.RELEASE)} style={{
+                flex: 1, padding: "16px", borderRadius: T.rs,
+                background: voting ? T.surface : releaseBg,
+                border: `1px solid ${releaseBorder}`,
+                color: releaseText,
+                fontFamily: T.mono, fontSize: 14, fontWeight: 700,
+                cursor: voting ? "default" : "pointer", transition: "all 0.2s",
+              }}>
+                {isArbiter ? "Side with " + releaseWinner : "✓ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.RELEASE)}
+              </button>
+            )}
+            <button disabled={voting} onClick={() => handleVote(Outcome.REFUND)} style={{
               flex: 1, padding: "16px", borderRadius: T.rs,
-              background: voting ? T.surface : T.greenDim,
-              border: `1px solid ${T.green}44`, color: T.green,
+              background: voting ? T.surface : refundBg,
+              border: `1px solid ${refundBorder}`,
+              color: refundText,
               fontFamily: T.mono, fontSize: 14, fontWeight: 700,
               cursor: voting ? "default" : "pointer", transition: "all 0.2s",
             }}>
-              ✓ {getVoteLabel(state.category, state.fulfillment, myRole, Outcome.RELEASE)}
+              {state.subscription
+                ? "🛑 Cancel & Refund Remaining"
+                : isArbiter
+                  ? "Side with " + refundWinner
+                  : "↩ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.REFUND)}
             </button>
-          )}
-          <button disabled={voting} onClick={() => handleVote(Outcome.REFUND)} style={{
-            flex: 1, padding: "16px", borderRadius: T.rs,
-            background: voting ? T.surface : state.subscription ? T.redDim : T.amberDim,
-            border: `1px solid ${state.subscription ? T.red : T.amber}44`,
-            color: state.subscription ? T.red : T.amber,
-            fontFamily: T.mono, fontSize: 14, fontWeight: 700,
-            cursor: voting ? "default" : "pointer", transition: "all 0.2s",
-          }}>
-            {state.subscription
-              ? "🛑 Cancel & Refund Remaining"
-              : "↩ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.REFUND)}
-          </button>
-        </div>
-      )}
+          </div>
+        );
+      })()}
 
       {/* Claim button */}
       {state.status === EscrowStatus.APPROVED && iAmWinner && !state.subscription && (

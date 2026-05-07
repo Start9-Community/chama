@@ -185,6 +185,8 @@ All four verticals share the spine; only labels and per-listing fields differ.
 - **Lending:** two stacked Option B cycles (loan + repayment), each a complete Market-style trade. Lender locks principal; borrower accepts; later borrower locks repayment; lender claims. Same npub appears in both cycles with reversed roles, no double-voting risk.
 - **Recurring payments:** not a vertical. A graduated Marketplace feature. Sellers earn the right to offer recurring payments after accumulating enough positive ratings — same reputation primitive that powers arbiter graduation. Sats.coffee is the design partner.
 
+  **v1 graduation threshold (placeholder):** 5+ positive ratings, 0 negative. Documented here as a v1 default; the real threshold will emerge from observed seller behavior post-launch. The decision lives in `canOfferSubscription` (`src/ui/decisions.ts`) and is invisible to ungraduated sellers — they don't see the toggle, they see it exist when other users use it. The threshold is intentionally strict (any negative disqualifies) because v1 has no rating-confidence math yet; better to defer access than to grant it on a coin flip.
+
 ---
 
 ## 4. User-facing language conventions
@@ -222,6 +224,8 @@ The C-shaped Trinity Ring (with aperture at 3 o'clock) is the wordmark glyph and
 - **Signal Teal (#5AC8FA → #2997FF gradient)** = Arbiter / tie-breaker
 
 These three colors carry semantic load throughout the product. A purple button means a buyer-side action. An orange chip means a seller-side actor. A teal indicator means arbiter presence. Designers do not use these three colors for any decorative purpose — they are reserved for role identification.
+
+**Role colors are doubly sacred at decision moments.** When an arbiter votes between buyer and seller, the vote buttons must directly mirror the role colors — purple for "side with buyer," orange for "side with seller." Buttons are physical; colors are mnemonic. Combining them removes ambiguity from the highest-stakes UI interaction in the product (the arbiter is voting on someone else's funds). Buyers and sellers voting on their own experience keep the green/amber semantics — green for happy path, amber for refund — because they're voting on the outcome, not on a counterparty.
 
 ### 5.3 Surface language
 

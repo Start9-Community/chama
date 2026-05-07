@@ -1,24 +1,42 @@
 import { type EscrowState, Role } from "../../escrow-engine/types.js";
+import { getCommunityBySlug } from "../../communities/registry.js";
 import { T, CAT_ICON, CAT_LABEL, fmtSats, refundRecipientFor } from "../theme.js";
 import { Badge } from "./Badge.js";
 import { Dot } from "./Dot.js";
 
-export function TradeCard({ state, pubkey, onSelect }: {
-  state: EscrowState; pubkey: string; onSelect: () => void;
+// v0.2.0 item 4: variant="non-matching" applies an amber tint per
+// chama_browse_amber_tint_sorted. Quiet, not alarmist — it's a
+// teaching affordance, not a warning. Tapping a non-matching listing
+// triggers the listing-tap dispatch in App.tsx (silent switch when
+// balance==0; destroy-confirm modal when balance>0). The community
+// flag/name appears inline so users can see at a glance which fed
+// they'd be switching to.
+export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
+  state: EscrowState;
+  pubkey: string;
+  onSelect: () => void;
+  variant?: "matching" | "non-matching";
 }) {
   const myRole = state.participants.buyer === pubkey ? "buyer"
     : state.participants.seller === pubkey ? "seller"
     : state.participants.arbiter === pubkey ? "arbiter" : null;
 
+  const isAmber = variant === "non-matching";
+  const cardBg = isAmber ? T.amberDim : T.card;
+  const cardBorder = isAmber ? T.amber + "44" : T.border;
+  const listingCommunity = state.community
+    ? getCommunityBySlug(state.community)
+    : null;
+
   return (
     <div onClick={onSelect} style={{
-      background: T.card, border: `1px solid ${T.border}`,
+      background: cardBg, border: `1px solid ${cardBorder}`,
       borderRadius: T.r, padding: 16, cursor: "pointer",
       transition: "border-color 0.2s",
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div style={{ flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
             <span style={{ fontSize: 14, opacity: 0.6 }}>{CAT_ICON[state.category] || "📦"}</span>
             {state.status === "EXPIRED" && (
               <span style={{
@@ -36,6 +54,22 @@ export function TradeCard({ state, pubkey, onSelect }: {
                 fontFamily: T.mono, fontWeight: 600,
               }}>
                 🔄 {state.subscription.releasedCount}/{state.subscription.totalPeriods}
+              </span>
+            )}
+            {/* Non-matching cards show the listing's community inline so
+                users can see at a glance which fed they'd be switching
+                to. Matching cards skip this — it's redundant with the
+                Browse-header flag pill. */}
+            {isAmber && listingCommunity && (
+              <span style={{
+                fontSize: 9, padding: "2px 6px", borderRadius: 8,
+                background: T.surface, color: T.amber,
+                border: `1px solid ${T.amber}33`,
+                fontFamily: T.mono, fontWeight: 600,
+                display: "inline-flex", alignItems: "center", gap: 3,
+              }}>
+                <span style={{ fontSize: 10, lineHeight: 1 }}>{listingCommunity.flagEmoji}</span>
+                {listingCommunity.disambiguator ?? listingCommunity.displayName}
               </span>
             )}
             <span style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans, lineHeight: 1.3 }}>
