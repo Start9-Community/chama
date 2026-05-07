@@ -5,7 +5,17 @@ set -euo pipefail
 #   ./scripts/release.sh "subject line"                       # short message
 #   ./scripts/release.sh -F /tmp/chama-pr-a-commit.txt        # long message from file
 
-# ── Parse args ─────────────────────────────────────────────────────────
+# ── Detect bump type FIRST and shift it off ──────────────────────────
+BUMP_TYPE="patch"
+if [ "${1:-}" = "--minor" ]; then
+  BUMP_TYPE="minor"
+  shift
+elif [ "${1:-}" = "--major" ]; then
+  BUMP_TYPE="major"
+  shift
+fi
+
+# ── NOW parse remaining args ─────────────────────────────────────────
 COMMIT_MSG=""
 COMMIT_FILE=""
 
@@ -26,16 +36,6 @@ else
   echo "   Usage: ./scripts/release.sh \"subject line\""
   echo "          ./scripts/release.sh -F /tmp/commit.txt"
   exit 1
-fi
-
-# Add near the top, after arg parsing:
-BUMP_TYPE="patch"
-if [ "${1:-}" = "--minor" ]; then
-  BUMP_TYPE="minor"
-  shift
-elif [ "${1:-}" = "--major" ]; then
-  BUMP_TYPE="major"
-  shift
 fi
 
 # ── Sanity: package.json in sync with last tag ─────────────────────────
