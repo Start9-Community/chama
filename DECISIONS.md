@@ -352,6 +352,155 @@ contradiction.
   paths) and partly architectural (the listing-tap → exact-invoice
   flow). This is "doctrinally pure" rather than feature-additive.
 
-**Status:** Active. v0.2.0 shipping; v0.3.0 brief drafting next.
+**Status:** Active. v0.2.0 shipped; v0.3.0 brief drafting next.
+
+---
+
+## 2026-05-07 — LNURL-first claim hierarchy (Pillar 2.7 operationalized)
+
+**Context:** v0.3.0 brief discussion surfaced the question of how
+users actually provide a destination at claim time. Initial framing
+was "they paste a BOLT11." Wife's feedback (separate thread) on the
+marketplace UX flagged that paste-as-default fails for non-technical
+users. Designing pure Option B atomic lifecycle made the destination-
+input step's UX a first-class question.
+
+**Options considered:**
+- (a) **Paste-only:** user always pastes a BOLT11 invoice. Universal,
+      works for every wallet, but creates friction every claim and
+      doesn't reward returning users.
+- (b) **LN Address only:** user types a Lightning Address, system
+      resolves. Smoother for users who have one, but breaks for
+      wallets that only generate BOLT11 (some Phoenix versions, some
+      Wallet of Satoshi flows, certain Fedi configurations).
+- (c) **Three-tier hierarchy:** saved destination tap (primary), LN
+      Address with auto-save toggle (secondary), BOLT11 paste behind
+      Advanced disclosure (tertiary). The smooth path is the default;
+      the manual path is the escape hatch.
+
+**Decision:** Option (c).
+
+**Rationale:** Reordering affordances rather than removing them
+preserves the ability of every wallet to claim while making the
+common case effortless. The auto-save-on-first-claim detail is the
+key — the user pastes their address once, the system remembers,
+and from the second claim onward they tap a saved row. The toggle
+itself ("Save for next time") is the educational moment per Pillar
+2.7 — the user reads the toggle, understands implicitly that future
+trades will be faster, and the system has taught them without a
+tutorial.
+
+This also corrects an architectural mistake: handle-management
+should not live in Settings as the canonical add-flow. Settings is
+for *managing* handles (rename, remove, mark default), not for
+*adding the first one*. Adding happens organically in the moment
+the user feels the friction of typing an address. That's the right
+onboarding gradient — the user learns about the feature at the
+moment using it saves them future work.
+
+**Implications:**
+- Saved-handles surface (already exists from v0.1.79) becomes the
+  primary affordance at claim and fund time, not a settings-tucked
+  power feature.
+- "Save for next time" toggle defaults ON in the input field. Users
+  who want to use a one-off address can untoggle; default behavior
+  is the helpful behavior.
+- Same hierarchy applies symmetrically at QR-IN where appropriate
+  (sender providing destination; the asymmetry is real but the
+  affordance ordering principle holds).
+- BOLT11 paste lives behind "Advanced" disclosure or "More options"
+  expander. Available, not hidden. Doesn't clutter the main flow.
+- This affordance hierarchy becomes a Chama-wide pattern: tap-saved
+  > input-with-save-toggle > paste-advanced. Applies to any future
+  surface where users need to provide destinations or selections
+  with returning-user dynamics.
+
+**Status:** Active. Lands in v0.3.0 alongside the atomic lifecycle
+work. The two are mutually reinforcing — atomic lifecycle removes
+the wallet-balance preamble, LNURL-first claim removes the
+paste-each-time preamble, and the result is a flow where the user
+taps a listing and taps to claim and the system handles everything
+in between.
+
+---
+
+## 2026-05-07 — Menu primitive as vertical-agnostic listing schema
+
+**Context:** Wife provided marketplace feedback that single-item
+listings don't match how real merchants think — sats.coffee, a
+tailor, a motorbike repair shop, all have menus, not single items.
+Initial thought was "add multi-item to marketplace." Generalizing
+revealed the same pattern applies across all five Chama verticals.
+
+**Options considered:**
+- (a) **Marketplace-only multi-item:** add multi-item support as a
+      Marketplace-vertical feature. Solves the immediate feedback,
+      but ships the same primitive five times eventually as each
+      other vertical encounters the same need.
+- (b) **Per-vertical multi-item, custom each time:** build it for
+      each vertical when the vertical's users ask. Five different
+      schemas, five different basket UIs, five different LOCK
+      payloads. Worst-case path.
+- (c) **Vertical-agnostic menu primitive:** listings gain optional
+      `items: MenuItem[]`. Absent = single-item (today's behavior).
+      Present = buyer composes basket. Trade carries `selected_items`
+      summed into single `amount_sats`. Escrow envelope unchanged
+      across all verticals. Per-vertical applications (FX flavors,
+      product menus, utility-payment menus, loan tiers, arbitration
+      tiers) emerge naturally from the same primitive.
+
+**Decision:** Option (c).
+
+**Rationale:** The escrow envelope was always vertical-agnostic —
+LOCK, VOTE, CLAIM don't care what the trade is *for*, only that it
+has an amount and participants. Multi-item is a *listing* concept,
+not an escrow concept. Building it as a listing-schema feature with
+buyer-side basket UI keeps the protocol layer untouched and unlocks
+all five verticals simultaneously.
+
+The cross-vertical applications make this compelling beyond the
+original marketplace use case:
+- P2P Exchange: liquidity providers list multiple FX flavors per
+  rail in one listing
+- Marketplace: full merchant menus (sats.coffee, tailors, repair
+  shops, etc.)
+- Bill Pay: volunteer help desks offering multiple utility services
+  with per-service fees
+- Community Lending: lenders publishing tiered loan products
+- Raw Escrow: arbiters publishing tiered fee structures
+
+This positions Chama as a decentralized, self-custodial alternative
+to BTCPayServer-style merchant tooling, but with the substrate being
+Nostr + Fedimint instead of Lightning + custodial infrastructure.
+That's a meaningful market positioning beyond what single-item
+P2P trade unlocks.
+
+**Implications:**
+- v0.4.0 ships the menu primitive after v0.3.0 atomic lifecycle.
+  Sequence matters: v0.3.0 makes funding clean (one BOLT11 per
+  trade); v0.4.0 makes the unit-of-funding richer (one trade can
+  contain multiple items). They reinforce, don't fight.
+- Buyer-side basket UI is new code in Browse → Listing detail.
+  Quantity steppers, running total, basket-modify pre-create.
+- Seller-side menu builder is new step in Create wizard for menu-
+  listings. Save-draft applies same as fixed-price.
+- LOCK payload format extends with `selected_items: SelectedItem[]`
+  (a snapshot, not a reference — the listing could change after
+  the trade is created). Listing snapshot in trade includes
+  line-itemized description so seller and arbiter see exactly what
+  was ordered.
+- Per-vertical UX nuances (loan term picker for Lending, fee tier
+  picker for Raw Escrow, etc.) are styling on top of the same
+  basket primitive. Not five separate features.
+- Future market positioning narrative: "Chama is the decentralized,
+  self-custodial alternative to merchant payment infrastructure" —
+  v0.4.0 enables that story credibly. Pre-v0.4.0, Chama is a P2P
+  trade tool; post-v0.4.0, Chama is a multi-vertical commerce
+  primitive.
+
+**Status:** Active. Targeted for v0.4.0 after v0.3.0 ships. Wife
+credited as design partner for surfacing the underlying need; the
+cross-vertical generalization emerged in conversation with Claude
+on 2026-05-06.
 
 ---
