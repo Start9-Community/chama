@@ -19,11 +19,18 @@ export function SettingsAdvanced({
   onBack,
   onSwitchFederation,
   onResetLocalWallet,
+  onSandboxFund,
 }: {
   fedimint: FedimintState;
   onBack: () => void;
   onSwitchFederation: (inviteCode: string, opts?: { force?: boolean }) => Promise<void>;
   onResetLocalWallet: () => Promise<void>;
+  /** v0.3.0 Phase 5: opens FundWalletModal — the only remaining
+   *  callsite of that surface in production. Reachable only when
+   *  Sandbox mode is on. The label on the button below carries the
+   *  warning in plain English; do not surface this from any other
+   *  production path. */
+  onSandboxFund?: () => void;
 }) {
   const [sandboxOn, setSandboxOn] = useState(isSandboxModeOn);
   // Toggle the flag — dev builds remain auto-on regardless
@@ -115,6 +122,43 @@ export function SettingsAdvanced({
               onSwitch={onSwitchFederation}
             />
           </div>
+
+          {/* v0.3.0 Phase 5: Manual fund (Sandbox) — the only remaining
+              entry point to FundWalletModal in production. The label
+              IS the warning (per Phase 5 reminder #2): power users see
+              "Production trades use atomic funding via listing-tap" and
+              understand at a glance that this is a testing surface,
+              not the normal funding path. */}
+          {onSandboxFund && (
+            <div style={{
+              background: T.card, border: `1px solid ${T.border}`,
+              borderRadius: T.r, padding: 16, marginBottom: 16,
+            }}>
+              <div style={{
+                fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+                letterSpacing: 1, marginBottom: 8,
+              }}>
+                MANUAL FUND (SANDBOX)
+              </div>
+              <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 12 }}>
+                Generate an arbitrary-amount Lightning invoice for testing.
+                Production trades use atomic funding via listing-tap.
+              </div>
+              <button
+                onClick={onSandboxFund}
+                style={{
+                  background: "none",
+                  border: `1px solid ${T.border}`,
+                  color: T.muted,
+                  fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+                  padding: "8px 12px", borderRadius: T.rs,
+                  cursor: "pointer", letterSpacing: 0.5,
+                }}
+              >
+                ⚡ Open manual fund
+              </button>
+            </div>
+          )}
 
           {/* Reset local Chama */}
           <div style={{

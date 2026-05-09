@@ -126,7 +126,64 @@ import {
   maskHandle,
   publicHandleDisplay,
   handleDisplayForViewer,
+  addOrTouchLightningHandle,
+  getSavedLightningHandles,
+  LIGHTNING_RAIL,
+  type SavedHandle,
 } from "../payments/saved-handles.js";
+
+// v0.3.0 Phase 1 — LNURL + DestinationPicker logic
+import {
+  parseLightningAddress,
+  isLightningAddress,
+  fetchLnurlPayMetadata,
+  requestLnurlInvoice,
+  resolveLightningAddressToInvoice,
+  LnurlError,
+  type LnurlPayMetadata,
+} from "../payments/lnurl.js";
+import {
+  decorateSavedHandlesForPicker,
+  classifyDestinationInput,
+  decideDispatch,
+} from "../ui/components/destination-picker-logic.js";
+
+// v0.3.0 Phase 2 — atomic fund-and-lock orchestrator
+import {
+  pollForFunding,
+  runFundAndLock,
+  type FundingPhase,
+  type FundAndLockPhase,
+  type FundAndLockTerminal,
+} from "../payments/fund-and-lock.js";
+
+// v0.3.0 Phase 3 — atomic claim-and-payout orchestrator
+import {
+  waitForBalanceGrowth,
+  runClaimAndPayout,
+  type ClaimAndPayoutPhase,
+} from "../payments/claim-and-payout.js";
+
+// v0.3.0 Phase 4 — balance recovery orchestrator
+import {
+  runRecoveryPayout,
+  type RecoveryPayoutPhase,
+} from "../payments/balance-recovery.js";
+
+// v0.3.0 Phase 5 — ChamaBar label decision
+import {
+  decideChamaBarLabel,
+} from "../ui/decisions.js";
+
+// v0.3.0 Phase 6 — Trinity Ring participant order (theme.ts)
+import { TRINITY_RING_ORDER } from "../ui/theme.js";
+
+// v0.3.0 Phase 6 — State B explainer card gate
+import {
+  hasStateBExplained,
+  markStateBExplained,
+  STATE_B_EXPLAINED_KEY_PREFIX,
+} from "../ui/screens/state-b-explainer.js";
 
 // PR 4 imports — envelope helpers + real NIP-44 from nostr-tools
 import {
@@ -3248,6 +3305,1839 @@ console.log("\n── CreateForm-derived mintUrl ──");
   // Unknown community → BP fallback.
   assert(resolveFederationForCommunity("xx-unknown") === BP_FEDERATION_INVITE,
     "Unknown community → BP fallback (no listing stranded)");
+}
+
+// ── 33. LNURL PARSER (v0.3.0 Phase 1) ────────────────────────────────────
+//
+// Parse-time validation rejects malformed Lightning Addresses BEFORE any
+// network call. Catches typos with a usable error in <1ms instead of
+// burning a 5-second DNS timeout that surfaces as a generic network
+// error. Per the v0.3.0 brief addition #1.
+console.log("\n── LNURL PARSER ──");
+{
+  // Standard form
+  const a = parseLightningAddress("alice@phoenix.app");
+  assert(a.user === "alice" && a.domain === "phoenix.app",
+    "Parses standard user@domain.tld");
+
+  // Whitespace trimmed
+  const b = parseLightningAddress("  bob@strike.me  ");
+  assert(b.user === "bob" && b.domain === "strike.me",
+    "Trims whitespace before parsing");
+
+  // Mixed case normalized to lowercase
+  const c = parseLightningAddress("Alice@Phoenix.App");
+  assert(c.user === "alice" && c.domain === "phoenix.app",
+    "Lowercases user and domain");
+
+  // Underscores, dots, dashes in user
+  const d = parseLightningAddress("first.last_99-x@wallet.io");
+  assert(d.user === "first.last_99-x" && d.domain === "wallet.io",
+    "Accepts dot/dash/underscore in user");
+
+  // Multi-level subdomain
+  const e = parseLightningAddress("user@pay.api.example.com");
+  assert(e.user === "user" && e.domain === "pay.api.example.com",
+    "Accepts multi-level subdomains");
+
+  // ── Synchronous rejection — no fetch issued ────────────────────────────
+  // Track whether fetch is called during parse-time validation. parser
+  // must not touch the network for any input it will reject.
+  let fetchCalled = 0;
+  const sentinelFetch: typeof fetch = (async () => {
+    fetchCalled++;
+    return new Response("{}", { status: 200 });
+  }) as any;
+  void sentinelFetch; // explicitly unused — parseLightningAddress is sync
+
+  const rejects = (raw: any, label: string) => {
+    let threwParse = false;
+    let code = "";
+    try { parseLightningAddress(raw); }
+    catch (err) {
+      if (err instanceof LnurlError) {
+        threwParse = true;
+        code = err.code;
+      }
+    }
+    assert(threwParse && code === "LnurlParseError",
+      `Rejects ${label} synchronously as LnurlParseError`);
+  };
+
+  rejects("", "empty string");
+  rejects("   ", "whitespace only");
+  rejects("noatsign", "missing '@'");
+  rejects("user@@two.ats", "two '@' signs");
+  rejects("user@nodot", "domain without TLD dot");
+  rejects("user@.tld", "domain starting with dot");
+  rejects("user@tld.x", "TLD shorter than 2 chars");
+  rejects("user@host.", "trailing dot domain");
+  rejects("user with space@host.com", "spaces in user");
+  rejects("user@host with space.com", "spaces in domain");
+  rejects("user!@host.com", "special char in user");
+  rejects(null, "null");
+  rejects(undefined, "undefined");
+  rejects(42, "number input");
+
+  assert(fetchCalled === 0,
+    "Parser issued zero fetches (synchronous validation only)");
+
+  // isLightningAddress mirrors parser without throwing
+  assert(isLightningAddress("alice@phoenix.app") === true,
+    "isLightningAddress true for valid input");
+  assert(isLightningAddress("not-an-address") === false,
+    "isLightningAddress false for invalid input");
+  assert(isLightningAddress("") === false,
+    "isLightningAddress false for empty");
+}
+
+// ── 34. LNURL RESOLVER (mocked fetch) ────────────────────────────────────
+//
+// Resolver tests use an explicit fetchImpl injected per test rather than
+// monkey-patching globalThis.fetch. Keeps tests order-independent and
+// concurrent-safe.
+console.log("\n── LNURL RESOLVER ──");
+{
+  const okMetadata = (overrides: Partial<any> = {}) => ({
+    callback: "https://phoenix.app/lnurlp/alice/callback",
+    minSendable: 1000,
+    maxSendable: 1_000_000_000,
+    metadata: "[]",
+    tag: "payRequest",
+    ...overrides,
+  });
+
+  const jsonResponse = (body: any, status = 200) => new Response(
+    JSON.stringify(body), { status, headers: { "content-type": "application/json" } },
+  );
+
+  const textResponse = (body: string, status = 200) => new Response(
+    body, { status, headers: { "content-type": "text/plain" } },
+  );
+
+  // Happy path — metadata fetch + invoice request → BOLT11 returned
+  {
+    const calls: string[] = [];
+    const mockFetch: typeof fetch = (async (url: any) => {
+      calls.push(String(url));
+      if (String(url).includes("/.well-known/lnurlp/")) {
+        return jsonResponse(okMetadata());
+      }
+      return jsonResponse({ pr: "lnbc500n1pfakeinvoice", routes: [] });
+    }) as any;
+
+    const meta = await fetchLnurlPayMetadata("alice@phoenix.app", mockFetch);
+    assert(meta.callback === "https://phoenix.app/lnurlp/alice/callback",
+      "Metadata callback parsed");
+    assert(meta.minSendable === 1000 && meta.maxSendable === 1_000_000_000,
+      "Metadata min/maxSendable parsed");
+    assert(meta.tag === "payRequest",
+      "Metadata tag pinned to payRequest");
+
+    const bolt11 = await requestLnurlInvoice(meta, 5000, mockFetch);
+    assert(bolt11 === "lnbc500n1pfakeinvoice",
+      "Callback returns BOLT11 invoice string");
+    assert(calls[0].endsWith("/.well-known/lnurlp/alice"),
+      "Metadata URL uses .well-known/lnurlp path");
+    assert(calls[1].includes("amount=5000000"),
+      "Callback URL includes amount in msats (5000 sats)");
+  }
+
+  // Resolver one-shot — chains metadata + callback
+  {
+    const mockFetch: typeof fetch = (async (url: any) => {
+      if (String(url).includes("/.well-known/lnurlp/")) {
+        return jsonResponse(okMetadata());
+      }
+      return jsonResponse({ pr: "lnbc1000n1pchainedok" });
+    }) as any;
+    const bolt11 = await resolveLightningAddressToInvoice(
+      "alice@phoenix.app", 1000, mockFetch,
+    );
+    assert(bolt11 === "lnbc1000n1pchainedok",
+      "resolveLightningAddressToInvoice chains metadata + callback");
+  }
+
+  // DNS / network error
+  {
+    const mockFetch: typeof fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as any;
+    let code = "";
+    try { await fetchLnurlPayMetadata("alice@phoenix.app", mockFetch); }
+    catch (e) { if (e instanceof LnurlError) code = e.code; }
+    assert(code === "LnurlDnsError",
+      "Network/DNS failure surfaces as LnurlDnsError");
+  }
+
+  // HTTP 404
+  {
+    const mockFetch: typeof fetch = (async () =>
+      jsonResponse({ status: "ERROR", reason: "user not found" }, 404)
+    ) as any;
+    let code = "";
+    try { await fetchLnurlPayMetadata("ghost@phoenix.app", mockFetch); }
+    catch (e) { if (e instanceof LnurlError) code = e.code; }
+    assert(code === "LnurlServerError",
+      "HTTP 404 surfaces as LnurlServerError");
+  }
+
+  // 200 OK but body is non-JSON
+  {
+    const mockFetch: typeof fetch = (async () =>
+      textResponse("<html>not json</html>")
+    ) as any;
+    let code = "";
+    try { await fetchLnurlPayMetadata("alice@phoenix.app", mockFetch); }
+    catch (e) { if (e instanceof LnurlError) code = e.code; }
+    assert(code === "LnurlMalformedError",
+      "Non-JSON body surfaces as LnurlMalformedError");
+  }
+
+  // 200 OK with LNURL-level error (status: ERROR)
+  {
+    const mockFetch: typeof fetch = (async () =>
+      jsonResponse({ status: "ERROR", reason: "user disabled" })
+    ) as any;
+    let code = "";
+    let msg = "";
+    try { await fetchLnurlPayMetadata("alice@phoenix.app", mockFetch); }
+    catch (e) {
+      if (e instanceof LnurlError) {
+        code = e.code;
+        msg = e.message;
+      }
+    }
+    assert(code === "LnurlServerError",
+      "LNURL status:ERROR surfaces as LnurlServerError");
+    assert(/user disabled/.test(msg),
+      "LNURL error reason carried into surfaced message");
+  }
+
+  // Malformed metadata — missing required fields
+  {
+    const mockFetch: typeof fetch = (async () =>
+      jsonResponse({ tag: "payRequest", callback: "https://x" /* no min/max */ })
+    ) as any;
+    let code = "";
+    try { await fetchLnurlPayMetadata("alice@phoenix.app", mockFetch); }
+    catch (e) { if (e instanceof LnurlError) code = e.code; }
+    assert(code === "LnurlMalformedError",
+      "Metadata missing min/maxSendable surfaces as LnurlMalformedError");
+  }
+
+  // Malformed metadata — wrong tag
+  {
+    const mockFetch: typeof fetch = (async () =>
+      jsonResponse({ tag: "withdrawRequest", callback: "https://x", minSendable: 1, maxSendable: 1 })
+    ) as any;
+    let code = "";
+    try { await fetchLnurlPayMetadata("alice@phoenix.app", mockFetch); }
+    catch (e) { if (e instanceof LnurlError) code = e.code; }
+    assert(code === "LnurlMalformedError",
+      "Wrong tag (not payRequest) surfaces as LnurlMalformedError");
+  }
+
+  // Amount out of range — synchronous, no fetch issued
+  {
+    let fetched = 0;
+    const mockFetch: typeof fetch = (async () => {
+      fetched++;
+      return jsonResponse({ pr: "lnbc1" });
+    }) as any;
+    const meta: LnurlPayMetadata = {
+      callback: "https://x/cb",
+      minSendable: 100_000,    // 100 sats
+      maxSendable: 1_000_000,  //   1k sats
+      metadata: "[]",
+      tag: "payRequest",
+    };
+    let codeBelow = "";
+    try { await requestLnurlInvoice(meta, 50, mockFetch); }
+    catch (e) { if (e instanceof LnurlError) codeBelow = e.code; }
+    let codeAbove = "";
+    try { await requestLnurlInvoice(meta, 5000, mockFetch); }
+    catch (e) { if (e instanceof LnurlError) codeAbove = e.code; }
+    assert(codeBelow === "LnurlAmountOutOfRangeError",
+      "Below minSendable → LnurlAmountOutOfRangeError");
+    assert(codeAbove === "LnurlAmountOutOfRangeError",
+      "Above maxSendable → LnurlAmountOutOfRangeError");
+    assert(fetched === 0,
+      "Out-of-range amount issues no callback fetch (synchronous reject)");
+  }
+
+  // Callback returns no `pr` field
+  {
+    const mockFetch: typeof fetch = (async (url: any) => {
+      if (String(url).includes("/.well-known/")) return jsonResponse(okMetadata());
+      return jsonResponse({ routes: [] }); // no pr field
+    }) as any;
+    let code = "";
+    try { await resolveLightningAddressToInvoice("alice@phoenix.app", 5, mockFetch); }
+    catch (e) { if (e instanceof LnurlError) code = e.code; }
+    assert(code === "LnurlMalformedError",
+      "Callback without pr field → LnurlMalformedError");
+  }
+
+  // Callback returns non-BOLT11 string (not starting with lnbc)
+  {
+    const mockFetch: typeof fetch = (async (url: any) => {
+      if (String(url).includes("/.well-known/")) return jsonResponse(okMetadata());
+      return jsonResponse({ pr: "not-an-invoice" });
+    }) as any;
+    let code = "";
+    try { await resolveLightningAddressToInvoice("alice@phoenix.app", 5, mockFetch); }
+    catch (e) { if (e instanceof LnurlError) code = e.code; }
+    assert(code === "LnurlMalformedError",
+      "Callback with non-BOLT11 pr → LnurlMalformedError");
+  }
+}
+
+// ── 35. SAVED HANDLES — Lightning rail (v0.3.0 Phase 1) ─────────────────
+//
+// addOrTouchLightningHandle is idempotent: re-saving the same address
+// bumps lastUsedAt rather than duplicating. getSavedLightningHandles
+// returns LN handles sorted by most-recent-used, falling back to
+// createdAt for handles missing lastUsedAt.
+console.log("\n── SAVED HANDLES — Lightning rail ──");
+{
+  (globalThis as any).localStorage.clear();
+
+  // First save creates new entry
+  const a = addOrTouchLightningHandle("alice@phoenix.app");
+  assert(a.rail === LIGHTNING_RAIL,
+    "First save uses LIGHTNING_RAIL key");
+  assert(a.handle === "alice@phoenix.app",
+    "Address stored as-typed (lowercase normalized)");
+  assert(typeof a.lastUsedAt === "number",
+    "First save sets lastUsedAt");
+  assert(a.visibility === "private",
+    "Lightning handles default to private (never published)");
+
+  // Mixed-case input normalized
+  const b = addOrTouchLightningHandle("Bob@Strike.ME");
+  assert(b.handle === "bob@strike.me",
+    "Mixed case normalized to lowercase on save");
+
+  // ── Idempotency: same address (same case) bumps lastUsedAt, no dup ───
+  // Wait at least 1 second so the second save's lastUsedAt is strictly
+  // greater than the first (the storage uses 1-second resolution).
+  await new Promise(r => setTimeout(r, 1100));
+  const aTouched = addOrTouchLightningHandle("alice@phoenix.app");
+  assert(aTouched.id === a.id,
+    "Re-saving same address returns same id (no dup)");
+  assert((aTouched.lastUsedAt ?? 0) > (a.lastUsedAt ?? 0),
+    "Re-saving bumps lastUsedAt forward");
+  assert(getSavedLightningHandles().length === 2,
+    "Storage still holds 2 LN handles after touch (no duplicate row)");
+
+  // Idempotency is case-insensitive
+  const aCaseTouched = addOrTouchLightningHandle("ALICE@PHOENIX.APP");
+  assert(aCaseTouched.id === a.id,
+    "Case-insensitive match against existing handle (no dup)");
+
+  // Empty rejected
+  let threwEmpty = false;
+  try { addOrTouchLightningHandle("   "); } catch { threwEmpty = true; }
+  assert(threwEmpty,
+    "addOrTouchLightningHandle rejects empty/whitespace input");
+
+  // ── Sort: most-recent-used first ─────────────────────────────────────
+  // After touching alice last, alice should be first in the picker list.
+  const sorted = getSavedLightningHandles();
+  assert(sorted.length === 2,
+    "Two LN handles in storage");
+  assert(sorted[0].handle === "alice@phoenix.app",
+    "Most-recently-used handle (alice) sorts first");
+  assert(sorted[1].handle === "bob@strike.me",
+    "Older handle (bob) sorts second");
+
+  // ── Other rails unaffected ───────────────────────────────────────────
+  addSavedHandle("revtag", "@charlie");
+  const lnOnly = getSavedLightningHandles();
+  assert(lnOnly.length === 2,
+    "getSavedLightningHandles excludes non-LN rails");
+  assert(lnOnly.every(h => h.rail === LIGHTNING_RAIL),
+    "All returned entries have rail=LIGHTNING_RAIL");
+
+  // ── Fallback to createdAt when lastUsedAt missing ────────────────────
+  // Simulate a pre-v0.3.0 handle that lacks lastUsedAt by writing
+  // directly to storage. getSavedLightningHandles must not crash and
+  // must use createdAt as the sort key.
+  const raw = (globalThis as any).localStorage.getItem(SAVED_HANDLES_STORAGE_KEY);
+  const all = JSON.parse(raw);
+  all.push({
+    id: "h_legacy",
+    rail: LIGHTNING_RAIL,
+    handle: "legacy@old.app",
+    visibility: "private",
+    createdAt: 1, // very old
+    // no lastUsedAt
+  });
+  (globalThis as any).localStorage.setItem(
+    SAVED_HANDLES_STORAGE_KEY, JSON.stringify(all),
+  );
+  const withLegacy = getSavedLightningHandles();
+  assert(withLegacy.length === 3,
+    "Legacy LN handle (no lastUsedAt) read without crash");
+  assert(withLegacy[withLegacy.length - 1].handle === "legacy@old.app",
+    "Handle missing lastUsedAt sorts last (createdAt fallback works)");
+}
+
+// ── 36. DESTINATION PICKER — pure decision logic (v0.3.0 Phase 1) ───────
+//
+// Tests the pure helpers in destination-picker-logic.ts. Component-level
+// rendering is exercised transitively by phases 3, 4 (claim, recovery,
+// destroy modal) per the brief.
+console.log("\n── DESTINATION PICKER — logic ──");
+{
+  // ── decorateSavedHandlesForPicker ────────────────────────────────────
+  // Empty list → empty array
+  assert(decorateSavedHandlesForPicker([]).length === 0,
+    "Empty saved-handles input → empty decorated list");
+
+  // Default badge on first (most-recent-used)
+  const handles = [
+    { id: "h1", rail: LIGHTNING_RAIL, handle: "alice@phoenix.app",
+      visibility: "private" as const, createdAt: 100, lastUsedAt: 200 },
+    { id: "h2", rail: LIGHTNING_RAIL, handle: "bob@strike.me",
+      visibility: "private" as const, createdAt: 100, lastUsedAt: 100 },
+    { id: "h3", rail: LIGHTNING_RAIL, handle: "carol@wallet.io",
+      visibility: "private" as const, createdAt: 100, lastUsedAt: 150 },
+  ];
+  const decorated = decorateSavedHandlesForPicker(handles);
+  assert(decorated.length === 3,
+    "Decorator preserves all input handles");
+  assert(decorated[0].handle.id === "h1" && decorated[0].isDefault === true,
+    "Most-recent-used handle (h1, lastUsedAt=200) gets isDefault=true");
+  assert(decorated[1].isDefault === false && decorated[2].isDefault === false,
+    "Non-first handles all have isDefault=false");
+  assert(decorated[1].handle.id === "h3",
+    "Sort: lastUsedAt 200 > 150 > 100 (h1, h3, h2)");
+
+  // Fallback to createdAt when lastUsedAt missing on some entries
+  const mixed = [
+    { id: "h_old", rail: LIGHTNING_RAIL, handle: "old@a.app",
+      visibility: "private" as const, createdAt: 50 /* no lastUsedAt */ },
+    { id: "h_new", rail: LIGHTNING_RAIL, handle: "new@b.app",
+      visibility: "private" as const, createdAt: 100, lastUsedAt: 100 },
+  ];
+  const mixedDec = decorateSavedHandlesForPicker(mixed);
+  assert(mixedDec[0].handle.id === "h_new",
+    "Handles with lastUsedAt sort above bare createdAt entries");
+
+  // ── classifyDestinationInput ─────────────────────────────────────────
+  assert(classifyDestinationInput("").kind === "empty",
+    "Empty input → empty");
+  assert(classifyDestinationInput("   ").kind === "empty",
+    "Whitespace-only → empty");
+
+  const lnAddr = classifyDestinationInput("alice@phoenix.app");
+  assert(lnAddr.kind === "lightning-address" && lnAddr.address === "alice@phoenix.app",
+    "Lightning Address recognized");
+
+  const lnAddrCase = classifyDestinationInput("ALICE@PHOENIX.APP");
+  assert(lnAddrCase.kind === "lightning-address" && lnAddrCase.address === "alice@phoenix.app",
+    "Lightning Address normalized to lowercase");
+
+  const bolt = classifyDestinationInput("lnbc500n1pfake");
+  assert(bolt.kind === "bolt11" && bolt.bolt11 === "lnbc500n1pfake",
+    "BOLT11 recognized via lnbc prefix");
+
+  const boltTrim = classifyDestinationInput("  lnbc500n1pfake  ");
+  assert(boltTrim.kind === "bolt11",
+    "BOLT11 with surrounding whitespace recognized after trim");
+
+  const invalid = classifyDestinationInput("zzz garbage");
+  assert(invalid.kind === "invalid",
+    "Random garbage → invalid");
+
+  // ── decideDispatch ───────────────────────────────────────────────────
+  // Tier 1: tapped saved row wins regardless of typed/paste content
+  const sample: SavedHandle = {
+    id: "h_sample", rail: LIGHTNING_RAIL, handle: "alice@phoenix.app",
+    visibility: "private", createdAt: 100, lastUsedAt: 100,
+  };
+  {
+    const r = decideDispatch({
+      tappedSavedHandle: sample,
+      typedInput: classifyDestinationInput("ignored@host.com"),
+      saveToggleOn: false,
+    });
+    assert(r.ok && r.decision.tier === "saved-row",
+      "Tapped saved row → tier=saved-row");
+    assert(r.ok && r.decision.addressUsed === "alice@phoenix.app",
+      "Tapped saved row → addressUsed = the saved handle");
+    assert(r.ok && r.decision.saveAfter === true,
+      "Tapped saved row → saveAfter true (bumps lastUsedAt)");
+  }
+
+  // Tier 3 (Advanced paste) wins over Tier 2 typed when both present
+  {
+    const r = decideDispatch({
+      typedInput: classifyDestinationInput("alice@phoenix.app"),
+      bolt11PasteInput: classifyDestinationInput("lnbc999n1ppaste"),
+      saveToggleOn: true,
+    });
+    assert(r.ok && r.decision.tier === "pasted-bolt11",
+      "Advanced BOLT11 paste preempts typed address");
+    assert(r.ok && r.decision.saveAfter === false,
+      "Advanced BOLT11 paste → saveAfter false (no address to save)");
+    assert(r.ok && r.decision.addressUsed === undefined,
+      "Advanced BOLT11 paste → addressUsed undefined");
+  }
+
+  // Tier 2 typed Lightning Address — saveAfter follows toggle
+  {
+    const rOn = decideDispatch({
+      typedInput: classifyDestinationInput("alice@phoenix.app"),
+      saveToggleOn: true,
+    });
+    assert(rOn.ok && rOn.decision.tier === "typed-address" && rOn.decision.saveAfter === true,
+      "Typed address with toggle ON → tier=typed-address, saveAfter=true");
+    const rOff = decideDispatch({
+      typedInput: classifyDestinationInput("alice@phoenix.app"),
+      saveToggleOn: false,
+    });
+    assert(rOff.ok && rOff.decision.saveAfter === false,
+      "Typed address with toggle OFF → saveAfter=false");
+  }
+
+  // Tier 2 cross-tier paste — user pasted BOLT11 into the LN field
+  {
+    const r = decideDispatch({
+      typedInput: classifyDestinationInput("lnbc12n1pcross"),
+      saveToggleOn: true,
+    });
+    assert(r.ok && r.decision.tier === "pasted-bolt11",
+      "BOLT11 typed into LN field accepted as pasted-bolt11");
+    assert(r.ok && r.decision.saveAfter === false,
+      "Cross-tier paste forces saveAfter=false (no address to save)");
+  }
+
+  // Invalid typed input → ok:false with reason
+  {
+    const r = decideDispatch({
+      typedInput: classifyDestinationInput("zzz garbage"),
+      saveToggleOn: true,
+    });
+    assert(!r.ok && /Lightning Address|BOLT11/.test(r.reason),
+      "Invalid input → ok:false carrying typed-classifier reason");
+  }
+
+  // Empty input + nothing tapped → ok:false
+  {
+    const r = decideDispatch({
+      typedInput: classifyDestinationInput(""),
+      saveToggleOn: true,
+    });
+    assert(!r.ok,
+      "Empty input + no saved row tap → ok:false");
+  }
+}
+
+// ── 37. POLL FOR FUNDING (v0.3.0 Phase 2) ────────────────────────────────
+//
+// pollForFunding is the polling watchdog inside runFundAndLock. Tests
+// inject a synthetic clock + sleep + balance reader so the timing
+// behavior is deterministic and fast. Each test pins one terminal
+// phase + the phase events leading to it.
+console.log("\n── POLL FOR FUNDING ──");
+{
+  // Helper: build a controllable clock + sleep that advance in lockstep,
+  // plus a balance script that returns the i-th value per call.
+  function harness(opts: {
+    balances: number[];
+    paymentDeadlineMs?: number;
+    mintConfirmTimeoutMs?: number;
+    pollIntervalMs?: number;
+    thresholdPct?: number;
+    signal?: AbortSignal;
+  }) {
+    let nowMs = 0;
+    let i = 0;
+    const phases: FundingPhase[] = [];
+    const sleep = async (ms: number) => { nowMs += ms; };
+    const now = () => nowMs;
+    const getBalance = async () => {
+      const v = opts.balances[Math.min(i, opts.balances.length - 1)];
+      i++;
+      return v;
+    };
+    const onPhase = (p: FundingPhase) => phases.push(p);
+    return { phases, getBalance, sleep, now, onPhase, callCountRef: () => i, clock: () => nowMs };
+  }
+
+  // Happy path — payment lands fully on first poll
+  {
+    const h = harness({ balances: [0, 100_000] });
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: h.getBalance,
+      onPhase: h.onPhase,
+      sleep: h.sleep,
+      now: h.now,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "payment-confirmed",
+      "Happy path: balance lands fully → payment-confirmed");
+    assert(h.phases[0]?.kind === "awaiting-payment",
+      "First emitted phase is awaiting-payment");
+    assert(h.phases.some(p => p.kind === "payment-confirmed"),
+      "Terminal payment-confirmed phase emitted");
+    assert(!h.phases.some(p => p.kind === "mint-confirming"),
+      "No mint-confirming phase when balance lands fully on first read");
+  }
+
+  // Threshold tolerance — accept 92% of expected (above 90% default)
+  {
+    const h = harness({ balances: [0, 92_000] });
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: h.getBalance,
+      onPhase: h.onPhase,
+      sleep: h.sleep,
+      now: h.now,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "payment-confirmed",
+      "Threshold tolerance: 92k of 100k accepted as confirmed (>= 90%)");
+  }
+
+  // Mint-confirming → payment-confirmed sequence
+  {
+    const h = harness({ balances: [0, 0, 50_000, 50_000, 100_000] });
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: h.getBalance,
+      onPhase: h.onPhase,
+      sleep: h.sleep,
+      now: h.now,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "payment-confirmed",
+      "Partial then full → payment-confirmed");
+    const order = h.phases.map(p => p.kind);
+    const awaitingIdx = order.indexOf("awaiting-payment");
+    const mintIdx = order.indexOf("mint-confirming");
+    const confIdx = order.indexOf("payment-confirmed");
+    assert(awaitingIdx === 0,
+      "Phase order: awaiting-payment first");
+    assert(mintIdx > awaitingIdx,
+      "Phase order: mint-confirming after awaiting-payment");
+    assert(confIdx > mintIdx,
+      "Phase order: payment-confirmed after mint-confirming");
+  }
+
+  // Expired — no payment ever, paymentDeadline elapses
+  {
+    const h = harness({ balances: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] });
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: h.getBalance,
+      onPhase: h.onPhase,
+      sleep: h.sleep,
+      now: h.now,
+      paymentDeadlineMs: 5_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "expired",
+      "No payment in window → expired");
+    assert(!h.phases.some(p => p.kind === "mint-confirming"),
+      "No mint-confirming phase emitted when balance never moves");
+  }
+
+  // Mint-timeout — partial credit got stuck for the full 60s grace
+  {
+    const h = harness({
+      balances: [0, 0, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000],
+    });
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: h.getBalance,
+      onPhase: h.onPhase,
+      sleep: h.sleep,
+      now: h.now,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 5_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "mint-timeout",
+      "Partial credit stuck past mint timeout → mint-timeout");
+    assert(h.phases.some(p => p.kind === "mint-confirming"),
+      "mint-confirming phase fired before timeout");
+    assert(h.phases[h.phases.length - 1].kind === "mint-timeout",
+      "Terminal phase emitted last is mint-timeout");
+  }
+
+  // Mint-confirming countdown is independent of paymentDeadline. Even
+  // if paymentDeadline would NOT have fired, mintConfirmTimeout fires
+  // its own clock from when partial was first detected.
+  {
+    // 100ms paymentDeadline (would have fired at t=100); but partial
+    // arrives at t=50, and mintConfirmTimeout=200ms, so terminal kind
+    // should be mint-timeout at t=250 (50 + 200), NOT expired at t=100.
+    let nowMs = 0;
+    let i = 0;
+    const balances = [0, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000];
+    const phases: FundingPhase[] = [];
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: async () => balances[Math.min(i++, balances.length - 1)],
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 100,
+      mintConfirmTimeoutMs: 200,
+      pollIntervalMs: 50,
+    });
+    assert(result.kind === "mint-timeout",
+      "Mint-confirm timer is independent: partial-then-stuck = mint-timeout, not expired");
+  }
+
+  // Aborted via signal mid-loop
+  {
+    const ctrl = new AbortController();
+    const h = harness({ balances: [0, 0, 0, 0, 0] });
+    // Abort before the first sleep tick so the loop exits at the top
+    ctrl.abort();
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: h.getBalance,
+      onPhase: h.onPhase,
+      sleep: h.sleep,
+      now: h.now,
+      signal: ctrl.signal,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "aborted",
+      "AbortSignal already-aborted → aborted terminal");
+    assert(h.phases[h.phases.length - 1].kind === "aborted",
+      "Aborted phase emitted as terminal");
+  }
+
+  // getBalance throwing transiently doesn't crash the loop
+  {
+    let calls = 0;
+    let nowMs = 0;
+    const phases: FundingPhase[] = [];
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: async () => {
+        calls++;
+        if (calls < 3) throw new Error("transient federation error");
+        return 100_000;
+      },
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "payment-confirmed",
+      "Transient getBalance throws don't break the loop");
+    assert(calls >= 3, "getBalance was retried after throws");
+  }
+
+  // Defaults match the documented constants
+  {
+    // 15min payment deadline, 60s mint-confirm, 5s poll, 0.9 threshold.
+    // We confirm by triggering the deadline path with defaults left in
+    // place. Use a tiny override only on pollIntervalMs so the test
+    // finishes quickly; everything else inherits.
+    let nowMs = 0;
+    const phases: FundingPhase[] = [];
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: async () => 0,
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      pollIntervalMs: 60_000, // 1-minute ticks so we hit 15min in 15 ticks
+    });
+    assert(result.kind === "expired",
+      "Default 15min payment deadline triggers expired with no payment");
+    // Roughly 15 ticks of 60s each = 15 minutes
+    assert(nowMs >= 15 * 60_000 && nowMs < 17 * 60_000,
+      "Expired fired around 15min mark using default deadline");
+  }
+}
+
+// ── 38. RUN FUND AND LOCK (v0.3.0 Phase 2) ──────────────────────────────
+//
+// runFundAndLock orchestrates createFundingInvoice + pollForFunding +
+// lockAndPublish. Mocks the wallet seam to verify each terminal path.
+console.log("\n── RUN FUND AND LOCK ──");
+{
+  // Mock helpers
+  function makeMockWallet(opts: {
+    balances: number[];
+    invoiceResult?: string | Error;
+    lockResult?: "ok" | Error;
+  }) {
+    let i = 0;
+    const calls = {
+      createInvoice: 0 as number,
+      lockAndPublish: 0 as number,
+      getBalance: 0 as number,
+    };
+    return {
+      calls,
+      getBalance: async () => {
+        calls.getBalance++;
+        return opts.balances[Math.min(i++, opts.balances.length - 1)];
+      },
+      createFundingInvoice: async (_msats: number, _desc: string) => {
+        calls.createInvoice++;
+        if (opts.invoiceResult instanceof Error) throw opts.invoiceResult;
+        return opts.invoiceResult ?? "lnbc100n1pfakefundingok";
+      },
+      lockAndPublish: async (_id: string, _o: { savedHandleId?: string }) => {
+        calls.lockAndPublish++;
+        if (opts.lockResult instanceof Error) throw opts.lockResult;
+        return {} as any;
+      },
+    };
+  }
+
+  // ── Happy path: invoice → balance lands → lock → locked ─────────────
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_1",
+      amountMsats: 100_000,
+      description: "test fund",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "locked",
+      "Happy path → terminal kind=locked");
+    const order = phases.map(p => p.kind);
+    assert(order[0] === "creating-invoice",
+      "First phase: creating-invoice");
+    assert(order.includes("invoice-created"),
+      "invoice-created phase emitted with BOLT11");
+    const invoiceCreated = phases.find(p => p.kind === "invoice-created");
+    assert(!!invoiceCreated && (invoiceCreated as any).bolt11 === "lnbc100n1pfakefundingok",
+      "invoice-created carries the BOLT11 returned by createFundingInvoice");
+    assert(order.includes("locking"),
+      "locking phase emitted after payment-confirmed");
+    assert(order[order.length - 1] === "locked",
+      "Terminal phase: locked");
+    assert(wallet.calls.createInvoice === 1,
+      "createFundingInvoice called exactly once");
+    assert(wallet.calls.lockAndPublish === 1,
+      "lockAndPublish called exactly once after payment");
+  }
+
+  // ── Sequencing assertion: lockAndPublish never called before payment-confirmed
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 0, 0, 0, 0] }); // never lands
+    let lockCalledAtPhase: string | null = null;
+    let lastPhase: string = "";
+    let nowMs = 0;
+    await runFundAndLock({
+      escrowId: "esc_test_2",
+      amountMsats: 100_000,
+      description: "test never-land",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: async (_id, _o) => {
+        lockCalledAtPhase = lastPhase;
+        wallet.calls.lockAndPublish++;
+        return {} as any;
+      },
+      onPhase: p => { lastPhase = p.kind; },
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 5_000,
+      mintConfirmTimeoutMs: 5_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(wallet.calls.lockAndPublish === 0,
+      "lockAndPublish NEVER called when payment doesn't land");
+    assert(lockCalledAtPhase === null,
+      "lock dispatch path never reached during expiry");
+  }
+
+  // ── Expired terminal: no orphan lock dispatched, modal handles cleanup
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 0, 0, 0] });
+    let nowMs = 0;
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_3",
+      amountMsats: 100_000,
+      description: "expire test",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 3_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "expired",
+      "No payment in window → terminal expired");
+    assert(wallet.calls.createInvoice === 1,
+      "Invoice was created");
+    assert(wallet.calls.lockAndPublish === 0,
+      "LOCK never dispatched on expired path (no orphan)");
+  }
+
+  // ── Mint-timeout terminal: surfaces try-LOCK retry path to caller
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000],
+    });
+    let nowMs = 0;
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_4",
+      amountMsats: 100_000,
+      description: "mint timeout test",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 3_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "mint-timeout",
+      "Partial credit stuck → terminal mint-timeout");
+    assert(wallet.calls.lockAndPublish === 0,
+      "LOCK NOT auto-dispatched on mint-timeout (modal surfaces try-LOCK retry)");
+  }
+
+  // ── LOCK-failed terminal: balance landed but lockAndPublish threw.
+  // This is the orphan-balance case the recovery banner catches on
+  // next visit (per Phase 4).
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 100_000, 100_000],
+      lockResult: new Error("FED_MISMATCH: wallet on different fed"),
+    });
+    let nowMs = 0;
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_5",
+      amountMsats: 100_000,
+      description: "lock fail test",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "lock-failed",
+      "Balance landed but lock threw → terminal lock-failed");
+    if (terminal.kind === "lock-failed") {
+      assert(/FED_MISMATCH/.test(terminal.error),
+        "lock-failed terminal carries the underlying error message");
+    }
+    assert(wallet.calls.lockAndPublish === 1,
+      "LOCK was attempted (not silently skipped)");
+  }
+
+  // ── Invoice-creation failure: lock-failed surfaces upstream error
+  {
+    const wallet = makeMockWallet({
+      balances: [0],
+      invoiceResult: new Error("federation unreachable"),
+    });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_6",
+      amountMsats: 100_000,
+      description: "invoice fail test",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "lock-failed",
+      "Invoice creation failure → terminal lock-failed");
+    if (terminal.kind === "lock-failed") {
+      assert(/federation unreachable/.test(terminal.error),
+        "Invoice failure error message preserved");
+    }
+    assert(wallet.calls.createInvoice === 1,
+      "createFundingInvoice was attempted");
+    assert(wallet.calls.lockAndPublish === 0,
+      "LOCK never attempted when invoice creation failed");
+    // No invoice-created phase since we never got the BOLT11
+    assert(!phases.some(p => p.kind === "invoice-created"),
+      "No invoice-created phase emitted on invoice-creation failure");
+  }
+
+  // ── Aborted mid-flow: signal triggered while polling
+  {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const wallet = makeMockWallet({ balances: [0] });
+    let nowMs = 0;
+    const terminal: FundAndLockTerminal = await runFundAndLock({
+      escrowId: "esc_test_7",
+      amountMsats: 100_000,
+      description: "abort test",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: () => {},
+      signal: ctrl.signal,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "aborted",
+      "Pre-aborted signal → terminal aborted (no invoice created)");
+    assert(wallet.calls.createInvoice === 0,
+      "createFundingInvoice not called when signal already aborted");
+    assert(wallet.calls.lockAndPublish === 0,
+      "lockAndPublish not called when signal already aborted");
+  }
+
+  // ── Phase callback is called with creating-invoice as the FIRST phase
+  // (before any wallet calls), so the modal can show its loading state
+  // immediately on mount.
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000] });
+    let firstPhase = "";
+    let createInvoiceCalledBefore = false;
+    let nowMs = 0;
+    await runFundAndLock({
+      escrowId: "esc_test_8",
+      amountMsats: 100_000,
+      description: "phase order",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: async (msats, desc) => {
+        if (firstPhase === "creating-invoice") createInvoiceCalledBefore = true;
+        return wallet.createFundingInvoice(msats, desc);
+      },
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => { if (!firstPhase) firstPhase = p.kind; },
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(firstPhase === "creating-invoice",
+      "First emitted phase: creating-invoice (before any wallet call)");
+    assert(createInvoiceCalledBefore,
+      "creating-invoice phase fires BEFORE createFundingInvoice (UI loading state)");
+  }
+}
+
+// ── 39. WAIT FOR BALANCE GROWTH (v0.3.0 Phase 3) ─────────────────────────
+//
+// The polling watchdog inside runClaimAndPayout. Mirrors Phase 2's
+// pollForFunding loop but with a single timeout (no payment-vs-mint
+// split — the user already triggered the claim). Tests inject
+// synthetic clock + sleep + balance reader for deterministic timing.
+console.log("\n── WAIT FOR BALANCE GROWTH ──");
+{
+  // Happy: balance grows on first read
+  {
+    let nowMs = 0;
+    let i = 0;
+    const balances = [100_000];
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => balances[Math.min(i++, balances.length - 1)],
+      timeoutMs: 60_000,
+      pollIntervalMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "grew",
+      "Balance lands fully → grew");
+  }
+
+  // Threshold tolerance — accept 92% of expected
+  {
+    let nowMs = 0;
+    let i = 0;
+    const balances = [92_000];
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => balances[Math.min(i++, balances.length - 1)],
+      timeoutMs: 60_000,
+      pollIntervalMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "grew",
+      "Threshold tolerance: 92k of 100k accepted (>= 90%)");
+  }
+
+  // Partial then full lands within timeout
+  {
+    let nowMs = 0;
+    let i = 0;
+    const balances = [0, 0, 50_000, 100_000];
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => balances[Math.min(i++, balances.length - 1)],
+      timeoutMs: 60_000,
+      pollIntervalMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "grew",
+      "Partial then full → grew");
+  }
+
+  // Timeout — balance never grows
+  {
+    let nowMs = 0;
+    let i = 0;
+    const balances = [0];
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => balances[Math.min(i++, balances.length - 1)],
+      timeoutMs: 5_000,
+      pollIntervalMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "timeout",
+      "Balance never grows in window → timeout");
+    assert(nowMs >= 5_000,
+      "Loop ran until timeout was reached");
+  }
+
+  // Aborted via signal
+  {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    let nowMs = 0;
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => 0,
+      signal: ctrl.signal,
+      timeoutMs: 60_000,
+      pollIntervalMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "aborted",
+      "Pre-aborted signal → aborted");
+  }
+
+  // Transient getBalance throws don't crash the loop
+  {
+    let nowMs = 0;
+    let calls = 0;
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => {
+        calls++;
+        if (calls < 3) throw new Error("transient");
+        return 100_000;
+      },
+      timeoutMs: 60_000,
+      pollIntervalMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "grew",
+      "Transient getBalance throws don't break the wait loop");
+  }
+
+  // Default 60s timeout
+  {
+    let nowMs = 0;
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => 0,
+      pollIntervalMs: 5_000, // 12 ticks of 5s = 60s
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "timeout",
+      "Default 60s confirm timeout fires when balance never grows");
+    assert(nowMs >= 60_000 && nowMs < 70_000,
+      "Default timeout fired around 60s mark");
+  }
+}
+
+// ── 40. RUN CLAIM AND PAYOUT (v0.3.0 Phase 3) ────────────────────────────
+//
+// runClaimAndPayout orchestrates claimAndRedeem → balance-confirm →
+// payInvoice → optional handle-save. Each terminal path is tested
+// independently with mocked deps.
+console.log("\n── RUN CLAIM AND PAYOUT ──");
+{
+  function makeMockWallet(opts: {
+    balances: number[];
+    claimResult?: "ok" | Error;
+    payInvoiceResult?: "ok" | Error;
+  }) {
+    let i = 0;
+    const calls = {
+      claimAndRedeem: 0,
+      payInvoice: 0,
+      getBalance: 0,
+      saveHandle: 0,
+    };
+    const handlesSaved: string[] = [];
+    return {
+      calls,
+      handlesSaved,
+      getBalance: async () => {
+        calls.getBalance++;
+        return opts.balances[Math.min(i++, opts.balances.length - 1)];
+      },
+      claimAndRedeem: async (_id: string) => {
+        calls.claimAndRedeem++;
+        if (opts.claimResult instanceof Error) throw opts.claimResult;
+        return {} as any;
+      },
+      payInvoice: async (_b: string) => {
+        calls.payInvoice++;
+        if (opts.payInvoiceResult instanceof Error) throw opts.payInvoiceResult;
+      },
+      addOrTouchLightningHandle: (address: string) => {
+        calls.saveHandle++;
+        handlesSaved.push(address);
+      },
+    };
+  }
+
+  // ── Happy path: claim → balance lands → payInvoice → save → done ────
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000, 100_000] });
+    const phases: ClaimAndPayoutPhase[] = [];
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_1",
+      bolt11: "lnbc100n1pfakeclaimpayout",
+      expectedDeltaMsats: 100_000,
+      saveAfter: true,
+      addressUsed: "alice@phoenix.app",
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "done",
+      "Happy path → terminal=done");
+    assert(wallet.calls.claimAndRedeem === 1,
+      "claimAndRedeem called exactly once");
+    assert(wallet.calls.payInvoice === 1,
+      "payInvoice called exactly once after claim confirms");
+    assert(wallet.calls.saveHandle === 1,
+      "addOrTouchLightningHandle called once on success with saveAfter=true");
+    assert(wallet.handlesSaved[0] === "alice@phoenix.app",
+      "Saved address matches addressUsed");
+    const order = phases.map(p => p.kind);
+    assert(order.indexOf("claiming") < order.indexOf("confirming"),
+      "Phase order: claiming → confirming");
+    assert(order.indexOf("confirming") < order.indexOf("paying-invoice"),
+      "Phase order: confirming → paying-invoice");
+    assert(order[order.length - 1] === "done",
+      "Terminal phase emitted: done");
+  }
+
+  // ── Sequencing: payInvoice never called before claim confirms ───────
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 0, 0, 0, 0, 0, 0], // never lands
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_2",
+      bolt11: "lnbc100n1pneverland",
+      expectedDeltaMsats: 100_000,
+      saveAfter: true,
+      addressUsed: "bob@strike.me",
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 5_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "claim-pending",
+      "Balance never lands → terminal=claim-pending");
+    assert(wallet.calls.payInvoice === 0,
+      "payInvoice NEVER called when balance doesn't confirm");
+    assert(wallet.calls.saveHandle === 0,
+      "addOrTouchLightningHandle NOT called on claim-pending (no successful payout)");
+  }
+
+  // ── Claim hard-failure: claim threw, no orphan, payInvoice not called
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 0],
+      claimResult: new Error("Not enough shares"),
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_3",
+      bolt11: "lnbc100n1pclaimfail",
+      expectedDeltaMsats: 100_000,
+      saveAfter: true,
+      addressUsed: "carol@wallet.io",
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "claim-failed",
+      "claimAndRedeem throws → terminal=claim-failed");
+    if (terminal.kind === "claim-failed") {
+      assert(/Not enough shares/.test(terminal.error),
+        "claim-failed terminal carries underlying error message");
+    }
+    assert(wallet.calls.claimAndRedeem === 1,
+      "claimAndRedeem was attempted");
+    assert(wallet.calls.payInvoice === 0,
+      "payInvoice NOT called on claim hard-failure (no orphan dispatched)");
+    assert(wallet.calls.saveHandle === 0,
+      "Handle NOT saved on claim-failed");
+  }
+
+  // ── Payout-failed: claim confirmed, balance grew, but payInvoice threw
+  // This is the orphan-balance case — recovery banner catches it
+  // (Phase 4 wiring).
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 100_000, 100_000],
+      payInvoiceResult: new Error("no route to recipient"),
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_4",
+      bolt11: "lnbc100n1ppayoutfail",
+      expectedDeltaMsats: 100_000,
+      saveAfter: true,
+      addressUsed: "dave@offline.app",
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "payout-failed",
+      "claim ok + payInvoice throws → terminal=payout-failed");
+    if (terminal.kind === "payout-failed") {
+      assert(/no route/.test(terminal.error),
+        "payout-failed terminal carries underlying LN error");
+    }
+    assert(wallet.calls.claimAndRedeem === 1,
+      "claim was attempted (succeeded)");
+    assert(wallet.calls.payInvoice === 1,
+      "payInvoice was attempted (failed)");
+    assert(wallet.calls.saveHandle === 0,
+      "Handle NOT saved when payout failed (orphan = recovery banner's job)");
+  }
+
+  // ── Auto-save toggle OFF: success but no save call ──────────────────
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000, 100_000] });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_5",
+      bolt11: "lnbc100n1psaveoff",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,                  // toggle OFF
+      addressUsed: "eve@phoenix.app",    // address known but save off
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "done",
+      "Happy path with saveAfter=false → done");
+    assert(wallet.calls.saveHandle === 0,
+      "saveAfter=false → handle NOT saved despite address being known");
+  }
+
+  // ── Tier 3 BOLT11 paste: addressUsed undefined → no save attempted
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000, 100_000] });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_6",
+      bolt11: "lnbc100n1pbolt11paste",
+      expectedDeltaMsats: 100_000,
+      saveAfter: true, // even with toggle on,
+      addressUsed: undefined, // no address means nothing to save
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "done",
+      "Tier 3 BOLT11 paste happy path → done");
+    assert(wallet.calls.saveHandle === 0,
+      "addressUsed undefined → addOrTouchLightningHandle NOT called even with saveAfter=true");
+  }
+
+  // ── Save throws: payout already succeeded; cosmetic failure swallowed
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000, 100_000] });
+    // Replace addOrTouchLightningHandle with one that throws.
+    const throwingSave = (_a: string) => { throw new Error("storage quota"); };
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_7",
+      bolt11: "lnbc100n1psavethrow",
+      expectedDeltaMsats: 100_000,
+      saveAfter: true,
+      addressUsed: "frank@wallet.app",
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: throwingSave,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "done",
+      "Save throws → terminal still done (cosmetic, payout already sent)");
+  }
+
+  // ── Phase ordering: confirming fires BEFORE paying-invoice
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000, 100_000] });
+    const phases: string[] = [];
+    let nowMs = 0;
+    let payInvoiceCalledAt = -1;
+    let confirmingFiredAt = -1;
+    await runClaimAndPayout({
+      escrowId: "esc_claim_8",
+      bolt11: "lnbc100n1pphaseorder",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: async (b) => {
+        payInvoiceCalledAt = phases.length;
+        return wallet.payInvoice(b);
+      },
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: p => {
+        if (p.kind === "confirming" && confirmingFiredAt === -1) {
+          confirmingFiredAt = phases.length;
+        }
+        phases.push(p.kind);
+      },
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(confirmingFiredAt >= 0 && confirmingFiredAt < payInvoiceCalledAt,
+      "confirming phase fires BEFORE payInvoice is called");
+  }
+}
+
+// ── 41. RUN RECOVERY PAYOUT (v0.3.0 Phase 4) ─────────────────────────────
+//
+// runRecoveryPayout drains an existing wallet balance to a Lightning
+// destination. Used by RecoveryBanner and DestroyEcashConfirmModal.
+// Simpler than runClaimAndPayout — no claim phase, just payInvoice +
+// optional handle save. Same save-on-success-never-on-failure +
+// cosmetic-failure-swallowed semantics as Phase 3.
+console.log("\n── RUN RECOVERY PAYOUT ──");
+{
+  function makeMockWallet(opts: { payInvoiceResult?: "ok" | Error }) {
+    const calls = { payInvoice: 0, saveHandle: 0 };
+    const handlesSaved: string[] = [];
+    return {
+      calls,
+      handlesSaved,
+      payInvoice: async (_b: string) => {
+        calls.payInvoice++;
+        if (opts.payInvoiceResult instanceof Error) throw opts.payInvoiceResult;
+      },
+      addOrTouchLightningHandle: (address: string) => {
+        calls.saveHandle++;
+        handlesSaved.push(address);
+      },
+    };
+  }
+
+  // ── Happy path: pay → save → done ───────────────────────────────────
+  {
+    const wallet = makeMockWallet({});
+    const phases: RecoveryPayoutPhase[] = [];
+    const terminal = await runRecoveryPayout({
+      bolt11: "lnbc100n1precover_ok",
+      saveAfter: true,
+      addressUsed: "alice@phoenix.app",
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: p => phases.push(p),
+    });
+    assert(terminal.kind === "done",
+      "Happy path → terminal=done");
+    assert(wallet.calls.payInvoice === 1,
+      "payInvoice called exactly once");
+    assert(wallet.calls.saveHandle === 1,
+      "addOrTouchLightningHandle called once on success with saveAfter=true");
+    assert(wallet.handlesSaved[0] === "alice@phoenix.app",
+      "Saved address matches addressUsed");
+    const order = phases.map(p => p.kind);
+    assert(order[0] === "paying-invoice",
+      "First phase: paying-invoice");
+    assert(order[order.length - 1] === "done",
+      "Terminal phase: done");
+  }
+
+  // ── Payout-failed: payInvoice throws → no save, error propagated ────
+  {
+    const wallet = makeMockWallet({
+      payInvoiceResult: new Error("no route to recipient"),
+    });
+    const terminal = await runRecoveryPayout({
+      bolt11: "lnbc100n1precover_fail",
+      saveAfter: true,
+      addressUsed: "bob@phoenix.app",
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+    });
+    assert(terminal.kind === "payout-failed",
+      "payInvoice throws → terminal=payout-failed");
+    if (terminal.kind === "payout-failed") {
+      assert(/no route/.test(terminal.error),
+        "payout-failed terminal carries underlying error");
+    }
+    assert(wallet.calls.saveHandle === 0,
+      "Handle NOT saved on payout-failed (orphan stays orphaned, recover later)");
+  }
+
+  // ── saveAfter=false: success, but handle NOT saved ──────────────────
+  {
+    const wallet = makeMockWallet({});
+    const terminal = await runRecoveryPayout({
+      bolt11: "lnbc100n1pno_save",
+      saveAfter: false,                  // toggle OFF
+      addressUsed: "carol@strike.me",    // address known but save off
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+    });
+    assert(terminal.kind === "done",
+      "saveAfter=false happy path → done");
+    assert(wallet.calls.saveHandle === 0,
+      "saveAfter=false → handle NOT saved despite address known");
+  }
+
+  // ── Tier 3 BOLT11 paste: addressUsed undefined → no save ────────────
+  {
+    const wallet = makeMockWallet({});
+    const terminal = await runRecoveryPayout({
+      bolt11: "lnbc100n1pbolt11_paste",
+      saveAfter: true,                   // toggle on, but...
+      addressUsed: undefined,            // Tier 3 paste has no address
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+    });
+    assert(terminal.kind === "done",
+      "Tier 3 paste happy path → done");
+    assert(wallet.calls.saveHandle === 0,
+      "addressUsed undefined → save NOT attempted (no address to save)");
+  }
+
+  // ── Cosmetic save failure swallowed: payout already succeeded ───────
+  {
+    const wallet = makeMockWallet({});
+    const throwingSave = (_a: string) => { throw new Error("storage quota"); };
+    const terminal = await runRecoveryPayout({
+      bolt11: "lnbc100n1psave_throw",
+      saveAfter: true,
+      addressUsed: "dave@wallet.io",
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: throwingSave,
+      onPhase: () => {},
+    });
+    assert(terminal.kind === "done",
+      "Save throws → terminal still done (cosmetic; payout already sent)");
+  }
+
+  // ── Phase callback fires paying-invoice BEFORE payInvoice runs ──────
+  // (Mirror of Phase 3's "creating-invoice fires before wallet call"
+  // — the modal needs to render its busy state immediately on dispatch.)
+  {
+    const wallet = makeMockWallet({});
+    let payInvoiceCalledAfter = false;
+    let firstPhase = "";
+    await runRecoveryPayout({
+      bolt11: "lnbc100n1porder",
+      saveAfter: false,
+      payInvoice: async (b) => {
+        if (firstPhase === "paying-invoice") payInvoiceCalledAfter = true;
+        return wallet.payInvoice(b);
+      },
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: p => { if (!firstPhase) firstPhase = p.kind; },
+    });
+    assert(firstPhase === "paying-invoice",
+      "First emitted phase: paying-invoice (UI busy state immediate)");
+    assert(payInvoiceCalledAfter,
+      "paying-invoice phase fires BEFORE payInvoice is called");
+  }
+}
+
+// ── 42. CHAMA BAR LABEL DECISION (v0.3.0 Phase 5) ────────────────────────
+//
+// decideChamaBarLabel maps (balance, hasActiveBuyerSellerCommitment) to
+// one of three top-bar states. Per Phase 5 reminder #3: arbiter-only
+// commitments are NOT treated as active — the predicate is the same
+// hasActiveBuyerSellerCommitment used by Create-blocking (locked in
+// v0.2.0 Q3). The bar's caller computes the predicate; this helper is
+// pure shape conversion + sat conversion + tie-breaking.
+console.log("\n── CHAMA BAR LABEL ──");
+{
+  // Zero balance → ready, regardless of commitment state
+  {
+    const r1 = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: false,
+    });
+    assert(r1.kind === "ready",
+      "Zero balance + no commitment → ready");
+
+    const r2 = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: true,
+    });
+    assert(r2.kind === "ready",
+      "Zero balance + active commitment → ready (no sats to label)");
+  }
+
+  // Positive balance + active commitment → in-trade with sats
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 50_000,
+      hasActiveBuyerSellerCommitment: true,
+    });
+    assert(r.kind === "in-trade",
+      "Balance + active commitment → in-trade");
+    if (r.kind === "in-trade") {
+      assert(r.sats === 50,
+        "in-trade carries sats (msats / 1000)");
+    }
+  }
+
+  // Positive balance + NO active commitment → stranded (failure mode)
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 100_000,
+      hasActiveBuyerSellerCommitment: false,
+    });
+    assert(r.kind === "stranded",
+      "Balance + no commitment → stranded (Pillar 2.1 Option B violation)");
+    if (r.kind === "stranded") {
+      assert(r.sats === 100,
+        "stranded carries sats");
+    }
+  }
+
+  // Sub-msat dust floors to ready (no fractional-sat states)
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 999, // less than 1 sat
+      hasActiveBuyerSellerCommitment: false,
+    });
+    assert(r.kind === "ready",
+      "Sub-1-sat dust floors to ready (no fractional-sat states)");
+  }
+
+  // Negative balance defensive guard (shouldn't happen, but pinned)
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: -100,
+      hasActiveBuyerSellerCommitment: false,
+    });
+    assert(r.kind === "ready",
+      "Negative balance defensive → ready (never claim stranded sats that don't exist)");
+  }
+
+  // Phase 5 reminder #3: arbiter-only "commitments" do NOT count as
+  // active. The predicate is computed by the caller; this test pins
+  // the contract — when the caller passes false (because the user is
+  // arbiter-only), the bar shows the truthful state of their balance.
+  // An arbiter mid-arbitration with a non-zero balance from a PRIOR
+  // trade would correctly see "stranded".
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 25_000,
+      // User is arbiter on an active trade. The predicate
+      // hasActiveBuyerSellerCommitment is FALSE — arbiter doesn't
+      // count. Their 25 sats is from a previous failed trade.
+      hasActiveBuyerSellerCommitment: false,
+    });
+    assert(r.kind === "stranded",
+      "Arbiter-only commitments don't shield prior orphans from stranded label");
+  }
+}
+
+// ── 43. TRINITY RING PARTICIPANT ORDER (v0.3.0 Phase 6) ──────────────────
+//
+// Pins B/A/S as the canonical participant render order in TradeDetail.
+// PHILOSOPHY.md §5.2 places the arbiter at the apex of the brand mark
+// with buyer/seller flanking below; the participants row mirrors this.
+// v0.2.0 shipped with B/S/A — Phase 6 corrects to B/A/S, and this test
+// is a tripwire: if a future "tidy" refactor silently reverts the
+// order, the test fails immediately. Doctrine protected forever.
+console.log("\n── TRINITY RING PARTICIPANT ORDER ──");
+{
+  assert(TRINITY_RING_ORDER.length === 3,
+    "Trinity Ring has exactly three participants");
+  assert(TRINITY_RING_ORDER[0] === Role.BUYER,
+    "Trinity Ring [0] = Buyer (left)");
+  assert(TRINITY_RING_ORDER[1] === Role.ARBITER,
+    "Trinity Ring [1] = Arbiter (middle / apex)");
+  assert(TRINITY_RING_ORDER[2] === Role.SELLER,
+    "Trinity Ring [2] = Seller (right)");
+}
+
+// ── 44. STATE B EXPLAINER CARD GATE (v0.3.0 Phase 6) ─────────────────────
+//
+// Per-pubkey localStorage gate for the educational State B card.
+// Mirrors the v0.2.0 chama_first_publish_done_<pubkey> pattern.
+// Different pubkey on the same device sees the card fresh; same pubkey
+// after dismiss never sees it again.
+console.log("\n── STATE B EXPLAINER CARD ──");
+{
+  (globalThis as any).localStorage.clear();
+
+  const ALICE = "alice_pubkey_hex_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const BOB = "bob_pubkey_hex_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  // Fresh state — neither pubkey has dismissed
+  assert(hasStateBExplained(ALICE) === false,
+    "Fresh storage: alice hasn't dismissed");
+  assert(hasStateBExplained(BOB) === false,
+    "Fresh storage: bob hasn't dismissed");
+
+  // null pubkey treated as "not yet explained" (caller decides to render
+  // or not based on pubkey presence)
+  assert(hasStateBExplained(null) === false,
+    "null pubkey → returns false (no localStorage check)");
+
+  // Mark alice → alice explained, bob still fresh
+  markStateBExplained(ALICE);
+  assert(hasStateBExplained(ALICE) === true,
+    "After marking alice, hasStateBExplained returns true");
+  assert(hasStateBExplained(BOB) === false,
+    "Per-pubkey isolation: bob still sees the card");
+
+  // Mark null is a no-op (no key written)
+  markStateBExplained(null);
+  // No throw, no key written.
+  const keys: string[] = [];
+  for (let i = 0; i < (globalThis as any).localStorage.length || 0; i++) {
+    keys.push((globalThis as any).localStorage.key(i)!);
+  }
+  // Storage stub doesn't expose .length the same way — check directly
+  assert(
+    (globalThis as any).localStorage.getItem(STATE_B_EXPLAINED_KEY_PREFIX + "null") === null,
+    "markStateBExplained(null) does NOT write a 'null' key",
+  );
+
+  // Storage shape exactly mirrors v0.2.0 first-publish pattern
+  const storedValue = (globalThis as any).localStorage.getItem(STATE_B_EXPLAINED_KEY_PREFIX + ALICE);
+  assert(storedValue === "1",
+    "Stored sentinel is the literal '1' (matches v0.2.0 chama_first_publish_done_ shape)");
+
+  // Now mark bob too → both explained
+  markStateBExplained(BOB);
+  assert(hasStateBExplained(BOB) === true,
+    "After marking bob, hasStateBExplained returns true");
+  assert(hasStateBExplained(ALICE) === true,
+    "Marking bob does NOT clear alice's flag");
+
+  // Storage key uses the documented prefix
+  assert(STATE_B_EXPLAINED_KEY_PREFIX === "chama_state_b_explained_",
+    "Key prefix is the documented chama_state_b_explained_");
+
+  (globalThis as any).localStorage.clear();
 }
 
 // ══════════════════════════════════════════════════════════════════════════

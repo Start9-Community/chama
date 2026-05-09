@@ -14,62 +14,16 @@ item is cheap; removing one without addressing it requires a note in
 ## v0.2.1 — polish + edge cases
 
 Surfaced from v0.1.88 + v0.2.0 smoke testing. Targeted as the
-fast-follower release after v0.2.0 stabilizes — though most of these
-may fold naturally into v0.3.0 since v0.3.0 rewrites the surfaces
-they touch.
-
-- [ ] **Recovery banner withdraw-failed UX (must-fix).** First-attempt
-      Lightning withdraw on Fedi failed with generic "Payment failed"
-      toast and no recovery path. Cause unknown without log
-      inspection — likely federation-side mint-issuance lag,
-      transient Lightning route failure, or OPFS sync race. Fix:
-      catch typed failure modes (`Hash mismatch`, `Not the winner`,
-      `Network timeout`, `Federation unreachable`, `Spend rejected`)
-      and route to specific copy. For transient categories, surface
-      "Try again" inline with 2-second debounce. For terminal
-      categories, suggest next step ("Wait 30s and retry — federation
-      may still be settling"). Per Pillar 2.7, recovery surfaces
-      should never dead-end. Surfaced v0.2.0 smoke.
-
-- [ ] **State B detail screen copy: Federation→Chama miss +
-      verbosity.** New copy shipped in v0.2.0 still uses "federation"
-      — PR A's sweep was scoped before this copy existed. Also reads
-      too educational for normies. Tighten:
-      - Subtitle: "Running on BLF · switched in for this trade"
-      - Callout (one sentence, dismissible): "Your Chama switched
-        automatically — no funds at risk."
-      - CTA unchanged: "Fund trade · X currency"
-      - Educational essay moves to one-time info card per pubkey
-        (same pattern as first-publish honesty card). Surface once,
-        dismiss forever.
-      Surfaced v0.2.0 smoke.
-
-- [ ] **Hard arbiter warning copy tighten.** Current text reads
-      slightly clinical. Tighter version:
-      > **A trade you're arbiting needs your vote.**
-      > {npub-A} and {npub-B} disagreed on their trade.
-      > Splitting your attention now could cost someone their sats.
-      > Resolve theirs first.
-      Surfaced v0.2.0 smoke.
-
-- [ ] **Participant order on TradeDetail: B / A / S (Trinity Ring
-      mirror).** Currently ordered B/S/A; should be B/A/S to mirror
-      the Trinity Ring brand mark where arbiter sits structurally
-      central (apex / 12 o'clock) and buyer/seller flank. Reinforces
-      brand consistency every time the trade detail renders. Pillar
-      5.2 brand-alignment fix. Surfaced v0.2.0 smoke.
+fast-follower release after v0.2.0 stabilizes. Most of v0.2.1's
+original list folded into v0.3.0 because v0.3.0 rewrote the surfaces
+those items touched (recovery banner, destroy modal, State B copy,
+Trinity Ring order, arbiter warning copy). What remains is genuinely
+v0.2.1 polish that v0.3.0 didn't subsume.
 
 - [ ] **Arbiter vote button role colors verified live.** Doctrine
       shipped in v0.2.0 — purple "Side with buyer" (#BF5AF2) and
       orange "Side with seller" (#F7931A). Confirm both render
       correctly in production trade detail. Surfaced v0.1.88 smoke.
-
-- [ ] **DestroyEcashConfirmModal "Withdraw via Lightning" path
-      verification.** Three-button flow shipped in v0.2.0; verify
-      the post-withdraw auto-switch fires correctly when balance
-      reaches zero. Edge case: user cancels modal mid-withdraw —
-      pending switch state should drop, not fire later. Surfaced
-      v0.1.88 smoke.
 
 - [ ] **Soften v0.1.74 seed-safety error red-on-refresh.** Fires red
       every refresh when Nostr relay momentarily returns zero events
@@ -96,73 +50,18 @@ they touch.
 
 ---
 
-## v0.3.0 — Atomic Lifecycle
+## v0.3.x — observability (no scheduled release)
 
-Operationalize Pillar 2.1 (Option B) — the QR-IN → QR-OUT principle.
-v0.2.0 still ships FundWalletModal with arbitrary funding, which
-violates the BOLT11-IN-at-fund → ecash-only-during-LOCK→CLAIM →
-BOLT11-OUT-at-claim trade lifecycle. Pure Option B never shows a
-balance not currently committed to a specific trade.
+Items filed as "watch for it in production, act if reality says so."
+Not actionable on a release timeline; surfaced from v0.3.0 development
+or smoke testing where the right answer is "let production tell us."
 
-- [ ] **Listing-tap → BOLT11 invoice for exact trade amount.** No
-      wallet preload step. Tap Fund → invoice generated for the trade
-      amount → user pays from external Lightning wallet → ecash mints
-      directly into the LOCK → trade enters LOCKED state. The invoice
-      *is* the funding moment.
-
-- [ ] **LNURL-first claim UX with hierarchy of affordances.**
-      Three-tier surface at claim time:
-      - **Primary (tap-saved-destination):** if user has a saved
-        Lightning Address or LNURL in their handles list, render as
-        one-tap row at the top. "Send to jetty@phoenix.app" with
-        affirmation that this is the easy path.
-      - **Secondary (LN address input):** field with placeholder
-        `you@yourwallet.app` and a "Save for next time" toggle
-        defaulting ON. Auto-saves on first claim. Second trade has
-        a saved destination already populated.
-      - **Tertiary (BOLT11 paste):** hidden behind "More options" or
-        "Advanced" disclosure. Available for power users, edge cases,
-        and BOLT11-only wallets. Doesn't compete for attention.
-      The "Save for next time" toggle is itself the educational moment
-      per Pillar 2.7 — user reads it, understands implicitly that
-      future trades will be faster. Settings is for *managing* handles
-      (rename, remove, mark default), not for *adding the first one*.
-      First add happens organically in the claim flow.
-
-- [ ] **Inverted same flow at QR-IN (fund time) for senders.** The
-      buyer's funding step also benefits from saved destinations on
-      the sender side — though the asymmetry is real (Lightning
-      Addresses receive, BOLT11 invoices the user pastes for funding
-      come from Chama itself). The hierarchy applies wherever the
-      user is providing a destination.
-
-- [ ] **Claim → BOLT11 OUT at claim time.** No claim-to-wallet step.
-      User pastes/scans BOLT11 invoice (or LN address) at claim time
-      → ecash reconstructs from shares → federation redeems →
-      Lightning routes to destination → OPFS drains. Single tap.
-
-- [ ] **FundWalletModal → Sandbox-only.** Move the modal out of the
-      normal-user surface and into Settings → Advanced → Sandbox.
-      Power users testing the app keep access; production users
-      never see arbitrary funding.
-
-- [ ] **Recovery banner = failure-mode surface only.** Pure Option B
-      means balance > 0 between trades is *always* a failure state
-      (interrupted trade, half-finished claim). Recovery banner
-      copy shifts from "you have unspent sats" to "your last trade
-      didn't finish — sweep these sats."
-
-- [ ] **Auto-sweep detection at QR-OUT.** If OPFS balance > trade
-      amount when winner reaches QR-OUT (i.e., orphans + dust from
-      previous failed trades), offer "Sweep everything ({total} sats)
-      instead?" — drains all orphans and the trade amount in one move.
-      Per PHILOSOPHY.md §State 6, this was already filed for v1.1; in
-      pure Option B it becomes the canonical claim flow.
-
-- [ ] **EcashProvider interface.** Abstract the bearer-cash backend
-      behind an interface so future Cashu support is non-invasive.
-      v1 ships only Fedimint; design the seam now to accommodate
-      additional providers without making it a v1 blocker.
+- [ ] **Fedimint LN gateway fee tuning.** v0.3.0 ships fundAndLock
+      with no mint-margin (exact amount + 90% threshold tolerance). If
+      production smoke testing or Nairobi data shows measured
+      shortfalls (federation receives less than invoice amount due to
+      gateway fee passthrough), add a configurable mint-margin. Filed
+      as observable, not actionable. Surfaced from v0.3.0 Phase 2.
 
 ---
 
@@ -307,13 +206,29 @@ content lives here.
       vote states. Brand-product alignment moment per PHILOSOPHY.md
       §5.1.
 
-- [ ] **Auto-sweep CTA at QR-OUT.** If pure Option B (v0.3.0) didn't
-      already make this canonical, finalize here.
+- [ ] **Auto-sweep CTA at QR-OUT.** If a winner reaches QR-OUT with
+      OPFS balance > trade amount (orphans + dust from previous failed
+      trades), offer "Sweep everything ({total} sats) instead?" Was
+      filed under v0.3.0 originally; deferred from v0.3.0 because real
+      orphan-accumulation frequency wasn't yet observable. Decide
+      after Nairobi smoke produces empirical orphan-accumulation data.
+
+- [ ] **EcashProvider interface.** Abstract the bearer-cash backend
+      behind an interface so future Cashu support is non-invasive.
+      Was filed under v0.3.0 originally; deferred because designing
+      the abstraction without a second concrete provider in hand
+      risks over-engineering. Revisit when Cashu becomes a concrete
+      need (v2's Cashu provider item depends on this interface
+      shipping). Surfaced from v0.3.0 scope-trim.
 
 - [ ] **NWC as IN/OUT adapter.** Power-user opt-in for Nostr Wallet
       Connect at fund and claim time, replacing the LN Address /
-      BOLT11 UX with a programmatic path. Follows the Phase 2 of the
-      pluggable Lightning interface laid out in the original brief.
+      BOLT11 UX with a programmatic path. v0.3.0's
+      AtomicFundingModal + DestinationPicker lay the structural
+      foundation: NWC adds a "use connected wallet" branch that
+      bypasses the BOLT11-paste tier on both sides. Follows the
+      Phase 2 of the pluggable Lightning interface laid out in the
+      original brief.
 
 ---
 

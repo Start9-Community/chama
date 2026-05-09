@@ -50,6 +50,28 @@ release a week later.
 - 489/489 tests. If any pre-existing test breaks during your work, stop
   and surface to Jetty. The protocol layer is sacred.
 
+## Important architectural clarification before scope
+
+**Lightning Addresses are receive-only by protocol.** A Lightning
+Address (e.g. `jetty@phoenix.app`) is a recipient identifier — anyone
+can use it to *send* money to that address, but the address itself
+does NOT grant spending authority on Jetty's wallet. This means:
+
+- **At funding time** (buyer pays Chama-generated BOLT11 to fund a
+  trade), the user is the *sender*. They must consciously pay the
+  BOLT11 from their external Lightning wallet. There is no "auto-fund
+  from saved Lightning Address" — that's not what Lightning Addresses
+  are. The user always confirms the payment in their own wallet UI.
+- **At claim time** (winner receives sats), the user is the *recipient*.
+  A saved Lightning Address tells Chama where to *send* the redeemed
+  sats. That's exactly what Lightning Addresses are for.
+
+The asymmetry is real and load-bearing for v0.3.0's UX. Auto-pay-from-
+saved-credentials is a v1.5 NWC feature (Nostr Wallet Connect grants
+spending authority with budgets); v0.3.0 ships the foundation that v1.5
+will layer on top of. Do NOT design surfaces in v0.3.0 that imply
+auto-fund-from-saved-address; that would mislead users.
+
 ## Scope — eight items, one PR
 
 This is one coherent release. All eight items ship together. No
@@ -78,8 +100,10 @@ Chama" balance.
    amount, plus a small mint-margin (~10 sats? to cover Fedimint
    issuance edge cases — needs verification with Fedimint internals).
 4. Modal renders: invoice QR + copyable BOLT11 text, exact amount
-   prominently displayed, expiration countdown (10 min), "Waiting for
-   payment..." pulse indicator.
+   prominently displayed, expiration countdown, "Waiting for payment..."
+   pulse indicator. The BOLT11 is the *centerpiece* of the modal — this
+   is the user's funding moment. Make it unambiguous: scan or paste in
+   your Lightning wallet to fund this trade.
 5. The same balance-watcher pattern from v0.1.52 detects payment landing.
    On detection: modal flips to a brief success state, then immediately
    chains into LOCK via `lockAndPublishAction`. State machine moves
@@ -106,7 +130,7 @@ Chama" balance.
   expected" + "Try LOCK now" + "Cancel" buttons. The cancel path
   returns the user to the listing detail; balance is now stranded
   and recovery banner will fire on next reload (which is the failure-
-  mode-only surface per item 7).
+  mode-only surface per item 5).
 - LOCK fails post-mint → toast surfaces error; existing recovery banner
   catches the orphan balance on next visit.
 
@@ -129,8 +153,13 @@ withdraw" two-step.**
 When a winner reaches the claim moment (status = APPROVED), they
 currently tap Claim, ecash redeems into their Chama balance, and they
 have to separately withdraw via FundWalletModal-Send-LN. v0.3.0
-collapses this: the user provides a destination at claim time, claim
-+ redeem + outbound Lightning payment happens in one flow.
+collapses this: the user provides a *receiving destination* at claim
+time, and claim + redeem + outbound Lightning payment happens in one
+flow.
+
+This is symmetric with item 1 but in the receive direction: at fund
+time the user pays an invoice from their wallet; at claim time the
+user receives sats *to* a destination they specify.
 
 **The destination input has three tiers:**
 
@@ -147,8 +176,9 @@ rows at the top of the claim modal:
 ```
 
 The "default" badge is on the most-recently-used handle. Tapping any
-row dispatches the claim flow with that destination. No further input
-required.
+row dispatches the claim flow with that destination. **Important:**
+this is the user *choosing* where to send the sats *to*. It's still a
+deliberate one-tap action; nothing happens automatically.
 
 **Tier 2 — Lightning Address input (secondary affordance, with
 auto-save).** Below the saved-destinations list (or as the primary
@@ -182,7 +212,8 @@ power users and BOLT11-only wallets:
 ```
 
 **LNURL resolution flow:**
-- User enters Lightning Address `jetty@phoenix.app`.
+- User enters Lightning Address `jetty@phoenix.app` (or taps a saved
+  Tier 1 row that contains one).
 - On Claim tap: resolve `https://phoenix.app/.well-known/lnurlp/jetty`
   → fetch LNURL-pay metadata → request invoice for the exact claim
   amount → receive BOLT11 → pass through to Lightning send.
@@ -212,35 +243,56 @@ power users and BOLT11-only wallets:
 
 ---
 
-### Item 3 — Inverted hierarchy at QR-IN (fund-time destinations)
+### Item 3 — DestinationPicker as canonical sender-side affordance (claim + sandbox sends only)
 
-The same three-tier hierarchy applies symmetrically at funding time
-when the user is providing destinations for fund-time flows. The
-asymmetry is real (Lightning Addresses are receive-only, BOLT11
-invoices the user pastes for funding come from Chama itself), but the
-affordance ordering principle holds:
+**The reusable component.** Items 2, 5, and 6 all need the same
+three-tier surface for "user provides a Lightning destination to
+*send* sats to." Build it once as `src/ui/components/DestinationPicker.tsx`.
 
-**At funding time, the user is on the receiving side** — they're
-receiving the BOLT11 invoice that Chama generated. Their job is to
-copy it / scan it / pay it from their external wallet. This isn't a
-destination-input surface; it's an invoice-display surface.
+**Where DestinationPicker is used:**
+- Claim flow (item 2): user receives trade winnings to a destination
+- Recovery banner withdraw (item 5): user sweeps stranded sats to a destination
+- Destroy modal withdraw (item 6): user recovers sats before federation switch
+- Sandbox-mode Send-LN (Settings → Advanced → Sandbox): power-user manual sends
 
-**However, when the user is acting as a sender** in non-trade contexts
-(Sandbox-mode FundWalletModal Send-LN, manual withdrawal flows
-post-v0.3.0), the same hierarchy applies. Bake it into a reusable
-component:
+**Where DestinationPicker is NOT used:**
 
-- New component: `src/ui/components/DestinationPicker.tsx` — renders
-  the three-tier surface (Tier 1 saved list, Tier 2 input + toggle,
-  Tier 3 advanced paste) and emits a resolved BOLT11 + a
-  `shouldSaveAfter: boolean` flag. Consumed by claim flow (item 2),
-  Sandbox Send-LN flow, and any future destination-input surface.
+- **AtomicFundingModal (item 1).** Fund-time is *receive-side* from
+  Chama's perspective — Chama generates the BOLT11 invoice, the user's
+  external wallet pays it. The user's destination doesn't enter the
+  picture; the trade's amount does. AtomicFundingModal is an *invoice-
+  display* surface, not a destination-input surface. Lightning
+  Addresses are receive-only by protocol; "auto-pay from saved address"
+  is not a thing the protocol allows. That capability requires NWC
+  (Nostr Wallet Connect), which is filed for v1.5 — at that point,
+  AtomicFundingModal will gain a "use connected wallet" branch that
+  bypasses the BOLT11 display entirely. v0.3.0 lays the structural
+  foundation; v1.5 layers velocity on top.
 
-This component becomes the canonical Chama affordance for "user
-provides a destination." Reusable, testable, single source of truth.
+**Component API:**
+
+```ts
+type DestinationPickerProps = {
+  amountSats: number;          // exact amount to send
+  savedHandles: SavedHandle[]; // user's saved LN destinations
+  onResolve: (bolt11: string, options: { saveAfter: boolean; addressUsed?: string }) => void;
+  onCancel: () => void;
+};
+```
+
+The component handles all three tiers internally, resolves the LNURL
+to a BOLT11, and emits via `onResolve`. The consumer (claim flow,
+recovery banner, etc.) handles the actual outbound payment.
+
+`saveAfter` is true if the user used Tier 2 with the toggle ON.
+`addressUsed` is the Lightning Address that should be saved (omitted
+if user used Tier 3 BOLT11 paste, since paste-mode addresses aren't
+auto-saved).
 
 **Tests:**
-- Covered transitively by item 2's test set; no separate test surface.
+Covered transitively by items 2, 5, 6. The component itself gets a
+small set of unit tests for the API contract — saved-list rendering,
+toggle default state, BOLT11 paste mode dispatch, error surfacing.
 
 ---
 
@@ -252,8 +304,7 @@ users testing the app, but production users never see it.
 
 **Paths that currently use FundWalletModal:**
 1. Top-bar Wallet button (existing) → REMOVED. The top-bar surface
-   becomes a status indicator only ("Active funds in escrow: N sats"
-   when in a trade, "Chama: ready" otherwise).
+   becomes a status indicator only (see "ChamaBar" component below).
 2. Recovery banner withdraw button (v0.2.0) → REPLACED by direct
    DestinationPicker flow (item 5 below).
 3. DestroyEcashConfirmModal "Withdraw via Lightning" (v0.2.0) →
@@ -262,7 +313,9 @@ users testing the app, but production users never see it.
    surface for testing federation switches, exercising mint flows,
    etc.
 
-**The Wallet/Chama top-bar component:**
+**The Wallet/Chama top-bar component (rename to `ChamaBar`):**
+- Renames `FedimintBar` → `ChamaBar` to match Federation→Chama language
+  sweep. Code-identifier change since you're touching the file anyway.
 - Renders federation status (existing).
 - When `balanceMsats > 0 && hasActiveBuyerSellerCommitment` → label
   reads "Active funds in escrow: N sats" with the existing accent pill
@@ -278,8 +331,8 @@ The top-bar is a *signal* surface, not an *action* surface. Actions
 live on the listing detail (Fund) and trade detail (Claim).
 
 **Tests:**
-- `Top-bar renders correct label for in-trade / stranded / ready states`
-- `Top-bar tap on stranded state opens recovery banner`
+- `ChamaBar renders correct label for in-trade / stranded / ready states`
+- `ChamaBar tap on stranded state opens recovery banner`
 
 ---
 
@@ -305,7 +358,7 @@ banner copy and the action hierarchy to match:
 > [Recover N sats →]
 
 **Action hierarchy on the banner:**
-- Primary CTA → opens the DestinationPicker (item 3 component) with
+- Primary CTA → opens DestinationPicker (item 3 component) with
   the stranded amount pre-filled.
 - After successful payout, the banner clears, balance is zero, Browse
   + Create are unblocked.
@@ -446,6 +499,13 @@ Tightened (v0.3.0):
 
 ## Items intentionally out of scope (not v0.3.0)
 
+- **Auto-fund-from-saved-credentials.** This is a v1.5 NWC feature and
+  fundamentally requires a different protocol than Lightning Addresses
+  provide. Lightning Addresses are receive-only; NWC grants spending
+  authority with budgets. v0.3.0 ships the foundation; v1.5 layers NWC
+  on top of `fundAndLock` to add a "use connected wallet" auto-pay
+  branch. Do not design v0.3.0 surfaces that imply this capability
+  exists today.
 - **EcashProvider interface.** Filed in BACKLOG.md under v0.3.0 but
   deferred — designing the abstraction without a second provider in
   hand risks over-engineering. v1.5+ work, when Cashu becomes a
@@ -471,19 +531,29 @@ Tightened (v0.3.0):
 **The DestinationPicker (item 3) is the load-bearing piece.** It's the
 single component that operationalizes Pillar 2.7's claim-time UX, gets
 reused by recovery banner (item 5) and destroy modal (item 6), and
-becomes the canonical "user provides a destination" affordance going
-forward. Build it well, test it thoroughly, document its API in the
-component file. Future surfaces (NWC adapter in v1.5, sovereign LN
-address withdrawal in v0.3.1) will plug into the same contract.
+becomes the canonical "user provides a destination to receive sats"
+affordance going forward. Build it well, test it thoroughly, document
+its API in the component file. Future surfaces (NWC adapter in v1.5,
+sovereign LN address withdrawal in v0.3.1) will plug into the same
+contract.
 
 **The fundAndLock action (item 1) is the other load-bearing piece.**
 It's the new atomic flow that operationalizes Pillar 2.1 Option B in
 the UI. Same care: well-tested, well-documented, phase callbacks
-exposed cleanly so the modal can render granular states.
+exposed cleanly so the modal can render granular states. Designed so
+v1.5 NWC can add a pre-BOLT11 auto-pay branch without restructuring
+the action.
 
 **FundWalletModal lives.** Don't delete it. It still serves Sandbox
 mode, where it's the right tool for power-user testing. Just remove
 all production code paths that reach it.
+
+**Receive-side vs. send-side asymmetry is intentional.** Item 1 is
+receive-side from Chama's perspective (Chama issues an invoice; user's
+external wallet pays). Items 2, 5, 6 are send-side from Chama's
+perspective (Chama dispatches a payment; user picks the destination).
+The DestinationPicker lives only on the send side. The
+AtomicFundingModal lives only on the receive side. Don't mix them.
 
 ## Patcher discipline reminders
 
@@ -517,14 +587,14 @@ Estimated v0.3.0 surface adds:
 
 After v0.3.0 ships:
 
-- A user taps a Bill Pay listing for 50 sats, scans the BOLT11 invoice
-  with Phoenix, pays it, watches the trade lock in real time. No
-  intermediate "fund your wallet" step.
+- A user taps a Bill Pay listing for 50 sats. AtomicFundingModal
+  appears with the BOLT11 prominently displayed. They open Phoenix
+  on their phone, scan the QR, confirm in Phoenix. Sats land in
+  escrow within seconds. LOCK fires. Trade enters LOCKED.
 - The arbiter votes. The buyer wins.
-- The buyer types `jetty@phoenix.app` into the claim input, taps
-  "Save for next time" (already on by default), taps Claim. Sats land
-  in their Phoenix wallet. Their next claim shows `jetty@phoenix.app`
-  as a tappable saved row.
+- The buyer taps Claim. DestinationPicker appears. They tap their
+  saved `jetty@phoenix.app` row (or type it in with Save toggled on
+  if it's their first claim). Sats land in their Phoenix wallet.
 - At no point did the user see a balance, a wallet, or a
   fund-then-trade two-step. Pure QR-IN → escrow → QR-OUT.
 - The Chama header shows `Chama: ready`. They go back to Browse and
@@ -567,13 +637,10 @@ list usable?
   Suggested: no cap, just sort by most-recent-used. If the list ever
   grows unwieldy, that's a v0.3.x polish item.
 
-**Q4 — Top-bar component name.** Currently `FedimintBar`. Should this
-rename in v0.3.0 to `ChamaBar` to match the broader Federation→Chama
-language sweep? Code-identifier-only change; no UI implication.
+**Q4 — `FedimintBar` → `ChamaBar` rename.** Item 4 proposes the rename
+since you're touching the file anyway. Confirm.
 
-  Suggested: yes. Rename in v0.3.0 since you're touching the file
-  anyway for item 4. Keeps the codebase honest with the user-facing
-  language.
+  Suggested: yes.
 
 Confirm these four answers and I'll come back with a phased plan
 (same shape as v0.2.0 PR B). Standing by.

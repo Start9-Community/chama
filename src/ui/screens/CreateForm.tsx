@@ -378,15 +378,18 @@ function ArbiterWarningCard({
             }}>
               A trade you're arbiting needs your vote.
             </div>
+            {/* v0.3.0 Phase 6 (item 8): tightened from 4 sentences to
+                3, dropping the "Your decision determines where their
+                sats go" filler and shortening "splitting attention here
+                can cost someone real money" → "could cost someone their
+                sats". Same urgency, less verbiage. */}
             <div style={{
               fontSize: 13, color: T.text, fontFamily: T.sans,
               lineHeight: 1.55, marginBottom: 20,
             }}>
               <strong>{counterpartyA}</strong> and <strong>{counterpartyB}</strong>{" "}
-              disagreed on the outcome of their trade. Your decision determines
-              where their sats go. Strongly recommend resolving their trade
-              before starting your own — splitting attention here can cost
-              someone real money.
+              disagreed on their trade. Splitting your attention now could
+              cost someone their sats. Resolve theirs first.
             </div>
           </>
         ) : (

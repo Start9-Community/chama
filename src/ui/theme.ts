@@ -7,6 +7,7 @@
 // and reserved for role identification (no decorative use).
 
 import type { CSSProperties } from "react";
+import { Role } from "../escrow-engine/types.js";
 
 export const T = {
   bg: "#0a0a0f", surface: "#111118", card: "#16161f",
@@ -46,6 +47,22 @@ export const STATUS = {
 //   Arbiter = Signal Teal    #5AC8FA
 export const ROLE_COLOR = { buyer: "#BF5AF2", seller: "#F7931A", arbiter: "#5AC8FA" };
 export const ROLE_ICON  = { buyer: "B", seller: "S", arbiter: "A" };
+
+// v0.3.0 Phase 6 (item 8): Trinity Ring participant render order.
+// PHILOSOPHY.md §5.2 brand mark places the arbiter at the apex with
+// buyer/seller flanking below. TradeDetail's participant row mirrors
+// this — arbiter is the structural center, not a third-party
+// afterthought. Order: Buyer (left) · Arbiter (middle) · Seller (right).
+//
+// This constant is the source of truth — TradeDetail.tsx imports it
+// for the .map render. The §43 test pins the order directly so a
+// future refactor that "tidies" rendering can't silently re-sort
+// participants and break brand coherence.
+export const TRINITY_RING_ORDER: readonly Role[] = [
+  Role.BUYER,
+  Role.ARBITER,
+  Role.SELLER,
+];
 
 export const CAT_ICON = { "p2p-trade": "⚡", "bill-pay": "🧾", marketplace: "🏪", lending: "🤝" } as Record<string, string>;
 export const CAT_LABEL: Record<string, string> = {

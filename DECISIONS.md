@@ -504,3 +504,141 @@ cross-vertical generalization emerged in conversation with Claude
 on 2026-05-06.
 
 ---
+
+## 2026-05-09 — DestinationPicker as canonical sender-side affordance
+
+**Context:** v0.3.0 needed a single "user provides a destination to
+receive sats" surface that three different consumer surfaces could
+reuse: the claim flow (Phase 3), the recovery banner failure-mode
+drain (Phase 4), and the destroy-modal recover-then-switch path
+(Phase 4). Building three near-identical pickers risked drift over
+time — the next maintainer adds a feature to one, forgets the others,
+and the three surfaces start diverging.
+
+**Options considered:**
+- (a) **Inline picker UI per surface** — each consumer renders its
+      own picker with its own LNURL resolution + saved-handle list +
+      BOLT11 paste affordance. Maximum flexibility per consumer; high
+      duplication; almost certain to drift.
+- (b) **DestinationPicker shell as canonical surface** — one React
+      component that consumers compose via
+      `<DestinationPicker onResolve={...} />`. The picker handles its
+      own LNURL resolution + tier rendering + error surfacing
+      internally; consumers receive a BOLT11 plus dispatch metadata
+      `{ saveAfter, addressUsed }` and decide what to do next.
+- (c) **Lower-level helpers, no shell** — export
+      `resolveLightningAddressToInvoice` + `decideDispatch` and let
+      consumers wire their own UI. Same drift risk as (a) plus the
+      added burden of every consumer reimplementing the visual
+      hierarchy.
+
+**Decision:** Option (b). The shell is the canonical surface;
+consumers import and compose, never reach past it into picker
+internals.
+
+**Rationale:** The three-tier visual hierarchy (saved rows / typed
+address with save toggle / BOLT11 paste under disclosure) is the load-
+bearing UX commitment from Pillar 2.7 — saved-first surfaces faster
+trades organically, and the "Save for next time" toggle IS the
+educational moment. Centralizing this in one component makes the
+hierarchy a single source of truth across surfaces. Phase 1 split the
+picker into a shell (`DestinationPicker.tsx`) plus pure decision
+logic (`destination-picker-logic.ts`); the logic is unit-tested
+exhaustively, and the shell is composed across consumers without
+exposing those internals.
+
+**Implications:**
+- Three consumer surfaces in v0.3.0 — `ClaimPayoutModal` (Phase 3),
+  `RecoveryPayoutModal` (Phase 4, used by both the recovery banner
+  and destroy-modal paths) — all mount `<DestinationPicker />`
+  directly. None of them imports from `destination-picker-logic.ts`.
+- Future surfaces (sovereign LN address withdrawal in v0.3.1, NWC
+  adapter in v1.5, any future "send sats out of Chama" flow) plug into
+  the same `onResolve` contract. NWC in v1.5 will likely add a fourth
+  tier ("use connected wallet") inside the shell, transparent to
+  existing consumers.
+- The internal seam (picker logic vs shell) is a stable architectural
+  boundary, not an implementation detail. Tests exist at the logic
+  layer; visual contract is reviewed at the shell layer.
+- Code-review heuristic: any future PR that imports from
+  `destination-picker-logic.ts` outside the shell or its own tests is
+  drifting from this decision. Catch in review, not after merge.
+
+**Status:** Active. Operationalized in v0.3.0 Phases 1 (foundation),
+3 (claim consumer), and 4 (recovery + destroy consumers). Pinned by
+the Phase 1 §36 picker-logic test surface and the Phase 3+4 reminder
+discipline that consumer surfaces compose the shell, not the
+internals.
+
+---
+
+## 2026-05-09 — AtomicFundingModal as receive-side BOLT11 surface
+
+**Context:** v0.3.0 needed a sender-side / receiver-side asymmetry to
+be intentional, not accidental. DestinationPicker (the previous
+decision) is unambiguously send-side: the user picks a destination to
+receive sats. The fund-time path looks superficially similar — the
+user is providing a wallet to interact with — but it's actually
+receive-side from Chama's perspective: Chama issues a BOLT11 invoice,
+the user's external Lightning wallet pays it. Lightning Addresses are
+receive-only by protocol; "auto-pay from saved Lightning Address" is
+not a thing the protocol allows.
+
+**Options considered:**
+- (a) **Symmetric DestinationPicker on both sides** — show saved
+      Lightning Addresses + "Save for next time" toggle at fund time
+      too. Visually consistent with the claim flow but architecturally
+      misleading: a Lightning Address has no spending authority, so
+      saving one at fund time would imply a capability the protocol
+      doesn't grant.
+- (b) **AtomicFundingModal as a separate receive-side surface** —
+      Chama-issued BOLT11 invoice is the centerpiece; user pays from
+      any external Lightning wallet via QR scan or paste. No saved-
+      destinations at fund time, because the user IS the sender. The
+      modal handles invoice generation, 15-minute countdown, payment
+      detection, mint-confirming watchdog, and chained LOCK in one
+      atomic flow.
+- (c) **Hide the fund-time UX entirely** — auto-detect inbound
+      payment via OPFS subscription and skip the modal. Sounds elegant
+      but breaks for users who need to actually scan a QR to pay; no
+      visual anchor for the "this is your funding moment" beat.
+
+**Decision:** Option (b). AtomicFundingModal is a receive-side
+surface; DestinationPicker is a send-side surface. The two never mix.
+
+**Rationale:** The protocol asymmetry between Lightning Addresses
+(receive-only) and Lightning sending (BOLT11 invoices, NWC for
+programmatic spending) is real and load-bearing. v0.3.0 ships the
+foundation that v1.5 NWC will layer on top of — at that point,
+AtomicFundingModal gains a "use connected wallet" branch that bypasses
+the BOLT11 display entirely (NWC grants spending authority with
+budgets, which Lightning Addresses fundamentally cannot). Designing
+the surfaces with the asymmetry visible NOW prevents v1.5 NWC from
+needing to restructure either modal.
+
+**Implications:**
+- DestinationPicker is mounted only by send-side consumers (claim,
+  recovery, destroy). Pinned by the Phase 1 reminder that consumer
+  surfaces compose the shell directly.
+- AtomicFundingModal is mounted only by the receive-side path
+  (listing-tap → Fund). It never composes DestinationPicker; the
+  surface architecture is intentionally not symmetric.
+- v1.5 NWC's "use connected wallet" feature will:
+  - Add a fourth tier inside DestinationPicker on the send side (NWC
+    grants spending authority, so the picker can now offer one-tap
+    auto-send instead of address-resolution).
+  - Add a pre-BOLT11 auto-pay branch inside AtomicFundingModal on the
+    receive side (the connected wallet pays the invoice
+    programmatically; the user never sees the BOLT11).
+  Both extensions plug in without restructuring either component.
+- Documentation surface: this asymmetry is mentioned in the brief and
+  in `DestinationPicker.tsx` / `AtomicFundingModal.tsx` file
+  headers. Future maintainers reading either modal in isolation can
+  see why the surfaces look different even though the user-facing
+  task ("connect a wallet to a trade") sounds similar.
+
+**Status:** Active. Operationalized in v0.3.0 Phase 2 (AtomicFunding-
+Modal + `runFundAndLock`). v1.5 NWC item in BACKLOG.md references this
+foundation explicitly.
+
+---

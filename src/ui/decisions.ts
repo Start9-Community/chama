@@ -379,6 +379,37 @@ export function hasActiveBuyerSellerCommitment(inputs: {
   return false;
 }
 
+// ── ChamaBar label decision (v0.3.0 Phase 5) ─────────────────────────────
+//
+// Three states the top-bar's right-side surface can be in:
+//   - in-trade : balance > 0 AND user is buyer/seller in an active trade
+//                ("Active funds in escrow: N sats" — accent-pill styling)
+//   - stranded : balance > 0 AND no active commitment (failure-mode;
+//                tappable → opens RecoveryPayoutModal directly)
+//   - ready    : balance == 0 (neutral, "Chama: ready")
+//
+// Per Phase 5 reminder #3: arbiter-only commitments do NOT count as
+// active. Arbiters mid-arbitration see "Chama: ready" because the
+// balance, if any, isn't theirs to commit. The predicate
+// hasActiveBuyerSellerCommitment is the same one Q3 of v0.2.0 locked
+// in for Create-blocking — Phase 5 reuses it for top-bar labelling.
+
+export type ChamaBarLabel =
+  | { kind: "ready" }
+  | { kind: "in-trade"; sats: number }
+  | { kind: "stranded"; sats: number };
+
+export function decideChamaBarLabel(opts: {
+  balanceMsats: number;
+  hasActiveBuyerSellerCommitment: boolean;
+}): ChamaBarLabel {
+  // Floor to whole sats — the bar always speaks in sats, never msats.
+  const sats = Math.floor(opts.balanceMsats / 1000);
+  if (sats <= 0) return { kind: "ready" };
+  if (opts.hasActiveBuyerSellerCommitment) return { kind: "in-trade", sats };
+  return { kind: "stranded", sats };
+}
+
 /** The most-recent active buyer/seller trade. Used by the shell to
  *  drive the "go to active trade" pill's tap target. Returns null if
  *  no active trade exists. */

@@ -1,0 +1,171 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Chama — ChamaBar (v0.3.0 Phase 5; renamed from FedimintBar)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// Top-bar status surface. Renames the v0.2.0 FedimintBar to match the
+// Federation→Chama language sweep, and drops the legacy onFund prop —
+// the listing-tap → AtomicFundingModal flow (Phase 2) is now the only
+// production funding path. FundWalletModal lives behind Settings →
+// Advanced → Sandbox for power-user testing.
+//
+// State-aware right-side label per the Phase 5 brief:
+//   - in-trade  : "Active funds in escrow: N sats" (accent pill)
+//   - stranded  : "N sats stranded · Recover →" (amber pill, tappable)
+//   - ready     : "Chama: ready" (muted neutral)
+//
+// The label decision lives in decisions.decideChamaBarLabel as a pure
+// helper — testable without React. The "stranded" tap opens the
+// RecoveryPayoutModal directly via onTapStranded; same flow as the
+// banner's primary CTA, just reachable from anywhere in the app.
+
+import { useState, useEffect } from "react";
+import { type FedimintState } from "../../hooks/useEscrow.js";
+import {
+  type FederationPreset,
+  CURATED_PRESETS,
+  fetchObserverFederations,
+  mergePresets,
+} from "../../fedimint/federation-config.js";
+import type { ChamaBarLabel } from "../decisions.js";
+import { T } from "../theme.js";
+
+export function ChamaBar({
+  fedimint,
+  chamaLabel,
+  onTapStranded,
+  onInit,
+  showReconnect,
+}: {
+  fedimint: FedimintState;
+  /** Pre-computed by the shell via decideChamaBarLabel. The bar is a
+   *  pure renderer — it does not introspect escrow state directly. */
+  chamaLabel: ChamaBarLabel;
+  /** Fired when the user taps the stranded label. The shell opens
+   *  RecoveryPayoutModal — same flow as the recovery banner's primary
+   *  CTA. No-op for the in-trade and ready labels (those aren't
+   *  tappable). */
+  onTapStranded: () => void;
+  onInit: () => void;
+  /** Whether to surface the Reconnect CTA when not joined. True for
+   *  returning users; false for first-time users (community pills are
+   *  the join surface). */
+  showReconnect: boolean;
+}) {
+  const [pillPresets, setPillPresets] = useState<FederationPreset[]>(CURATED_PRESETS);
+  useEffect(() => {
+    let cancelled = false;
+    const ctrl = new AbortController();
+    fetchObserverFederations(ctrl.signal).then((observerList) => {
+      if (cancelled || observerList.length === 0) return;
+      setPillPresets(mergePresets(CURATED_PRESETS, observerList));
+    });
+    return () => { cancelled = true; ctrl.abort(); };
+  }, []);
+
+  let displayName: string;
+  if (!fedimint.joined) {
+    displayName = fedimint.busy ? "Connecting Chama..." : "No Chama";
+  } else {
+    const matched = fedimint.federationId
+      ? pillPresets.find((p) => p.federationId === fedimint.federationId)
+      : null;
+    if (matched) {
+      displayName = matched.name;
+    } else if (fedimint.federationId) {
+      displayName = `Custom Chama (${fedimint.federationId.slice(0, 8)})`;
+    } else {
+      displayName = fedimint.federationName;
+    }
+  }
+
+  const healthFailed = fedimint.joined && fedimint.lastHealthOk === false;
+  const dotColor = healthFailed
+    ? T.amber
+    : fedimint.joined ? T.green : fedimint.busy ? T.amber : T.muted;
+  const dotGlow = !healthFailed && fedimint.joined ? `0 0 8px ${T.green}66` : "none";
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      padding: "12px 16px", background: T.surface,
+      borderBottom: `1px solid ${T.border}`, fontFamily: T.mono,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+        <div
+          title={healthFailed ? "Chama unreachable — receives will be refused" : undefined}
+          style={{
+            width: 8, height: 8, borderRadius: "50%",
+            background: dotColor,
+            boxShadow: dotGlow,
+            animation: fedimint.busy ? "pulse 1.2s infinite" : "none",
+            flexShrink: 0,
+          }}
+        />
+        <span style={{
+          fontSize: 10, color: T.muted,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {displayName}
+        </span>
+      </div>
+
+      {/* Right side — state-aware label or Reconnect when not joined. */}
+      {fedimint.joined ? (
+        <ChamaBarLabelPill label={chamaLabel} onTapStranded={onTapStranded} />
+      ) : !fedimint.busy && showReconnect && (
+        <button onClick={onInit} style={{
+          padding: "6px 16px", borderRadius: 20,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+          cursor: "pointer",
+        }}>
+          Reconnect
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ChamaBarLabelPill({
+  label, onTapStranded,
+}: {
+  label: ChamaBarLabel;
+  onTapStranded: () => void;
+}) {
+  if (label.kind === "ready") {
+    return (
+      <span style={{
+        fontSize: 10, color: T.muted, fontFamily: T.mono,
+        letterSpacing: 0.3,
+      }}>
+        Chama: ready
+      </span>
+    );
+  }
+  if (label.kind === "in-trade") {
+    return (
+      <span style={{
+        padding: "5px 12px", borderRadius: 20,
+        background: T.accentDim, border: `1px solid ${T.accent}66`,
+        color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+        letterSpacing: 0.3, whiteSpace: "nowrap",
+      }}>
+        ⚡ {label.sats.toLocaleString()} sats in escrow
+      </span>
+    );
+  }
+  // stranded — tappable, amber, points at recovery
+  return (
+    <button
+      onClick={onTapStranded}
+      style={{
+        padding: "5px 12px", borderRadius: 20,
+        background: T.amberDim, border: `1px solid ${T.amber}66`,
+        color: T.amber, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+        letterSpacing: 0.3, whiteSpace: "nowrap", cursor: "pointer",
+      }}
+    >
+      ⚠ {label.sats.toLocaleString()} sats stranded · Recover →
+    </button>
+  );
+}

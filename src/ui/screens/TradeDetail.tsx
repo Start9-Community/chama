@@ -14,10 +14,14 @@ import {
 } from "../../payments/saved-handles.js";
 import { getRailByKey } from "../../payments/rail-registry.js";
 import {
-  T, STATUS, ROLE_COLOR, CAT_LABEL,
+  T, STATUS, ROLE_COLOR, CAT_LABEL, TRINITY_RING_ORDER,
   fmtSats, refundRecipientFor, inputStyle,
 } from "../theme.js";
 import { decideTradeDetailFraming } from "../decisions.js";
+import {
+  hasStateBExplained,
+  markStateBExplained,
+} from "./state-b-explainer.js";
 import { Badge } from "../components/Badge.js";
 import { Dot } from "../components/Dot.js";
 import { CountdownTimer } from "../components/CountdownTimer.js";
@@ -35,7 +39,7 @@ export function TradeDetail({
   homeCommunity: string | null;
   onBack: () => void;
   onVote: (outcome: Outcome) => void;
-  onClaim: () => void;
+  onClaim: () => Promise<void>;
   onJoin: (role: Role) => void;
   onLock: (savedHandleId?: string) => Promise<void>;
   onSendChat: (message: string) => void;
@@ -55,7 +59,16 @@ export function TradeDetail({
   const [voting, setVoting] = useState(false);
   const [joining, setJoining] = useState(false);
   const [locking, setLocking] = useState(false);
+  // v0.3.0 Phase 3: claiming flag survives the ClaimPayoutModal lifetime
+  // via the promise-based onClaim contract (mirrors Phase 2's onLock).
+  // Disables the Claim button while the modal is open so re-taps can't
+  // queue another flow.
+  const [claiming, setClaiming] = useState(false);
   const [selectedHandleId, setSelectedHandleId] = useState<string>("");
+  // v0.3.0 Phase 6: one-time educational card for State B (cross-fed
+  // listing). Renders ONCE per pubkey, same gate-pattern as v0.2.0's
+  // first-publish honesty card. Dismiss is sticky in localStorage.
+  const [stateBDismissed, setStateBDismissed] = useState(() => hasStateBExplained(pubkey));
   const s = STATUS[state.status] || STATUS.CREATED;
   const myRole = state.participants.buyer === pubkey ? Role.BUYER
     : state.participants.seller === pubkey ? Role.SELLER
@@ -157,6 +170,47 @@ export function TradeDetail({
             : "Same federation as your Chama · cross-community trade"}
         </div>
       )}
+      {/* v0.3.0 Phase 6: one-time State B educational card. Renders
+          ONCE per pubkey above the permanent State B callout. Dismiss
+          is sticky via chama_state_b_explained_<pubkey> in localStorage
+          (same shape as v0.2.0's chama_first_publish_done_<pubkey>).
+          Pillar 2.7: educate at the first opportunity, never lecture
+          returning users. */}
+      {state.status === EscrowStatus.CREATED && framing.kind === "state-b" && !stateBDismissed && (
+        <div style={{
+          padding: 14, marginBottom: 12,
+          background: T.accentDim, border: `1px solid ${T.accent}33`,
+          borderRadius: T.r,
+        }}>
+          <div style={{
+            fontSize: 11, fontWeight: 700, color: T.accent, fontFamily: T.mono,
+            letterSpacing: 1, marginBottom: 8,
+          }}>
+            FIRST CROSS-FEDERATION TRADE? HEADS UP
+          </div>
+          <div style={{ fontSize: 12, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 12 }}>
+            Your wallet was on {framing.homeFlagEmoji} {framing.homeCommunityName}.
+            Since this listing is on {framing.listingFlagEmoji} {framing.listingCommunityName} and
+            your balance was 0 sats, we switched automatically. No funds moved
+            on Lightning — fresh wallet on {framing.listingFlagEmoji} {framing.listingCommunityName} for
+            this trade. Switching back is just another tap.
+          </div>
+          <button
+            onClick={() => {
+              markStateBExplained(pubkey);
+              setStateBDismissed(true);
+            }}
+            style={{
+              background: "none", border: `1px solid ${T.accent}66`,
+              color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+              padding: "6px 12px", borderRadius: T.rs,
+              cursor: "pointer", letterSpacing: 0.3,
+            }}
+          >
+            Got it
+          </button>
+        </div>
+      )}
       {state.status === EscrowStatus.CREATED && framing.kind === "state-b" && (
         <div style={{
           padding: 14, marginBottom: 12,
@@ -169,14 +223,17 @@ export function TradeDetail({
           }}>
             CROSS-FEDERATION
           </div>
+          {/* v0.3.0 Phase 6: tightened from
+                "Running on {emoji} {name} · we switched you in for this trade."
+              to drop "we" — the system did it; the framing is the user's. */}
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 6 }}>
-            Running on {framing.listingFlagEmoji} <strong>{framing.listingCommunityName}</strong> ·
-            we switched you in for this trade.
+            Running on {framing.listingFlagEmoji} <strong>{framing.listingCommunityName}</strong> · switched in for this trade
           </div>
+          {/* v0.3.0 Phase 6: educational essay moved to the one-time
+              card above. This callout is now a single reassuring
+              sentence, the only thing returning State-B users see. */}
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
-            Your home is on {framing.homeFlagEmoji} {framing.homeCommunityName}. No funds
-            moved on Lightning — fresh Chama on the listing's federation.
-            Switching back is just another tap.
+            Your Chama switched automatically — no funds at risk.
           </div>
         </div>
       )}
@@ -263,11 +320,16 @@ export function TradeDetail({
         </div>
       )}
 
-      {/* Participants */}
+      {/* Participants — Trinity Ring order: Buyer · Arbiter · Seller.
+          Order is sourced from theme.TRINITY_RING_ORDER. PHILOSOPHY.md
+          §5.2 places the arbiter at the apex with buyer/seller flanking
+          below; this row mirrors that arrangement. v0.2.0 shipped with
+          B/S/A — the §43 test pins B/A/S so future refactors can't
+          silently revert the order. */}
       <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 16 }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 16 }}>PARTICIPANTS</div>
         <div style={{ display: "flex", justifyContent: "space-around" }}>
-          {([Role.BUYER, Role.SELLER, Role.ARBITER] as Role[]).map(role => (
+          {TRINITY_RING_ORDER.map(role => (
             <Dot key={role} role={role} pk={state.participants[role]} isYou={myRole === role}
               voted={!!state.votes[role]} outcome={state.votes[role]} />
           ))}
@@ -577,16 +639,29 @@ export function TradeDetail({
 
       {/* Claim button */}
       {state.status === EscrowStatus.APPROVED && iAmWinner && !state.subscription && (
-        <button onClick={onClaim} style={{
-          width: "100%", padding: "18px", borderRadius: T.rs,
-          background: `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
-          border: "none", color: T.bg,
-          fontFamily: T.mono, fontSize: 15, fontWeight: 800,
-          cursor: "pointer", letterSpacing: 1,
-          marginBottom: 16,
-          animation: "pulse 2s ease-in-out infinite",
-        }}>
-          ⚡ CLAIM YOUR SATS
+        <button
+          disabled={claiming}
+          onClick={async () => {
+            setClaiming(true);
+            try {
+              await onClaim();
+            } finally {
+              setClaiming(false);
+            }
+          }}
+          style={{
+            width: "100%", padding: "18px", borderRadius: T.rs,
+            background: claiming
+              ? T.surface
+              : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
+            border: "none",
+            color: claiming ? T.muted : T.bg,
+            fontFamily: T.mono, fontSize: 15, fontWeight: 800,
+            cursor: claiming ? "default" : "pointer", letterSpacing: 1,
+            marginBottom: 16,
+            animation: claiming ? "none" : "pulse 2s ease-in-out infinite",
+          }}>
+          {claiming ? "Claiming…" : "⚡ CLAIM YOUR SATS"}
         </button>
       )}
 

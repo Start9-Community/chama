@@ -1,0 +1,546 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Chama — AtomicFundingModal (v0.3.0 receive-side atomic flow)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// Listing-tap → exact-amount BOLT11 → ecash mints → LOCK fires, all in
+// one user motion. Replaces the prior two-step "open FundWalletModal,
+// generate invoice, pay, then tap Fund again to LOCK from balance" flow.
+//
+// Pillar 2.1 Option B: the user never sees an intermediate balance
+// surface. The BOLT11 is the centerpiece of this modal — that IS the
+// user's funding moment. Once payment lands and the federation credits,
+// LOCK fires automatically and the modal auto-closes.
+//
+// Phase orchestration lives in src/payments/fund-and-lock.ts. This file
+// is the React shell that renders phase transitions.
+
+import { useEffect, useRef, useState, lazy, Suspense } from "react";
+import { T } from "../theme.js";
+import type {
+  FundAndLockPhase,
+  FundAndLockTerminal,
+} from "../../payments/fund-and-lock.js";
+
+const QRCode = lazy(() => import("../QRCode.js"));
+
+export interface AtomicFundingModalProps {
+  /** Trade ID being funded. Passed through to fundAndLock. */
+  escrowId: string;
+  /** Exact trade amount in millisatoshis. */
+  amountMsats: number;
+  /** Category-aware label ("Fund Escrow", "Pay for Item", etc.). */
+  ctaLabel: string;
+  /** Optional handle to reveal in the LOCK payload. */
+  savedHandleId?: string;
+  /** Bound to actions.fundAndLock from useEscrow. */
+  fundAndLock: (
+    escrowId: string,
+    opts: {
+      amountMsats: number;
+      description: string;
+      savedHandleId?: string;
+      onPhase: (phase: FundAndLockPhase) => void;
+      signal?: AbortSignal;
+    },
+  ) => Promise<FundAndLockTerminal>;
+  /** Bound to actions.lockAndPublish — used for the "Try LOCK now"
+   *  retry path on mint-timeout (balance landed, but watchdog gave up
+   *  on the mint settling within 60s). */
+  lockAndPublish: (escrowId: string, opts: { savedHandleId?: string }) => Promise<unknown>;
+  /** Closed when the modal terminates (success or user cancel). The
+   *  consumer can read the terminal kind to decide post-modal navigation
+   *  (e.g. show success toast on locked, error toast on lock-failed). */
+  onClose: (terminal: FundAndLockTerminal) => void;
+}
+
+type ModalPhase =
+  | { kind: "creating-invoice" }
+  | { kind: "awaiting-payment"; bolt11: string; expiresAt: number }
+  | { kind: "mint-confirming"; bolt11: string; expiresAt: number }
+  | { kind: "payment-confirmed" }
+  | { kind: "locking" }
+  | { kind: "locked" }
+  | { kind: "expired" }
+  | { kind: "mint-timeout" }
+  | { kind: "aborted" }
+  | { kind: "lock-failed"; error: string };
+
+export function AtomicFundingModal({
+  escrowId,
+  amountMsats,
+  ctaLabel,
+  savedHandleId,
+  fundAndLock,
+  lockAndPublish,
+  onClose,
+}: AtomicFundingModalProps) {
+  const amountSats = Math.floor(amountMsats / 1000);
+  const [phase, setPhase] = useState<ModalPhase>({ kind: "creating-invoice" });
+  const [retryToken, setRetryToken] = useState(0);
+  const [tryLockBusy, setTryLockBusy] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const abortRef = useRef<AbortController | null>(null);
+  const settledRef = useRef(false);
+
+  // Phase-driven main loop. Re-runs when the user taps "Generate new
+  // invoice" (retryToken increments). Aborts on unmount.
+  useEffect(() => {
+    settledRef.current = false;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
+    let lastBolt11: string | null = null;
+    let lastExpiresAt: number | null = null;
+
+    const run = async () => {
+      const terminal = await fundAndLock(escrowId, {
+        amountMsats,
+        description: `Chama trade · ${ctaLabel}`,
+        savedHandleId,
+        signal: ctrl.signal,
+        onPhase: (p) => {
+          if (p.kind === "invoice-created") {
+            lastBolt11 = p.bolt11;
+            lastExpiresAt = p.expiresAt;
+            setPhase({
+              kind: "awaiting-payment",
+              bolt11: p.bolt11,
+              expiresAt: p.expiresAt,
+            });
+            return;
+          }
+          if (p.kind === "creating-invoice") {
+            setPhase({ kind: "creating-invoice" });
+            return;
+          }
+          if (p.kind === "awaiting-payment") {
+            // pollForFunding emits this on entry; we need the BOLT11
+            // already resolved from the prior "invoice-created" phase.
+            if (lastBolt11 && lastExpiresAt) {
+              setPhase({
+                kind: "awaiting-payment",
+                bolt11: lastBolt11,
+                expiresAt: lastExpiresAt,
+              });
+            }
+            return;
+          }
+          if (p.kind === "mint-confirming") {
+            if (lastBolt11 && lastExpiresAt) {
+              setPhase({
+                kind: "mint-confirming",
+                bolt11: lastBolt11,
+                expiresAt: lastExpiresAt,
+              });
+            }
+            return;
+          }
+          // payment-confirmed / locking / locked / expired / mint-timeout
+          // / aborted / lock-failed all map directly.
+          setPhase(p as ModalPhase);
+        },
+      });
+      // After loop terminates: if it's a TERMINAL state that should
+      // dismiss the modal automatically (locked → success), do it after
+      // a brief delay so the user sees the success state.
+      if (settledRef.current) return; // Try-LOCK retry path took over
+      if (terminal.kind === "locked") {
+        setTimeout(() => onClose(terminal), 1200);
+      } else if (terminal.kind === "aborted") {
+        // No callback — user already triggered close.
+      }
+      // expired / mint-timeout / lock-failed leave the modal open with
+      // a retry/cancel surface; user dismisses explicitly.
+    };
+
+    run().catch((e) => {
+      // runFundAndLock catches its own errors; this is defensive.
+      setPhase({ kind: "lock-failed", error: (e as Error).message || "Unexpected error" });
+    });
+
+    return () => {
+      ctrl.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retryToken]);
+
+  // 1Hz tick for the countdown timer when an invoice is live.
+  useEffect(() => {
+    if (phase.kind !== "awaiting-payment" && phase.kind !== "mint-confirming") {
+      return;
+    }
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [phase.kind]);
+
+  const handleCancel = () => {
+    abortRef.current?.abort();
+    settledRef.current = true;
+    onClose({ kind: "aborted" });
+  };
+
+  const handleRegenerate = () => {
+    setRetryToken((t) => t + 1);
+  };
+
+  const handleTryLockNow = async () => {
+    settledRef.current = true;
+    abortRef.current?.abort();
+    setTryLockBusy(true);
+    try {
+      await lockAndPublish(escrowId, { savedHandleId });
+      setPhase({ kind: "locked" });
+      setTimeout(() => onClose({ kind: "locked" }), 1200);
+    } catch (e: any) {
+      setPhase({ kind: "lock-failed", error: e?.message || "LOCK failed" });
+    } finally {
+      setTryLockBusy(false);
+    }
+  };
+
+  const copyText = (text: string) => {
+    navigator.clipboard?.writeText(text).catch(() => {});
+  };
+
+  return (
+    <div onClick={handleCancel} style={{
+      position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+      display: "flex", alignItems: "center", justifyContent: "center",
+      padding: 16, animation: "fadeIn 0.2s ease",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: T.card, border: `1px solid ${T.borderHi}`, borderRadius: T.r,
+        padding: 24, maxWidth: 420, width: "100%",
+      }}>
+        {/* Header — amount is the eyebrow, label is the title */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 4 }}>
+              {ctaLabel.toUpperCase()}
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
+              {amountSats.toLocaleString()} <span style={{ color: T.muted, fontWeight: 600, fontSize: 14 }}>sats</span>
+            </div>
+          </div>
+          <button onClick={handleCancel} style={{
+            background: "none", border: "none", color: T.muted,
+            fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
+          }}>×</button>
+        </div>
+
+        {phase.kind === "creating-invoice" && <CreatingInvoice />}
+
+        {(phase.kind === "awaiting-payment" || phase.kind === "mint-confirming") && (
+          <InvoiceDisplay
+            bolt11={phase.bolt11}
+            expiresAt={phase.expiresAt}
+            now={now}
+            phaseKind={phase.kind}
+            onCopy={copyText}
+          />
+        )}
+
+        {phase.kind === "payment-confirmed" && <PaymentConfirmed amountSats={amountSats} />}
+
+        {phase.kind === "locking" && <Locking />}
+
+        {phase.kind === "locked" && <LockedSuccess amountSats={amountSats} />}
+
+        {phase.kind === "expired" && (
+          <ExpiredState
+            onRegenerate={handleRegenerate}
+            onCancel={handleCancel}
+          />
+        )}
+
+        {phase.kind === "mint-timeout" && (
+          <MintTimeoutState
+            busy={tryLockBusy}
+            onTryLockNow={handleTryLockNow}
+            onCancel={handleCancel}
+          />
+        )}
+
+        {phase.kind === "lock-failed" && (
+          <LockFailedState
+            error={phase.error}
+            onCancel={() => onClose(phase)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Sub-components ──────────────────────────────────────────────────────
+
+function CreatingInvoice() {
+  return (
+    <div style={{
+      padding: "32px 16px", textAlign: "center",
+      background: T.surface, border: `1px solid ${T.border}`,
+      borderRadius: T.r,
+    }}>
+      <div style={{
+        width: 8, height: 8, borderRadius: "50%",
+        background: T.accent, animation: "pulse 1.4s ease-in-out infinite",
+        margin: "0 auto 12px",
+      }} />
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>
+        GENERATING INVOICE…
+      </div>
+    </div>
+  );
+}
+
+function InvoiceDisplay({
+  bolt11, expiresAt, now, phaseKind, onCopy,
+}: {
+  bolt11: string;
+  expiresAt: number;
+  now: number;
+  phaseKind: "awaiting-payment" | "mint-confirming";
+  onCopy: (s: string) => void;
+}) {
+  const remainingSec = Math.max(0, Math.floor((expiresAt - now) / 1000));
+  const mins = Math.floor(remainingSec / 60);
+  const secs = remainingSec % 60;
+  const isMintConfirming = phaseKind === "mint-confirming";
+
+  return (
+    <>
+      <div style={{
+        fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1,
+        marginBottom: 8, textAlign: "center",
+      }}>
+        {isMintConfirming ? "PAYMENT DETECTED · CREDITING…" : "SCAN OR COPY TO PAY"}
+      </div>
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+        <Suspense fallback={<div style={{ width: 200, height: 200, background: T.surface, borderRadius: T.rs }} />}>
+          <QRCode data={bolt11} size={200} fgColor={isMintConfirming ? "#fbbf24" : "#a78bfa"} />
+        </Suspense>
+      </div>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        gap: 8, marginBottom: 12, padding: "6px 12px",
+        borderRadius: T.rs,
+        background: isMintConfirming ? T.amberDim : T.surface,
+        border: `1px solid ${isMintConfirming ? T.amber + "44" : T.border}`,
+      }}>
+        <div style={{
+          width: 8, height: 8, borderRadius: "50%",
+          background: isMintConfirming ? T.amber : T.accent,
+          animation: "pulse 1.4s ease-in-out infinite",
+        }} />
+        <span style={{
+          fontSize: 10, fontFamily: T.mono,
+          color: isMintConfirming ? T.amber : T.muted, letterSpacing: 0.5,
+        }}>
+          {isMintConfirming
+            ? "Confirming with the federation…"
+            : `Waiting for payment · ${mins}:${secs.toString().padStart(2, "0")}`}
+        </span>
+      </div>
+      <div style={{
+        padding: 8, marginBottom: 12, borderRadius: T.rs,
+        background: T.surface, border: `1px solid ${T.border}`,
+        fontFamily: T.mono, fontSize: 8, color: T.muted,
+        wordBreak: "break-all", maxHeight: 60, overflowY: "auto", textAlign: "center",
+      }}>{bolt11}</div>
+      <button
+        onClick={() => onCopy(bolt11)}
+        style={{
+          width: "100%", padding: "10px 16px", borderRadius: T.rs,
+          background: T.accentDim, border: `1px solid ${T.accent}44`,
+          color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+          cursor: "pointer",
+        }}
+      >
+        Copy invoice
+      </button>
+    </>
+  );
+}
+
+function PaymentConfirmed({ amountSats }: { amountSats: number }) {
+  return (
+    <div style={{
+      padding: "28px 16px", textAlign: "center",
+      background: T.greenDim, border: `1px solid ${T.green}66`, borderRadius: T.r,
+    }}>
+      <div style={{ fontSize: 36, marginBottom: 8 }}>⚡</div>
+      <div style={{ fontSize: 13, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 4 }}>
+        Payment received
+      </div>
+      <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
+        +{amountSats.toLocaleString()} sats
+      </div>
+      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 10, letterSpacing: 1 }}>
+        SEALING THE TRADE…
+      </div>
+    </div>
+  );
+}
+
+function Locking() {
+  return (
+    <div style={{
+      padding: "32px 16px", textAlign: "center",
+      background: T.purpleDim, border: `1px solid ${T.purple}44`, borderRadius: T.r,
+    }}>
+      <div style={{
+        width: 10, height: 10, borderRadius: "50%",
+        background: T.purple, animation: "pulse 1.4s ease-in-out infinite",
+        margin: "0 auto 12px",
+      }} />
+      <div style={{ fontSize: 11, fontWeight: 600, color: T.purple, fontFamily: T.mono, letterSpacing: 1 }}>
+        SPLITTING SHARES · PUBLISHING LOCK
+      </div>
+    </div>
+  );
+}
+
+function LockedSuccess({ amountSats }: { amountSats: number }) {
+  return (
+    <div style={{
+      padding: "32px 16px", textAlign: "center",
+      background: T.greenDim, border: `1px solid ${T.green}66`,
+      borderRadius: T.r, animation: "fadeIn 0.3s ease",
+    }}>
+      <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
+        Locked in escrow
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
+        {amountSats.toLocaleString()} sats
+      </div>
+      <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
+        Trade is live · closing…
+      </div>
+    </div>
+  );
+}
+
+function ExpiredState({
+  onRegenerate, onCancel,
+}: { onRegenerate: () => void; onCancel: () => void }) {
+  return (
+    <div>
+      <div style={{
+        padding: "20px 16px", textAlign: "center",
+        background: T.redDim, border: `1px solid ${T.red}66`, borderRadius: T.r,
+        marginBottom: 12,
+      }}>
+        <div style={{ fontSize: 28, marginBottom: 8 }}>⌛</div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: T.red, fontFamily: T.sans, marginBottom: 4 }}>
+          Invoice expired
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
+          No payment received in the time window. Generate a new one to retry.
+        </div>
+      </div>
+      <button
+        onClick={onRegenerate}
+        style={{
+          width: "100%", padding: "12px 16px", borderRadius: T.rs,
+          background: T.accent, border: `1px solid ${T.accent}`,
+          color: "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+          cursor: "pointer", marginBottom: 8,
+        }}
+      >
+        ⚡ Generate new invoice
+      </button>
+      <button
+        onClick={onCancel}
+        style={{
+          width: "100%", padding: "10px 16px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+          cursor: "pointer",
+        }}
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+function MintTimeoutState({
+  busy, onTryLockNow, onCancel,
+}: { busy: boolean; onTryLockNow: () => void; onCancel: () => void }) {
+  return (
+    <div>
+      <div style={{
+        padding: "20px 16px", textAlign: "center",
+        background: T.amberDim, border: `1px solid ${T.amber}66`, borderRadius: T.r,
+        marginBottom: 12,
+      }}>
+        <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: T.amber, fontFamily: T.sans, marginBottom: 4 }}>
+          Mint is taking longer than expected
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
+          Your payment landed, but the federation hasn't fully credited your wallet yet. You can try locking now or cancel and recover via the banner.
+        </div>
+      </div>
+      <button
+        disabled={busy}
+        onClick={onTryLockNow}
+        style={{
+          width: "100%", padding: "12px 16px", borderRadius: T.rs,
+          background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`,
+          color: busy ? T.muted : "#000",
+          fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+          cursor: busy ? "not-allowed" : "pointer", marginBottom: 8,
+        }}
+      >
+        {busy ? "Locking…" : "Try LOCK now"}
+      </button>
+      <button
+        onClick={onCancel}
+        disabled={busy}
+        style={{
+          width: "100%", padding: "10px 16px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+          cursor: busy ? "not-allowed" : "pointer",
+        }}
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+function LockFailedState({
+  error, onCancel,
+}: { error: string; onCancel: () => void }) {
+  return (
+    <div>
+      <div style={{
+        padding: "20px 16px", textAlign: "center",
+        background: T.redDim, border: `1px solid ${T.red}66`, borderRadius: T.r,
+        marginBottom: 12,
+      }}>
+        <div style={{ fontSize: 24, marginBottom: 8 }}>✕</div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: T.red, fontFamily: T.sans, marginBottom: 4 }}>
+          Couldn't lock the trade
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, wordBreak: "break-word" }}>
+          {error}
+        </div>
+      </div>
+      <button
+        onClick={onCancel}
+        style={{
+          width: "100%", padding: "10px 16px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+          cursor: "pointer",
+        }}
+      >
+        Close
+      </button>
+    </div>
+  );
+}

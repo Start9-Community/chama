@@ -1,25 +1,24 @@
 // ══════════════════════════════════════════════════════════════════════════
-// Chama — Recovery banner (v0.2.0 item 2)
+// Chama — Recovery banner (v0.3.0 Phase 4 — failure-mode framing)
 // ══════════════════════════════════════════════════════════════════════════
 //
-// Per Pillar 2.1's "no sats stranded, ever" promise: when the user's
-// OPFS holds a balance but no active trade claims it, we replace
-// Browse + Create with this recovery banner and force a Lightning
-// withdrawal before any new commitment can be created. The user
-// learns, viscerally, that ecash is bearer cash that needs to leave
-// the local wallet to be safe — and that Chama treats every stranded
-// sat as a structural failure to repair.
+// Per Pillar 2.1 Option B: balance > 0 between trades is ALWAYS a
+// failure state. ecash exists only during LOCK→CLAIM. v0.3.0 retunes
+// this banner from "Continue your trade · withdraw N sats" (v0.2.0)
+// to a failure-mode framing that names the state correctly: the user's
+// last trade didn't finish cleanly, sats are stranded on their local
+// Chama, and recovering them is a structural repair — not a routine
+// "withdraw" operation.
 //
-// The banner is a Browse-replacement, not a modal. It intercepts
-// navigation to Browse and Create only; Me remains fully accessible
-// (per the v0.2.0 brief: users may need to update their LN address,
-// fetch counterparty kind:0, or check ratings/history as part of
-// resolving the recovery itself).
+// Trigger contract is unchanged: balance > 0 && !hasActiveBuyerSellerCommitment
+// (see decisions.shouldShowRecoveryBanner). Phase 3's three-way claim
+// failure split (claim-failed / claim-pending / payout-failed) makes
+// the banner more meaningful, not less — payout-failed is the most
+// common path that lands here in real production.
 //
-// Counterparty resolution: identifyStrandedEcashSource walks the
-// local replay to find the most recent CLAIM event the user signed.
-// If no CLAIM is found, generic copy ("Trade with unknown
-// counterparty") + a generic withdraw flow.
+// Counterparty resolution: identifyStrandedEcashSource walks the local
+// replay to find the most recent CLAIM event the user signed. Generic
+// fallback when no CLAIM is found.
 
 import { T, fmtSats } from "../theme.js";
 import { displayCounterpartyName, type StrandedEcashSource } from "../decisions.js";
@@ -29,12 +28,15 @@ export function RecoveryBanner({
   balanceMsats,
   source,
   fetchKind0Enabled,
-  onWithdraw,
+  onRecover,
 }: {
   balanceMsats: number;
   source: StrandedEcashSource | null;
   fetchKind0Enabled: boolean;
-  onWithdraw: () => void;
+  /** Open the RecoveryPayoutModal. v0.3.0 renames from onWithdraw to
+   *  onRecover to match the failure-mode framing — this is structural
+   *  repair, not a routine wallet withdrawal. */
+  onRecover: () => void;
 }) {
   const sats = Math.floor(balanceMsats / 1000);
   const counterpartyName = source
@@ -46,12 +48,12 @@ export function RecoveryBanner({
     : "an unknown counterparty";
 
   const headline = source
-    ? `Your trade with ${counterpartyName} didn't finish`
-    : "You have unspent sats from a previous trade";
+    ? `Your trade with ${counterpartyName} didn't finish cleanly`
+    : "Your last trade didn't finish cleanly";
 
   const explanation = source
-    ? "Connection dropped before your sats landed in your Lightning wallet. Pick up where you left off."
-    : "Withdraw them to your Lightning wallet to keep them safe — Chama is non-custodial and ecash is bearer cash.";
+    ? `${sats.toLocaleString()} sats are still in escrow on your local Chama. Send them to your Lightning wallet to recover and free up Chama for your next trade.`
+    : `${sats.toLocaleString()} sats are still in escrow on your local Chama. Send them to your Lightning wallet to recover and free up Chama for your next trade.`;
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -59,7 +61,10 @@ export function RecoveryBanner({
         background: T.amberDim, border: `1px solid ${T.amber}66`,
         borderRadius: T.r, padding: 20, marginBottom: 16,
       }}>
-        {/* Small-caps header with amber dot */}
+        {/* v0.3.0: failure-mode small-caps header. "Continue your trade"
+            (v0.2.0) reframed to "Trade needs attention" because Pillar
+            2.1 Option B treats stranded balance as a failure to repair,
+            not a normal step. */}
         <div style={{
           display: "flex", alignItems: "center", gap: 8,
           fontSize: 10, fontWeight: 700, color: T.amber, fontFamily: T.mono,
@@ -71,7 +76,7 @@ export function RecoveryBanner({
             boxShadow: `0 0 8px ${T.amber}88`,
             animation: "pulse 2s ease-in-out infinite",
           }} />
-          Continue your trade
+          ⚠ Trade needs attention
         </div>
 
         <div style={{
@@ -88,8 +93,8 @@ export function RecoveryBanner({
           {explanation}
         </div>
 
-        {/* Trade identity card — only when we have source. Generic
-            withdraw flow when source is null. */}
+        {/* Trade identity card — when we have source. Generic copy
+            without this card when the local replay yielded no CLAIM. */}
         {source && (
           <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
@@ -129,7 +134,7 @@ export function RecoveryBanner({
         )}
 
         <button
-          onClick={onWithdraw}
+          onClick={onRecover}
           style={{
             width: "100%", padding: "14px",
             background: `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
@@ -138,7 +143,7 @@ export function RecoveryBanner({
             cursor: "pointer", letterSpacing: 0.5,
           }}
         >
-          ⚡ Finish trade · withdraw {sats.toLocaleString()} sats
+          ⚡ Recover {sats.toLocaleString()} sats →
         </button>
 
         <div style={{
@@ -156,8 +161,8 @@ export function RecoveryBanner({
         opacity: 0.5, lineHeight: 1.5,
       }}>
         {source
-          ? <>Browse opens once your trade with {counterpartyName} is finished — Chama keeps it simple, one trade at a time.</>
-          : <>Browse opens once your sats are withdrawn — Chama keeps it simple, one trade at a time.</>}
+          ? <>Browse opens once your sats are recovered — Chama keeps it simple, one trade at a time.</>
+          : <>Browse opens once your sats are recovered — Chama keeps it simple, one trade at a time.</>}
       </div>
     </div>
   );

@@ -17,6 +17,7 @@ import {
   shouldShowBrowserSupportBanner,
   shouldShowRecoveryBanner,
   hasActiveBuyerSellerCommitment,
+  decideChamaBarLabel,
   findActiveTrade,
   identifyStrandedEcashSource,
 } from "./decisions.js";
@@ -36,9 +37,13 @@ import { MeScreen } from "./screens/MeScreen.js";
 import { SettingsAdvanced } from "./screens/SettingsAdvanced.js";
 
 import { WalletBar } from "./panels/WalletBar.js";
-import { FedimintBar } from "./panels/FedimintBar.js";
+import { ChamaBar } from "./panels/ChamaBar.js";
 import { DestroyEcashConfirmModal } from "./panels/DestroyEcashConfirmModal.js";
 import { FundWalletModal } from "./panels/FundWalletModal.js";
+import { AtomicFundingModal } from "./panels/AtomicFundingModal.js";
+import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
+import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
+import { addOrTouchLightningHandle, getSavedLightningHandles } from "../payments/saved-handles.js";
 import { SavedHandlesPanel } from "./panels/SavedHandlesPanel.js";
 
 const QRScanner = lazy(() => import("./QRScanner.js"));
@@ -149,25 +154,56 @@ export default function App() {
     label: string;
     navigateToEscrowAfter?: string;
   } | null>(null);
+  // v0.3.0 Phase 2: AtomicFundingModal mount state. When the user taps
+  // Fund on a listing, we stash the pending fund-and-lock here and the
+  // modal mounts. The TradeDetail Fund button awaits a promise that
+  // resolves on modal close, preserving the in-flight disabled state
+  // throughout the modal's lifetime.
+  const [pendingFundAndLock, setPendingFundAndLock] = useState<{
+    escrowId: string;
+    amountMsats: number;
+    ctaLabel: string;
+    savedHandleId?: string;
+    resolve: () => void;
+  } | null>(null);
+  // v0.3.0 Phase 3: ClaimPayoutModal mount state. Same shape as
+  // pendingFundAndLock — TradeDetail's setClaiming(true) flag survives
+  // the modal lifetime via the resolve-on-close promise.
+  const [pendingClaim, setPendingClaim] = useState<{
+    escrowId: string;
+    payoutMsats: number;
+    resolve: () => void;
+  } | null>(null);
+  // v0.3.0 Phase 4: RecoveryPayoutModal mount state. Single mount used
+  // by BOTH the failure-mode RecoveryBanner (no follow-up after drain)
+  // AND the DestroyEcashConfirmModal flow (queues pendingSwitchAfter-
+  // Withdraw — the existing watcher useEffect dispatches the switch
+  // when balance reaches zero). The `title` prop differentiates the
+  // two surfaces visually.
+  const [pendingRecovery, setPendingRecovery] = useState<{
+    title: string;
+    subtitle?: string;
+  } | null>(null);
   // Browser-support banner state lives in a dedicated hook so the
   // per-pubkey scoping (Bug E from v0.1.85 smoke testing) stays
   // testable in isolation and App.tsx stays an orchestrator.
   const { dismissed: browserBannerDismissed, dismiss: dismissBrowserBanner } =
     useBrowserBanner(pubkey);
 
-  // v0.2.0 item 8: post-withdraw auto-switch. When the user chose
-  // "Withdraw via Lightning" from the destroy-confirm modal, we wait
-  // for balance to drain to zero, then dispatch the originally-
-  // attempted federation switch. If they close the FundWalletModal
-  // without draining, the state is dropped (handled in onClose
-  // below — see showFundModal wiring).
+  // v0.2.0 item 8 / v0.3.0 Phase 4 reminder #3: post-recover auto-
+  // switch. State machine unchanged; only the trigger surface moves
+  // (FundWalletModal in v0.2.0 → RecoveryPayoutModal in v0.3.0). When
+  // the user picked "Recover & switch" from the destroy-confirm modal,
+  // the watcher waits for balance to drain to zero, then dispatches
+  // the originally-attempted federation switch. If the user dismisses
+  // the picker before resolving, the modal's onClose drops the pending
+  // switch (explicit abandonment).
   useEffect(() => {
     if (!pendingSwitchAfterWithdraw) return;
     if ((fedimint.balanceMsats ?? 0) > 0) return;
     // Balance reached zero — dispatch the switch.
     const target = pendingSwitchAfterWithdraw;
     setPendingSwitchAfterWithdraw(null);
-    setShowFundModal(false);
     (async () => {
       try {
         setToast({ message: `Switching to ${target.label}…`, type: "info" });
@@ -623,15 +659,26 @@ export default function App() {
         relayStatuses={relayStatuses}
       />
 
-      {/* Chama (Fedimint) bar. showReconnect is true for users who have
-          a reconnect target (picked community or active invite) so the
-          Reconnect CTA appears after a failed switch+revert; first-time
-          users (no community yet) don't see it because their join path
-          is community pills, not Reconnect. */}
-      <FedimintBar
+      {/* Chama bar (renamed from FedimintBar in v0.3.0 Phase 5).
+          showReconnect is true for users who have a reconnect target
+          (picked community or active invite) so the Reconnect CTA
+          appears after a failed switch+revert; first-time users (no
+          community yet) don't see it because their join path is
+          community pills, not Reconnect.
+
+          v0.3.0 Phase 5: onFund is gone. The right-side surface is
+          state-aware via chamaLabel — in-trade / stranded / ready —
+          rather than a permanent funding entry point. The stranded
+          tap reuses the same RecoveryPayoutModal as the banner, so
+          the failure-mode escape hatch is reachable from anywhere. */}
+      <ChamaBar
         fedimint={fedimint}
+        chamaLabel={decideChamaBarLabel({
+          balanceMsats: fedimint.balanceMsats ?? 0,
+          hasActiveBuyerSellerCommitment: hasActiveCommitment,
+        })}
+        onTapStranded={() => setPendingRecovery({ title: "Recover sats" })}
         showReconnect={getUserCommunitySlugRaw() !== null || getActiveInvite() !== null}
-        onFund={() => setShowFundModal(true)}
         onInit={() => actions.initFedimint().catch(
           (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
         )}
@@ -674,25 +721,108 @@ export default function App() {
         />
       )}
 
-      {/* Federation drift confirm */}
+      {/* v0.3.0 Phase 2: AtomicFundingModal — listing-tap → exact-amount
+          BOLT11 → mint → LOCK in one motion. Replaces the prior
+          FundWalletModal-then-Fund two-step on the production funding
+          path. FundWalletModal stays mounted above for the (Phase 5-
+          gated) Sandbox-mode path. */}
+      {pendingFundAndLock && (
+        <AtomicFundingModal
+          escrowId={pendingFundAndLock.escrowId}
+          amountMsats={pendingFundAndLock.amountMsats}
+          ctaLabel={pendingFundAndLock.ctaLabel}
+          savedHandleId={pendingFundAndLock.savedHandleId}
+          fundAndLock={actions.fundAndLock}
+          lockAndPublish={actions.lockAndPublish}
+          onClose={(terminal) => {
+            const { resolve } = pendingFundAndLock;
+            setPendingFundAndLock(null);
+            if (terminal.kind === "locked") {
+              setToast({ message: "Locked! Vote buttons are live.", type: "success" });
+            } else if (terminal.kind === "lock-failed") {
+              setToast({ message: terminal.error, type: "error" });
+            } else if (terminal.kind === "expired") {
+              setToast({ message: "Invoice expired — no payment received.", type: "info" });
+            } else if (terminal.kind === "mint-timeout") {
+              setToast({
+                message: "Mint stalled. If sats are stranded, recover via the banner on Browse.",
+                type: "info",
+              });
+            }
+            // aborted = silent (user cancelled)
+            resolve();
+          }}
+        />
+      )}
+
+      {/* v0.3.0 Phase 3: ClaimPayoutModal — APPROVED winner taps Claim →
+          DestinationPicker → atomic claim+payout in one motion.
+          Replaces the prior "claim into wallet then withdraw" two-step
+          on the production path. claimAndRedeem stays as a building
+          block + Sandbox path; production winners always go through
+          this modal. */}
+      {pendingClaim && (
+        <ClaimPayoutModal
+          escrowId={pendingClaim.escrowId}
+          payoutMsats={pendingClaim.payoutMsats}
+          savedHandles={getSavedLightningHandles()}
+          claimAndPayout={actions.claimAndPayout}
+          onClose={(terminal) => {
+            const { resolve } = pendingClaim;
+            setPendingClaim(null);
+            if (!terminal) {
+              // User dismissed picker before resolving — silent.
+            } else if (terminal.kind === "done") {
+              setToast({ message: "Sats sent to your wallet!", type: "success" });
+            } else if (terminal.kind === "claim-failed") {
+              setToast({ message: terminal.error, type: "error" });
+            } else if (terminal.kind === "claim-pending") {
+              setToast({
+                message: "Claim is in flight — sats will arrive shortly.",
+                type: "info",
+              });
+            } else if (terminal.kind === "payout-failed") {
+              setToast({
+                message: "Payout failed. Recover from the banner on Browse.",
+                type: "error",
+              });
+            }
+            resolve();
+          }}
+        />
+      )}
+
+      {/* Federation drift confirm.
+          v0.3.0 Phase 4: now a TWO-button modal (no destroy escape).
+          Primary "Recover & switch" stashes the pending switch in
+          pendingSwitchAfterWithdraw and opens RecoveryPayoutModal
+          (DestinationPicker → outbound LN). The withdraw-watcher
+          useEffect dispatches the queued switch once balance reaches
+          zero. The destroy escape (v0.2.0's tertiary button) is gone
+          — Sandbox-mode users who truly need to nuke OPFS use
+          Settings → Advanced → Sandbox → Reset OPFS. */}
       {pendingDestroyConfirm && (
         <DestroyEcashConfirmModal
           targetLabel={pendingDestroyConfirm.label}
           balanceMsats={pendingDestroyConfirm.balanceMsats}
           onWithdraw={() => {
-            // v0.2.0 item 8: stash the pending switch so the shell can
-            // dispatch it once balance reaches zero, then open
-            // FundWalletModal-Send-LN. The withdraw-watcher useEffect
-            // below ties the two together. Per Q4: cancel of the
-            // withdraw modal = explicit abandonment, drop the pending
-            // switch entirely.
+            // pendingSwitchAfterWithdraw state machine unchanged —
+            // only the trigger surface moves from FundWalletModal
+            // to RecoveryPayoutModal (Phase 4 reminder #3). The
+            // existing useEffect watcher dispatches the switch when
+            // balance reaches zero. Cancel of the picker = explicit
+            // abandonment, drops the pending switch.
             setPendingSwitchAfterWithdraw({
               invite: pendingDestroyConfirm.invite,
               label: pendingDestroyConfirm.label,
               navigateToEscrowAfter: pendingDestroyConfirm.navigateToEscrowAfter,
             });
             setPendingDestroyConfirm(null);
-            setShowFundModal(true);
+            const sats = Math.floor(pendingDestroyConfirm.balanceMsats / 1000);
+            setPendingRecovery({
+              title: "Recover & switch Chama",
+              subtitle: `Send ${sats.toLocaleString()} sats to your Lightning wallet, then switch to ${pendingDestroyConfirm.label}.`,
+            });
           }}
           onCancel={() => {
             actions.setCustomInvite(pendingDestroyConfirm.activeInvite);
@@ -701,22 +831,38 @@ export default function App() {
               setToast({ message: e?.message || "Re-init failed", type: "error" })
             );
           }}
-          onConfirm={async () => {
-            const target = pendingDestroyConfirm;
-            setPendingDestroyConfirm(null);
-            try {
-              setToast({ message: "Switching Chama…", type: "info" });
-              await actions.initFedimint(target.invite, { force: true });
-              setToast({ message: `Joined ${target.label}!`, type: "success" });
-              // v0.2.0 item 1: when the destroy-confirm was triggered by
-              // a listing-tap, carry the user's intent through and open
-              // the listing detail after the switch confirms.
-              if (target.navigateToEscrowAfter) {
-                setSelectedId(target.navigateToEscrowAfter);
-                setView("detail");
-              }
-            } catch (e: any) {
-              setToast({ message: e?.message || "Switch failed", type: "error" });
+        />
+      )}
+
+      {/* v0.3.0 Phase 4: RecoveryPayoutModal — single mount serving
+          both the failure-mode RecoveryBanner path AND the destroy-
+          modal recover-then-switch path. Title differentiates per
+          surface; the underlying drain semantics are identical. */}
+      {pendingRecovery && (
+        <RecoveryPayoutModal
+          balanceMsats={fedimint.balanceMsats ?? 0}
+          savedHandles={getSavedLightningHandles()}
+          title={pendingRecovery.title}
+          subtitle={pendingRecovery.subtitle}
+          payInvoice={(bolt11) => actions.payInvoice(bolt11)}
+          addOrTouchLightningHandle={(addr) => { addOrTouchLightningHandle(addr); }}
+          onClose={(terminal) => {
+            setPendingRecovery(null);
+            if (!terminal) {
+              // User dismissed picker before resolving. If a switch
+              // was queued, drop it (explicit abandonment per the
+              // v0.2.0 Q4 semantics — stays the same in Phase 4).
+              setPendingSwitchAfterWithdraw(null);
+            } else if (terminal.kind === "done") {
+              setToast({ message: "Recovered to your wallet!", type: "success" });
+              // Balance reaching zero will trigger the watcher
+              // useEffect (line ~187) which dispatches the queued
+              // switch automatically. No extra wiring needed here.
+            } else if (terminal.kind === "payout-failed") {
+              setToast({ message: terminal.error, type: "error" });
+              // Payout failed — drop any queued switch since the
+              // balance never drained.
+              setPendingSwitchAfterWithdraw(null);
             }
           }}
         />
@@ -762,9 +908,27 @@ export default function App() {
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
               (e: any) => setToast({ message: e.message, type: "error" })
             )}
-            onClaim={() => {
-              actions.claimAndRedeem(selectedId!).catch((e: any) => {
-                console.debug("[chama] Claim action threw (already toasted):", e?.message);
+            onClaim={async () => {
+              // v0.3.0 Phase 3: open ClaimPayoutModal instead of
+              // dispatching claimAndRedeem directly. The modal carries
+              // the user through DestinationPicker → claim → outbound
+              // LN payout in one motion. Pillar 2.1 Option B: no
+              // intermediate balance UI.
+              if (!selected) return;
+              // Post-fee payout: state.fees deducts platformMsats +
+              // arbiterMsats from the winner's share at LOCK time.
+              // Same calculation used internally by claimAndRedeemAction
+              // for its watchdog expectedDelta.
+              const payoutMsats = Math.max(
+                0,
+                selected.amountMsats - selected.fees.platformMsats - selected.fees.arbiterMsats,
+              );
+              return new Promise<void>((resolve) => {
+                setPendingClaim({
+                  escrowId: selectedId!,
+                  payoutMsats,
+                  resolve,
+                });
               });
             }}
             onJoin={async (role) => {
@@ -804,13 +968,25 @@ export default function App() {
                 });
                 return;
               }
-              try {
-                setToast({ message: "Spending ecash & splitting shares...", type: "info" });
-                await actions.lockAndPublish(selectedId!, { savedHandleId });
-                setToast({ message: "Locked! Vote buttons are live.", type: "success" });
-              } catch (e: any) {
-                setToast({ message: e.message || "Lock failed", type: "error" });
-              }
+              if (!selected) return;
+              // v0.3.0 Phase 2: open AtomicFundingModal instead of
+              // dispatching lockAndPublish directly. The modal handles
+              // BOLT11 → mint → LOCK in one user-perceived motion.
+              // Pillar 2.1 Option B: no intermediate balance UI.
+              const lockLabel = selected.category === "marketplace" ? "Pay for Item"
+                : selected.category === "lending" ? "Fund Loan"
+                : selected.category === "bill-pay" ? "Lock Sats"
+                : selected.category === "p2p-trade" ? "Fund Escrow"
+                : "Lock Sats";
+              return new Promise<void>((resolve) => {
+                setPendingFundAndLock({
+                  escrowId: selectedId!,
+                  amountMsats: selected.amountMsats,
+                  ctaLabel: lockLabel,
+                  savedHandleId,
+                  resolve,
+                });
+              });
             }}
             onOpenSettings={() => setView("saved-handles")}
           />
@@ -832,7 +1008,14 @@ export default function App() {
               balanceMsats={fedimint.balanceMsats ?? 0}
               source={strandedSource}
               fetchKind0Enabled={false}
-              onWithdraw={() => setShowFundModal(true)}
+              onRecover={() => {
+                // v0.3.0 Phase 4: open RecoveryPayoutModal — no
+                // queued follow-up since this path isn't gated by a
+                // pending federation switch.
+                setPendingRecovery({
+                  title: "Recover sats",
+                });
+              }}
             />
           ) : hasActiveCommitment && activeTrade ? (
             <CreateBlockedCard
@@ -892,6 +1075,7 @@ export default function App() {
           <SettingsAdvanced
             fedimint={fedimint}
             onBack={() => setView("me")}
+            onSandboxFund={() => setShowFundModal(true)}
             onSwitchFederation={async (inviteCode, opts) => {
               try {
                 setToast({ message: "Joining Chama…", type: "info" });
@@ -933,7 +1117,14 @@ export default function App() {
               balanceMsats={fedimint.balanceMsats ?? 0}
               source={strandedSource}
               fetchKind0Enabled={false}
-              onWithdraw={() => setShowFundModal(true)}
+              onRecover={() => {
+                // v0.3.0 Phase 4: open RecoveryPayoutModal — no
+                // queued follow-up since this path isn't gated by a
+                // pending federation switch.
+                setPendingRecovery({
+                  title: "Recover sats",
+                });
+              }}
             />
           ) : (
             <BrowseView

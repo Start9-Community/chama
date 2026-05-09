@@ -1,37 +1,51 @@
 import { T } from "../theme.js";
 
-// Surfaces when a federation switch attempt would destroy ecash held
-// in the user's current Chama. v0.2.0 item 8: three-button
-// restructure. Pre-v0.2.0 the modal forced a binary choice between
-// "Cancel" and "Switch and destroy", which violated Pillar 2.1 by
-// presenting sat-loss as an equal-weight option to safety. v0.2.0
-// surfaces a primary "Withdraw via Lightning" CTA that opens the
-// FundWalletModal-Send-LN flow; once balance reaches zero the shell
-// auto-dispatches the originally-attempted switch.
+// ══════════════════════════════════════════════════════════════════════════
+// Chama — DestroyEcashConfirmModal
+// ══════════════════════════════════════════════════════════════════════════
 //
-// Final button order:
-//   1. Withdraw via Lightning (primary, accent) — preserves sats,
-//      then re-prompts the switch
-//   2. Cancel — keep my sats (secondary, neutral) — reverts to the
-//      current Chama; sats untouched
-//   3. Switch and destroy (tertiary, red) — existing force-override;
-//      destroys the balance held under the current fed
+// Surfaces when a federation switch attempt would destroy ecash held in
+// the user's current Chama. The button hierarchy has evolved across
+// three releases as Pillar 2.1 doctrine tightened:
+//
+//   v0.1.83  Cancel  ·  Switch and destroy
+//             Two-button: a binary choice between safety and destruction.
+//             Wrong because it framed sat-loss as an equal-weight option.
+//
+//   v0.2.0   Withdraw via Lightning (primary)
+//             Cancel — keep my sats (secondary)
+//             Switch and destroy (tertiary, red)
+//             Three-button: surfaced the safe path and demoted destroy
+//             to muted styling. Withdraw opened FundWalletModal-Send-LN;
+//             once balance reached zero, the shell auto-dispatched the
+//             queued switch via pendingSwitchAfterWithdraw.
+//
+//   v0.3.0   ⚡ Recover N sats and switch (primary, accent)
+//             Cancel — keep my Chama (secondary)
+//             TWO-button: removes the destroy escape hatch entirely.
+//             Pure Option B — there is no legitimate user flow where
+//             destroying sats is correct. Sandbox-mode users who truly
+//             need to nuke OPFS use Settings → Advanced → Sandbox →
+//             Reset OPFS, the explicit power-user path.
+//
+// The pendingSwitchAfterWithdraw state machine in App.tsx is unchanged
+// — only the trigger surface moves from FundWalletModal to
+// RecoveryPayoutModal (which composes DestinationPicker).
 export function DestroyEcashConfirmModal({
   targetLabel,
   balanceMsats,
   onCancel,
-  onConfirm,
   onWithdraw,
 }: {
   targetLabel: string;
   balanceMsats: number;
+  /** Reverts to the current Chama; sats untouched. */
   onCancel: () => void;
-  onConfirm: () => void;
-  /** v0.2.0 item 8: opens the FundWalletModal-Send-LN flow. The shell
-   *  tracks the originally-attempted switch in state and auto-
-   *  dispatches it when balance reaches zero. If the user cancels
-   *  the withdraw before draining, the shell drops the pending
-   *  switch (per Q4: cancel = explicit abandonment). */
+  /** v0.3.0: opens RecoveryPayoutModal (DestinationPicker → outbound
+   *  LN). The shell tracks the originally-attempted switch in
+   *  pendingSwitchAfterWithdraw and auto-dispatches it once balance
+   *  reaches zero. If the user cancels the picker before resolving,
+   *  the shell drops the pending switch (explicit abandonment). */
   onWithdraw: () => void;
 }) {
   const sats = Math.floor(balanceMsats / 1000);
@@ -43,10 +57,10 @@ export function DestroyEcashConfirmModal({
     }}>
       <div style={{
         maxWidth: 440, width: "100%", padding: 20, borderRadius: T.r,
-        background: T.card, border: `1px solid ${T.red}66`,
+        background: T.card, border: `1px solid ${T.amber}66`,
       }}>
         <div style={{
-          fontSize: 11, fontWeight: 700, color: T.red, fontFamily: T.mono,
+          fontSize: 11, fontWeight: 700, color: T.amber, fontFamily: T.mono,
           letterSpacing: 1, marginBottom: 12,
         }}>
           ⚠ FUNDS AT RISK
@@ -55,10 +69,10 @@ export function DestroyEcashConfirmModal({
           fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55,
           marginBottom: 16,
         }}>
-          Switching to <strong>{targetLabel}</strong> will destroy{" "}
-          <strong>{sats > 0 ? `${sats.toLocaleString()} sats` : "an unknown balance"}</strong>{" "}
-          held in your current Chama. Move them out via Lightning first
-          to keep them safe.
+          Switching to <strong>{targetLabel}</strong> will move you to a
+          different Chama. Your local{" "}
+          <strong>{sats > 0 ? `${sats.toLocaleString()} sats` : "balance"}</strong>{" "}
+          needs to be recovered to your Lightning wallet first.
         </div>
         <div style={{
           fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
@@ -68,8 +82,9 @@ export function DestroyEcashConfirmModal({
           those sats cannot be recovered from the Chama.
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {/* Primary: withdraw via Lightning. Bitcoin-orange to match
-              Pillar 5.2's role-color semantics (accent = sats moving). */}
+          {/* Primary: recover, then auto-dispatch the queued switch.
+              Bitcoin-orange to match Pillar 5.2 (accent = sats moving
+              with intent). */}
           <button
             onClick={onWithdraw}
             style={{
@@ -79,12 +94,7 @@ export function DestroyEcashConfirmModal({
               cursor: "pointer", letterSpacing: 0.3,
             }}
           >
-            ⚡ Withdraw via Lightning
-            {sats > 0 && (
-              <span style={{ marginLeft: 6, fontWeight: 600 }}>
-                · {sats.toLocaleString()} sats
-              </span>
-            )}
+            ⚡ Recover{sats > 0 ? ` ${sats.toLocaleString()} sats` : ""} and switch →
           </button>
           {/* Secondary: keep current Chama, abandon the switch. */}
           <button
@@ -96,20 +106,7 @@ export function DestroyEcashConfirmModal({
               cursor: "pointer",
             }}
           >
-            Cancel — keep my sats
-          </button>
-          {/* Tertiary: force-override. Destructive; muted styling so
-              it doesn't compete with the safe paths. */}
-          <button
-            onClick={onConfirm}
-            style={{
-              width: "100%", padding: "10px 14px", borderRadius: T.rs,
-              background: "transparent", border: `1px solid ${T.red}66`,
-              color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            Switch and destroy
+            Cancel — keep my Chama
           </button>
         </div>
       </div>

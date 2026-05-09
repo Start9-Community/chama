@@ -174,11 +174,46 @@ export interface UseEscrowActions {
   /** Cast a vote */
   vote: (escrowId: string, outcome: Outcome) => Promise<EscrowState>;
   /**
-   * Claim ecash as the winner.
+   * Claim ecash as the winner — leaves sats in the user's Chama wallet.
    * Runs the full real-Fedimint flow:
    *   decrypt shares → Shamir combine → verify hash → redeemEcash → publish CLAIM
+   *
+   * v0.3.0: production code paths must use claimAndPayout, which
+   * additionally dispatches an outbound Lightning payment to a
+   * user-chosen destination. claimAndRedeem leaves sats orphaned in
+   * the user's local Chama (Pillar 2.1 Option B violation). It stays
+   * exported as a building block for claimAndPayout and for Sandbox-
+   * mode testing. Phase 5 will demote this to Sandbox-only by gating
+   * its production callsites; do NOT add new direct callers.
    */
   claimAndRedeem: (escrowId: string) => Promise<EscrowState>;
+  /**
+   * v0.3.0 Phase 3 — atomic claim-and-payout. Composes
+   *   claimAndRedeem → wait-for-balance → payInvoice → optional handle save
+   * into one user-facing flow. The user picks a destination via
+   * DestinationPicker; this action carries it through to settlement.
+   * The user never holds an intermediate balance (Pillar 2.1 Option B,
+   * send side).
+   *
+   * Resolves with the terminal kind — never throws. Failure modes are
+   * split for the recovery banner UX:
+   *   claim-failed   — claim threw hard; no orphan
+   *   claim-pending  — claim returned but balance hasn't landed in 60s;
+   *                    sats may still arrive (recovery banner catches)
+   *   payout-failed  — claim landed but LN send failed; orphan balance
+   *                    (recovery banner is the next stop)
+   *   done           — payout sent
+   */
+  claimAndPayout: (
+    escrowId: string,
+    args: {
+      bolt11: string;
+      expectedDeltaMsats: number;
+      saveAfter: boolean;
+      addressUsed?: string;
+      onPhase: (phase: import("../payments/claim-and-payout.js").ClaimAndPayoutPhase) => void;
+    },
+  ) => Promise<import("../payments/claim-and-payout.js").ClaimAndPayoutTerminal>;
   /** Release a subscription period */
   releasePeriod: (escrowId: string, periodIndex: number) => Promise<EscrowState>;
   /** Send a chat message */
@@ -215,6 +250,28 @@ export interface UseEscrowActions {
    * Returns the BOLT11 string for the user to pay from another wallet.
    */
   createFundingInvoice: (amountMsats: number, description?: string) => Promise<string>;
+  /**
+   * v0.3.0 atomic funding: compose createFundingInvoice → balance-watcher
+   * → lockAndPublish into one user-facing flow. The user pays a BOLT11
+   * for exactly the trade amount; the moment ecash mints, LOCK fires
+   * automatically. The user never holds an intermediate wallet balance
+   * (Pillar 2.1 Option B). AtomicFundingModal renders phase events for
+   * granular UI updates; the action resolves with the terminal phase.
+   *
+   * Resolves with the terminal kind — never throws. Callers branch on
+   * the returned kind for post-modal navigation. Per-phase UI lives in
+   * the modal via opts.onPhase.
+   */
+  fundAndLock: (
+    escrowId: string,
+    opts: {
+      amountMsats: number;
+      description: string;
+      savedHandleId?: string;
+      onPhase: (phase: import("../payments/fund-and-lock.js").FundAndLockPhase) => void;
+      signal?: AbortSignal;
+    },
+  ) => Promise<import("../payments/fund-and-lock.js").FundAndLockTerminal>;
   payInvoice: (bolt11: string) => Promise<void>;
   spendNotes: (amountMsats: number) => Promise<string>;
   /** Refresh the current balance from the wallet */
@@ -1577,6 +1634,82 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     return fedimint.createInvoice(amountMsats, description);
   }, [updateFedimint]);
 
+  // v0.3.0 Phase 2: atomic fund-and-lock orchestrator. Composes the
+  // existing createFundingInvoice + lockAndPublishAction into a single
+  // flow with a phase callback for granular UI updates. The pure
+  // orchestrator lives in src/payments/fund-and-lock.ts (testable
+  // without React); this binding wires it to the live wallet.
+  const fundAndLockAction = useCallback(async (
+    escrowId: string,
+    opts: {
+      amountMsats: number;
+      description: string;
+      savedHandleId?: string;
+      onPhase: (phase: import("../payments/fund-and-lock.js").FundAndLockPhase) => void;
+      signal?: AbortSignal;
+    },
+  ): Promise<import("../payments/fund-and-lock.js").FundAndLockTerminal> => {
+    const fedimint = fedimintRef.current;
+    if (!fedimint) {
+      const err = "Wallet not initialized";
+      opts.onPhase({ kind: "lock-failed", error: err });
+      return { kind: "lock-failed", error: err };
+    }
+    const { runFundAndLock } = await import("../payments/fund-and-lock.js");
+    return runFundAndLock({
+      escrowId,
+      amountMsats: opts.amountMsats,
+      description: opts.description,
+      savedHandleId: opts.savedHandleId,
+      getBalance: () => fedimint.getBalance(),
+      createFundingInvoice: createFundingInvoice,
+      lockAndPublish: lockAndPublishAction,
+      onPhase: opts.onPhase,
+      signal: opts.signal,
+    });
+  }, [createFundingInvoice, lockAndPublishAction]);
+
+  // v0.3.0 Phase 3: atomic claim-and-payout orchestrator. Composes the
+  // existing claimAndRedeemAction with a balance watchdog and outbound
+  // payInvoice into a single flow with phase callbacks. The pure
+  // orchestrator lives in src/payments/claim-and-payout.ts (testable
+  // without React); this binding wires it to the live wallet.
+  const claimAndPayoutAction = useCallback(async (
+    escrowId: string,
+    args: {
+      bolt11: string;
+      expectedDeltaMsats: number;
+      saveAfter: boolean;
+      addressUsed?: string;
+      onPhase: (phase: import("../payments/claim-and-payout.js").ClaimAndPayoutPhase) => void;
+    },
+  ): Promise<import("../payments/claim-and-payout.js").ClaimAndPayoutTerminal> => {
+    const fedimint = fedimintRef.current;
+    const bridge = requireBridge();
+    if (!fedimint) {
+      const err = "Wallet not initialized";
+      args.onPhase({ kind: "claim-failed", error: err });
+      return { kind: "claim-failed", error: err };
+    }
+    const { runClaimAndPayout } = await import("../payments/claim-and-payout.js");
+    const { addOrTouchLightningHandle } = await import("../payments/saved-handles.js");
+    return runClaimAndPayout({
+      escrowId,
+      bolt11: args.bolt11,
+      expectedDeltaMsats: args.expectedDeltaMsats,
+      saveAfter: args.saveAfter,
+      addressUsed: args.addressUsed,
+      getBalance: () => fedimint.getBalance(),
+      claimAndRedeem: claimAndRedeemAction,
+      payInvoice: async (bolt11: string) => {
+        await bridge.payInvoice(bolt11);
+        refreshBalanceRef.current?.().catch(() => {});
+      },
+      addOrTouchLightningHandle,
+      onPhase: args.onPhase,
+    });
+  }, [claimAndRedeemAction]);
+
   // ── Return ──────────────────────────────────────────────────────────────
 
   const actions: UseEscrowActions = {
@@ -1593,6 +1726,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       return newState;
     },
     claimAndRedeem: claimAndRedeemAction,
+    claimAndPayout: claimAndPayoutAction,
     sendChat,
     cancel: cancelAction,
     loadEscrow,
@@ -1600,6 +1734,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     initFedimint,
     setCustomInvite,
     createFundingInvoice,
+    fundAndLock: fundAndLockAction,
     payInvoice: async (bolt11: string) => {
       const bridge = requireBridge();
       await bridge.payInvoice(bolt11);

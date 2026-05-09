@@ -1,0 +1,245 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Chama — Atomic claim-and-payout orchestrator (v0.3.0 Phase 3)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// Per PHILOSOPHY.md §2.7: claim time is when the user provides a destination
+// to receive sats. v0.3.0 collapses the prior two-step "claim then withdraw"
+// into a single atomic flow: tap Claim → DestinationPicker presents saved
+// LN handles + new-address input + BOLT11 paste → user picks destination
+// → claimAndPayout dispatches decrypt-shares → SSS-combine → redeemEcash
+// → outbound LN payment → modal closes. The user never holds an
+// intermediate balance (Pillar 2.1 Option B, send side).
+//
+// This module is the pure orchestrator (testable without React or a
+// running Fedimint). The hook (useEscrow.ts) binds the dependencies
+// to the live wallet; the ClaimPayoutModal renders phase transitions
+// to the user.
+//
+// ── Phase model ────────────────────────────────────────────────────────
+//
+// `claiming`         transient — bridge.claimAndRedeem call (decrypt
+//                    shares, SSS-combine, redeem ecash, publish CLAIM)
+// `confirming`       polling — waiting for balance to land. Same
+//                    v0.1.62 watchdog principle as Phase 2's mint-
+//                    confirming: claimAndRedeem may return before the
+//                    balance fully settles (partial-success / transient
+//                    error paths). We poll up to a 60s grace before
+//                    declaring "claim-pending".
+// `paying-invoice`   transient — outbound LN to the user's destination
+// `done`             TERMINAL — payout sent, optional handle saved
+// `claim-failed`     TERMINAL — claim threw a HARD failure (bad shares,
+//                    not the winner, hash mismatch). No orphan.
+// `claim-pending`    TERMINAL — claim returned but balance hasn't
+//                    landed within 60s. Sats may still arrive — the
+//                    recovery banner catches them next session.
+// `payout-failed`    TERMINAL — claim succeeded, balance landed, but
+//                    payInvoice threw. ORPHAN balance — the recovery
+//                    banner catches it.
+//
+// The split between claim-failed (no orphan) and payout-failed (orphan)
+// is load-bearing for the recovery banner UX (Phase 4 wiring).
+
+// ── Phase types ──────────────────────────────────────────────────────────
+
+export type ClaimAndPayoutPhase =
+  | { kind: "claiming" }
+  | { kind: "confirming" }
+  | { kind: "paying-invoice" }
+  | { kind: "done" }
+  | { kind: "claim-failed"; error: string }
+  | { kind: "claim-pending"; error: string }
+  | { kind: "payout-failed"; error: string };
+
+export type ClaimAndPayoutTerminal =
+  | { kind: "done" }
+  | { kind: "claim-failed"; error: string }
+  | { kind: "claim-pending"; error: string }
+  | { kind: "payout-failed"; error: string };
+
+// ── Tunables ─────────────────────────────────────────────────────────────
+
+/** v0.1.62 watchdog: 60s grace for the federation to credit the user's
+ *  wallet after CLAIM publishes. Mirrors the claim-side timeout in
+ *  Phase 2's pollForFunding (mint-confirm). */
+export const DEFAULT_CONFIRM_TIMEOUT_MS = 60 * 1000;
+
+/** Same cadence as the existing claim watchdog and Phase 2. */
+export const DEFAULT_POLL_INTERVAL_MS = 5_000;
+
+/** Accept any delta ≥ 90% of expected as "fully landed". Matches the
+ *  Fedimint settlement tolerance baked into startClaimWatchdog. */
+export const DEFAULT_THRESHOLD_PCT = 0.9;
+
+const defaultSleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+const defaultNow = () => Date.now();
+
+// ── waitForBalanceGrowth ─────────────────────────────────────────────────
+
+export interface WaitForBalanceGrowthOpts {
+  baselineMsats: number;
+  expectedDeltaMsats: number;
+  getBalance: () => Promise<number>;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  thresholdPct?: number;
+  signal?: AbortSignal;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/** Poll the wallet balance until it grows by ≥ thresholdPct * expected,
+ *  or the timeout elapses, or the signal aborts. Resolves with the
+ *  outcome — never throws. Used as the "claim-confirming" loop in
+ *  runClaimAndPayout. */
+export async function waitForBalanceGrowth(
+  opts: WaitForBalanceGrowthOpts,
+): Promise<"grew" | "timeout" | "aborted"> {
+  const sleep = opts.sleep ?? defaultSleep;
+  const now = opts.now ?? defaultNow;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS;
+  const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const thresholdPct = opts.thresholdPct ?? DEFAULT_THRESHOLD_PCT;
+  const requiredDelta = Math.floor(opts.expectedDeltaMsats * thresholdPct);
+  const start = now();
+
+  while (true) {
+    if (opts.signal?.aborted) return "aborted";
+    let balance = opts.baselineMsats;
+    try {
+      balance = await opts.getBalance();
+    } catch {
+      // Transient federation hiccups during polling — retry on next tick.
+    }
+    if (balance - opts.baselineMsats >= requiredDelta) return "grew";
+    if (now() - start >= timeoutMs) return "timeout";
+    await sleep(pollIntervalMs);
+  }
+}
+
+// ── runClaimAndPayout ────────────────────────────────────────────────────
+
+export interface RunClaimAndPayoutDeps {
+  /** Bound to fedimint.getBalance() in the hook. */
+  getBalance: () => Promise<number>;
+  /** Bound to the existing claimAndRedeemAction (decrypt + SSS + redeem
+   *  + publish CLAIM). May resolve before balance has fully settled —
+   *  the orchestrator polls separately to handle the watchdog case. */
+  claimAndRedeem: (escrowId: string) => Promise<unknown>;
+  /** Bound to bridge.payInvoice. Outbound Lightning send. */
+  payInvoice: (bolt11: string) => Promise<void>;
+  /** Bound to addOrTouchLightningHandle. Best-effort post-success save. */
+  addOrTouchLightningHandle: (address: string) => void;
+}
+
+export interface RunClaimAndPayoutOpts extends RunClaimAndPayoutDeps {
+  escrowId: string;
+  /** BOLT11 invoice the user's destination resolved to. */
+  bolt11: string;
+  /** Expected post-fee payout in msats. The wallet's balance after CLAIM
+   *  should grow by this much, give or take 10% threshold tolerance. */
+  expectedDeltaMsats: number;
+  /** Whether to call addOrTouchLightningHandle on success. Set by the
+   *  DestinationPicker — true when user tapped a saved row OR typed an
+   *  address with the "Save for next time" toggle on. */
+  saveAfter: boolean;
+  /** The Lightning Address to save (if saveAfter). Unset for BOLT11
+   *  paste — there's no address to save. */
+  addressUsed?: string;
+
+  onPhase: (phase: ClaimAndPayoutPhase) => void;
+
+  // Polling tunables.
+  confirmTimeoutMs?: number;
+  pollIntervalMs?: number;
+  /** Test seams. */
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/** Compose claimAndRedeem → balance-confirm → payInvoice → optional
+ *  handle-save into one atomic flow. Resolves with the terminal phase.
+ *  Never rejects.
+ *
+ *  Failure modes are split so the recovery banner UX is clean:
+ *   - claim-failed: claim threw HARD; balance unchanged; no orphan
+ *   - claim-pending: claim returned but balance never landed in 60s;
+ *     potential orphan — recovery banner catches on next session
+ *   - payout-failed: claim landed (balance grew), but Lightning send
+ *     failed; CONFIRMED orphan — recovery banner is the next stop */
+export async function runClaimAndPayout(
+  opts: RunClaimAndPayoutOpts,
+): Promise<ClaimAndPayoutTerminal> {
+  const emit = (p: ClaimAndPayoutPhase) => opts.onPhase(p);
+
+  // Snapshot baseline before we dispatch anything. The polling phase
+  // measures growth from here.
+  let baseline: number;
+  try {
+    baseline = await opts.getBalance();
+  } catch (e: any) {
+    const error = e?.message || "Couldn't read wallet balance";
+    emit({ kind: "claim-failed", error });
+    return { kind: "claim-failed", error };
+  }
+
+  // Phase 1: claim. Decrypt shares, SSS-combine, redeem ecash, publish
+  // CLAIM. May resolve via:
+  //   - synchronous success (balance already grew)
+  //   - watchdog success (balance grows during polling)
+  //   - hard failure (throws — surfaced as claim-failed)
+  emit({ kind: "claiming" });
+  try {
+    await opts.claimAndRedeem(opts.escrowId);
+  } catch (e: any) {
+    const error = e?.message || "Claim failed";
+    emit({ kind: "claim-failed", error });
+    return { kind: "claim-failed", error };
+  }
+
+  // Phase 2: confirm balance landed. Poll for up to confirmTimeoutMs.
+  // This handles BOTH the synchronous-success case (poll sees grown
+  // balance immediately on first read) and the watchdog case (poll
+  // waits while the federation settles).
+  emit({ kind: "confirming" });
+  const grew = await waitForBalanceGrowth({
+    baselineMsats: baseline,
+    expectedDeltaMsats: opts.expectedDeltaMsats,
+    getBalance: opts.getBalance,
+    timeoutMs: opts.confirmTimeoutMs,
+    pollIntervalMs: opts.pollIntervalMs,
+    sleep: opts.sleep,
+    now: opts.now,
+  });
+  if (grew !== "grew") {
+    const error =
+      "Your sats are still arriving from the federation. They'll land shortly — recover them via the banner on Browse if they don't appear within a few minutes.";
+    emit({ kind: "claim-pending", error });
+    return { kind: "claim-pending", error };
+  }
+
+  // Phase 3: outbound Lightning. Pay the user's destination invoice.
+  // If this throws, the balance is now orphaned in the user's Chama —
+  // recovery banner is the next stop.
+  emit({ kind: "paying-invoice" });
+  try {
+    await opts.payInvoice(opts.bolt11);
+  } catch (e: any) {
+    const error = e?.message || "Lightning payment failed";
+    emit({ kind: "payout-failed", error });
+    return { kind: "payout-failed", error };
+  }
+
+  // Phase 4: best-effort handle save. Failures here are cosmetic —
+  // the payout already succeeded.
+  if (opts.saveAfter && opts.addressUsed) {
+    try {
+      opts.addOrTouchLightningHandle(opts.addressUsed);
+    } catch {
+      // ignore
+    }
+  }
+
+  emit({ kind: "done" });
+  return { kind: "done" };
+}
