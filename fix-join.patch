@@ -1,0 +1,38 @@
+src/hooks/useEscrow.ts — at line ~1237 (right after const previousActiveInvite = getActiveInvite(); and before the // Fetch (or generate + publish) the Fedimint seed comment), insert:
+
+      // Wait for at least one relay to actually accept publishes before
+      // running the seed round-trip. `state.connected` flips true
+      // synchronously when client.connect() is dispatched, but the
+      // relay WebSocket handshakes happen async — racing this gate
+      // sends getOrCreateSeed's publishRaw into "No connected relays —
+      // cannot publish" on first-launch (no seed marker) users. Match
+      // the saved-escrow-reload pattern (line ~671): bounded wait, ≥1
+      // relay is enough since seed publish goes to all of them.
+      if (!isTestnetMode()) {
+        const client: any = clientRef.current;
+        let waited = 0;
+        while (waited < 5000) {
+          const connectedCount = [...client.relayManager.relays.values()]
+            .filter((r: any) => r.status === "connected").length;
+          if (connectedCount >= 1) break;
+          await new Promise(r => setTimeout(r, 250));
+          waited += 250;
+        }
+      }
+src/ui/App.tsx — two edits in the auto-init useEffect (around line 262):
+
+After if (!connected || autoInitDone) return;, insert:
+    // `connected` flips true synchronously when client.connect() is
+    // dispatched, but relay WebSocket handshakes happen async. Firing
+    // initFedimint with zero connected relays drives getOrCreateSeed
+    // into the fresh-seed publish path (first-launch users with no
+    // marker) → relayManager.publish() throws "No connected relays —
+    // cannot publish" → autoInitDone is already true → the user is
+    // stuck on "No Chama" until they tap Reconnect manually. Wait
+    // until at least one relay is actually open before dispatching.
+    if (connectedRelays === 0) return;
+At the end of that useEffect (around line 310), change the dependency array from:
+  }, [connected, autoInitDone, fedimint.joined, fedimint.busy, fedimint.initialized, actions]);
+to:
+
+  }, [connected, connectedRelays, autoInitDone, fedimint.joined, fedimint.busy, fedimint.initialized, actions]);
