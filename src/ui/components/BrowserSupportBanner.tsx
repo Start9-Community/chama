@@ -25,10 +25,11 @@ export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
         fontSize: 13, color: T.text, fontFamily: T.sans,
         lineHeight: 1.55,
       }}>
-        Chama works most reliably from the mobile app today — browser support
-        depends on Lightning relay infrastructure that's still maturing. You
-        can still trade from browser, but expect occasional connection
-        retries.
+	Heads up: Browser Fedimint clients are temporarily blocked on a 
+	known upstream issue (iroh-relay protocol upgrade, Fedimint SDK 
+	catch-up pending). You can sign in and browse, but federation 
+	operations won't complete from browser today. Tracking: 
+	github.com/fedimint/fedimint-sdk/issues/288
       </div>
       <button
         onClick={onDismiss}
