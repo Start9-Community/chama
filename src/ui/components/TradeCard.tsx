@@ -1,6 +1,6 @@
-import { type EscrowState, Role } from "../../escrow-engine/types.js";
+import { type EscrowState } from "../../escrow-engine/types.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
-import { T, CAT_ICON, CAT_LABEL, fmtSats, refundRecipientFor } from "../theme.js";
+import { T, CAT_ICON, CAT_LABEL, TRINITY_RING_ORDER, fmtSats, refundRecipientFor } from "../theme.js";
 import { Badge } from "./Badge.js";
 import { Dot } from "./Dot.js";
 
@@ -93,8 +93,15 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
         <Badge status={state.status} />
       </div>
 
+      {/* v0.3.1 Phase 2: participant order sourced from
+          TRINITY_RING_ORDER (theme.ts). Phase 6 introduced the
+          constant for TradeDetail but TradeCard still had the inline
+          [B, S, A] tuple — production smoke caught the drift. The
+          §43 grep tripwire test now scans src/ui/ for any inline
+          three-element Role literal and fails if it finds one
+          outside theme.ts. Forever-asset for brand coherence. */}
       <div style={{ display: "flex", gap: 12, marginTop: 12, justifyContent: "center" }}>
-        {([Role.BUYER, Role.SELLER, Role.ARBITER] as Role[]).map(role => (
+        {TRINITY_RING_ORDER.map(role => (
           <Dot
             key={role}
             role={role}

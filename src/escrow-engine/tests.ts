@@ -158,9 +158,11 @@ import {
 } from "../payments/fund-and-lock.js";
 
 // v0.3.0 Phase 3 — atomic claim-and-payout orchestrator
+// v0.3.1 Phase 1 — adds claim-bridge-threw terminal + bridge-throw discrimination
 import {
   waitForBalanceGrowth,
   runClaimAndPayout,
+  BRIDGE_THREW_ERROR_CODES,
   type ClaimAndPayoutPhase,
 } from "../payments/claim-and-payout.js";
 
@@ -176,7 +178,10 @@ import {
 } from "../ui/decisions.js";
 
 // v0.3.0 Phase 6 — Trinity Ring participant order (theme.ts)
+// v0.3.1 Phase 2 — extends §43 with a grep tripwire over src/ui/
 import { TRINITY_RING_ORDER } from "../ui/theme.js";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 // v0.3.0 Phase 6 — State B explainer card gate
 import {
@@ -5055,18 +5060,153 @@ console.log("\n── CHAMA BAR LABEL ──");
     assert(r.kind === "stranded",
       "Arbiter-only commitments don't shield prior orphans from stranded label");
   }
+
+  // ── v0.3.1 Phase 3: bootProbeState routing ───────────────────────────
+  // bootProbeState === "failed" overrides ALL other state to surface
+  // the "⚠ Chama unreachable · Reconnect →" pill. Reachability is
+  // the floor for any other meaningful state: if the user can't reach
+  // the federation, they can't recover stranded sats or progress an
+  // in-trade flow — the actionable next step is Reconnect.
+
+  // failed + zero balance → unreachable (overrides ready)
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: false,
+      bootProbeState: "failed",
+    });
+    assert(r.kind === "unreachable",
+      "bootProbeState=failed + zero balance → unreachable (overrides ready)");
+  }
+
+  // failed + stranded balance → unreachable (overrides stranded)
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 50_000,
+      hasActiveBuyerSellerCommitment: false,
+      bootProbeState: "failed",
+    });
+    assert(r.kind === "unreachable",
+      "bootProbeState=failed + stranded balance → unreachable (Reconnect is the actionable step, not Recover)");
+  }
+
+  // failed + in-trade → unreachable (overrides in-trade)
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 100_000,
+      hasActiveBuyerSellerCommitment: true,
+      bootProbeState: "failed",
+    });
+    assert(r.kind === "unreachable",
+      "bootProbeState=failed + active commitment → unreachable (can't progress trade until reachable)");
+  }
+
+  // ok → passes through to existing three-state decision
+  {
+    const r1 = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: false,
+      bootProbeState: "ok",
+    });
+    assert(r1.kind === "ready",
+      "bootProbeState=ok preserves existing 'ready' kind");
+
+    const r2 = decideChamaBarLabel({
+      balanceMsats: 50_000,
+      hasActiveBuyerSellerCommitment: false,
+      bootProbeState: "ok",
+    });
+    assert(r2.kind === "stranded",
+      "bootProbeState=ok preserves existing 'stranded' kind");
+
+    const r3 = decideChamaBarLabel({
+      balanceMsats: 100_000,
+      hasActiveBuyerSellerCommitment: true,
+      bootProbeState: "ok",
+    });
+    assert(r3.kind === "in-trade",
+      "bootProbeState=ok preserves existing 'in-trade' kind");
+  }
+
+  // pending → passes through to existing three-state decision
+  // (pending is transient; UI is fine with the brief optimistic
+  // rendering during it; only failed gates action surfaces).
+  {
+    const r1 = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: false,
+      bootProbeState: "pending",
+    });
+    assert(r1.kind === "ready",
+      "bootProbeState=pending does NOT override (transient state, optimistic render)");
+
+    const r2 = decideChamaBarLabel({
+      balanceMsats: 50_000,
+      hasActiveBuyerSellerCommitment: false,
+      bootProbeState: "pending",
+    });
+    assert(r2.kind === "stranded",
+      "bootProbeState=pending preserves stranded kind (transient state)");
+  }
+
+  // bootProbeState undefined → backwards-compatible (acts as ok)
+  // Defensive: any pre-Phase-3 caller that hasn't been updated
+  // continues to render the three-state surface as before.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 50_000,
+      hasActiveBuyerSellerCommitment: false,
+      // bootProbeState omitted
+    });
+    assert(r.kind === "stranded",
+      "bootProbeState undefined → backwards-compatible (renders as if ok)");
+  }
+
+  // Tripwire: failed-state ordering is independent of every other
+  // input. If a future refactor accidentally moves the bootProbeState
+  // check below the balance/commitment checks, in-trade or stranded
+  // could leak through during a federation outage — this test fails
+  // immediately in that case.
+  {
+    const inputs = [
+      { balanceMsats: 0, hasActiveBuyerSellerCommitment: false },
+      { balanceMsats: 50_000, hasActiveBuyerSellerCommitment: false },
+      { balanceMsats: 100_000, hasActiveBuyerSellerCommitment: true },
+      { balanceMsats: 999, hasActiveBuyerSellerCommitment: false },
+      { balanceMsats: -100, hasActiveBuyerSellerCommitment: false },
+    ];
+    for (const i of inputs) {
+      const r = decideChamaBarLabel({ ...i, bootProbeState: "failed" });
+      assert(r.kind === "unreachable",
+        `Tripwire: bootProbeState=failed overrides input { balance=${i.balanceMsats}, commitment=${i.hasActiveBuyerSellerCommitment} }`);
+    }
+  }
 }
 
-// ── 43. TRINITY RING PARTICIPANT ORDER (v0.3.0 Phase 6) ──────────────────
+// ── 43. TRINITY RING PARTICIPANT ORDER (v0.3.0 Phase 6 + v0.3.1 Phase 2) ─
 //
-// Pins B/A/S as the canonical participant render order in TradeDetail.
-// PHILOSOPHY.md §5.2 places the arbiter at the apex of the brand mark
-// with buyer/seller flanking below; the participants row mirrors this.
-// v0.2.0 shipped with B/S/A — Phase 6 corrects to B/A/S, and this test
-// is a tripwire: if a future "tidy" refactor silently reverts the
-// order, the test fails immediately. Doctrine protected forever.
+// Pins B/A/S as the canonical participant render order. PHILOSOPHY.md
+// §5.2 places the arbiter at the apex of the brand mark with
+// buyer/seller flanking below; the participants row mirrors this.
+//
+// Two-layer tripwire:
+//   (1) Constant-value assertions on TRINITY_RING_ORDER. Catches a
+//       maintainer editing the constant itself in theme.ts.
+//   (2) Grep tripwire over src/ui/. Catches a NEW render surface that
+//       declares its own inline `[Role.X, Role.Y, Role.Z]` tuple
+//       instead of importing the constant. Production smoke for
+//       v0.3.0 caught exactly this — TradeCard.tsx had drifted from
+//       TradeDetail.tsx because Phase 6 only patched the latter.
+//       v0.3.1 Phase 2 patches TradeCard AND adds this tripwire so
+//       no future participant-rendering surface can silently drift.
+//
+// Whitespace is normalized before matching so a future "format for
+// readability" diff that breaks the tuple across multiple lines still
+// trips the tripwire. Comments are stripped so doc strings mentioning
+// the literal don't false-positive.
 console.log("\n── TRINITY RING PARTICIPANT ORDER ──");
 {
+  // Layer 1: constant value
   assert(TRINITY_RING_ORDER.length === 3,
     "Trinity Ring has exactly three participants");
   assert(TRINITY_RING_ORDER[0] === Role.BUYER,
@@ -5075,6 +5215,95 @@ console.log("\n── TRINITY RING PARTICIPANT ORDER ──");
     "Trinity Ring [1] = Arbiter (middle / apex)");
   assert(TRINITY_RING_ORDER[2] === Role.SELLER,
     "Trinity Ring [2] = Seller (right)");
+
+  // Layer 2: grep tripwire. Walks src/ui/, strips comments, normalizes
+  // whitespace, and asserts no file outside the canonical definition
+  // site (theme.ts) contains an inline three-element Role tuple.
+  function walkUiFiles(root: string): string[] {
+    const out: string[] = [];
+    const stack = [root];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      let entries: string[];
+      try { entries = readdirSync(cur); } catch { continue; }
+      for (const ent of entries) {
+        // Defensive skip — src/ui/ shouldn't contain these but if a
+        // future refactor introduces a nested package, don't recurse.
+        if (ent === "node_modules" || ent === "dist") continue;
+        const full = join(cur, ent);
+        let st;
+        try { st = statSync(full); } catch { continue; }
+        if (st.isDirectory()) stack.push(full);
+        else if (ent.endsWith(".ts") || ent.endsWith(".tsx")) out.push(full);
+      }
+    }
+    return out;
+  }
+
+  function stripComments(src: string): string {
+    // Block comments first (handles /** ... */ doc blocks too).
+    let result = src.replace(/\/\*[\s\S]*?\*\//g, "");
+    // Then line comments.
+    result = result.replace(/\/\/[^\n]*/g, "");
+    return result;
+  }
+
+  function normalizeWhitespace(src: string): string {
+    return src.replace(/\s+/g, " ");
+  }
+
+  // Pattern: [Role.X, Role.Y, Role.Z] where X/Y/Z ∈ {BUYER, SELLER,
+  // ARBITER}. Catches all 27 combinations (the 6 permutations plus
+  // the 21 with repeats — repeats would be a bug too, so we want all).
+  // Trailing comma before `]` is optional to catch reformatted variants.
+  const ROLE_TUPLE_RE =
+    /\[\s*Role\.(?:BUYER|SELLER|ARBITER)\s*,\s*Role\.(?:BUYER|SELLER|ARBITER)\s*,\s*Role\.(?:BUYER|SELLER|ARBITER)\s*,?\s*\]/;
+
+  // Only the canonical definition site is allowed to contain the
+  // literal tuple. Matched by suffix so the test is robust to
+  // working-directory variation.
+  const ALLOWED_SUFFIXES = ["theme.ts"];
+
+  // Matcher self-tests — confirm the regex actually catches what we
+  // want it to. Doctrine: if these fail, the rest of the layer-2
+  // tripwire is silently broken.
+  assert(
+    ROLE_TUPLE_RE.test("renders [Role.BUYER, Role.SELLER, Role.ARBITER] dots"),
+    "Tripwire self-test: matches the original v0.2.0 [B, S, A] bug literal",
+  );
+  assert(
+    ROLE_TUPLE_RE.test(normalizeWhitespace(
+      "[\n  Role.BUYER,\n  Role.SELLER,\n  Role.ARBITER,\n]"
+    )),
+    "Tripwire self-test: matches reformatted multi-line variant with trailing comma after whitespace normalization",
+  );
+  assert(
+    !ROLE_TUPLE_RE.test("if (role === Role.BUYER) doStuff();"),
+    "Tripwire self-test: does NOT trip on scalar Role references",
+  );
+  assert(
+    !ROLE_TUPLE_RE.test("[Role.BUYER, Role.SELLER]"),
+    "Tripwire self-test: does NOT trip on a two-element Role tuple",
+  );
+
+  // Actual scan
+  const uiRoot = "src/ui";
+  let scannedCount = 0;
+  const offenders: string[] = [];
+  for (const file of walkUiFiles(uiRoot)) {
+    scannedCount++;
+    if (ALLOWED_SUFFIXES.some(suffix => file.endsWith(suffix))) continue;
+    const src = readFileSync(file, "utf8");
+    const stripped = normalizeWhitespace(stripComments(src));
+    if (ROLE_TUPLE_RE.test(stripped)) offenders.push(file);
+  }
+  assert(scannedCount > 0,
+    "Tripwire actually scanned src/ui/ files (sanity: cwd resolved)");
+  assert(offenders.length === 0,
+    offenders.length === 0
+      ? "No inline three-element Role tuples outside theme.ts (grep tripwire)"
+      : `Inline Role tuple offenders outside theme.ts: ${offenders.join(", ")}`,
+  );
 }
 
 // ── 44. STATE B EXPLAINER CARD GATE (v0.3.0 Phase 6) ─────────────────────
@@ -5136,6 +5365,290 @@ console.log("\n── STATE B EXPLAINER CARD ──");
   // Storage key uses the documented prefix
   assert(STATE_B_EXPLAINED_KEY_PREFIX === "chama_state_b_explained_",
     "Key prefix is the documented chama_state_b_explained_");
+
+  (globalThis as any).localStorage.clear();
+}
+
+// ── 45. CLAIM-BRIDGE-THREW DISCRIMINATION (v0.3.1 Phase 1) ───────────────
+//
+// v0.3.0 production smoke caught a hang on Bitcoin Principles
+// federation where every claim attempt landed in the `claim-pending`
+// "your sats are still arriving" terminal, even though redeemEcash
+// definitively failed pre-publish with FED_PROBE_FAILED. Root cause:
+// claimAndRedeemAction in useEscrow.ts was swallowing typed bridge
+// errors (FED_PROBE_FAILED, FED_MISMATCH) into the transient watchdog
+// catch-all. By the time runClaimAndPayout saw the resolved promise,
+// it interpreted the silently-returned local state as "claim
+// succeeded, balance just hasn't grown yet" → claim-pending.
+//
+// Phase 1 fix: split the throws by code, route typed bridge errors to
+// a new `claim-bridge-threw` terminal with retry semantics. Other
+// throws stay on `claim-failed` (no retry). Balance-doesn't-grow
+// AFTER a clean claimAndRedeem return stays on `claim-pending`.
+//
+// These tests pin the discrimination at the orchestrator level — the
+// caller is the source of truth for whether the bridge threw, and the
+// orchestrator routes correctly.
+console.log("\n── CLAIM-BRIDGE-THREW DISCRIMINATION ──");
+{
+  function makeMockWallet(opts: {
+    balances: number[];
+    claimResult?: "ok" | Error;
+    payInvoiceResult?: "ok" | Error;
+  }) {
+    let i = 0;
+    const calls = { claimAndRedeem: 0, payInvoice: 0, saveHandle: 0 };
+    return {
+      calls,
+      getBalance: async () => opts.balances[Math.min(i++, opts.balances.length - 1)],
+      claimAndRedeem: async (_id: string) => {
+        calls.claimAndRedeem++;
+        if (opts.claimResult instanceof Error) throw opts.claimResult;
+        return {} as any;
+      },
+      payInvoice: async (_b: string) => {
+        calls.payInvoice++;
+        if (opts.payInvoiceResult instanceof Error) throw opts.payInvoiceResult;
+      },
+      addOrTouchLightningHandle: () => { calls.saveHandle++; },
+    };
+  }
+
+  // ── FED_PROBE_FAILED → claim-bridge-threw (the bug class fix) ──────
+  {
+    const bridgeErr: any = new Error(
+      "Couldn't verify your federation before claiming. " +
+        "(No sats were spent — retry when your Chama is reachable.)"
+    );
+    bridgeErr.code = "FED_PROBE_FAILED";
+    const wallet = makeMockWallet({
+      balances: [0],
+      claimResult: bridgeErr,
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_bridge_threw_probe",
+      bolt11: "lnbc100n1pprobetest",
+      expectedDeltaMsats: 100_000,
+      saveAfter: true,
+      addressUsed: "alice@phoenix.app",
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "claim-bridge-threw",
+      "FED_PROBE_FAILED throws route to claim-bridge-threw (not claim-pending)");
+    if (terminal.kind === "claim-bridge-threw") {
+      assert(/No sats were spent/.test(terminal.error),
+        "claim-bridge-threw carries the honest 'No sats were spent' message from the bridge");
+    }
+    assert(wallet.calls.payInvoice === 0,
+      "payInvoice NOT called when bridge throws pre-redeem");
+    assert(wallet.calls.saveHandle === 0,
+      "Handle NOT saved on claim-bridge-threw (no successful payout)");
+  }
+
+  // ── FED_MISMATCH → claim-bridge-threw (sister case) ───────────────
+  {
+    const bridgeErr: any = new Error(
+      "This trade's sats were minted on federation X. Your wallet is on Y. " +
+        "Sign out and rejoin with the correct federation, then retry."
+    );
+    bridgeErr.code = "FED_MISMATCH";
+    const wallet = makeMockWallet({
+      balances: [0],
+      claimResult: bridgeErr,
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_bridge_threw_mismatch",
+      bolt11: "lnbc100n1pmismatch",
+      expectedDeltaMsats: 100_000,
+      saveAfter: true,
+      addressUsed: "bob@strike.me",
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "claim-bridge-threw",
+      "FED_MISMATCH throws route to claim-bridge-threw (sister of FED_PROBE_FAILED)");
+  }
+
+  // ── Hard-failure throws → claim-failed (existing semantic preserved)
+  {
+    const wallet = makeMockWallet({
+      balances: [0],
+      claimResult: new Error("Not enough shares to reconstruct"),
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_hard_fail",
+      bolt11: "lnbc100n1phardfail",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "claim-failed",
+      "Hard-failure throws (no error code) stay on claim-failed");
+  }
+
+  // ── Untyped throw → claim-failed (no e.code falls through) ────────
+  {
+    const wallet = makeMockWallet({
+      balances: [0],
+      claimResult: new Error("some generic protocol error"),
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_untyped",
+      bolt11: "lnbc100n1puntyped",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "claim-failed",
+      "Untyped throws (no .code) route to claim-failed, not claim-bridge-threw");
+  }
+
+  // ── Balance-never-grows AFTER clean claim → claim-pending (preserved)
+  // This is the case claim-pending was DESIGNED for: bridge resolved
+  // successfully (no throw, no e.code), but the wallet balance hasn't
+  // reflected the credit yet. Genuinely in-flight.
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 0, 0, 0, 0, 0],
+      claimResult: "ok",
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_balance_stall",
+      bolt11: "lnbc100n1pstall",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 3_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "claim-pending",
+      "Clean claim + balance never grows → claim-pending (genuinely in-flight)");
+    assert(wallet.calls.payInvoice === 0,
+      "payInvoice NOT called on claim-pending");
+  }
+
+  // ── BRIDGE_THREW_ERROR_CODES is the documented set ─────────────────
+  // Tripwire: if a future maintainer adds a new typed bridge error
+  // (e.g., FED_DISCONNECTED), this test fails unless they also update
+  // the documented codes. Forces the contract update + this routing
+  // logic to evolve together.
+  {
+    assert(BRIDGE_THREW_ERROR_CODES.length === 2,
+      "BRIDGE_THREW_ERROR_CODES has exactly the two documented codes");
+    assert(BRIDGE_THREW_ERROR_CODES.includes("FED_PROBE_FAILED"),
+      "FED_PROBE_FAILED is in the documented set");
+    assert(BRIDGE_THREW_ERROR_CODES.includes("FED_MISMATCH"),
+      "FED_MISMATCH is in the documented set");
+  }
+}
+
+// ── 46. SAVED HANDLES PANEL — partition contract (v0.3.1 Phase 4) ────────
+//
+// The Payment Handles UI partitions saved handles into TWO subsections:
+//   - Lightning Addresses (top)  → getSavedLightningHandles()
+//   - Fiat rails (below)         → listSavedHandles().filter(h => h.rail !== LIGHTNING_RAIL)
+//
+// This test pins the partition contract: the two subsections must be
+// disjoint AND complete (every saved handle appears in exactly one).
+// If a future refactor changes either source-of-truth in a way that
+// breaks the partition, the panel would either double-render handles
+// or hide some from the user entirely — the test fires immediately.
+// Same shape as §43's grep tripwire: a forever-asset for UI doctrine.
+console.log("\n── SAVED HANDLES PANEL — partition ──");
+{
+  (globalThis as any).localStorage.clear();
+
+  // Seed a mixed handle set: 2 LN, 2 fiat
+  addOrTouchLightningHandle("alice@phoenix.app");
+  addOrTouchLightningHandle("bob@strike.me");
+  addSavedHandle("revtag", "@carol");
+  addSavedHandle("wave", "+221 77 555 1234");
+
+  const all = listSavedHandles();
+  const lnSubsection = getSavedLightningHandles();
+  const fiatSubsection = all.filter(h => h.rail !== LIGHTNING_RAIL);
+
+  // ── Disjoint: no id appears in both subsections ────────────────────
+  const lnIds = new Set(lnSubsection.map(h => h.id));
+  const fiatIds = new Set(fiatSubsection.map(h => h.id));
+  for (const id of lnIds) {
+    assert(!fiatIds.has(id),
+      `Partition disjoint: LN handle ${id} does NOT appear in fiat subsection`);
+  }
+  for (const id of fiatIds) {
+    assert(!lnIds.has(id),
+      `Partition disjoint: fiat handle ${id} does NOT appear in LN subsection`);
+  }
+
+  // ── Complete: every saved handle appears in exactly one subsection
+  assert(lnSubsection.length + fiatSubsection.length === all.length,
+    "Partition complete: |LN| + |fiat| === |all| (no handle dropped or duplicated)");
+
+  // ── LN subsection only contains LIGHTNING_RAIL handles ─────────────
+  assert(lnSubsection.every(h => h.rail === LIGHTNING_RAIL),
+    "LN subsection contains only LIGHTNING_RAIL handles");
+
+  // ── Fiat subsection excludes LIGHTNING_RAIL ────────────────────────
+  assert(fiatSubsection.every(h => h.rail !== LIGHTNING_RAIL),
+    "Fiat subsection excludes LIGHTNING_RAIL (no double-render with LN subsection)");
+
+  // ── deleteSavedHandle works for LN handles (panel Delete button) ──
+  // Pins the contract that the panel's onDelete handler, which calls
+  // deleteSavedHandle(id), correctly removes an LN handle from
+  // getSavedLightningHandles() on the next refresh.
+  const targetLn = lnSubsection[0];
+  deleteSavedHandle(targetLn.id);
+  const lnAfter = getSavedLightningHandles();
+  assert(lnAfter.length === lnSubsection.length - 1,
+    "deleteSavedHandle removes one LN handle from getSavedLightningHandles");
+  assert(lnAfter.every(h => h.id !== targetLn.id),
+    "Deleted LN handle is gone from the subsection after delete");
+  // Fiat subsection unchanged by the LN delete
+  const fiatAfter = listSavedHandles().filter(h => h.rail !== LIGHTNING_RAIL);
+  assert(fiatAfter.length === fiatSubsection.length,
+    "Fiat subsection unchanged when an LN handle is deleted");
 
   (globalThis as any).localStorage.clear();
 }

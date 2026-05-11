@@ -29,7 +29,7 @@ import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 
 export function TradeDetail({
-  state, pubkey, homeCommunity,
+  state, pubkey, homeCommunity, bootProbeFailed,
   onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings,
 }: {
   state: EscrowState; pubkey: string;
@@ -37,6 +37,14 @@ export function TradeDetail({
    *  on CREATED listings (item 1, listing-detail half). For LOCKED+
    *  trades the subtitle reflects trade status, not framing. */
   homeCommunity: string | null;
+  /** v0.3.1 Phase 3: when true (bootProbeState === "failed"), Fund +
+   *  Claim buttons render disabled with the "Federation unreachable —
+   *  reconnect first" subtitle. The Reconnect CTA lives in ChamaBar
+   *  per the Phase 3 directive (single source of truth for Reconnect);
+   *  TradeDetail just gates its action buttons. The boolean is
+   *  computed by App.tsx from fedimint.bootProbeState — passing the
+   *  bool keeps TradeDetail's API minimal and explicit. */
+  bootProbeFailed: boolean;
   onBack: () => void;
   onVote: (outcome: Outcome) => void;
   onClaim: () => Promise<void>;
@@ -463,8 +471,13 @@ export function TradeDetail({
             </div>
           )}
 
+          {/* v0.3.1 Phase 3: Fund button gates on bootProbeFailed in
+              addition to its existing locking/buyer guards. The
+              Reconnect CTA lives in ChamaBar (single source of truth
+              per Phase 3 directive); this button just disables with
+              the subtitle below. */}
           <button
-            disabled={locking || !state.participants.buyer}
+            disabled={locking || !state.participants.buyer || bootProbeFailed}
             onClick={async () => {
               setLocking(true);
               try {
@@ -475,18 +488,26 @@ export function TradeDetail({
             }}
             style={{
               width: "100%", padding: "16px", borderRadius: T.rs,
-              background: locking || !state.participants.buyer
+              background: locking || !state.participants.buyer || bootProbeFailed
                 ? T.surface
                 : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
               border: "none",
-              color: locking || !state.participants.buyer ? T.muted : T.bg,
+              color: locking || !state.participants.buyer || bootProbeFailed ? T.muted : T.bg,
               fontFamily: T.mono, fontSize: 14, fontWeight: 800,
-              cursor: locking || !state.participants.buyer ? "default" : "pointer",
+              cursor: locking || !state.participants.buyer || bootProbeFailed ? "default" : "pointer",
               letterSpacing: 0.5, transition: "all 0.2s",
             }}
           >
             {locking ? "Locking..." : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
           </button>
+          {bootProbeFailed && (
+            <div style={{
+              textAlign: "center", marginTop: 8,
+              fontSize: 10, color: T.amber, fontFamily: T.mono,
+            }}>
+              Federation unreachable — reconnect first
+            </div>
+          )}
           <div style={{
             textAlign: "center", marginTop: 8,
             fontSize: 9, color: T.muted, fontFamily: T.mono,
@@ -637,32 +658,46 @@ export function TradeDetail({
         );
       })()}
 
-      {/* Claim button */}
+      {/* Claim button.
+          v0.3.1 Phase 3 expanded scope (Q4): boot probe also gates
+          the Claim button. When bootProbeFailed === true, the button
+          disables with "Federation unreachable — reconnect first"
+          subtitle. The Reconnect CTA lives in ChamaBar (single
+          source of truth). */}
       {state.status === EscrowStatus.APPROVED && iAmWinner && !state.subscription && (
-        <button
-          disabled={claiming}
-          onClick={async () => {
-            setClaiming(true);
-            try {
-              await onClaim();
-            } finally {
-              setClaiming(false);
-            }
-          }}
-          style={{
-            width: "100%", padding: "18px", borderRadius: T.rs,
-            background: claiming
-              ? T.surface
-              : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
-            border: "none",
-            color: claiming ? T.muted : T.bg,
-            fontFamily: T.mono, fontSize: 15, fontWeight: 800,
-            cursor: claiming ? "default" : "pointer", letterSpacing: 1,
-            marginBottom: 16,
-            animation: claiming ? "none" : "pulse 2s ease-in-out infinite",
-          }}>
-          {claiming ? "Claiming…" : "⚡ CLAIM YOUR SATS"}
-        </button>
+        <div style={{ marginBottom: 16 }}>
+          <button
+            disabled={claiming || bootProbeFailed}
+            onClick={async () => {
+              setClaiming(true);
+              try {
+                await onClaim();
+              } finally {
+                setClaiming(false);
+              }
+            }}
+            style={{
+              width: "100%", padding: "18px", borderRadius: T.rs,
+              background: claiming || bootProbeFailed
+                ? T.surface
+                : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
+              border: "none",
+              color: claiming || bootProbeFailed ? T.muted : T.bg,
+              fontFamily: T.mono, fontSize: 15, fontWeight: 800,
+              cursor: claiming || bootProbeFailed ? "default" : "pointer", letterSpacing: 1,
+              animation: (claiming || bootProbeFailed) ? "none" : "pulse 2s ease-in-out infinite",
+            }}>
+            {claiming ? "Claiming…" : "⚡ CLAIM YOUR SATS"}
+          </button>
+          {bootProbeFailed && (
+            <div style={{
+              textAlign: "center", marginTop: 8,
+              fontSize: 10, color: T.amber, fontFamily: T.mono,
+            }}>
+              Federation unreachable — reconnect first
+            </div>
+          )}
+        </div>
       )}
 
       {/* Trade chat */}

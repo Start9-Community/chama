@@ -642,3 +642,206 @@ Modal + `runFundAndLock`). v1.5 NWC item in BACKLOG.md references this
 foundation explicitly.
 
 ---
+
+## 2026-05-11 — Federation reachability as a first-class boot-time state
+
+**Context:** v0.3.0 shipped with federation reachability checked only
+at just-in-time moments (lock, claim, invoice creation). Production
+smoke on Bitcoin Principles (the default federation, b21068c8 —
+surfaced as "Global · USD" in the picker) caught the failure mode: 3
+of 4 guardians dead means mint operations cannot complete, but `join`
+succeeds because joining only requires reading public federation info
+(one guardian suffices). Result: every user composed a trade for ~90
+seconds before learning the federation was unreachable. The hang then
+manifested as the wrong terminal (`claim-pending`) because the
+useEscrow catch-all swallowed the typed bridge error into a silent
+watchdog (see sister entry below).
+
+**Options considered:**
+- (a) **Probe at lock time only** (status quo through v0.3.0).
+      Federation truth surfaces too late — after the user has invested
+      attention in composing a trade.
+- (b) **Periodic background probe** — every N seconds, refresh
+      reachability state. Adds complexity, polling cost, race
+      conditions between probe windows and user actions.
+- (c) **Cold-boot probe** — run probe1 sequentially after
+      initFedimint resolves successfully; expose result as
+      `bootProbeState`; gate action surfaces on it. Surfaces unreachable
+      federations at app load, before composition. Single source of
+      truth across the app.
+
+**Decision:** Option (c). probe1 lives inside `useEscrow.initFedimint`,
+sequential — runs after init resolves and before the action returns.
+`FedimintState.bootProbeState: "pending" | "ok" | "failed"` exposes
+the result. Action surfaces (Fund + Claim) gate on
+`bootProbeState === "failed"`. ChamaBar surfaces a single
+"⚠ Chama unreachable · Reconnect →" pill (the v0.3.0
+`decideChamaBarLabel` decision gains an `unreachable` kind that wins
+over the existing three). TradeDetail's Fund + Claim buttons disable
+with "Federation unreachable — reconnect first" subtitle pointing back
+at the ChamaBar Reconnect — single source of truth, no parallel
+surface.
+
+**Rationale:** Reachability is the floor for any other meaningful
+state. If the user can't reach the federation, they can't recover
+stranded sats, lock new ones, or claim trade winnings — the
+actionable next step is always Reconnect, not Recover or Vote.
+Surfacing reachability at boot turns "discover brokenness 90 seconds
+into composing" into "know immediately at app load and can act."
+Sequential placement inside initFedimint means probe1 truth is
+available before any meaningful navigation. Single Reconnect surface
+across the app (ChamaBar pill) prevents fragmentation — TradeDetail
+gates its buttons against the same flag, doesn't render its own
+Reconnect.
+
+**Implications:**
+- The existing healthRef cache override pattern stays for the legacy
+  probe2 path, but boot probe truth wins on conflict. The pre-Phase-3
+  optimism ("a successful join is itself proof of reachability") was
+  wrong in the broken-quorum case; boot probe explicitly overrides
+  that seed.
+- The Phase 1 `probeFederation` action also updates `bootProbeState`,
+  so the claim-bridge-threw Try-Again flow naturally unblocks the
+  boot gate across the entire UI. Same probe seam, three callsites
+  (initFedimint boot, claim-bridge-threw retry, ChamaBar Reconnect
+  tap — all dispatch through the same action).
+- `decideChamaBarLabel` priority ordering: unreachable > in-trade /
+  stranded / ready. Tested as a tripwire (§42 in tests.ts) — a
+  future refactor that accidentally reorders the priority checks
+  would let in-trade or stranded leak through during a federation
+  outage. The tripwire fires immediately on regression.
+- "pending" is a transient state (between initFedimint resolving and
+  probe1 awaiting); UI is fine with the brief optimistic rendering
+  during it. Only "failed" gates action surfaces.
+
+**Status:** Active. Operationalized in v0.3.1 Phase 3. §42 tripwire
+in tests.ts pins the priority ordering — failed-overrides-all-inputs
+is a forever-asset.
+
+---
+
+## 2026-05-11 — Typed bridge errors propagate; watchdog is fallback
+
+**Context:** v0.3.0 Phase 3 shipped the claim-and-payout three-terminal
+split (`claim-failed` / `claim-pending` / `payout-failed`). The design
+was correct, but a gap in the underlying `useEscrow.claimAndRedeem-
+Action` catch chain blocked it from working as designed. The catch
+had a "Probably transient" catch-all that swallowed typed bridge
+errors (`FED_PROBE_FAILED`, `FED_MISMATCH`) into a silent watchdog. By
+the time `runClaimAndPayout` saw the resolved promise, it interpreted
+the silently-returned local state as "claim succeeded, balance hasn't
+grown yet" → `claim-pending`. Production smoke: every claim attempt on
+Bitcoin Principles showed "Your sats are still arriving" for 60
+seconds, even though redeem definitively failed pre-publish with no
+spend, no chain advance, nothing in flight. The user had no path to
+retry beyond closing and reopening the modal.
+
+**Options considered:**
+- (a) Tighten the watchdog catch-all to ignore typed bridge errors so
+      they re-throw and `runClaimAndPayout`'s existing `claim-failed`
+      terminal catches them. Cheap, but conflates two different
+      failure modes (hard claim failure with no retry vs. retry-able
+      bridge unreachability).
+- (b) Restructure the three-terminal split. **Rejected** per Phase 1
+      scope guardrail — the three-terminal design was correct; the
+      swallow is what blocked it from working as designed.
+- (c) **Add a fourth retry-able terminal `claim-bridge-threw`** for
+      typed bridge errors with a documented set of codes
+      (`BRIDGE_THREW_ERROR_CODES`). Watchdog stays for genuinely
+      uncategorized errors (worker timeout, fetch failed, RPC
+      hiccups). Modal surfaces actual error + Try-again button.
+
+**Decision:** Option (c).
+`BRIDGE_THREW_ERROR_CODES = ["FED_PROBE_FAILED", "FED_MISMATCH"] as const`
+is the documented set; `isBridgeThrewError` predicate discriminates in
+`runClaimAndPayout`'s catch block. ClaimPayoutModal renders the new
+terminal with the underlying error as subtitle and a two-step
+Try-again button: probe federation first → if ok, re-dispatch claim
+from scratch with the same destination; if probe still fails, stay on
+terminal with updated error message.
+
+**Rationale:** The existing watchdog fallback (transient → wait for
+balance to land) is correct for genuinely transient errors, where the
+federation IS processing the redeem and the JS-side error reflects an
+RPC hiccup. But typed bridge errors with a known code communicate a
+structural state ("federation unreachable", "wallet on wrong fed")
+that no amount of waiting will fix. Surfacing them directly with the
+actual message + retry affordance matches reality. Watchdog stays as
+fallback for the unknown-error case, not the primary path for known
+errors.
+
+**Implications:**
+- Honest-copy fix at escrow-bridge.ts: the pre-stash
+  `FED_PROBE_FAILED` throw now says "(No sats were spent — retry when
+  your Chama is reachable.)" instead of the previous false "Notes
+  stashed for retry" message. Notes are NOT stashed at that point in
+  the flow (stash happens AFTER CLAIM publish, ~50 lines later). The
+  post-stash `claimPublished: true` throw keeps its existing "Claim
+  published, redeem failed" copy because notes ARE stashed there.
+  Two throw paths with different post-conditions and different copy —
+  Pillar 2.7 with gradations.
+- Tripwire test for the documented codes set: if a future maintainer
+  adds a new typed bridge error (e.g., `FED_DISCONNECTED`), the
+  `BRIDGE_THREW_ERROR_CODES.length === 2` assertion fails until they
+  update the documented set + add a routing test. Forces the contract
+  to evolve together.
+- The claim-bridge-threw retry path reuses the Phase 1
+  `probeFederation` action — same probe seam that the boot probe
+  uses. A successful retry-probe both unblocks the modal AND updates
+  `bootProbeState` to ok (see sister DECISIONS entry above), so the
+  ChamaBar unreachable pill clears and Fund/Claim re-enable across
+  the rest of the UI in one action.
+- The original three-terminal split is preserved unchanged.
+  `claim-pending` is now RESERVED for the case it was designed for:
+  bridge resolved successfully (no throw), but balance hasn't reflected
+  the credit within the 60s watchdog window. `payout-failed` stays
+  reserved for claim-landed-but-LN-send-threw.
+
+**Status:** Active. Operationalized in v0.3.1 Phase 1. §45 in tests.ts
+pins the discrimination at every quadrant: typed throws → bridge-threw,
+hard-failure throws → claim-failed, untyped throws → claim-failed,
+clean+stalled → claim-pending.
+
+---
+
+## 2026-05-11 — Fedi-runtime delegation is a viable v0.4.0 path
+
+**Context:** Pre-v0.3.0, the assumption was that Chama's browser OPFS
+Fedimint client would handle all federation operations directly,
+independent of Fedi. Production smoke against Bitcoin Principles
+(3 of 4 guardians dead) AND Bitcoin Life (full quorum, iroh-relay
+transport failure) confirmed that the OPFS-Fedimint-via-iroh-relay
+transport doesn't work in browser today, against any federation.
+
+**Decision:** Pursue Hybrid runtime. v0.4.0 detects Fedi webview at
+boot (per the _isFediRuntime pattern proven in Satoshi Market)
+and delegates federation operations to:
+  - window.fediInternal.generateEcash({amount}) for lock-time
+    ecash generation (federation-aware via notes prefix)
+  - window.fediInternal.receiveEcash(notes) for claim-time
+    ecash receipt (cross-federation confirmed working)
+  - window.webln.sendPayment/makeInvoice for LN routing
+  - window.nostr for NIP-07 signing (already used)
+
+Outside Fedi, Chama continues to use OPFS Fedimint client and
+surfaces honest errors per v0.3.1's claim-bridge-threw terminal
+until v0.x ships native iroh transport for browser.
+
+**Rationale:** The Satoshi Market codebase already proved every API
+above works in production. We are not exploring; we are porting
+a known-working integration pattern into Chama. v0.4.0 ships
+Nairobi-ready demo via Fedi webview; native browser transport
+remains a separate workstream without blocking demo timing.
+
+**Implications:**
+  - Fedi-runtime detection becomes a top-level architectural fork
+  - SSS escrow logic is unchanged (ecash splitting is rail-agnostic)
+  - Chama's OPFS client stays for non-Fedi-webview environments
+  - "Couldn't reach your Chama" remains correct fallback for
+    standalone browser until native transport ships
+  - Nairobi demo: Chama-as-Fedi-mini-app, demoable on any phone
+    with Fedi installed
+
+**Status:** Active — v0.4.0 scope, post-v0.3.1 release.
+
+---

@@ -290,13 +290,18 @@ export class EscrowFedimintBridge {
     try {
       redeemProbe = await this.fedimint.probeFederation();
     } catch (probeErr) {
-      // Probe failed but we already have the reconstructed notes. We
-      // don't want to lose them — stash and surface a probe-specific
-      // error so the UI can offer a retry path.
+      // v0.3.1 Phase 1: honest copy. This throw fires BEFORE
+      // stashPendingRedemption (below, ~line 341) AND before the CLAIM
+      // publish at this.escrow.claim() — nothing has been stashed,
+      // nothing has been published, no chain advance. The previous
+      // "Notes stashed for retry" copy was technically false at this
+      // point in the flow (Pillar 2.7 violation surfaced in v0.3.0
+      // production smoke). The other claim-side throw at the
+      // post-redeem catch (below, claimPublished:true) keeps its
+      // existing copy because notes ARE stashed by that point.
       const err: any = new Error(
         "Couldn't verify your federation before claiming. " +
-          "Your sats are safe — they'll be claimed automatically when " +
-          "the federation is reachable. (Notes stashed for retry.)"
+          "(No sats were spent — retry when your Chama is reachable.)"
       );
       err.code = "FED_PROBE_FAILED";
       err.cause = probeErr;

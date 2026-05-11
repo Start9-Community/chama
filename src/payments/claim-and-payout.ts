@@ -28,16 +28,35 @@
 // `paying-invoice`   transient — outbound LN to the user's destination
 // `done`             TERMINAL — payout sent, optional handle saved
 // `claim-failed`     TERMINAL — claim threw a HARD failure (bad shares,
-//                    not the winner, hash mismatch). No orphan.
-// `claim-pending`    TERMINAL — claim returned but balance hasn't
-//                    landed within 60s. Sats may still arrive — the
-//                    recovery banner catches them next session.
+//                    not the winner, hash mismatch). No orphan, no
+//                    retry semantic. User cannot recover from this
+//                    without protocol-level repair.
+// `claim-bridge-threw` TERMINAL — claim threw a typed bridge error
+//                    (FED_PROBE_FAILED, FED_MISMATCH). Structural,
+//                    retry-able once the federation becomes reachable
+//                    or the user switches feds. No orphan (the bridge
+//                    bails before any redeem or CLAIM publish). User
+//                    sees the underlying error + a Try-again button
+//                    in the modal that re-probes before re-dispatch.
+//                    v0.3.1 fix: previously this case silently fell
+//                    through to claim-pending, hanging the user with
+//                    "your sats are still arriving" while nothing was
+//                    actually arriving.
+// `claim-pending`    TERMINAL — claim returned (no throw) but balance
+//                    hasn't landed within 60s. Genuinely in-flight —
+//                    sats may still arrive from the federation. The
+//                    recovery banner catches them on next session if
+//                    they do. RESERVED for the no-throw / balance-
+//                    stalled case ONLY; bridge throws now route to
+//                    claim-bridge-threw above.
 // `payout-failed`    TERMINAL — claim succeeded, balance landed, but
 //                    payInvoice threw. ORPHAN balance — the recovery
 //                    banner catches it.
 //
-// The split between claim-failed (no orphan) and payout-failed (orphan)
-// is load-bearing for the recovery banner UX (Phase 4 wiring).
+// The four-way split lets the modal surface UX that matches reality:
+// `claim-bridge-threw` shows the actual error + retry; `claim-pending`
+// shows "still arriving" reassurance; `claim-failed` shows terminal
+// no-recovery framing; `payout-failed` points at the recovery banner.
 
 // ── Phase types ──────────────────────────────────────────────────────────
 
@@ -47,14 +66,27 @@ export type ClaimAndPayoutPhase =
   | { kind: "paying-invoice" }
   | { kind: "done" }
   | { kind: "claim-failed"; error: string }
+  | { kind: "claim-bridge-threw"; error: string }
   | { kind: "claim-pending"; error: string }
   | { kind: "payout-failed"; error: string };
 
 export type ClaimAndPayoutTerminal =
   | { kind: "done" }
   | { kind: "claim-failed"; error: string }
+  | { kind: "claim-bridge-threw"; error: string }
   | { kind: "claim-pending"; error: string }
   | { kind: "payout-failed"; error: string };
+
+/** Error codes the bridge tags on typed retry-able failures. Defined
+ *  alongside the orchestrator so test mocks + downstream consumers
+ *  reference the same string source-of-truth. */
+export const BRIDGE_THREW_ERROR_CODES = ["FED_PROBE_FAILED", "FED_MISMATCH"] as const;
+export type BridgeThrewErrorCode = typeof BRIDGE_THREW_ERROR_CODES[number];
+
+function isBridgeThrewError(e: unknown): e is { code: BridgeThrewErrorCode; message: string } {
+  const code = (e as { code?: string } | null)?.code;
+  return typeof code === "string" && (BRIDGE_THREW_ERROR_CODES as readonly string[]).includes(code);
+}
 
 // ── Tunables ─────────────────────────────────────────────────────────────
 
@@ -187,12 +219,23 @@ export async function runClaimAndPayout(
   // CLAIM. May resolve via:
   //   - synchronous success (balance already grew)
   //   - watchdog success (balance grows during polling)
-  //   - hard failure (throws — surfaced as claim-failed)
+  //   - hard failure (throws non-bridge error — surfaced as claim-failed)
+  //   - typed bridge error (throws with code FED_PROBE_FAILED or
+  //     FED_MISMATCH — surfaced as claim-bridge-threw, retry-able)
   emit({ kind: "claiming" });
   try {
     await opts.claimAndRedeem(opts.escrowId);
   } catch (e: any) {
     const error = e?.message || "Claim failed";
+    // v0.3.1 Phase 1: typed bridge errors get their own retry-able
+    // terminal. Discrimination is on e.code (the bridge tags
+    // FED_PROBE_FAILED + FED_MISMATCH at throw sites in
+    // escrow-bridge.ts). Other throws — hard claim failures, generic
+    // protocol errors — stay on claim-failed (no retry semantic).
+    if (isBridgeThrewError(e)) {
+      emit({ kind: "claim-bridge-threw", error });
+      return { kind: "claim-bridge-threw", error };
+    }
     emit({ kind: "claim-failed", error });
     return { kind: "claim-failed", error };
   }

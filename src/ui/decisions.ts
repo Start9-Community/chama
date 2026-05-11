@@ -379,30 +379,51 @@ export function hasActiveBuyerSellerCommitment(inputs: {
   return false;
 }
 
-// ── ChamaBar label decision (v0.3.0 Phase 5) ─────────────────────────────
+// ── ChamaBar label decision (v0.3.0 Phase 5 + v0.3.1 Phase 3) ─────────────
 //
-// Three states the top-bar's right-side surface can be in:
-//   - in-trade : balance > 0 AND user is buyer/seller in an active trade
-//                ("Active funds in escrow: N sats" — accent-pill styling)
-//   - stranded : balance > 0 AND no active commitment (failure-mode;
-//                tappable → opens RecoveryPayoutModal directly)
-//   - ready    : balance == 0 (neutral, "Chama: ready")
+// Four states the top-bar's right-side surface can be in:
+//   - unreachable : bootProbeState === "failed" (v0.3.1 Phase 3 —
+//                   federation joined but unreachable; "⚠ Chama
+//                   unreachable · Reconnect →"; tappable). Wins over
+//                   all other states because reachability is the
+//                   floor for any other meaningful state.
+//   - in-trade    : balance > 0 AND user is buyer/seller in an active
+//                   trade ("Active funds in escrow: N sats")
+//   - stranded    : balance > 0 AND no active commitment (failure-mode;
+//                   tappable → opens RecoveryPayoutModal directly)
+//   - ready       : balance == 0 (neutral, "Chama: ready")
 //
 // Per Phase 5 reminder #3: arbiter-only commitments do NOT count as
 // active. Arbiters mid-arbitration see "Chama: ready" because the
 // balance, if any, isn't theirs to commit. The predicate
 // hasActiveBuyerSellerCommitment is the same one Q3 of v0.2.0 locked
-// in for Create-blocking — Phase 5 reuses it for top-bar labelling.
+// in for Create-blocking.
+//
+// v0.3.1 Phase 3 ordering rationale: unreachable wins over stranded
+// and in-trade because if the user can't reach the federation, they
+// also can't recover stranded sats or progress an in-trade flow —
+// the actionable next step is Reconnect, not Recover or Vote. The
+// "pending" bootProbeState does NOT override the existing kinds; it's
+// a transient state between initFedimint resolving and probe1 result,
+// and the UI is fine with the (brief) optimistic rendering during it.
 
 export type ChamaBarLabel =
   | { kind: "ready" }
   | { kind: "in-trade"; sats: number }
-  | { kind: "stranded"; sats: number };
+  | { kind: "stranded"; sats: number }
+  | { kind: "unreachable" };
 
 export function decideChamaBarLabel(opts: {
   balanceMsats: number;
   hasActiveBuyerSellerCommitment: boolean;
+  /** v0.3.1 Phase 3 — when "failed", overrides all other kinds and
+   *  returns `{ kind: "unreachable" }`. "pending" and "ok" pass
+   *  through to the existing three-state decision. Optional/defaulted
+   *  for backwards compatibility — pre-Phase-3 callsites continue to
+   *  render the three-state surface as if probe is ok. */
+  bootProbeState?: "pending" | "ok" | "failed";
 }): ChamaBarLabel {
+  if (opts.bootProbeState === "failed") return { kind: "unreachable" };
   // Floor to whole sats — the bar always speaks in sats, never msats.
   const sats = Math.floor(opts.balanceMsats / 1000);
   if (sats <= 0) return { kind: "ready" };

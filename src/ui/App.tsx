@@ -676,6 +676,13 @@ export default function App() {
         chamaLabel={decideChamaBarLabel({
           balanceMsats: fedimint.balanceMsats ?? 0,
           hasActiveBuyerSellerCommitment: hasActiveCommitment,
+          // v0.3.1 Phase 3: bootProbeState routes the "unreachable"
+          // ChamaBar variant. Failed → "⚠ Chama unreachable ·
+          // Reconnect →"; pending/ok pass through to the existing
+          // three-state decision. Same source of truth gates
+          // TradeDetail's Fund + Claim buttons (see TradeDetail
+          // mount below).
+          bootProbeState: fedimint.bootProbeState,
         })}
         onTapStranded={() => setPendingRecovery({ title: "Recover sats" })}
         showReconnect={getUserCommunitySlugRaw() !== null || getActiveInvite() !== null}
@@ -767,6 +774,7 @@ export default function App() {
           payoutMsats={pendingClaim.payoutMsats}
           savedHandles={getSavedLightningHandles()}
           claimAndPayout={actions.claimAndPayout}
+          probeFederation={actions.probeFederation}
           onClose={(terminal) => {
             const { resolve } = pendingClaim;
             setPendingClaim(null);
@@ -775,6 +783,12 @@ export default function App() {
             } else if (terminal.kind === "done") {
               setToast({ message: "Sats sent to your wallet!", type: "success" });
             } else if (terminal.kind === "claim-failed") {
+              setToast({ message: terminal.error, type: "error" });
+            } else if (terminal.kind === "claim-bridge-threw") {
+              // v0.3.1 Phase 1: structural failure (FED_PROBE_FAILED /
+              // FED_MISMATCH). Modal surfaced the actual error +
+              // Try-again button; if user closed without retrying,
+              // the toast reminds them what happened. No sats moved.
               setToast({ message: terminal.error, type: "error" });
             } else if (terminal.kind === "claim-pending") {
               setToast({
@@ -903,6 +917,12 @@ export default function App() {
             state={selected}
             pubkey={pubkey!}
             homeCommunity={getUserCommunitySlugRaw()}
+            // v0.3.1 Phase 3 (Q4 scope): same boot-probe flag the
+            // ChamaBar's "unreachable" pill reads from. Fund + Claim
+            // buttons disable with the "Federation unreachable —
+            // reconnect first" subtitle when this is true. Reconnect
+            // dispatch lives in ChamaBar only.
+            bootProbeFailed={fedimint.bootProbeState === "failed"}
             onBack={() => { setView("browse"); setSelectedId(null); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),

@@ -120,6 +120,36 @@ export interface FedimintState {
   lastHealthOk: boolean | null;
   /** PR 5: ms-since-epoch of the last probe. Used for the 30s cache TTL. */
   lastHealthAt: number | null;
+  /**
+   * v0.3.1 Phase 3: cold-boot federation probe state.
+   *
+   * Sequential to initFedimint: runs once after a successful init/switch,
+   * before the user can compose a trade. Eliminates the
+   * "compose-then-fail-at-lock" UX where the user only discovers fed
+   * unreachability after 90 seconds of trade composition.
+   *
+   *   "pending" — probe1 has not yet completed. Initial state on app
+   *                load; brief transient state between initFedimint
+   *                resolving and probe1 result. Action surfaces are
+   *                NOT gated on pending (only on failed).
+   *   "ok"      — probe1 succeeded this session. Lock + Claim actions
+   *                are unblocked.
+   *   "failed"  — probe1 threw. ChamaBar surfaces "⚠ Chama unreachable
+   *                · Reconnect →"; Fund + Claim buttons render
+   *                disabled with the "Federation unreachable" subtitle.
+   *
+   * Reset to "pending" at the start of each initFedimint() call; set
+   * to "ok"/"failed" after the post-init probe resolves. The Phase 1
+   * probeFederation() action also updates this state, so the
+   * claim-bridge-threw Try-Again flow naturally unblocks the boot
+   * gate on a successful retry.
+   *
+   * If initFedimint() itself throws (init failed), the probe never
+   * runs and bootProbeState stays "pending" — but fedimint.joined is
+   * false in that case, so the existing not-joined Reconnect surface
+   * in ChamaBar handles UX, not the new unreachable variant.
+   */
+  bootProbeState: "pending" | "ok" | "failed";
 }
 
 export interface UseEscrowState {
@@ -274,6 +304,16 @@ export interface UseEscrowActions {
   ) => Promise<import("../payments/fund-and-lock.js").FundAndLockTerminal>;
   payInvoice: (bolt11: string) => Promise<void>;
   spendNotes: (amountMsats: number) => Promise<string>;
+  /**
+   * v0.3.1 Phase 1: explicit federation probe. Returns
+   * `{ ok: true }` if the federation responds to the standard probe,
+   * `{ ok: false, error: msg }` otherwise. Used by the
+   * ClaimPayoutModal's retry path on the `claim-bridge-threw`
+   * terminal — re-probe before re-dispatch so the user gets a clean
+   * "Chama reachable → claim retried" sequence rather than "retry →
+   * same error instantly". Never throws.
+   */
+  probeFederation: () => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Refresh the current balance from the wallet */
   refreshBalance: () => Promise<void>;
   /**
@@ -373,6 +413,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       error: null,
       lastHealthOk: null,
       lastHealthAt: null,
+      // v0.3.1 Phase 3: cold-boot probe state. Starts "pending" until
+      // initFedimint runs probe1 sequentially after a successful init.
+      bootProbeState: "pending",
     },
   });
 
@@ -691,6 +734,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         error: null,
         lastHealthOk: null,
         lastHealthAt: null,
+        // v0.3.1 Phase 3: matches the primary initial state above.
+        // disconnect() resets to pre-init shape; bootProbeState resets
+        // with it.
+        bootProbeState: "pending",
       },
     });
   }, []);
@@ -1044,6 +1091,21 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         throw e;
       }
 
+      // v0.3.1 Phase 1: typed bridge errors propagate. FED_PROBE_FAILED
+      // (federation unreachable at probe time) and FED_MISMATCH (wallet
+      // is on a different fed than the trade's notes) are structural
+      // bridge failures, not network hiccups. They have a clean retry
+      // semantic — once the fed is reachable / the user switches feds,
+      // the same claim works. Propagating them as throws lets
+      // claim-and-payout route them to the new `claim-bridge-threw`
+      // terminal with a Try-again affordance, instead of silently
+      // dropping into the in-flight watchdog (which is useless here
+      // because the bridge bailed before any redeem happened).
+      if (e?.code === "FED_PROBE_FAILED" || e?.code === "FED_MISMATCH") {
+        notify?.({ phase: "failure", escrowId, reason: msg });
+        throw e;
+      }
+
       // Probably transient (worker timeout, RPC hiccup, "fetch failed", etc.)
       // The federation very likely IS processing the redeem. Start watching
       // balance instead of throwing.
@@ -1376,6 +1438,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
       // PR 5: a successful join is itself proof of reachability — seed
       // the health cache so the first invoice doesn't have to probe.
+      // v0.3.1 Phase 3 caveat: this optimism is WRONG in the
+      // broken-quorum case (Bitcoin Principles production smoke: join
+      // succeeded against a federation with 3-of-4 guardians dead,
+      // because join only requires reading public federation info
+      // which any single guardian can serve; but mint operations need
+      // the threshold and fail downstream). The boot probe below
+      // overrides this seed when it actually exercises mint-touching
+      // RPC — that's the only check that catches broken-quorum.
       const joinedAt = Date.now();
       healthRef.current = { ok: true, at: joinedAt };
       updateFedimint({
@@ -1389,9 +1459,51 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         error: null,
         lastHealthOk: true,
         lastHealthAt: joinedAt,
+        // Reset boot probe to pending; the probe below sets ok/failed.
+        bootProbeState: "pending",
       });
 
       vibrate([40, 20, 40, 20, 80]);
+
+      // v0.3.1 Phase 3: cold-boot federation probe. Sequential — runs
+      // AFTER initFedimint has resolved init successfully. If init
+      // throws (preceding catch), this block is skipped and
+      // bootProbeState stays "pending" (but fedimint.joined === false
+      // in that case, so the existing not-joined Reconnect surface in
+      // ChamaBar handles the UX, not the new "unreachable" variant).
+      //
+      // Probe1 vs probe2:
+      //   probe1 — this block, fires once per initFedimint
+      //   probe2 — the just-in-time check inside createFundingInvoice
+      //            (line ~1614) and escrow-bridge probes at lock/claim.
+      //   Probe2 sites are unchanged; the boot gate ensures probe2
+      //   never has to surface the first "federation unreachable"
+      //   error to the user mid-trade-composition.
+      try {
+        await fedimint.probeFederation();
+        const probeOkAt = Date.now();
+        healthRef.current = { ok: true, at: probeOkAt };
+        updateFedimint({
+          bootProbeState: "ok",
+          lastHealthOk: true,
+          lastHealthAt: probeOkAt,
+        });
+      } catch (probeErr) {
+        // Probe failed — joined the fed but it's structurally broken
+        // (e.g., quorum dead). Override the optimistic ok seed above.
+        // The ChamaBar "⚠ Chama unreachable · Reconnect →" pill picks
+        // up bootProbeState=failed and the Fund + Claim buttons gate
+        // themselves on the same flag.
+        const probeFailedAt = Date.now();
+        const probeMsg = probeErr instanceof Error ? probeErr.message : String(probeErr);
+        console.warn("[chama] boot probe failed:", probeMsg);
+        healthRef.current = { ok: false, at: probeFailedAt };
+        updateFedimint({
+          bootProbeState: "failed",
+          lastHealthOk: false,
+          lastHealthAt: probeFailedAt,
+        });
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       updateFedimint({ busy: false, error: message });
@@ -1745,6 +1857,43 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const notes = await bridge.spendNotes(amountMsats);
       refreshBalanceRef.current?.().catch(() => {});
       return notes;
+    },
+    probeFederation: async () => {
+      // v0.3.1 Phase 1: explicit probe seam for the Try-again path on
+      // claim-bridge-threw. Doesn't pass through the HEALTH_TTL_MS cache
+      // (createFundingInvoice does) — a retry intentionally wants a
+      // fresh read. Returns a structured result; never throws.
+      //
+      // v0.3.1 Phase 3: also updates bootProbeState so a successful
+      // retry-probe naturally unblocks the boot gate. If the user
+      // reaches claim-bridge-threw → taps Try Again → probe succeeds,
+      // the ChamaBar "⚠ unreachable" pill clears AND the Fund/Claim
+      // buttons un-disable across the rest of the UI — single source
+      // of truth.
+      const fedimint = fedimintRef.current;
+      if (!fedimint) {
+        return { ok: false as const, error: "Wallet not initialized" };
+      }
+      try {
+        await fedimint.probeFederation();
+        const at = Date.now();
+        healthRef.current = { ok: true, at };
+        updateFedimint({
+          lastHealthOk: true,
+          lastHealthAt: at,
+          bootProbeState: "ok",
+        });
+        return { ok: true as const };
+      } catch (e: any) {
+        const at = Date.now();
+        healthRef.current = { ok: false, at };
+        updateFedimint({
+          lastHealthOk: false,
+          lastHealthAt: at,
+          bootProbeState: "failed",
+        });
+        return { ok: false as const, error: e?.message || "Federation unreachable" };
+      }
     },
     refreshBalance,
     resetLocalWallet,

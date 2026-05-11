@@ -7,6 +7,8 @@ import {
   deleteSavedHandle,
   setHandleVisibility,
   maskHandle,
+  getSavedLightningHandles,
+  LIGHTNING_RAIL,
 } from "../../payments/saved-handles.js";
 import {
   getRailByKey,
@@ -19,17 +21,44 @@ import {
 // private — saved-handles.ts enforces the same on writes as defense in
 // depth). Handle preview is masked by default with reveal-on-tap so the
 // owner can audit without exposing PII to a shoulder-surfer.
+//
+// v0.3.1 Phase 4: the panel partitions handles into TWO surfaces:
+//
+//   1. Lightning Addresses (top) — populated from
+//      getSavedLightningHandles(). LIGHTNING_RAIL handles auto-save
+//      from claim/recovery flows (DestinationPicker's "Save for next
+//      time" toggle). Read-only display + delete only; no add field
+//      here because the picker IS the canonical add path. First entry
+//      gets the [DEFAULT] badge per the MRU sort.
+//
+//   2. Fiat rail handles (below) — populated from listSavedHandles()
+//      filtered to exclude LIGHTNING_RAIL. The existing add form +
+//      rail picker live in this section. Untouched by Phase 4 except
+//      for the new filter on the render input.
+//
+// Partition contract: getSavedLightningHandles() is the canonical
+// source for the LN subsection; listSavedHandles().filter(...) is the
+// canonical source for the fiat list. Tests pin this contract so the
+// two surfaces never double-render the same handle.
 export function SavedHandlesPanel({ communitySlug, onClose }: {
   communitySlug: string;
   onClose: () => void;
 }) {
   const [handles, setHandles] = useState<SavedHandle[]>(() => listSavedHandles());
+  const [lnHandles, setLnHandles] = useState<SavedHandle[]>(() => getSavedLightningHandles());
   const [revealedIds, setRevealedIds] = useState<Set<string>>(new Set());
   const [addRail, setAddRail] = useState<string>("");
   const [addValue, setAddValue] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = () => setHandles(listSavedHandles());
+  const refresh = () => {
+    setHandles(listSavedHandles());
+    setLnHandles(getSavedLightningHandles());
+  };
+
+  // v0.3.1 Phase 4: fiat handles only — LN handles render in their own
+  // subsection above. Partition matches the documented contract.
+  const fiatHandles = handles.filter(h => h.rail !== LIGHTNING_RAIL);
 
   const availableRails = railsForCommunity(communitySlug);
 
@@ -97,8 +126,83 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
         (Revtag, $cashtag, etc.) can be opted in for profile display.
       </div>
 
-      {/* Existing handles list */}
-      {handles.length === 0 ? (
+      {/* v0.3.1 Phase 4: Lightning Addresses subsection.
+          Populated by getSavedLightningHandles() — handles auto-saved
+          from claim/recovery flows when the user ticks "Save for next
+          time" in the DestinationPicker. No add affordance here; the
+          picker is the canonical entry point. */}
+      <div style={{
+        fontSize: 10, fontWeight: 600, color: T.muted,
+        fontFamily: T.mono, letterSpacing: 1.5, marginBottom: 10,
+        textTransform: "uppercase",
+      }}>
+        Lightning Addresses
+      </div>
+      {lnHandles.length === 0 ? (
+        <div style={{
+          padding: 18, borderRadius: T.r,
+          background: T.surface, border: `1px dashed ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11,
+          lineHeight: 1.5, marginBottom: 24,
+        }}>
+          No Lightning Addresses saved yet. They'll appear here after
+          your first successful claim.
+        </div>
+      ) : (
+        <div style={{ marginBottom: 24 }}>
+          <div style={{
+            fontSize: 10, color: T.muted, fontFamily: T.mono,
+            marginBottom: 10, lineHeight: 1.5,
+          }}>
+            Saved automatically from claims and recoveries. Tap delete to
+            remove an address; first row is the default at claim time.
+          </div>
+          {lnHandles.map((h, i) => (
+            <div key={h.id} style={{
+              background: T.card, border: `1px solid ${T.border}`,
+              borderRadius: T.rs, padding: 12, marginBottom: 8,
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                <span style={{ color: T.accent, fontFamily: T.mono, fontSize: 14 }}>⚡</span>
+                <span style={{
+                  color: T.text, fontFamily: T.mono, fontSize: 12,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>
+                  {h.handle}
+                </span>
+                {i === 0 && (
+                  <span style={{
+                    fontSize: 8, fontFamily: T.mono, letterSpacing: 1,
+                    color: T.accent, background: T.accentDim,
+                    padding: "2px 6px", borderRadius: 4, flexShrink: 0,
+                  }}>DEFAULT</span>
+                )}
+              </div>
+              <button
+                onClick={() => handleDelete(h.id)}
+                style={{
+                  background: "none", border: "none",
+                  color: T.red, fontFamily: T.mono, fontSize: 10,
+                  cursor: "pointer", padding: "0 4px", flexShrink: 0,
+                }}
+              >Delete</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Fiat rail handles list. v0.3.1 Phase 4: filtered to exclude
+          LIGHTNING_RAIL so LN handles don't double-render across the
+          two subsections. */}
+      <div style={{
+        fontSize: 10, fontWeight: 600, color: T.muted,
+        fontFamily: T.mono, letterSpacing: 1.5, marginBottom: 10,
+        textTransform: "uppercase",
+      }}>
+        Fiat rails
+      </div>
+      {fiatHandles.length === 0 ? (
         <div style={{
           padding: 24, textAlign: "center", borderRadius: T.r,
           background: T.surface, border: `1px dashed ${T.border}`,
@@ -109,7 +213,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
         </div>
       ) : (
         <div style={{ marginBottom: 24 }}>
-          {handles.map(h => {
+          {fiatHandles.map(h => {
             const rail = getRailByKey(h.rail);
             const railName = rail?.displayName || h.rail;
             const allowsPublic = railAllowsPublicHandle(h.rail);

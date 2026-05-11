@@ -17,11 +17,20 @@
 // Phase orchestration lives in src/payments/claim-and-payout.ts. This
 // file is the React shell that renders the picker → running →
 // terminal sequence.
+//
+// v0.3.1 Phase 1: adds the `claim-bridge-threw` terminal panel with a
+// Try-again affordance. Per Q2 of the v0.3.1 plan, retry is two-step:
+// (1) probe the federation; (2) if probe succeeds, re-dispatch
+// claimAndPayout with the same destination; if probe fails, stay on
+// the same terminal with an updated error message. Avoids the confusing
+// "tapped Try again, got same error instantly" UX (Pillar 2.7).
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { T } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
-import type { SavedHandle } from "../../payments/saved-handles.js";
+import type {
+  SavedHandle,
+} from "../../payments/saved-handles.js";
 import type {
   ClaimAndPayoutPhase,
   ClaimAndPayoutTerminal,
@@ -49,6 +58,11 @@ export interface ClaimPayoutModalProps {
       onPhase: (phase: ClaimAndPayoutPhase) => void;
     },
   ) => Promise<ClaimAndPayoutTerminal>;
+  /** v0.3.1 Phase 1: bound to actions.probeFederation. Called from the
+   *  Try-again button on claim-bridge-threw terminal. Returns ok/error
+   *  shape (never throws). The retry path only re-dispatches the claim
+   *  if the probe returns ok. */
+  probeFederation: () => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Closed when the modal terminates (success, cancel, or error).
    *  Consumer reads the terminal kind to surface a toast. Undefined
    *  means user dismissed the picker before resolving. */
@@ -60,15 +74,78 @@ type Stage =
   | { kind: "running"; phase: ClaimAndPayoutPhase }
   | { kind: "terminal"; terminal: ClaimAndPayoutTerminal };
 
+/** Stashed dispatch arguments from the initial picker resolve. Used by
+ *  the claim-bridge-threw retry path to re-dispatch with the same
+ *  destination after a successful re-probe. */
+interface DispatchArgs {
+  bolt11: string;
+  saveAfter: boolean;
+  addressUsed?: string;
+}
+
 export function ClaimPayoutModal({
   escrowId,
   payoutMsats,
   savedHandles,
   claimAndPayout,
+  probeFederation,
   onClose,
 }: ClaimPayoutModalProps) {
   const payoutSats = Math.floor(payoutMsats / 1000);
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
+  // Retry state: when claim-bridge-threw terminal is up, the "Try
+  // again" button toggles this to render the inline probing spinner.
+  const [retryProbing, setRetryProbing] = useState(false);
+  // Stashed dispatch args. Set when the picker resolves; reused on
+  // Try-again so the retry uses the exact same destination/save
+  // semantics as the original attempt.
+  const lastDispatchRef = useRef<DispatchArgs | null>(null);
+
+  // Common dispatch helper — used by both the picker's first resolve
+  // and the bridge-threw retry path. Updates stage transitions and
+  // schedules auto-close on success.
+  const dispatchClaim = async (args: DispatchArgs) => {
+    setStage({ kind: "running", phase: { kind: "claiming" } });
+    const terminal = await claimAndPayout(escrowId, {
+      bolt11: args.bolt11,
+      expectedDeltaMsats: payoutMsats,
+      saveAfter: args.saveAfter,
+      addressUsed: args.addressUsed,
+      onPhase: (phase) => setStage({ kind: "running", phase }),
+    });
+    setStage({ kind: "terminal", terminal });
+    if (terminal.kind === "done") {
+      // Auto-close on success after a brief celebratory beat.
+      setTimeout(() => onClose(terminal), 1500);
+    }
+  };
+
+  // v0.3.1 Phase 1: claim-bridge-threw retry handler. Two-step per
+  // Q2: probe first, then re-dispatch only on probe success. Stays
+  // on terminal with updated error if the probe still fails.
+  const handleBridgeThrewRetry = async () => {
+    const args = lastDispatchRef.current;
+    if (!args) return;
+    setRetryProbing(true);
+    try {
+      const probe = await probeFederation();
+      if (!probe.ok) {
+        setStage({
+          kind: "terminal",
+          terminal: {
+            kind: "claim-bridge-threw",
+            error: probe.error || "Federation still unreachable",
+          },
+        });
+        return;
+      }
+      // Probe succeeded — re-dispatch from scratch. dispatchClaim
+      // moves stage off the terminal as its first act.
+      await dispatchClaim(args);
+    } finally {
+      setRetryProbing(false);
+    }
+  };
 
   // Stage 1: DestinationPicker. The shell handles all three tiers
   // internally. We pass amountSats so the LNURL resolver requests an
@@ -80,20 +157,15 @@ export function ClaimPayoutModal({
         savedHandles={savedHandles}
         title="Claim your sats"
         subtitle={`Send ${payoutSats.toLocaleString()} sats to your Lightning wallet`}
-        onResolve={async (bolt11, opts) => {
-          setStage({ kind: "running", phase: { kind: "claiming" } });
-          const terminal = await claimAndPayout(escrowId, {
+        onResolve={(bolt11, opts) => {
+          lastDispatchRef.current = {
             bolt11,
-            expectedDeltaMsats: payoutMsats,
             saveAfter: opts.saveAfter,
             addressUsed: opts.addressUsed,
-            onPhase: (phase) => setStage({ kind: "running", phase }),
-          });
-          setStage({ kind: "terminal", terminal });
-          if (terminal.kind === "done") {
-            // Auto-close on success after a brief celebratory beat.
-            setTimeout(() => onClose(terminal), 1500);
-          }
+          };
+          // Fire-and-forget — dispatchClaim manages its own stage
+          // transitions and terminal handling.
+          void dispatchClaim(lastDispatchRef.current);
         }}
         onCancel={() => onClose(undefined)}
       />
@@ -132,7 +204,7 @@ export function ClaimPayoutModal({
               {payoutSats.toLocaleString()} <span style={{ color: T.muted, fontWeight: 600, fontSize: 14 }}>sats</span>
             </div>
           </div>
-          {stage.kind === "terminal" && (
+          {stage.kind === "terminal" && !retryProbing && (
             <button onClick={() => onClose(stage.terminal)} style={{
               background: "none", border: "none", color: T.muted,
               fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
@@ -143,7 +215,12 @@ export function ClaimPayoutModal({
         {stage.kind === "running" && <RunningPanel phase={stage.phase} />}
 
         {stage.kind === "terminal" && (
-          <TerminalPanel terminal={stage.terminal} onClose={() => onClose(stage.terminal)} />
+          <TerminalPanel
+            terminal={stage.terminal}
+            retryProbing={retryProbing}
+            onRetry={handleBridgeThrewRetry}
+            onClose={() => onClose(stage.terminal)}
+          />
         )}
       </div>
     </div>
@@ -185,8 +262,13 @@ function RunningPanel({ phase }: { phase: ClaimAndPayoutPhase }) {
 }
 
 function TerminalPanel({
-  terminal, onClose,
-}: { terminal: ClaimAndPayoutTerminal; onClose: () => void }) {
+  terminal, retryProbing, onRetry, onClose,
+}: {
+  terminal: ClaimAndPayoutTerminal;
+  retryProbing: boolean;
+  onRetry: () => void;
+  onClose: () => void;
+}) {
   if (terminal.kind === "done") {
     return (
       <div style={{
@@ -205,12 +287,14 @@ function TerminalPanel({
     );
   }
 
-  // Error states share a common card layout but vary in tone + message.
+  // Error states share a common card layout but vary in tone + message
+  // + retry affordance.
   let title: string;
   let subtitle: string;
   let tone: string;
   let toneDim: string;
   let icon: string;
+  let showRetry = false;
 
   if (terminal.kind === "claim-failed") {
     title = "Couldn't recover your share";
@@ -218,6 +302,16 @@ function TerminalPanel({
     tone = T.red;
     toneDim = T.redDim;
     icon = "✕";
+  } else if (terminal.kind === "claim-bridge-threw") {
+    // v0.3.1 Phase 1: retry-able structural failure (FED_PROBE_FAILED
+    // / FED_MISMATCH). Surface the actual underlying error and offer
+    // Try again. No sats moved — safe to retry.
+    title = "Couldn't reach your Chama";
+    subtitle = terminal.error;
+    tone = T.amber;
+    toneDim = T.amberDim;
+    icon = "⚠";
+    showRetry = true;
   } else if (terminal.kind === "claim-pending") {
     title = "Your sats are still arriving";
     subtitle = terminal.error;
@@ -251,13 +345,38 @@ function TerminalPanel({
           {subtitle}
         </div>
       </div>
+      {showRetry && (
+        <button
+          disabled={retryProbing}
+          onClick={onRetry}
+          style={{
+            width: "100%", padding: "12px 16px", borderRadius: T.rs,
+            background: retryProbing ? T.surface : T.accent,
+            border: `1px solid ${T.accent}`,
+            color: retryProbing ? T.muted : "#000",
+            fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+            cursor: retryProbing ? "not-allowed" : "pointer",
+            marginBottom: 8,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          }}
+        >
+          {retryProbing && (
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: T.muted, animation: "pulse 1.4s ease-in-out infinite",
+            }} />
+          )}
+          {retryProbing ? "Checking your Chama…" : "Try again"}
+        </button>
+      )}
       <button
         onClick={onClose}
+        disabled={retryProbing}
         style={{
           width: "100%", padding: "10px 16px", borderRadius: T.rs,
           background: T.surface, border: `1px solid ${T.border}`,
           color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-          cursor: "pointer",
+          cursor: retryProbing ? "not-allowed" : "pointer",
         }}
       >
         Close

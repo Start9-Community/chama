@@ -45,6 +45,12 @@ export function ChamaBar({
    *  CTA. No-op for the in-trade and ready labels (those aren't
    *  tappable). */
   onTapStranded: () => void;
+  /** Fires for the v0.2.0 not-joined Reconnect AND for the v0.3.1
+   *  Phase 3 "⚠ Chama unreachable" Reconnect (same dispatch — both
+   *  call initFedimint() with no args, which uses the stored custom
+   *  invite or BP fallback). Single source of truth for the
+   *  Reconnect CTA — no parallel surface in TradeDetail per the
+   *  Phase 3 directive. */
   onInit: () => void;
   /** Whether to surface the Reconnect CTA when not joined. True for
    *  returning users; false for first-time users (community pills are
@@ -109,9 +115,19 @@ export function ChamaBar({
         </span>
       </div>
 
-      {/* Right side — state-aware label or Reconnect when not joined. */}
+      {/* Right side — state-aware label or Reconnect when not joined.
+          v0.3.1 Phase 3: when joined AND bootProbeState === "failed",
+          chamaLabel.kind === "unreachable" and the pill becomes a
+          Reconnect tappable surface (same dispatch as the not-joined
+          Reconnect — both fire onInit). The pill IS the Reconnect
+          CTA; no parallel "Reconnect" button is added elsewhere in
+          the app per the Phase 3 directive. */}
       {fedimint.joined ? (
-        <ChamaBarLabelPill label={chamaLabel} onTapStranded={onTapStranded} />
+        <ChamaBarLabelPill
+          label={chamaLabel}
+          onTapStranded={onTapStranded}
+          onTapUnreachable={onInit}
+        />
       ) : !fedimint.busy && showReconnect && (
         <button onClick={onInit} style={{
           padding: "6px 16px", borderRadius: 20,
@@ -127,11 +143,34 @@ export function ChamaBar({
 }
 
 function ChamaBarLabelPill({
-  label, onTapStranded,
+  label, onTapStranded, onTapUnreachable,
 }: {
   label: ChamaBarLabel;
   onTapStranded: () => void;
+  /** v0.3.1 Phase 3: tap handler for the "⚠ Chama unreachable"
+   *  variant. Wired to initFedimint() at the parent (same dispatch
+   *  as the not-joined Reconnect button). */
+  onTapUnreachable: () => void;
 }) {
+  if (label.kind === "unreachable") {
+    // v0.3.1 Phase 3: federation joined but unreachable (boot probe
+    // failed). Single Reconnect surface across the app — TradeDetail
+    // gates Fund/Claim buttons against the same bootProbeState flag
+    // but does NOT render its own Reconnect button; users come here.
+    return (
+      <button
+        onClick={onTapUnreachable}
+        style={{
+          padding: "5px 12px", borderRadius: 20,
+          background: T.amberDim, border: `1px solid ${T.amber}66`,
+          color: T.amber, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+          letterSpacing: 0.3, whiteSpace: "nowrap", cursor: "pointer",
+        }}
+      >
+        ⚠ Chama unreachable · Reconnect →
+      </button>
+    );
+  }
   if (label.kind === "ready") {
     return (
       <span style={{
