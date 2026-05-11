@@ -845,3 +845,40 @@ remains a separate workstream without blocking demo timing.
 **Status:** Active — v0.4.0 scope, post-v0.4.0 release.
 
 ---
+
+## 2026-05-11 — All current Chama surfaces blocked on Fedimint SDK ≤0.1.1 + iroh-relay ≥0.91 mismatch
+
+After v0.4.1's relay race fix unblocked Chama's local init path, the
+underlying federation transport reachability was revealed as a pure
+upstream dependency problem: @fedimint/fedimint-client-wasm-bundler
+ships a pre-iroh-0.91 client. iroh-relay servers were upgraded to
+iroh ≥0.91 (Aug 2025) with wire-level breaking changes to the WebSocket
+handshake protocol. Client and server can't handshake. HTTP 400 every
+time.
+
+Affected surfaces (all identically blocked):
+- Standalone browser (Firefox, Chrome, Safari) — same WASM
+- Capacitor APK — wraps WebView, same WASM
+- Chama-as-Fedi-mini-app — loads chama.satoshimarket.app, same WASM
+- (Only Fedi mobile native app reaches federations, via compiled
+  iroh-net binary that bypasses iroh-relay entirely; that code path
+  is not available to web clients)
+
+Tracking upstream: github.com/fedimint/fedimint-sdk/issues/288
+
+v0.4.1's relay race fix and v0.4.0's honest error surfacing remain
+correct and valuable independent of this issue. They make the local
+diagnostic clean so the "Chama unreachable" message now points at the
+real, upstream blocker.
+
+Unblock path:
+1. Fedimint SDK releases a version targeting iroh ≥0.91 → bump deps,
+   smoke test, ship v0.4.2
+2. If a working canary build is identified, use it as an interim
+   bridge while waiting for a proper release
+3. If both paths fail before Nairobi: pivot demo strategy to
+   listings-and-Nostr-only (signed escrow events render, full trade
+   completion deferred to post-SDK-update)
+
+Nairobi feasibility depends on (1) or (2). Architecturally Chama is
+ready; transport layer is upstream-blocked.
