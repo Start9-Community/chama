@@ -552,7 +552,7 @@ exposing those internals.
   `RecoveryPayoutModal` (Phase 4, used by both the recovery banner
   and destroy-modal paths) — all mount `<DestinationPicker />`
   directly. None of them imports from `destination-picker-logic.ts`.
-- Future surfaces (sovereign LN address withdrawal in v0.3.1, NWC
+- Future surfaces (sovereign LN address withdrawal in v0.4.0, NWC
   adapter in v1.5, any future "send sats out of Chama" flow) plug into
   the same `onResolve` contract. NWC in v1.5 will likely add a fourth
   tier ("use connected wallet") inside the shell, transparent to
@@ -714,7 +714,7 @@ Reconnect.
   probe1 awaiting); UI is fine with the brief optimistic rendering
   during it. Only "failed" gates action surfaces.
 
-**Status:** Active. Operationalized in v0.3.1 Phase 3. §42 tripwire
+**Status:** Active. Operationalized in v0.4.0 Phase 3. §42 tripwire
 in tests.ts pins the priority ordering — failed-overrides-all-inputs
 is a forever-asset.
 
@@ -797,7 +797,7 @@ errors.
   the credit within the 60s watchdog window. `payout-failed` stays
   reserved for claim-landed-but-LN-send-threw.
 
-**Status:** Active. Operationalized in v0.3.1 Phase 1. §45 in tests.ts
+**Status:** Active. Operationalized in v0.4.0 Phase 1. §45 in tests.ts
 pins the discrimination at every quadrant: typed throws → bridge-threw,
 hard-failure throws → claim-failed, untyped throws → claim-failed,
 clean+stalled → claim-pending.
@@ -824,7 +824,7 @@ and delegates federation operations to:
   - window.nostr for NIP-07 signing (already used)
 
 Outside Fedi, Chama continues to use OPFS Fedimint client and
-surfaces honest errors per v0.3.1's claim-bridge-threw terminal
+surfaces honest errors per v0.4.0's claim-bridge-threw terminal
 until v0.x ships native iroh transport for browser.
 
 **Rationale:** The Satoshi Market codebase already proved every API
@@ -842,6 +842,6 @@ remains a separate workstream without blocking demo timing.
   - Nairobi demo: Chama-as-Fedi-mini-app, demoable on any phone
     with Fedi installed
 
-**Status:** Active — v0.4.0 scope, post-v0.3.1 release.
+**Status:** Active — v0.4.0 scope, post-v0.4.0 release.
 
 ---

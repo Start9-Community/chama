@@ -67,10 +67,10 @@ or smoke testing where the right answer is "let production tell us."
 
 ## v0.3.2 — chama.community Lightning Address service
 
-Originally planned as v0.3.1; renumbered to v0.3.2 after v0.3.0
+Originally planned as v0.4.0; renumbered to v0.3.2 after v0.3.0
 production smoke caught a hard claim hang on Bitcoin Principles (the
 default federation — 3 of 4 guardians dead, mint operations couldn't
-complete). v0.3.1 became the fix release: surface bridge errors
+complete). v0.4.0 became the fix release: surface bridge errors
 honestly (claim-bridge-threw terminal), cold-boot federation probe
 gate, Trinity Ring drift on TradeCard, Lightning Address subsection
 in the saved-handles panel. This section's items shift one slot.
