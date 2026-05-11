@@ -261,6 +261,15 @@ export default function App() {
   // gates are in place.
   useEffect(() => {
     if (!connected || autoInitDone) return;
+    // `connected` flips true synchronously when client.connect() is
+    // dispatched, but relay WebSocket handshakes happen async. Firing
+    // initFedimint with zero connected relays drives getOrCreateSeed
+    // into the fresh-seed publish path (first-launch users with no
+    // marker) → relayManager.publish() throws "No connected relays —
+    // cannot publish" → autoInitDone is already true → the user is
+    // stuck on "No Chama" until they tap Reconnect manually. Wait
+    // until at least one relay is actually open before dispatching.
+    if (connectedRelays === 0) return;
     if (fedimint.joined || fedimint.busy || fedimint.initialized) return;
 
     const target = decideAutoInitTarget({
@@ -307,7 +316,7 @@ export default function App() {
         });
       }
     });
-  }, [connected, autoInitDone, fedimint.joined, fedimint.busy, fedimint.initialized, actions]);
+  }, [connected, connectedRelays, autoInitDone, fedimint.joined, fedimint.busy, fedimint.initialized, actions]);
 
   const now = Math.floor(Date.now() / 1000);
   const HIDE_AFTER = 7 * 86400;

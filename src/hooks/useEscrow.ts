@@ -1235,6 +1235,26 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         || resolveFederationForCommunity(userCommunity);
       const previousActiveInvite = getActiveInvite();
 
+      // Wait for at least one relay to actually accept publishes before
+      // running the seed round-trip. `state.connected` flips true
+      // synchronously when client.connect() is dispatched, but the
+      // relay WebSocket handshakes happen async — racing this gate
+      // sends getOrCreateSeed's publishRaw into "No connected relays —
+      // cannot publish" on first-launch (no seed marker) users. Match
+      // the saved-escrow-reload pattern (line ~671): bounded wait, ≥1
+      // relay is enough since seed publish goes to all of them.
+      if (!isTestnetMode()) {
+        const client: any = clientRef.current;
+        let waited = 0;
+        while (waited < 5000) {
+          const connectedCount = [...client.relayManager.relays.values()]
+            .filter((r: any) => r.status === "connected").length;
+          if (connectedCount >= 1) break;
+          await new Promise(r => setTimeout(r, 250));
+          waited += 250;
+        }
+      }
+
       // Fetch (or generate + publish) the Fedimint seed from Nostr
       // *before* initializing the wallet. The seed is encrypted to the
       // user's own pubkey and stored as a replaceable kind-30078 event,
