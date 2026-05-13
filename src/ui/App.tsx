@@ -45,6 +45,7 @@ import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
 import { addOrTouchLightningHandle, getSavedLightningHandles } from "../payments/saved-handles.js";
 import { SavedHandlesPanel } from "./panels/SavedHandlesPanel.js";
+import { SimModePill, SimEntryModal } from "../sim/SimModeBanner.js";
 
 const QRScanner = lazy(() => import("./QRScanner.js"));
 
@@ -555,6 +556,8 @@ export default function App() {
     return (
       <div style={{ background: T.bg, color: T.text, minHeight: "100vh", fontFamily: T.sans }}>
         <style>{globalCss}</style>
+        <SimModePill />
+        <SimEntryModal />
         {loginSuccess && <LoginSuccessSplash />}
         {showQRScanner && (
           <Suspense fallback={null}>
@@ -633,6 +636,8 @@ export default function App() {
       paddingBottom: BOTTOM_NAV_HEIGHT,
     }}>
       <style>{globalCss}</style>
+      <SimModePill />
+      <SimEntryModal />
 
       {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
 

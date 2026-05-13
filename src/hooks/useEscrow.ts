@@ -66,6 +66,7 @@ import {
 } from "../fedimint/index.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
+import { isSimModeOn } from "../sim/simMode.js";
 
 // ── Hook state ────────────────────────────────────────────────────────────
 
@@ -1243,7 +1244,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // cannot publish" on first-launch (no seed marker) users. Match
       // the saved-escrow-reload pattern (line ~671): bounded wait, ≥1
       // relay is enough since seed publish goes to all of them.
-      if (!isTestnetMode()) {
+      if (!isTestnetMode() && !isSimModeOn()) {
         const client: any = clientRef.current;
         let waited = 0;
         while (waited < 5000) {
@@ -1259,11 +1260,17 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // *before* initializing the wallet. The seed is encrypted to the
       // user's own pubkey and stored as a replaceable kind-30078 event,
       // so the wallet is recoverable on any device with access to the
-      // user's signer. In testnet mode the mock wallet ignores the
+      // user's signer. In testnet/sim mode the mock wallets ignore the
       // mnemonic, so we skip the Nostr round-trip.
-      const mnemonic = isTestnetMode()
+      const skipMnemonic = isTestnetMode() || isSimModeOn();
+      const mnemonic = skipMnemonic
         ? undefined
         : await getOrCreateSeed(clientRef.current!, signerRef.current!);
+      // Sim wallet keys its persisted state by npub so multiple
+      // identities in the same browser don't share a sim balance.
+      const simNpub = isSimModeOn()
+        ? (await signerRef.current!.getPublicKey().catch(() => null))
+        : null;
 
       const buildClient = () => new FedimintClient({
         onBalanceUpdate: (balance) => updateFedimint({ balanceMsats: balance }),
@@ -1281,7 +1288,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       let fedimint = fedimintRef.current;
       if (!fedimint) {
         fedimint = buildClient();
-        await fedimint.init({ mnemonic });
+        await fedimint.init({ mnemonic, simNpub });
         fedimintRef.current = fedimint;
         updateFedimint({ initialized: true });
       }
@@ -1387,7 +1394,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         // below lands on the desired fed cleanly (no v0.1.69 case-c
         // throw, no case-b silent no-op).
         fedimint = buildClient();
-        await fedimint.init({ mnemonic });
+        await fedimint.init({ mnemonic, simNpub });
         fedimintRef.current = fedimint;
       }
 
@@ -1447,7 +1454,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       //
       // Fire-and-forget, matches the v0.1.68 drain pattern. Non-blocking
       // so UI transitions to the "joined" state without waiting.
-      if (!isTestnetMode()) {
+      if (!isTestnetMode() && !isSimModeOn()) {
         checkAndMaybeRepublishSeed(
           clientRef.current!,
           signerRef.current!

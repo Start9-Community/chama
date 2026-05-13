@@ -49,6 +49,7 @@ import { ENCRYPTION_CONFIG, maybeEncrypt } from "./encryption-config.js";
 import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
 import { createEnvelope, decryptFromEnvelope } from "./envelope.js";
 import { RelayManager, type NostrFilter } from "./relay-manager.js";
+import { simTagOrNull, shouldDropForSimPolicy } from "../sim/simMode.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // SIGNER INTERFACE — Injected dependency for key operations
@@ -206,6 +207,24 @@ export class EscrowClient {
     return this.signer;
   }
 
+  /**
+   * v0.4.2 sim mode: sign an event, but first stamp a `chama-sim` tag
+   * if sim mode is active. The tag rides on every event the escrow
+   * engine publishes so the receive side can isolate sim trades from
+   * real ones cleanly (see handleIncomingEvent below for the drop
+   * policy). Callers that previously used `this.signer.signEvent` for
+   * an escrow-chain event should route through here. Raw-publish
+   * paths (e.g. seed-manager) intentionally bypass — they don't
+   * touch the trade chain and don't need the tag.
+   */
+  private async signWithSimTag(unsigned: UnsignedEvent): Promise<NostrEvent> {
+    const simTag = simTagOrNull();
+    if (simTag) {
+      unsigned = { ...unsigned, tags: [...unsigned.tags, simTag] };
+    }
+    return this.signer.signEvent(unsigned);
+  }
+
   // ── Raw Nostr helpers ───────────────────────────────────────────────────
   // These are used by auxiliary modules (e.g. the Fedimint seed manager)
   // that need to publish or query events outside the escrow event chain.
@@ -321,7 +340,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     // Apply locally immediately (optimistic)
@@ -363,7 +382,7 @@ export class EscrowClient {
           ],
           content: subContent,
         };
-        const subSigned = await this.signer.signEvent(subUnsigned);
+        const subSigned = await this.signWithSimTag(subUnsigned);
         await this.relayManager.publish(subSigned);
         this.applyLocally(escrowId, subSigned, subPayload);
         console.debug("[chama] SUBSCRIBE event published for", escrowId);
@@ -406,7 +425,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     // JOIN is ACK-only in the atomic-funding model: it records the
@@ -503,7 +522,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     // For local apply, we have the cleartext in scope — synthesize a
@@ -566,7 +585,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     const newState = this.applyLocally(escrowId, signed, payload);
@@ -626,7 +645,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     return this.applyLocally(escrowId, signed, payload);
@@ -683,7 +702,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     return this.applyLocally(escrowId, signed, payload);
@@ -754,7 +773,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     // Apply chat locally for instant display (don't wait for relay echo)
@@ -807,7 +826,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     return this.applyLocally(escrowId, signed, payload);
@@ -1015,6 +1034,13 @@ export class EscrowClient {
     // Check if this is an escrow event kind
     const validKinds = new Set(Object.values(EscrowEventKind).filter(v => typeof v === "number"));
     if (!validKinds.has(event.kind)) return;
+
+    // v0.4.2 sim mode: a sim-tagged event is only valid for a sim-mode
+    // client, and vice versa. We can't filter at the relay-filter level
+    // for the "drop sim in prod" direction (NIP-01 has no NOT-has-tag
+    // operator), so the drop happens here on receive. Cheap — tag scan
+    // happens before any decrypt or state-machine work.
+    if (shouldDropForSimPolicy(event)) return;
 
     // Extract escrow ID from d-tag
     const dTag = event.tags.find(t => t[0] === TAGS.ESCROW_ID);
@@ -1397,7 +1423,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     this.applyLocally(escrowId, signed, payload);
@@ -1446,7 +1472,7 @@ export class EscrowClient {
       content,
     };
 
-    const signed = await this.signer.signEvent(unsigned);
+    const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
 
     return this.applyLocally(escrowId, signed, payload);

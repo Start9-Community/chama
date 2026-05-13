@@ -142,11 +142,18 @@ export interface FedimintClientCallbacks {
 export interface FedimintWalletFactoryOptions {
   /** BIP-39 mnemonic words, if a deterministic seed should be installed */
   mnemonic?: string[];
+  /** v0.4.2 sim mode: hex pubkey of the active signer. Sim-wallet keys
+   *  its persistent state by this so multiple identities in one browser
+   *  don't share a sim balance. Ignored by the real wallet factory. */
+  simNpub?: string | null;
 }
 
 export interface FedimintInitOptions {
   /** BIP-39 mnemonic words, if a deterministic seed should be installed */
   mnemonic?: string[];
+  /** v0.4.2 sim mode: hex pubkey of the active signer. See
+   *  FedimintWalletFactoryOptions.simNpub. */
+  simNpub?: string | null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -183,7 +190,18 @@ export class FedimintClient {
   private static async defaultWalletFactory(
     opts: FedimintWalletFactoryOptions
   ): Promise<IFedimintWallet> {
-    // ?testnet=1 → swap in the in-memory mock wallet. Dev/CI only.
+    // v0.4.2: ?sim=1 → swap in the product-facing sim wallet (0 starting
+    // sats, npub-keyed persistence, realistic latency). Takes priority
+    // over testnet=1 if both happen to be set.
+    const { isSimModeOn } = await import("../sim/simMode.js");
+    if (isSimModeOn()) {
+      const { createSimWallet } = await import("../sim/sim-wallet.js");
+      console.info("[chama] ⚠ sim=1 — using sim Fedimint wallet (no real money)");
+      return createSimWallet({ npub: opts.simNpub ?? null });
+    }
+
+    // ?testnet=1 → in-memory mock for unit-test scaffolding. Distinct
+    // from sim mode (1k starting sats, not persisted). Dev/CI only.
     const { isTestnetMode, createMockWallet } = await import("./mock-wallet.js");
     if (isTestnetMode()) {
       console.info("[chama] ⚠ testnet=1 — using mock Fedimint wallet");
@@ -211,7 +229,10 @@ export class FedimintClient {
    */
   async init(opts: FedimintInitOptions = {}): Promise<void> {
     try {
-      this.wallet = await this.walletFactory({ mnemonic: opts.mnemonic });
+      this.wallet = await this.walletFactory({
+        mnemonic: opts.mnemonic,
+        simNpub: opts.simNpub,
+      });
 
       // Try to open an existing client in the DB. On a fresh OPFS file
       // (e.g. after filename rotation or a first-ever launch) there is
@@ -575,6 +596,20 @@ export class FedimintClient {
    */
   async probeFederation(): Promise<{ prefix: string; fed: string | null }> {
     const wallet = this.requireWallet();
+
+    // v0.4.2 sim mode: the probe exists to verify wallet ↔ federation
+    // identity match via a 1-sat ecash roundtrip. Sim mode has exactly
+    // one synthetic federation, the wallet always agrees with itself,
+    // and the wallet starts at 0 sats so a real spend-and-refund would
+    // throw insufficient-balance. Short-circuit with the sim prefix
+    // and the sim fed id — the prefix matches what spendNotes returns
+    // so the at-LOCK comparison in escrow-bridge still passes.
+    const { isSimModeOn } = await import("../sim/simMode.js");
+    if (isSimModeOn()) {
+      mlog("FED-PROBE", { fed: this._federationId, result: "sim-bypass" });
+      return { prefix: "SBX_sim0v1", fed: this._federationId };
+    }
+
     const PROBE_MSATS = 1000; // 1 sat — smallest meaningful probe
 
     let probeNotes: string;
