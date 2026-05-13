@@ -43,6 +43,17 @@ export interface RelayCallbacks {
   onOk?: (eventId: string, accepted: boolean, message: string, relayUrl: string) => void;
   onError?: (error: Error, relayUrl: string) => void;
   onStatusChange?: (relayUrl: string, status: RelayStatus) => void;
+  /**
+   * v0.4.2 sim mode (hotfix round 2): chokepoint drop predicate. If
+   * returns true, the relay-manager skips ALL downstream dispatch
+   * for this event — onEvent callback, pending-fetch routing,
+   * fetchOnce capture, dedup. The escrow client sets this to
+   * shouldDropForSimPolicy so a sim-tagged event never enters the
+   * prod browser's state via any path (handleIncomingEvent,
+   * loadEscrow→fetchEscrowEvents, fetchOnce). Without this, the
+   * handleIncomingEvent filter alone misses the fetch-based paths.
+   */
+  shouldDropEvent?: (event: NostrEvent) => boolean;
 }
 
 // ── Single relay connection ───────────────────────────────────────────────
@@ -182,6 +193,15 @@ export class RelayManager {
         if (data.length < 3) return;
         const event = data[2] as NostrEvent;
         if (!event?.id) return;
+
+        // v0.4.2 sim-mode chokepoint drop (hotfix round 2). Applied
+        // before ALL dispatch paths (pending fetches, fetchOnce
+        // intercept, onEvent callback) so a sim-tagged event in a
+        // prod client — or a prod event in a sim client — never
+        // enters local state via any path. The handleIncomingEvent
+        // filter alone wasn't enough: fetchEscrowEvents / fetchOnce
+        // route raw events directly to their callers, bypassing it.
+        if (this.callbacks.shouldDropEvent?.(event)) return;
 
         // Route to pending fetch subscriptions FIRST (before global dedup)
         // Match by escrow ID from the event's d-tag, NOT by subscription ID.

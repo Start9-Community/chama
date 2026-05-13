@@ -1,5 +1,6 @@
 import { useState, useEffect, lazy, Suspense } from "react";
 import { T, inputStyle } from "../theme.js";
+import { isSimModeOn } from "../../sim/simMode.js";
 
 const QRCode = lazy(() => import("../QRCode.js"));
 
@@ -209,6 +210,23 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
             );
           })()}
           <div style={{ padding: 8, marginBottom: 12, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 8, color: T.muted, wordBreak: "break-all", maxHeight: 60, overflowY: "auto", textAlign: "center" }}>{invoice}</div>
+          {/* v0.4.2 sim-mode honest disclosure (Pillar 2.7). Sim invoices
+              auto-settle 3-8s after creation regardless of whether the
+              user does anything with the QR. Without this notice, users
+              report confusion when the balance credits after they've
+              dismissed the modal without action. Amber matches the
+              SIM MODE pill's warning palette. */}
+          {isSimModeOn() && (
+            <div style={{
+              padding: "8px 12px", marginBottom: 12, borderRadius: T.rs,
+              background: T.amberDim, border: `1px solid ${T.amber}55`,
+              fontFamily: T.mono, fontSize: 10, color: T.amber,
+              lineHeight: 1.5, textAlign: "center",
+            }}>
+              ▲ Sim mode — auto-credits in 3-8s.<br />
+              Do not fund this invoice with real sats.
+            </div>
+          )}
           <button onClick={() => copyText(invoice)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.accentDim, border: `1px solid ${T.accent}44`, color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>Copy invoice</button>
           <button onClick={() => {
             setInvoice(null);

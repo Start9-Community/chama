@@ -5667,6 +5667,66 @@ console.log("\n── SAVED HANDLES PANEL — partition ──");
   (globalThis as any).localStorage.clear();
 }
 
+// ── SIM MODE — cross-mode drop policy + BOLT11 parser ──────────────────
+//
+// Bug A (round 2 hotfix) was a cross-mode listing leak: sim-tagged
+// events appeared in non-sim browsers. The fix wires a chokepoint
+// `shouldDropEvent` callback into the relay-manager so every dispatch
+// path (handleIncomingEvent, fetchEscrowEvents, fetchOnce) uses the
+// same policy. The truth table is verified directly here so a future
+// refactor can't silently invert it.
+//
+// Bug B (round 2) was the sim payInvoice not debiting on outbound LN
+// payout, leaving the winner's wallet with a phantom balance after
+// COMPLETE. The fix parses the BOLT11 amount; failure modes (no
+// amount, malformed prefix) must return null so the wallet can
+// throw cleanly instead of silently moving phantom sats.
+console.log("\n── SIM MODE — cross-mode policy + BOLT11 parser ──");
+{
+  const { shouldDropForSimPolicy, eventIsSim } = await import("../sim/simMode.js");
+  const { parseBolt11Msats } = await import("../sim/sim-wallet.js");
+
+  const simEvent = { tags: [["d", "abc"], ["chama-sim", "v1"]] } as any;
+  const realEvent = { tags: [["d", "abc"]] } as any;
+
+  // Force sim OFF for the first half.
+  (globalThis as any).localStorage.removeItem("chama_sim_mode");
+
+  assert(eventIsSim(simEvent) === true,
+    "eventIsSim returns true for chama-sim-tagged events");
+  assert(eventIsSim(realEvent) === false,
+    "eventIsSim returns false for untagged events");
+
+  assert(shouldDropForSimPolicy(simEvent) === true,
+    "Sim OFF + sim-tagged event → DROP (was the listing leak failure case)");
+  assert(shouldDropForSimPolicy(realEvent) === false,
+    "Sim OFF + untagged event → keep");
+
+  // Flip sim ON for the second half.
+  (globalThis as any).localStorage.setItem("chama_sim_mode", "1");
+  assert(shouldDropForSimPolicy(simEvent) === false,
+    "Sim ON + sim-tagged event → keep");
+  assert(shouldDropForSimPolicy(realEvent) === true,
+    "Sim ON + untagged event → DROP (no prod chatter in sim view)");
+
+  (globalThis as any).localStorage.removeItem("chama_sim_mode");
+
+  // BOLT11 amount parsing — covers the sim wallet's payout-debit path
+  // and the four BOLT-11 multiplier units.
+  assert(parseBolt11Msats("lnbc500u1pXXX") === 50_000_000,
+    "Parser handles real-shape bolt11 with 'u' multiplier (500u = 50k sats)");
+  assert(parseBolt11Msats("lnbcsim50000n1pXXX") === 5_000_000,
+    "Parser handles sim invoices (lnbcsim prefix, 'n' multiplier)");
+  assert(parseBolt11Msats("lnbc10m1pXXX") === 1_000_000_000,
+    "Parser handles 'm' multiplier (10m = 1M sats)");
+  assert(parseBolt11Msats("lnbc1p10n1pXXX") !== null,
+    "Parser tolerates BOLT11 strings with characters after the amount field");
+  assert(parseBolt11Msats("not-a-bolt11") === null,
+    "Parser returns null for non-bolt11 strings");
+  assert(parseBolt11Msats("") === null,
+    "Parser returns null for empty string");
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // RESULTS
 // ══════════════════════════════════════════════════════════════════════════

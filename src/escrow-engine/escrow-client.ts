@@ -176,6 +176,12 @@ export class EscrowClient {
         onEvent: (event, relay) => this.handleIncomingEvent(event, relay),
         onStatusChange: (relay, status) => this.callbacks.onRelayStatus?.(relay, status),
         onError: (err, relay) => console.warn(`[relay] ${relay}: ${err.message}`),
+        // v0.4.2 sim mode (hotfix round 2): wire the chokepoint drop so
+        // sim-tagged events never enter prod state via fetch-based paths
+        // (loadEscrow's fetchEscrowEvents, raw fetchOnce). Defense in
+        // depth — handleIncomingEvent still has its own check, but this
+        // catches paths that bypass it entirely.
+        shouldDropEvent: (event) => shouldDropForSimPolicy(event),
       },
       config.wsImpl
     );

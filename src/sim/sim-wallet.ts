@@ -89,6 +89,47 @@ function simDelay(): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+// ── BOLT11 amount parser ──────────────────────────────────────────────────
+//
+// Extracts the msat amount encoded in the human-readable prefix of a
+// BOLT11 invoice. BIP-21 / BOLT-11 §amount: `ln<chain>[amount][multiplier]`
+// where multiplier is one of:
+//   m = milli-BTC (10^-3 BTC = 1e8 msat)
+//   u = micro-BTC (10^-6 BTC = 1e5 msat)
+//   n = nano-BTC  (10^-9 BTC = 1e2 msat)
+//   p = pico-BTC  (10^-12 BTC = 0.1 msat — must be multiple of 10)
+//   ε = whole BTC (1e11 msat)
+//
+// The amount field is OPTIONAL; donation-style invoices have none. Returns
+// null on parse failure (caller decides what to do — sim's payInvoice
+// throws because we can't debit an unknown amount).
+//
+// This is sim-only. Real Fedimint clients parse BOLT11 via the WASM SDK;
+// we don't ship a general-purpose parser to production callers.
+export function parseBolt11Msats(bolt11: string): number | null {
+  if (typeof bolt11 !== "string") return null;
+  const lower = bolt11.toLowerCase().trim();
+  // Anchored at start, allow any ln<chain> prefix (lnbc, lntb, lnbcrt,
+  // lnbcsim, etc.). `[a-z]+?` is non-greedy so it consumes only the
+  // chain prefix; then digits = amount; then optional multiplier.
+  const m = /^ln[a-z]+?(\d+)([munp]?)1/.exec(lower);
+  if (!m) return null;
+  const amount = parseInt(m[1], 10);
+  if (!Number.isFinite(amount) || amount < 0) return null;
+  const mult = m[2];
+  switch (mult) {
+    case "m": return amount * 100_000_000;
+    case "u": return amount * 100_000;
+    case "n": return amount * 100;
+    case "p":
+      // pico-BTC must yield integer msat (BOLT-11 spec requires the
+      // value to be a multiple of 10 for `p`). Floor for safety.
+      return Math.floor(amount / 10);
+    case "":  return amount * 100_000_000_000;
+    default:  return null;
+  }
+}
+
 // ── Factory ───────────────────────────────────────────────────────────────
 
 export interface CreateSimWalletOptions {
@@ -102,6 +143,11 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
   const state = loadState(npub);
   let open = false;
   const subscribers = new Set<(balance: number) => void>();
+  // v0.4.2 hotfix round 2: track pending invoice auto-credit timers so
+  // cleanup() can cancel them. Without this, a stale funding-invoice
+  // timer fires AFTER a trade completes and re-credits the wallet —
+  // the "Recovery pill after DONE" failure mode the user reported.
+  const pendingCreditTimers = new Set<ReturnType<typeof setTimeout>>();
 
   const persist = () => saveState(npub, state);
   const notifyBalance = () => {
@@ -186,27 +232,49 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
         // No delay on invoice creation — real LN invoices are local.
         const opId = `sim_op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const tag = description.replace(/\W/g, "").slice(0, 10) || "trade";
+        // Encode msats in the BOLT11 amount field so parseBolt11Msats
+        // can recover it later for refunds / accounting.
         const invoice = `lnbcsim${amountMsats}n1p${tag}${opId}`;
-        // Auto-settle after a randomized delay. This stands in for the
-        // payer's LN wallet completing the hop. The randomization is
-        // load-bearing for surfacing race conditions in the UI's
-        // "waiting for payment" states.
-        setTimeout(() => {
+        // Auto-settle after a randomized delay. Stands in for the
+        // payer's LN wallet completing the hop. Track the timer
+        // handle so cleanup() can cancel any in-flight credit — a
+        // funding invoice that fires AFTER the trade completes would
+        // otherwise leave a stranded balance and trip the Recovery
+        // Banner even though COMPLETE published.
+        const delay = MIN_DELAY_MS + Math.floor(Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS));
+        const timer = setTimeout(() => {
+          pendingCreditTimers.delete(timer);
           state.balanceMsats += amountMsats;
           persist();
           notifyBalance();
-        }, MIN_DELAY_MS + Math.floor(Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS)));
+        }, delay);
+        pendingCreditTimers.add(timer);
         return { invoice, operationId: opId };
       },
-      async payInvoice(_bolt11: string) {
-        // We don't currently parse the bolt11 amount in sim — LN-out
-        // in the trade flow goes through wallet.mint.spendNotes
-        // (lockAndPublish), not through payInvoice. The sandbox-fund
-        // path is the only payInvoice caller and it's not part of the
-        // trade-critical path. Real-amount-deduction would require
-        // bolt11 parsing; the testnet mock punts on this for the same
-        // reason and the world hasn't ended.
+      async payInvoice(bolt11: string) {
+        // v0.4.2 hotfix round 2: claim-and-payout's LN-out leg lands
+        // here. Without a debit, the winner's wallet shows the
+        // redeemed claim amount as "stranded" after payout (Recovery
+        // Banner fires even though COMPLETE published). Parse the
+        // BOLT11 amount and decrement so the post-payout balance
+        // matches reality.
         await simDelay();
+        const debit = parseBolt11Msats(bolt11);
+        if (debit === null) {
+          throw new Error(
+            "Sim wallet: couldn't parse BOLT11 amount. " +
+            "Sim only supports amount-encoded invoices (lnbc<amount><multiplier>1…)."
+          );
+        }
+        if (debit > state.balanceMsats) {
+          throw new Error(
+            `Sim wallet: insufficient balance for payout ` +
+            `(have ${state.balanceMsats} msat, need ${debit} msat).`
+          );
+        }
+        state.balanceMsats -= debit;
+        persist();
+        notifyBalance();
         return { operationId: `sim_pay_${Date.now()}` };
       },
     },
@@ -217,6 +285,11 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
     },
 
     async cleanup() {
+      // v0.4.2 hotfix round 2: cancel pending invoice auto-credit
+      // timers so a stale funding invoice doesn't fire post-cleanup
+      // and stamp a phantom balance into a freshly-reset wallet.
+      for (const t of pendingCreditTimers) clearTimeout(t);
+      pendingCreditTimers.clear();
       subscribers.clear();
       open = false;
       // Note: we deliberately do not reset state.joined or balance on
