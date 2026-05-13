@@ -16,6 +16,7 @@
 
 import { useEffect, useRef, useState, lazy, Suspense } from "react";
 import { T } from "../theme.js";
+import { isSimModeOn } from "../../sim/simMode.js";
 import type {
   FundAndLockPhase,
   FundAndLockTerminal,
@@ -347,6 +348,23 @@ function InvoiceDisplay({
         fontFamily: T.mono, fontSize: 8, color: T.muted,
         wordBreak: "break-all", maxHeight: 60, overflowY: "auto", textAlign: "center",
       }}>{bolt11}</div>
+      {/* v0.4.2 sim mode hotfix round 3: honest auto-credit disclosure.
+          This is the atomic-funding modal — the centerpiece of every
+          listing-tap flow — so the notice is required here, not just
+          on the manual-fund surface. Conditional ONLY on isSimModeOn();
+          no other state gates the disclosure. Amber matches the
+          SIM MODE pill warning palette (Pillar 2.7). */}
+      {isSimModeOn() && (
+        <div style={{
+          padding: "8px 12px", marginBottom: 12, borderRadius: T.rs,
+          background: T.amberDim, border: `1px solid ${T.amber}55`,
+          fontFamily: T.mono, fontSize: 10, color: T.amber,
+          lineHeight: 1.5, textAlign: "center",
+        }}>
+          ▲ Sim mode — auto-credits in 3-8s.<br />
+          Do not fund this invoice with real sats.
+        </div>
+      )}
       <button
         onClick={() => onCopy(bolt11)}
         style={{

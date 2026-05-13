@@ -5195,6 +5195,145 @@ console.log("\n── CHAMA BAR LABEL ──");
         `Tripwire: bootProbeState=failed overrides input { balance=${i.balanceMsats}, commitment=${i.hasActiveBuyerSellerCommitment} }`);
     }
   }
+
+  // v0.4.2 hotfix round 3: activeCommittedMsats drives the in-escrow
+  // pill during LOCKED state, when balance is correctly 0 (ecash spent
+  // into SSS shares). The previous logic returned "ready" at exactly
+  // the moment users needed to see "your money is in escrow" — the
+  // load-bearing Pillar 2.1 Option B failure mode.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: true,
+      activeCommittedMsats: 50_000_000,
+    });
+    assert(r.kind === "in-trade" && (r as any).sats === 50_000,
+      "balance=0 + activeCommittedMsats=50M msat → in-trade pill shows 50k sats (LOCKED state)");
+  }
+
+  // After CLAIM completes (terminal, no commitment), pill returns to
+  // ready when balance has been debited. activeCommittedMsats=0
+  // because LOCKED/APPROVED-only filter excludes COMPLETED.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: false,
+      activeCommittedMsats: 0,
+    });
+    assert(r.kind === "ready",
+      "Post-CLAIM terminal: balance=0 + no commitment → ready (no phantom in-escrow)");
+  }
+
+  // Balance > 0 still wins over activeCommittedMsats — if the wallet
+  // has actual cash AND there's an active trade, the pill prefers the
+  // wallet's authoritative number. Both paths land on in-trade.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 30_000_000,
+      hasActiveBuyerSellerCommitment: true,
+      activeCommittedMsats: 50_000_000,
+    });
+    assert(r.kind === "in-trade" && (r as any).sats === 30_000,
+      "balance > 0 takes precedence: wallet shows 30k, ignore committed=50k");
+  }
+
+  // bootProbeState=failed still overrides committed amount — Reconnect
+  // is the actionable next step, not the in-escrow pill.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: true,
+      activeCommittedMsats: 50_000_000,
+      bootProbeState: "failed",
+    });
+    assert(r.kind === "unreachable",
+      "bootProbeState=failed overrides committed-msats in-trade kind");
+  }
+
+  // activeCommittedMsats < 1 sat (sub-1000 msat) → still ready.
+  // The bar speaks in whole sats; sub-sat dust doesn't qualify.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: true,
+      activeCommittedMsats: 500,
+    });
+    assert(r.kind === "ready",
+      "Sub-1-sat committed amount → ready (whole-sat granularity)");
+  }
+
+  // Backwards compat: omitting activeCommittedMsats entirely behaves
+  // like the pre-round-3 callsites — balance=0 → ready.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: true,
+    });
+    assert(r.kind === "ready",
+      "Omitted activeCommittedMsats falls back to ready (pre-round-3 callsite compat)");
+  }
+
+  // activeCommittedMsats helper itself: only LOCKED/APPROVED count.
+  const { activeCommittedMsats } = await import("../ui/decisions.js");
+  const buildEscrow = (status: EscrowStatus, amount: number, me: string) => ({
+    id: "x", status, description: "", amountMsats: amount,
+    category: "p2p-trade", fulfillment: "service", community: null,
+    mintUrl: BP_FEDERATION_INVITE,
+    participants: { buyer: me, seller: "s", arbiter: "a" },
+    initiator: { pubkey: me, role: Role.BUYER },
+    communityArbiters: [], subscription: null, votes: {},
+    resolvedOutcome: null, resolvedMajority: null, resolvedAt: null,
+    completedAt: null, cancelledAt: null, claim: null,
+    fees: { platformBps: 50, platformPubkey: me, arbiterFeeMsats: 0 },
+    expiresAt: 0, createdAt: 0, eventChain: [], chatMessages: [],
+    lock: { handle: null },
+  } as unknown as EscrowState);
+  const me = "user_pubkey";
+  assert(
+    activeCommittedMsats({
+      escrows: [buildEscrow(EscrowStatus.LOCKED, 50_000_000, me)],
+      userPubkey: me,
+    }) === 50_000_000,
+    "activeCommittedMsats: LOCKED status counted",
+  );
+  assert(
+    activeCommittedMsats({
+      escrows: [buildEscrow(EscrowStatus.APPROVED, 50_000_000, me)],
+      userPubkey: me,
+    }) === 50_000_000,
+    "activeCommittedMsats: APPROVED status counted",
+  );
+  assert(
+    activeCommittedMsats({
+      escrows: [buildEscrow(EscrowStatus.CLAIMED, 50_000_000, me)],
+      userPubkey: me,
+    }) === 0,
+    "activeCommittedMsats: CLAIMED NOT counted (winner has redeemed; balance reflects it)",
+  );
+  assert(
+    activeCommittedMsats({
+      escrows: [buildEscrow(EscrowStatus.COMPLETED, 50_000_000, me)],
+      userPubkey: me,
+    }) === 0,
+    "activeCommittedMsats: COMPLETED NOT counted (terminal)",
+  );
+  assert(
+    activeCommittedMsats({
+      escrows: [buildEscrow(EscrowStatus.CREATED, 50_000_000, me)],
+      userPubkey: me,
+    }) === 0,
+    "activeCommittedMsats: CREATED NOT counted (listing exists; no commitment yet)",
+  );
+  assert(
+    activeCommittedMsats({
+      escrows: [
+        buildEscrow(EscrowStatus.LOCKED, 50_000_000, me),
+        buildEscrow(EscrowStatus.APPROVED, 25_000_000, me),
+      ],
+      userPubkey: me,
+    }) === 75_000_000,
+    "activeCommittedMsats: sums across multiple active commitments",
+  );
 }
 
 // ── 43. TRINITY RING PARTICIPANT ORDER (v0.3.0 Phase 6 + v0.3.1 Phase 2) ─
@@ -5665,6 +5804,105 @@ console.log("\n── SAVED HANDLES PANEL — partition ──");
     "Fiat subsection unchanged when an LN handle is deleted");
 
   (globalThis as any).localStorage.clear();
+}
+
+// ── SIM WALLET — balance subscription end-to-end ─────────────────────────
+//
+// Round 3 hotfix: the user reported inconsistent ChamaBar pill behavior
+// driven by suspected missing notifyBalance() calls across the sim
+// wallet's mutation sites. This test simulates a full trade lifecycle
+// (fund → spend/lock → redeem/claim → payout) and asserts that the
+// balance subscriber receives a callback after EVERY mutation with the
+// correct new value. setTimeout is monkey-patched to fire synchronously
+// so the test is deterministic — no real-world 3-8s waits.
+console.log("\n── SIM WALLET — balance subscription end-to-end ──");
+{
+  const realSetTimeout = (globalThis as any).setTimeout;
+  // Replace setTimeout with a synchronous trampoline so createInvoice's
+  // auto-credit fires before the next test line runs.
+  (globalThis as any).setTimeout = (fn: () => void, _ms: number) => {
+    fn();
+    return 0 as any;
+  };
+
+  try {
+    (globalThis as any).localStorage?.removeItem?.("chama_sim_mode");
+    const w = await import("../sim/sim-wallet.js");
+    const npub = "test_sub_e2e_" + Date.now();
+    const wallet = w.createSimWallet({ npub });
+    await wallet.joinFederation("fed1sim");
+    await wallet.open();
+
+    const events: number[] = [];
+    wallet.balance.subscribeBalance((b) => events.push(b));
+
+    // subscribeBalance emits the current balance via setTimeout(0); with
+    // the trampoline it fires synchronously. First entry: starting 0.
+    assert(events.length >= 1 && events[0] === 0,
+      "subscribeBalance emits the starting balance (0) on subscribe");
+
+    // 1) createInvoice — auto-credit fires synchronously under the
+    //    trampoline. Expect the subscriber to fire with the new balance.
+    const eventsBeforeInvoice = events.length;
+    await wallet.lightning.createInvoice(50_000_000, "fund");
+    assert(events.length > eventsBeforeInvoice,
+      "createInvoice auto-credit fires balance subscriber");
+    assert(events[events.length - 1] === 50_000_000,
+      "Balance after createInvoice auto-credit = 50,000,000 msat");
+
+    // 2) spendNotes — LOCK debit path. Subscriber must fire.
+    const eventsBeforeSpend = events.length;
+    const oob = await wallet.mint.spendNotes(40_000_000);
+    assert(events.length > eventsBeforeSpend,
+      "spendNotes fires balance subscriber");
+    assert(events[events.length - 1] === 10_000_000,
+      "Balance after spendNotes(40M) = 10M msat (50M - 40M)");
+
+    // 3) redeemEcash — CLAIM credit path. Subscriber must fire.
+    const eventsBeforeRedeem = events.length;
+    await wallet.mint.redeemEcash(oob);
+    assert(events.length > eventsBeforeRedeem,
+      "redeemEcash fires balance subscriber");
+    assert(events[events.length - 1] === 50_000_000,
+      "Balance after redeemEcash = 50M msat (10M + 40M)");
+
+    // 4) payInvoice — outbound LN debit path. Subscriber must fire.
+    //    Use a sim-formatted invoice (round-trip-safe after the round-3
+    //    encoding fix).
+    const eventsBeforePay = events.length;
+    const inv = await wallet.lightning.createInvoice(20_000_000, "out");
+    // createInvoice fires the credit timer synchronously under the
+    // trampoline; the balance is now 70M. Drain the events from that
+    // event before we pay so we measure payInvoice's own callback.
+    const eventsAfterCredit = events.length;
+    assert(events[events.length - 1] === 70_000_000,
+      "Balance after second createInvoice auto-credit = 70M msat");
+
+    await wallet.lightning.payInvoice(inv.invoice);
+    assert(events.length > eventsAfterCredit,
+      "payInvoice fires balance subscriber");
+    assert(events[events.length - 1] === 50_000_000,
+      "Balance after payInvoice(20M) = 50M msat (70M - 20M)");
+
+    // 5) cleanup() cancels pending credit timers. The trampoline fires
+    //    setTimeout synchronously, so an in-flight timer has already
+    //    completed before cleanup() can see it — which means we can't
+    //    test cancellation under the trampoline. Instead: confirm the
+    //    visible side-effect (subscribers Set cleared) by calling
+    //    notifyBalance after cleanup and verifying no callback fires.
+    const eventsBeforeCleanup = events.length;
+    await wallet.cleanup();
+    // Manually trigger a balance bump after cleanup — subscribers
+    // should be empty so no event appends. (We use the publicly-visible
+    // joinFederation, which calls notifyBalance internally.)
+    await wallet.joinFederation("fed1sim");
+    assert(events.length === eventsBeforeCleanup,
+      "cleanup() clears subscriber set (post-cleanup mutations don't reach old subscribers)");
+
+    (globalThis as any).localStorage?.removeItem?.("chama_sim_wallet_" + npub);
+  } finally {
+    (globalThis as any).setTimeout = realSetTimeout;
+  }
 }
 
 // ── SIM MODE — cross-mode drop policy + BOLT11 parser ──────────────────

@@ -17,6 +17,7 @@ import {
   shouldShowBrowserSupportBanner,
   shouldShowRecoveryBanner,
   hasActiveBuyerSellerCommitment,
+  activeCommittedMsats,
   decideChamaBarLabel,
   findActiveTrade,
   identifyStrandedEcashSource,
@@ -346,6 +347,13 @@ export default function App() {
   const hasActiveCommitment = pubkey
     ? hasActiveBuyerSellerCommitment({ escrows: escrows.values(), userPubkey: pubkey })
     : false;
+  // v0.4.2 hotfix round 3: msats locked in active escrows where the
+  // user is buyer/seller. Drives the ChamaBar "X sats in escrow" pill
+  // during LOCKED state, when balance is correctly 0 (ecash spent
+  // into SSS shares) but the commitment is still live.
+  const committedMsats = pubkey
+    ? activeCommittedMsats({ escrows: escrows.values(), userPubkey: pubkey })
+    : 0;
 
   // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND no
   // active trade — orphan ecash from a previous trade that didn't
@@ -696,6 +704,7 @@ export default function App() {
         chamaLabel={decideChamaBarLabel({
           balanceMsats: fedimint.balanceMsats ?? 0,
           hasActiveBuyerSellerCommitment: hasActiveCommitment,
+          activeCommittedMsats: committedMsats,
           // v0.3.1 Phase 3: bootProbeState routes the "unreachable"
           // ChamaBar variant. Failed → "⚠ Chama unreachable ·
           // Reconnect →"; pending/ok pass through to the existing

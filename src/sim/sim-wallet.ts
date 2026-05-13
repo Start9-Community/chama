@@ -143,11 +143,19 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
   const state = loadState(npub);
   let open = false;
   const subscribers = new Set<(balance: number) => void>();
-  // v0.4.2 hotfix round 2: track pending invoice auto-credit timers so
-  // cleanup() can cancel them. Without this, a stale funding-invoice
+  // v0.4.2 hotfix round 2/3: track pending invoice auto-credit timers
+  // so cleanup() can cancel them. Without this, a stale funding-invoice
   // timer fires AFTER a trade completes and re-credits the wallet —
-  // the "Recovery pill after DONE" failure mode the user reported.
-  const pendingCreditTimers = new Set<ReturnType<typeof setTimeout>>();
+  // the "Recovery pill after DONE" failure mode.
+  //
+  // Map<symbol, TimerHandle> instead of Set<TimerHandle>: the callback
+  // needs a stable key it can use to remove itself from the registry,
+  // but referencing the timer handle from inside the callback hits a
+  // temporal-dead-zone error if setTimeout fires synchronously
+  // (which it does in our deterministic tests with a setTimeout
+  // trampoline). The symbol is created before setTimeout, so the
+  // callback can always reference it.
+  const pendingCreditTimers = new Map<symbol, ReturnType<typeof setTimeout>>();
 
   const persist = () => saveState(npub, state);
   const notifyBalance = () => {
@@ -234,7 +242,15 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
         const tag = description.replace(/\W/g, "").slice(0, 10) || "trade";
         // Encode msats in the BOLT11 amount field so parseBolt11Msats
         // can recover it later for refunds / accounting.
-        const invoice = `lnbcsim${amountMsats}n1p${tag}${opId}`;
+        //
+        // v0.4.2 hotfix round 3: previously used `${amountMsats}n` which
+        // is off by 100x — 'n' multiplier in BOLT-11 is 100 msat, not
+        // 1 msat. A 50k-sat invoice generated as `lnbcsim50000000n1...`
+        // would parse back as 5M sats. Using `p` multiplier with
+        // `amountMsats * 10` gives an exact msat round-trip
+        // (p = 0.1 msat, encoded N * p = msats N/10; we use N = msats*10
+        // so encoded N/10 = msats).
+        const invoice = `lnbcsim${amountMsats * 10}p1p${tag}${opId}`;
         // Auto-settle after a randomized delay. Stands in for the
         // payer's LN wallet completing the hop. Track the timer
         // handle so cleanup() can cancel any in-flight credit — a
@@ -242,13 +258,14 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
         // otherwise leave a stranded balance and trip the Recovery
         // Banner even though COMPLETE published.
         const delay = MIN_DELAY_MS + Math.floor(Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS));
+        const key = Symbol("sim-credit-timer");
         const timer = setTimeout(() => {
-          pendingCreditTimers.delete(timer);
+          pendingCreditTimers.delete(key);
           state.balanceMsats += amountMsats;
           persist();
           notifyBalance();
         }, delay);
-        pendingCreditTimers.add(timer);
+        pendingCreditTimers.set(key, timer);
         return { invoice, operationId: opId };
       },
       async payInvoice(bolt11: string) {
@@ -285,10 +302,10 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
     },
 
     async cleanup() {
-      // v0.4.2 hotfix round 2: cancel pending invoice auto-credit
+      // v0.4.2 hotfix round 2/3: cancel pending invoice auto-credit
       // timers so a stale funding invoice doesn't fire post-cleanup
       // and stamp a phantom balance into a freshly-reset wallet.
-      for (const t of pendingCreditTimers) clearTimeout(t);
+      for (const t of pendingCreditTimers.values()) clearTimeout(t);
       pendingCreditTimers.clear();
       subscribers.clear();
       open = false;

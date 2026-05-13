@@ -385,6 +385,45 @@ export function hasActiveBuyerSellerCommitment(inputs: {
   return false;
 }
 
+/**
+ * v0.4.2 hotfix round 3: msats the user has committed to active escrows
+ * as buyer or seller. Returns the SUM across all active non-terminal
+ * commitments (LOCKED / APPROVED / CLAIMED — anything past CREATE but
+ * before COMPLETED/CANCELLED). Used by decideChamaBarLabel to drive
+ * the "X sats in escrow" pill during LOCKED state when the wallet
+ * balance is correctly 0 (the user has SPENT the ecash into SSS shares).
+ *
+ * Why this matters: the previous decision read only wallet balance,
+ * which is correctly 0 after LOCK (the seller's ecash got split into
+ * encrypted shares on Nostr — none of it sits in the local wallet).
+ * The pill went silent at exactly the moment users most need to see
+ * "your money is committed." Pillar 2.1 Option B.
+ *
+ * Status set:
+ *   CREATED  → 0 (no commitment yet — the listing exists but no money moved)
+ *   LOCKED   → amountMsats (sats are in escrow as SSS shares)
+ *   APPROVED → amountMsats (still in escrow until claim+redeem completes)
+ *   CLAIMED  → 0 (winner has redeemed; commitment over, balance reflects it)
+ *   COMPLETED/CANCELLED → 0 (terminal, no commitment)
+ *   EXPIRED  → 0 (healing transient — the commitment is already resolving
+ *                 via auto-refund; not load-bearing for the pill)
+ */
+export function activeCommittedMsats(inputs: {
+  escrows: Iterable<EscrowState>;
+  userPubkey: string;
+}): number {
+  let sum = 0;
+  for (const e of inputs.escrows) {
+    const isBuyerOrSeller =
+      e.participants.buyer === inputs.userPubkey
+      || e.participants.seller === inputs.userPubkey;
+    if (!isBuyerOrSeller) continue;
+    if (e.status !== EscrowStatus.LOCKED && e.status !== EscrowStatus.APPROVED) continue;
+    sum += e.amountMsats;
+  }
+  return sum;
+}
+
 // ── ChamaBar label decision (v0.3.0 Phase 5 + v0.3.1 Phase 3) ─────────────
 //
 // Four states the top-bar's right-side surface can be in:
@@ -428,13 +467,28 @@ export function decideChamaBarLabel(opts: {
    *  for backwards compatibility — pre-Phase-3 callsites continue to
    *  render the three-state surface as if probe is ok. */
   bootProbeState?: "pending" | "ok" | "failed";
+  /** v0.4.2 hotfix round 3: msats committed to active LOCKED/APPROVED
+   *  trades as buyer or seller. When the wallet balance is 0 but this
+   *  is > 0, the pill reflects the escrowed amount instead of going
+   *  silent. Pillar 2.1 Option B: "your money is in escrow" must be
+   *  visible during the LOCKED state, where balance is correctly 0
+   *  (ecash was spent into SSS shares). Pure helper above:
+   *  `activeCommittedMsats`. Optional for backwards compatibility. */
+  activeCommittedMsats?: number;
 }): ChamaBarLabel {
   if (opts.bootProbeState === "failed") return { kind: "unreachable" };
   // Floor to whole sats — the bar always speaks in sats, never msats.
   const sats = Math.floor(opts.balanceMsats / 1000);
-  if (sats <= 0) return { kind: "ready" };
-  if (opts.hasActiveBuyerSellerCommitment) return { kind: "in-trade", sats };
-  return { kind: "stranded", sats };
+  if (sats > 0) {
+    if (opts.hasActiveBuyerSellerCommitment) return { kind: "in-trade", sats };
+    return { kind: "stranded", sats };
+  }
+  // Balance is 0. If there's an active LOCKED/APPROVED commitment,
+  // surface its amount as the in-trade pill — the escrow ledger is
+  // the source of truth here, not the (correctly-zero) wallet.
+  const committedSats = Math.floor((opts.activeCommittedMsats ?? 0) / 1000);
+  if (committedSats > 0) return { kind: "in-trade", sats: committedSats };
+  return { kind: "ready" };
 }
 
 /** The most-recent active buyer/seller trade. Used by the shell to
