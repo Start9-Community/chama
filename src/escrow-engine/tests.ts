@@ -2549,6 +2549,20 @@ console.log("\n── BROWSER SUPPORT BANNER GATE ──");
     }) === false,
     "Once dismissed, the banner stays dismissed across sessions",
   );
+
+  // v0.4.2 sim mode: contradicts the SIM MODE pill, always suppress.
+  assert(
+    shouldShowBrowserSupportBanner({
+      isBrowser: true, dismissed: false, simModeOn: true,
+    }) === false,
+    "Sim mode suppresses the iroh-relay disclosure banner",
+  );
+  assert(
+    shouldShowBrowserSupportBanner({
+      isBrowser: true, dismissed: true, simModeOn: true,
+    }) === false,
+    "Sim mode + dismissed is still suppressed",
+  );
 }
 
 // ── 29b. COUNTERPARTY DISPLAY NAME (v0.1.87 / v0.2.0+v0.2.1 helper) ─────

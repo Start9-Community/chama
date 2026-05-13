@@ -45,7 +45,8 @@ import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
 import { addOrTouchLightningHandle, getSavedLightningHandles } from "../payments/saved-handles.js";
 import { SavedHandlesPanel } from "./panels/SavedHandlesPanel.js";
-import { SimModePill, SimEntryModal } from "../sim/SimModeBanner.js";
+import { SimModePill, SimEntryModal, SIM_PILL_HEIGHT } from "../sim/SimModeBanner.js";
+import { isSimModeOn } from "../sim/simMode.js";
 
 const QRScanner = lazy(() => import("./QRScanner.js"));
 
@@ -552,9 +553,13 @@ export default function App() {
   };
 
   // ── Not connected → show connect screen ──
+  const simOn = isSimModeOn();
   if (!connected) {
     return (
-      <div style={{ background: T.bg, color: T.text, minHeight: "100vh", fontFamily: T.sans }}>
+      <div style={{
+        background: T.bg, color: T.text, minHeight: "100vh", fontFamily: T.sans,
+        paddingTop: simOn ? SIM_PILL_HEIGHT : 0,
+      }}>
         <style>{globalCss}</style>
         <SimModePill />
         <SimEntryModal />
@@ -634,6 +639,7 @@ export default function App() {
       background: T.bg, color: T.text, minHeight: "100vh",
       fontFamily: T.sans, maxWidth: 520, margin: "0 auto",
       paddingBottom: BOTTOM_NAV_HEIGHT,
+      paddingTop: simOn ? SIM_PILL_HEIGHT : 0,
     }}>
       <style>{globalCss}</style>
       <SimModePill />
@@ -712,6 +718,7 @@ export default function App() {
       {shouldShowBrowserSupportBanner({
         isBrowser: !Capacitor.isNativePlatform(),
         dismissed: browserBannerDismissed,
+        simModeOn: simOn,
       }) && (
         <BrowserSupportBanner onDismiss={dismissBrowserBanner} />
       )}

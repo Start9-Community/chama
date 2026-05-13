@@ -240,9 +240,15 @@ export function decideAutoInitTarget(inputs: AutoInitInputs): AutoInitTarget {
 export interface BrowserBannerInputs {
   isBrowser: boolean;
   dismissed: boolean;
+  /** v0.4.2: sim mode swaps the WASM Fedimint client for a localStorage
+   *  mock, so iroh-relay reachability is moot. The "honest browser
+   *  disclosure" copy directly contradicts the SIM MODE pill if shown
+   *  alongside it. Hide unconditionally when sim mode is on. */
+  simModeOn?: boolean;
 }
 
 export function shouldShowBrowserSupportBanner(inputs: BrowserBannerInputs): boolean {
+  if (inputs.simModeOn) return false;
   if (!inputs.isBrowser) return false;
   if (inputs.dismissed) return false;
   return true;

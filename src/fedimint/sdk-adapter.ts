@@ -253,6 +253,31 @@ if (typeof import.meta !== "undefined" && (import.meta as any).hot) {
  * relays and will be reinstalled on the next init().
  */
 export async function resetLocalFedimintWallet(): Promise<void> {
+  // v0.4.2 sim mode: sim wallets live in localStorage, not OPFS. Calling
+  // navigator.storage.getDirectory() in sim mode is both unnecessary and
+  // can throw "Security error" in restricted browser contexts (the
+  // community-pill crash reported during 0.4.2 smoke). Short-circuit
+  // here so every caller that "wipes local state" — switchFederation,
+  // listing-tap fed switch, manual reset — Just Works in sim mode. We
+  // also clear the per-npub sim wallet entry so reset still has its
+  // intended semantic (clean slate for the next init).
+  const { isSimModeOn } = await import("../sim/simMode.js");
+  if (isSimModeOn()) {
+    try {
+      if (typeof localStorage !== "undefined") {
+        for (const key of Object.keys(localStorage)) {
+          if (key.startsWith("chama_sim_wallet_")) {
+            localStorage.removeItem(key);
+          }
+        }
+      }
+    } catch (e) {
+      console.debug("[chama] sim wallet localStorage clear threw (non-fatal):", e);
+    }
+    console.info("[chama] resetLocalFedimintWallet: sim mode — cleared localStorage, skipped OPFS");
+    return;
+  }
+
   // 1. Release any live sync handle by killing the worker that owns it.
   terminateCurrentWorker();
 

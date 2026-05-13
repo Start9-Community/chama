@@ -24,6 +24,16 @@ import { isSimModeOn, setSimMode } from "./simMode.js";
 
 const ACK_KEY = "chama_sim_modal_ack_v1";
 
+/**
+ * Vertical space the fixed-position pill occupies. App roots add
+ * paddingTop = SIM_PILL_HEIGHT when sim mode is on so the header
+ * doesn't render underneath the banner.
+ *
+ * Kept in sync with the pill's padding: 6px top + ~14px text line +
+ * 6px bottom, plus a 4px buffer for varying font metrics.
+ */
+export const SIM_PILL_HEIGHT = 30;
+
 export function SimModePill() {
   // Stay reactive to sim-mode flips (e.g. user clicks "Exit" in the modal)
   const [on, setOn] = useState(isSimModeOn);
