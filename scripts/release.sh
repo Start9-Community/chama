@@ -58,6 +58,12 @@ git add -A
 npm version "$BUMP_TYPE" --no-git-tag-version
 NEW_VERSION=$(node -p "require('./package.json').version")
 
+# ── Pre-deploy gate (typecheck + tests) ────────────────────────────────
+# Refuses to proceed if `tsc --noEmit` or the escrow-engine tests fail.
+# Placed BEFORE commit so a failing gate never produces a public artifact.
+echo "🔎 Running predeploy gate (typecheck + tests)..."
+npm run predeploy
+
 # ── Commit ─────────────────────────────────────────────────────────────
 if [ -n "$COMMIT_FILE" ]; then
   git commit -F "$COMMIT_FILE"
