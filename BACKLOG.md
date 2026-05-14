@@ -332,3 +332,127 @@ version target once the shape is clear.
 - Architectural decisions (not just task items) belong in
   [DECISIONS.md](DECISIONS.md), not here. If an item's "fix" requires
   a design choice you haven't yet made, write the decision first.
+
+---
+
+## LN addresses are payout destinations, not handles (v0.4.3 or v0.5.0)
+
+Currently `saved_handles` storage conflates two categories:
+- Counterparty handles (Wave, Zelle, Revtag, Orange Money) — given to a counterparty so they can send fiat
+- Self-payout LN addresses — destinations for receiving sats during CLAIM
+
+These are different concepts that share UI surface. The handle-reveal 
+dropdown during LOCK currently exposes LN addresses to counterparties, 
+which is wrong — counterparties don't need to know where the user 
+chooses to receive their sats.
+
+Required changes:
+1. New `chama_payout_destinations` localStorage store for LN addresses
+2. Migration from `saved_handles` LIGHTNING_RAIL entries
+3. Remove LN entries from trade-flow handle-reveal dropdown
+4. New section in Me → Settings: "Payout destinations" with LN addresses
+5. Claim flow saves new LN address to payout destinations, NOT to saved handles
+
+Pillar 2.5 (clarity of intent), and protects user privacy 
+(counterparties don't learn user's LN address from trade flow).
+
+---
+
+## Backlog: Browse view briefly shows completed trades during boot. 
+
+When user signs in and saved-escrows loads from Nostr, completed trades appear in Browse for ~1s before being filtered out. Expected: only OPEN/LOCKED trades by other users appear in Browse. The user's own completed trades should NEVER appear in Browse, they belong in Me → trade history. Filter chain needs to also exclude COMPLETED/CANCELLED states from Browse rendering, not just sim/non-sim tagging.
+
+---
+
+## v0.4.3 candidates
+
+1. **getchama.app migration.** Retire chama.satoshimarket.app from URL. 
+   DNS A-record for app.getchama.app → 89.147.108.68. SSL via Let's Encrypt. 
+   Update release.sh TARGET_HOST. Update Capacitor manifest. 301 redirect 
+   from old subdomain for ~6 months. Estimated 2-4 hours including DNS 
+   propagation. Do BEFORE recording marketing videos longer-term.
+
+2. **LN-addresses-as-payout-destinations, not handles.** Currently 
+   saved_handles conflates counterparty handles (Wave, Zelle, Revtag, etc.) 
+   with self-payout LN addresses. Wrong category. Migration: new 
+   `chama_payout_destinations` localStorage store keyed by pubkey. 
+   Remove LN entries from trade-flow handle-reveal dropdown. Move LN 
+   saved-addresses to Me → Settings → Payout Destinations section.
+
+3. **Per-npub localStorage for user-scoped state.** chama_active_invite, 
+   chama_community, saved_handles all keyed by browser, not pubkey. 
+   Fresh npubs inherit previous npub's state on shared machines. Refactor 
+   to consistently key by pubkey prefix: chama_<key>_<npub>.
+
+4. **Manual-fund + Recovery Banner collision in sim mode.** When sim user 
+   manually funds via Settings → Advanced → Open manual fund, balance > 0 
+   + no active trade triggers Recovery Banner. Fix: either remove manual 
+   fund affordance from sim mode entirely (auto-credit via createInvoice 
+   is sufficient), or suppress Recovery Banner when sim mode + 
+   manual-funded-balance.
+
+5. **Release.sh package.json bump ordering bug.** Tags commit but doesn't 
+   bump package.json (or follow-up commit reverts it). Caused version 
+   pill drift since v0.3.0. Fix: bump package.json BEFORE building, 
+   commit bump, THEN tag, THEN build with bumped version.
+
+## v0.4.4+ candidates
+
+6. **Browse view briefly shows user's completed/cancelled trades on boot.** 
+   ~1s flash before filter takes effect. Filter chain needs to exclude 
+   user-as-participant on COMPLETED/CANCELLED states from Browse rendering. 
+   User's own completed trades belong only in Me → trade history.
+
+7. **Sim mode: 2M sats race condition when user dismisses funding modal 
+   multiple times.** Auto-credit timers from prior dismissed invoices 
+   not always cancelled cleanly. Edge case. Add timer-cancel-on-modal-dismiss 
+   handler in AtomicFundingModal cleanup.
+
+8. **Fiat display (mempool.space + open.er-api.com).** Sat-primary, 
+   fiat-secondary listings. Currency-aware Browse filter. Backlog for after 
+   Nairobi feedback informs which fiat displays are most needed.
+
+## v0.5.0+ candidates
+
+9. **Trusted arbiter pool.** Hardcoded TRUSTED_ARBITERS array 
+   (Chapsmart, Graysatoshi, Bitcrazy + Jetty fallback) at src/arbiters/pool.ts. 
+   Auto-assign random-from-pool on LOCK. Arbiter Dashboard in Me tab. 
+   Demo-ready before Nairobi.
+
+10. **Trinity Ring progressive completion animation.** Each role color 
+    fills in as participant joins. Same Trinity Ring geometry (220,220 
+    center, r=150, stroke 52). Triggered on JOIN events: 1 color at 
+    first JOIN, 2 at second, all 3 + complete ring at LOCK. Reusable 
+    across CREATE preview, LOCK preview, Active Trade card, completed 
+    trade view. Replaces static three-glyph row currently in Participants 
+    section. Never built — we've shipped 80+ versions with static rings.
+
+11. **Storefront per npub.** Group all OPEN listings by seller npub. 
+    Render as coherent shopfront with kind:0 metadata as header. 
+    Buyer browses stores instead of listings. Converges v0.4.0 menu 
+    primitive + npub identity + kind:0 profile. "Store window" metaphor 
+    — depth and personality, not flat tiles.
+
+## v1+ candidates  
+
+12. **Bisq-vs-Chama blog post / marketing one-liner.** "What happened 
+    to Bisq this week cannot happen to Chama. Here's why." Architectural 
+    differentiator. Trusted update channel attack surface vs. 2-of-3 
+    SSS attack surface. Write while Bisq incident is fresh.
+
+13. **Open arbiter pool with kind:38104 availability events.** 
+    Community-elected, not hardcoded. Self-publishing availability. 
+    Reputation tracking. v1.5.
+
+14. **Arbiter incentive economics design.** Flat fee per trade vs. 
+    percentage vs. tiered. Pay-regardless-of-outcome (honesty bonus) 
+    vs. pay-on-resolution-only. Needs Nairobi data first.
+
+15. **UTXOracle integration.** Exchange-free BTC/USD from on-chain 
+    UTXO patterns. Requires self-run Bitcoin Core full node. 
+    Philosophically perfect, operationally expensive. Defer to v1.5+.
+
+16. **Native browser iroh transport contribution upstream.** Fixes 
+    the root cause of sim mode's existence. Months of Rust+WASM work. 
+    Do not start before v1 ships. Real Nairobi user data should 
+    precede design. v1.5/v2 commitment.
