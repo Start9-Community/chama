@@ -774,35 +774,19 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   const createEscrow = useCallback(async (params: Parameters<EscrowClient["createEscrow"]>[0]) => {
     const client = requireClient();
 
-    // v0.1.87 fix (item 9): the federation probe is INFORMATIONAL, not
-    // gating. Pre-v0.1.87 a probe failure stripped both fedPrefix and
-    // fed from the CREATE event, which cascaded into buyers filtering
-    // the listing out. Per Pillar 2.3 ("federation follows the
-    // listing"), every listing must carry enough federation context
-    // for buyers to resolve regardless of seller-side probe outcome.
+    // v0.4.4: CREATE no longer probes the federation. Pillar 2.3
+    // ("federation follows the listing") only requires the `fed` tag
+    // (federation ID), which the running client always knows from
+    // init — no roundtrip needed. The legacy fedPrefix tag is no
+    // longer emitted (probeResult is always null here), so new CREATE
+    // events carry only the fed-ID. Buyers gate JOIN on fed-ID
+    // equality (useEscrow.joinEscrow) and the LOCK bridge gates on
+    // the same fed-ID, so the prefix path is structurally dead.
     //
-    // The deriveCreateFedTags helper returns:
-    //   - fed (federation ID hex) — populated from cached client state
-    //     even when the probe fails. Buyers always have enough to
-    //     resolve.
-    //   - fedPrefix (10-char ecash-derived prefix) — only when the
-    //     probe round-trips a 1-sat OOB note. Used by buyers for an
-    //     early-warning toast on JOIN; its absence falls back to the
-    //     LOCK gate, which is the load-bearing money-move defense.
-    let probeResult: { prefix: string; fed: string | null } | null = null;
-    let cachedFedId: string | null = null;
-    if (fedimintRef.current) {
-      cachedFedId = fedimintRef.current.getFederationId();
-      try {
-        probeResult = await fedimintRef.current.probeFederation();
-      } catch (e) {
-        console.warn(
-          "[chama] CREATE: federation probe failed; publishing with fed tag only (fedPrefix omitted):",
-          e instanceof Error ? e.message : e
-        );
-      }
-    }
-    const fedTags = deriveCreateFedTags({ cachedFedId, probeResult });
+    // deriveCreateFedTags handles probeResult: null cleanly: it emits
+    // `fed` from cachedFedId alone and omits `fedPrefix`.
+    const cachedFedId = fedimintRef.current?.getFederationId() ?? null;
+    const fedTags = deriveCreateFedTags({ cachedFedId, probeResult: null });
 
     const result = await client.createEscrow({
       ...params,
@@ -817,43 +801,37 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   const joinEscrow = useCallback(async (escrowId: string, role: Role) => {
     const client = requireClient();
 
-    // v0.1.72 federation gates ─────────────────────────────────────────
-    // Pre-flight: if the trade's CREATE event carries a fedPrefix tag,
-    // probe the joiner's wallet and refuse to publish JOIN if there's
-    // a mismatch. This catches bad joins BEFORE any money operation.
+    // v0.4.4 federation gate (fed-ID equality) ─────────────────────────
+    // Pre-flight: if the trade's CREATE event carries a `fed` tag
+    // (federation ID hex), compare it to the joiner's wallet federation.
+    // Refuse the join on mismatch BEFORE any money operation.
     //
-    // For pre-.72 trades (no fedPrefix on CREATE), we allow the join
-    // unconditionally — the LOCK gate will still catch a wallet
-    // mismatch when the locker tries to spend, and the REDEEM gate
-    // catches it when the winner tries to claim. Layered defense.
+    // The v0.1.72-era fedPrefix gate spent 1 sat as a probe to extract
+    // a 10-char identifier — incompatible with v0.1.76 Option B
+    // ("wallets always at 0 between trades"). The fed-ID is captured
+    // from the running client at init and surfaced into CREATE via
+    // deriveCreateFedTags; no spend needed.
+    //
+    // Legacy trades without payload.fed: allow the join. The LOCK gate
+    // (escrow-bridge.lockAndPublish) remains the load-bearing
+    // money-move defense — it gates on the same fed-ID.
     const state = client.getState(escrowId);
     const createEvent = state?.eventChain?.[0];
-    const expectedFedPrefix: string | undefined =
-      (createEvent?.payload as any)?.fedPrefix;
+    const expectedFed: string | undefined =
+      (createEvent?.payload as any)?.fed;
 
-    if (expectedFedPrefix && fedimintRef.current) {
-      try {
-        const probe = await fedimintRef.current.probeFederation();
-        if (probe.prefix !== expectedFedPrefix) {
-          const err: any = new Error(
-            `This trade requires federation ${expectedFedPrefix}. ` +
-              `Your wallet is on ${probe.prefix}. ` +
-              `Sign out and rejoin with the correct federation, then try again.`
-          );
-          err.code = "FED_MISMATCH";
-          err.expected = expectedFedPrefix;
-          err.got = probe.prefix;
-          throw err;
-        }
-      } catch (probeErr: any) {
-        // If the error is FED_MISMATCH, re-throw — let the UI surface it.
-        if (probeErr?.code === "FED_MISMATCH") throw probeErr;
-        // Otherwise the probe itself failed (network, etc.). Allow the
-        // join to proceed — the LOCK gate is still in place.
-        console.warn(
-          "[chama] JOIN: federation probe failed, proceeding without gate:",
-          probeErr instanceof Error ? probeErr.message : probeErr
+    if (expectedFed && fedimintRef.current) {
+      const walletFed = fedimintRef.current.getFederationId();
+      if (walletFed && walletFed !== expectedFed) {
+        const err: any = new Error(
+          `This trade requires federation ${expectedFed}. ` +
+            `Your wallet is on ${walletFed}. ` +
+            `Sign out and rejoin with the correct federation, then try again.`
         );
+        err.code = "FED_MISMATCH";
+        err.expected = expectedFed;
+        err.got = walletFed;
+        throw err;
       }
     }
 
@@ -1507,7 +1485,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       //   never has to surface the first "federation unreachable"
       //   error to the user mid-trade-composition.
       try {
-        await fedimint.probeFederation();
+        await fedimint.probeReachable();
         const probeOkAt = Date.now();
         healthRef.current = { ok: true, at: probeOkAt };
         updateFedimint({
@@ -1750,7 +1728,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       healthy = cached.ok;
     } else {
       try {
-        await fedimint.probeFederation();
+        await fedimint.probeReachable();
         healthy = true;
         healthRef.current = { ok: true, at: now };
         updateFedimint({ lastHealthOk: true, lastHealthAt: now });
@@ -1902,7 +1880,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         return { ok: false as const, error: "Wallet not initialized" };
       }
       try {
-        await fedimint.probeFederation();
+        await fedimint.probeReachable();
         const at = Date.now();
         healthRef.current = { ok: true, at };
         updateFedimint({

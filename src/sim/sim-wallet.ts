@@ -211,8 +211,8 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
         persist();
         notifyBalance();
         // OOB string format: prefix + counter + amount. The 10-char
-        // prefix matches probeFederation's expectations so the gate
-        // passes for sim trades.
+        // prefix matches the sim federation's identifier so reconstructed
+        // notes round-trip cleanly for sim trades.
         return `${SIM_FEDERATION_PREFIX}_${state.noteCounter}_${amountMsats}`;
       },
       async redeemEcash(oobNotes: string) {

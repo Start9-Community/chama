@@ -430,7 +430,7 @@ export async function createRealWallet(
   const attemptInit = async (fname: string) => {
     const t = new WasmWorkerTransport();
     registerTransport(t as unknown as AnyTransport);
-    const d = new WalletDirector(t, /* lazy */ true);
+    const d = new WalletDirector(t, undefined, /* lazy */ true);
     // _client is protected; cast through unknown to reach initialize()
     const tc = (d as unknown as {
       _client: { initialize(testFilename?: string): Promise<boolean> };
@@ -603,7 +603,7 @@ export async function createRealWallet(
           const { WasmWorkerTransport: WT2 } = await import("@fedimint/transport-web");
           const t2 = new WT2();
           registerTransport(t2 as unknown as AnyTransport);
-          const d2 = new WD2(t2, true);
+          const d2 = new WD2(t2, undefined, /* lazy */ true);
           const tc2 = (d2 as unknown as {
             _client: { initialize(testFilename?: string): Promise<boolean> };
           })._client;

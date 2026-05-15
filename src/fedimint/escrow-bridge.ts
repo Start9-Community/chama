@@ -56,25 +56,28 @@ export class EscrowFedimintBridge {
     const state = this.escrow.getState(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
 
-    // v0.1.72 federation gates ───────────────────────────────────────────
-    // Pre-flight: probe the locker's wallet, compare to CREATE's
-    // fedPrefix. On mismatch, refuse to spend at all — no money moves.
-    // On match (or absent fedPrefix for pre-.72 trades), proceed.
+    // v0.4.4 federation gates (fed-ID equality) ──────────────────────────
+    // Pre-flight: confirm the wallet's federation matches the trade's
+    // `fed` tag. On mismatch, refuse to spend at all — no money moves.
+    // probeReachable also doubles as the pre-spend reachability check
+    // (its throw surfaces as FED_PROBE_FAILED so the UI can offer a
+    // clean retry path).
     //
-    // This is BEFORE the spend, so there's nothing to refund on
-    // mismatch. The post-spend self-check below catches the very
-    // narrow window where the wallet could shift between probe and
-    // spend — it auto-refunds via redeemEcash.
+    // Legacy trades without payload.fed: allow (no gate). The wallet's
+    // own spendNotes call below will surface any deeper federation
+    // fault via its native error path. v0.1.72-era fedPrefix tags are
+    // ignored — new CREATE events no longer emit them (see
+    // useEscrow.createEscrow and deriveCreateFedTags).
     const createEvent = state.eventChain.find(
       (e: any) => e.kind === 38100 || e.payload?.type === "escrow:create"
     );
-    const expectedFedPrefix: string | undefined =
-      (createEvent?.payload as any)?.fedPrefix;
+    const expectedFed: string | undefined =
+      (createEvent?.payload as any)?.fed;
 
-    if (expectedFedPrefix) {
-      let probe: { prefix: string; fed: string | null };
+    if (expectedFed) {
+      let probe: { fed: string | null };
       try {
-        probe = await this.fedimint.probeFederation();
+        probe = await this.fedimint.probeReachable();
       } catch (probeErr) {
         const err: any = new Error(
           "Couldn't verify your federation. Your wallet may be disconnected. " +
@@ -85,22 +88,19 @@ export class EscrowFedimintBridge {
         throw err;
       }
 
-      if (probe.prefix !== expectedFedPrefix) {
+      if (probe.fed !== expectedFed) {
         const err: any = new Error(
-          `This trade requires federation ${expectedFedPrefix}. ` +
-            `Your wallet is on ${probe.prefix}. ` +
+          `This trade requires federation ${expectedFed}. ` +
+            `Your wallet is on ${probe.fed}. ` +
             `Sign out and rejoin with the correct federation invite. ` +
             `(No sats were spent.)`
         );
         err.code = "FED_MISMATCH";
-        err.expected = expectedFedPrefix;
-        err.got = probe.prefix;
+        err.expected = expectedFed;
+        err.got = probe.fed;
         throw err;
       }
     }
-    // Pre-.72 trades have no fedPrefix tag — we allow with a passive
-    // warning surfaced by the UI elsewhere (no block here, per Jetty's
-    // backwards-compat decision).
 
     // PR 1 atomic-funding: derive buyer + arbiter pubkeys before spending.
     // LOCK is self-describing — it carries both pubkeys directly — so the
@@ -272,23 +272,27 @@ export class EscrowFedimintBridge {
       state.lock.notesHash
     );
 
-    // v0.1.72 federation gates ───────────────────────────────────────────
-    // Probe the redeemer's wallet and verify the reconstructed notes
-    // were minted by the same federation. If not, the redeem will
-    // either silently partial-credit (the v0.1.71 incident root cause)
-    // or hard-fail with a confusing error from the SDK. Catch it here
-    // with a clear actionable error instead.
+    // v0.4.4 federation gates (fed-ID equality) ──────────────────────────
+    // Probe reachability of the redeemer's wallet, and verify it sits on
+    // the same federation the trade was created on. If not, the redeem
+    // would either silently partial-credit (the v0.1.71 incident root
+    // cause) or hard-fail with a confusing error from the SDK. Catch it
+    // here with a clear actionable error instead.
     //
-    // We compare oobNotes.slice(0,10) (the reconstructed federation
-    // prefix) to a fresh probe of the redeemer's wallet. Both must
-    // match. Pre-.72 trades have no fedPrefix on CREATE, but the
-    // reconstructed notes themselves still carry the federation
-    // identity — so this check works regardless of whether CREATE
-    // was tagged.
-    const reconstructedPrefix = oobNotes.slice(0, 10);
-    let redeemProbe: { prefix: string; fed: string | null };
+    // The CREATE event's `fed` tag is the source of truth for which
+    // federation the lock lives on. We compare it to the wallet's own
+    // fed ID. Legacy trades without payload.fed fall through to the
+    // redeem itself, whose native federation rejection still surfaces
+    // a (less-clear) error.
+    const claimCreateEvent = state.eventChain.find(
+      (e: any) => e.kind === 38100 || e.payload?.type === "escrow:create"
+    );
+    const expectedFed: string | undefined =
+      (claimCreateEvent?.payload as any)?.fed;
+
+    let redeemProbe: { fed: string | null };
     try {
-      redeemProbe = await this.fedimint.probeFederation();
+      redeemProbe = await this.fedimint.probeReachable();
     } catch (probeErr) {
       // v0.3.1 Phase 1: honest copy. This throw fires BEFORE
       // stashPendingRedemption (below, ~line 341) AND before the CLAIM
@@ -308,16 +312,16 @@ export class EscrowFedimintBridge {
       throw err;
     }
 
-    if (redeemProbe.prefix !== reconstructedPrefix) {
+    if (expectedFed && redeemProbe.fed !== expectedFed) {
       const err: any = new Error(
-        `This trade's sats were minted on federation ${reconstructedPrefix}. ` +
-          `Your wallet is on ${redeemProbe.prefix}. ` +
+        `This trade's sats were minted on federation ${expectedFed}. ` +
+          `Your wallet is on ${redeemProbe.fed}. ` +
           `Sign out and rejoin with the correct federation, then retry. ` +
           `Your claim has been published — your sats are safe and waiting.`
       );
       err.code = "FED_MISMATCH";
-      err.expected = reconstructedPrefix;
-      err.got = redeemProbe.prefix;
+      err.expected = expectedFed;
+      err.got = redeemProbe.fed;
       // Don't publish CLAIM yet — refusing redeem before claim publish
       // means the trade chain doesn't advance prematurely. The user
       // switches feds and retries; CLAIM will publish on the next try.

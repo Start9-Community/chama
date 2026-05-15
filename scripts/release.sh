@@ -54,9 +54,9 @@ if [ -n "$LAST_TAG_VERSION" ] && [ "$CURRENT_PKG_VERSION" != "$LAST_TAG_VERSION"
 fi
 
 # ── Bump version (no git tag yet — we'll do it after commit) ──────────
-git add -A
 npm version "$BUMP_TYPE" --no-git-tag-version
 NEW_VERSION=$(node -p "require('./package.json').version")
+git add -A
 
 # ── Pre-deploy gate (typecheck + tests) ────────────────────────────────
 # Refuses to proceed if `tsc --noEmit` or the escrow-engine tests fail.

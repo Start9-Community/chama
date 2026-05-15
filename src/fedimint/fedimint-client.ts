@@ -570,98 +570,72 @@ export class FedimintClient {
     return { totalAmount: parsed.total_amount };
   }
 
-  // v0.1.72 federation gates ─────────────────────────────────────────────
+  // v0.4.4 federation reachability ───────────────────────────────────────
   /**
-   * Probe the wallet's current federation by spending 1 sat as ecash,
-   * extracting the federation-identifying prefix from the OOB notes
-   * string, and immediately redeeming the probe back. Net zero
-   * movement, ~1-second round trip, invisible to the user.
+   * Probe the wallet's current federation for reachability WITHOUT
+   * requiring any balance. Returns the cached federation ID on success;
+   * throws if the federation cannot be queried.
    *
-   * The first ~10 chars of any OOB ecash notes string is a stable
-   * federation identifier — the VPS federated-escrow project mapped
-   * known prefixes:
-   *   AwEEiItw7A — Bitcoin Life Federation
-   *   AwEEG8tk5g — Global Bitcoin Federation
-   *   AwEE_yhqbg — Afribit Kibera
+   * Why balance-free: per v0.1.76 Option B ("no sats stranded ever"),
+   * wallets sit at 0 between trades. The old probeFederation() spent
+   * 1 sat as ecash to extract a federation-identifying prefix; with
+   * zero balance that path was guaranteed to throw "Insufficient
+   * balance" and falsely surface the federation as unreachable. This
+   * variant uses a balance-independent wallet roundtrip so the boot
+   * probe survives the steady-state-zero invariant.
+   *
+   * isOpen() alone is too cheap (pure local state); getBalance()
+   * actually exercises the wallet's federation-bound DB read path and
+   * surfaces a federation-side fault as a thrown error.
    *
    * Used by:
-   *   - escrow-client.createEscrow  — captures locker's fed at create
-   *   - escrow-client.joinEscrow    — refuses to join wrong federation
-   *   - escrow-bridge.lockAndPublish — verifies notes match the create
-   *   - escrow-bridge.claimAndRedeem — verifies redeemer is on the
-   *                                    federation that minted the notes
+   *   - useEscrow.initFedimint        — cold-boot reachability gate
+   *   - useEscrow.createFundingInvoice — pre-receive health check
+   *   - useEscrow.probeFederation     — explicit re-probe (Try Again)
+   *   - escrow-bridge.lockAndPublish  — fed-ID gate before LOCK
+   *   - escrow-bridge.claimAndRedeem  — fed-ID gate before redeem
    *
-   * Throws if the wallet isn't joined or if the federation rejects
-   * the probe (likely a connectivity issue).
+   * Throws if the wallet isn't joined or if the wallet/federation
+   * rejects the read (likely a connectivity issue).
    */
-  async probeFederation(): Promise<{ prefix: string; fed: string | null }> {
+  async probeReachable(): Promise<{ fed: string | null }> {
     const wallet = this.requireWallet();
 
-    // v0.4.2 sim mode: the probe exists to verify wallet ↔ federation
-    // identity match via a 1-sat ecash roundtrip. Sim mode has exactly
-    // one synthetic federation, the wallet always agrees with itself,
-    // and the wallet starts at 0 sats so a real spend-and-refund would
-    // throw insufficient-balance. Short-circuit with the sim prefix
-    // and the sim fed id — the prefix matches what spendNotes returns
-    // so the at-LOCK comparison in escrow-bridge still passes.
+    // v0.4.2 sim mode: sim wallet has exactly one synthetic federation
+    // and always agrees with itself. Short-circuit with the cached
+    // fed ID — no roundtrip needed.
     const { isSimModeOn } = await import("../sim/simMode.js");
     if (isSimModeOn()) {
-      mlog("FED-PROBE", { fed: this._federationId, result: "sim-bypass" });
-      return { prefix: "SBX_sim0v1", fed: this._federationId };
+      mlog("FED-PROBE-REACHABLE", {
+        fed: this._federationId,
+        result: "sim-bypass",
+      });
+      return { fed: this._federationId };
     }
 
-    const PROBE_MSATS = 1000; // 1 sat — smallest meaningful probe
-
-    let probeNotes: string;
+    let balance: number | undefined;
     try {
-      probeNotes = await wallet.mint.spendNotes(PROBE_MSATS);
+      balance = await wallet.balance.getBalance();
     } catch (e) {
-      mlog("FED-PROBE", {
+      mlog("FED-PROBE-REACHABLE", {
         fed: this._federationId,
-        result: "spend-failed",
+        result: "balance-read-failed",
         errMsg: (e instanceof Error ? e.message : String(e)).slice(0, 120),
       });
       throw new Error(
-        "Federation probe failed (couldn't generate ecash). " +
+        "Federation probe failed (couldn't query wallet state). " +
         "Your wallet may be disconnected or the federation may be unreachable. " +
         "Try again in a moment."
       );
     }
 
-    if (!probeNotes || probeNotes.length < 10) {
-      // Try to refund what we got (best-effort) before throwing
-      try { await wallet.mint.redeemEcash(probeNotes); } catch {}
-      mlog("FED-PROBE", {
-        fed: this._federationId,
-        result: "short-notes",
-        oobNotesLen: probeNotes?.length ?? 0,
-      });
-      throw new Error("Federation probe returned malformed notes — try again.");
-    }
-
-    const prefix = probeNotes.slice(0, 10);
-
-    // Refund the probe immediately. Net zero movement.
-    try {
-      await wallet.mint.redeemEcash(probeNotes);
-    } catch (refundErr) {
-      // The probe sat may take a moment to come back via the balance
-      // subscriber, but the prefix we captured is still correct. Log
-      // and continue — we don't want to fail the whole flow over a
-      // 1-sat refund hiccup.
-      console.warn(
-        "[chama] FED-PROBE: 1-sat probe refund failed (will arrive via balance subscriber):",
-        refundErr instanceof Error ? refundErr.message : refundErr
-      );
-    }
-
-    mlog("FED-PROBE", {
+    mlog("FED-PROBE-REACHABLE", {
       fed: this._federationId,
-      prefix,
+      balance,
       result: "ok",
     });
 
-    return { prefix, fed: this._federationId };
+    return { fed: this._federationId };
   }
 
   // ══════════════════════════════════════════════════════════════════════════

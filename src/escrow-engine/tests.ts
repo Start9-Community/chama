@@ -2678,6 +2678,195 @@ console.log("\n── CREATE FED TAGS (probe-decoupled) ──");
     "Partial probe falls back to cachedFedId for fed");
 }
 
+// ── 29d. PROBE REACHABILITY (v0.4.4) ─────────────────────────────────────
+//
+// v0.1.76 Option B ("no sats stranded ever") sits wallets at 0 between
+// trades. The pre-v0.4.4 probeFederation() round-tripped a 1-sat OOB
+// note to extract a 10-char federation identifier — that path was
+// guaranteed to throw "Insufficient balance: requested 1000 msat but
+// only 0 msat available" against any clean wallet, and the boot probe
+// dutifully surfaced "Chama unreachable" for every user on every cold
+// boot. The bug was masked by prior iroh-relay 400 errors; once those
+// got fixed (canary branch), the probe's own bug was the only
+// remaining "unreachable" signal.
+//
+// v0.4.4 replaces the spend-based probe with probeReachable(), which:
+//   - returns { fed } using the cached client federation ID
+//   - exercises wallet.balance.getBalance() (works cleanly at 0 sats)
+//   - throws if the wallet/federation rejects the read
+//   - bypasses sim mode with a direct fed-ID return
+//
+// Two-layer tripwire:
+//   (1) Behavioral assertions on the real FedimintClient with a mock
+//       wallet — verifies probeReachable returns {fed} at 0 balance
+//       (the boot-probe failure case for the old spend-based probe),
+//       throws when not joined, and sim-mode-bypasses cleanly.
+//   (2) Grep tripwire over src/fedimint/fedimint-client.ts. Catches
+//       any reintroduction of a probeFederation() function definition.
+//       Same shape as §43's Trinity Ring tripwire — strips comments
+//       and normalizes whitespace so doc references to the historical
+//       name in jsdoc blocks don't trigger.
+console.log("\n── PROBE REACHABILITY ──");
+{
+  const { FedimintClient } = await import("../fedimint/fedimint-client.js");
+
+  // Minimal IFedimintWallet stub. Starts at 0 balance — the case that
+  // structurally broke the old spend-based probe.
+  function makeZeroBalanceWallet(opts: { federationId: string }) {
+    return {
+      async open() {},
+      isOpen() { return true; },
+      recovery: {
+        async hasPendingRecoveries() { return false; },
+        async waitForAllRecoveries() {},
+      },
+      async joinFederation(_invite: string) {},
+      balance: {
+        async getBalance() { return 0; },
+        subscribeBalance(_cb: (b: number) => void) { return () => {}; },
+      },
+      mint: {
+        async spendNotes(_msat: number): Promise<string> {
+          throw new Error("Insufficient balance: requested 1000 msat but only 0 msat available");
+        },
+        async redeemEcash(_oob: string) {},
+        async parseNotes(_oob: string) { return { total_amount: 0 }; },
+      },
+      lightning: {
+        async createInvoice(_msat: number, _desc: string) {
+          return { invoice: "lnbc0", operationId: "op0" };
+        },
+        async payInvoice(_b: string) { return { operationId: "op0" }; },
+      },
+      federation: {
+        async getFederationId() { return opts.federationId; },
+        async getInviteCode() { return "fed1zerobal"; },
+      },
+      async cleanup() {},
+    };
+  }
+
+  // Force sim OFF for the real-wallet path.
+  (globalThis as any).localStorage?.removeItem?.("chama_sim_mode");
+
+  // (1a) probeReachable returns { fed } at 0 balance — the boot-probe
+  //      failure case for the old probeFederation.
+  {
+    const FED_ID = "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
+    const client = new FedimintClient(
+      {},
+      async () => makeZeroBalanceWallet({ federationId: FED_ID }),
+    );
+    await client.init();
+    const result = await client.probeReachable();
+    assert(result.fed === FED_ID,
+      "probeReachable returns the cached federation ID at 0 balance (old probe's structural failure case now passes)");
+    await client.cleanup();
+  }
+
+  // (1b) probeReachable throws when not joined (requireWallet path).
+  {
+    const client = new FedimintClient({}, async () => {
+      throw new Error("factory never called");
+    });
+    // No init() — wallet null.
+    let threw = false;
+    try {
+      await client.probeReachable();
+    } catch (e: any) {
+      threw = true;
+      assert(/not initialized/.test(e?.message || ""),
+        "probeReachable throws a clear 'not initialized' error when called before init()");
+    }
+    assert(threw, "probeReachable throws when the wallet has not been initialized");
+  }
+
+  // (1c) probeReachable throws when the wallet balance read fails —
+  //      surfaces a federation-unreachable error rather than silently
+  //      succeeding.
+  {
+    const FED_ID = "deadbeefcafebabe";
+    const client = new FedimintClient(
+      {},
+      async () => {
+        const w = makeZeroBalanceWallet({ federationId: FED_ID });
+        w.balance.getBalance = async () => {
+          throw new Error("federation guardians unreachable");
+        };
+        return w;
+      },
+    );
+    await client.init();
+    let threw = false;
+    try {
+      await client.probeReachable();
+    } catch (e: any) {
+      threw = true;
+      assert(/Federation probe failed/.test(e?.message || ""),
+        "probeReachable surfaces a Federation-probe-failed error when balance read throws");
+    }
+    assert(threw, "probeReachable throws when the wallet refuses to read balance");
+    await client.cleanup();
+  }
+
+  // (1d) Sim mode bypass — returns { fed: simFedId } without any
+  //      balance/spend roundtrip.
+  {
+    (globalThis as any).localStorage?.setItem?.("chama_sim_mode", "1");
+    try {
+      const SIM_FED = "sim_fed_id_xyz";
+      const client = new FedimintClient(
+        {},
+        async () => makeZeroBalanceWallet({ federationId: SIM_FED }),
+      );
+      await client.init();
+      const result = await client.probeReachable();
+      assert(result.fed === SIM_FED,
+        "Sim mode: probeReachable short-circuits and returns the sim federation ID");
+      await client.cleanup();
+    } finally {
+      (globalThis as any).localStorage?.removeItem?.("chama_sim_mode");
+    }
+  }
+
+  // (2) Tripwire — probeFederation must not reappear as a function
+  // definition or non-comment call in fedimint-client.ts. Strips
+  // comments and normalizes whitespace (same shape as §43's Trinity
+  // Ring tripwire) so the jsdoc note in probeReachable's docstring
+  // (which references the historical name in plain prose) doesn't
+  // trip the check.
+  {
+    function stripComments(src: string): string {
+      let result = src.replace(/\/\*[\s\S]*?\*\//g, "");
+      result = result.replace(/\/\/[^\n]*/g, "");
+      return result;
+    }
+    function normalizeWhitespace(src: string): string {
+      return src.replace(/\s+/g, " ");
+    }
+
+    // Self-tests — confirm the strip/normalize is doing what we expect.
+    assert(
+      !stripComments("/* probeFederation in a block comment */").includes("probeFederation"),
+      "Tripwire self-test: stripComments removes block-comment references",
+    );
+    assert(
+      !stripComments("// probeFederation in a line comment").includes("probeFederation"),
+      "Tripwire self-test: stripComments removes line-comment references",
+    );
+    assert(
+      stripComments("async probeFederation() {} // doc").includes("probeFederation"),
+      "Tripwire self-test: a real function definition survives stripComments",
+    );
+
+    const fcSrc = readFileSync("src/fedimint/fedimint-client.ts", "utf8");
+    const stripped = normalizeWhitespace(stripComments(fcSrc));
+    assert(!stripped.includes("probeFederation"),
+      "probeFederation does NOT appear in non-comment code of src/fedimint/fedimint-client.ts " +
+      "(v0.4.4 deleted the balance-coupled probe; any reintroduction is a regression)");
+  }
+}
+
 // ── 30. setUserCommunitySlug LOCALSTORAGE ROUNDTRIP ─────────────────────
 //
 // The community-tap handler in App.tsx calls actions.setCommunity(slug),
