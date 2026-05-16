@@ -40,10 +40,17 @@
 // ── Phase types ──────────────────────────────────────────────────────────
 
 /** Phases emitted during the polling loop (a sub-set of the orchestrator's
- *  full phase set). pollForFunding emits these. */
+ *  full phase set). pollForFunding emits these.
+ *
+ *  v0.5.1: `mint-confirming-slow` is an in-flight hint, not a terminal —
+ *  it fires once after `mintSlowWarnMs` of mint-confirming with no further
+ *  progress, so the UI can switch from the optimistic "crediting…" copy
+ *  to a "federation is slow · keep waiting or cancel" surface. The poll
+ *  loop keeps running; only `mint-timeout` (the hard cap) terminates. */
 export type FundingPhase =
   | { kind: "awaiting-payment" }
   | { kind: "mint-confirming" }
+  | { kind: "mint-confirming-slow" }
   | { kind: "payment-confirmed" }
   | { kind: "expired" }
   | { kind: "mint-timeout" }
@@ -79,9 +86,26 @@ export type FundAndLockTerminal =
  *  open Phoenix; short enough that abandoned-mid-flow invoices clear. */
 export const DEFAULT_PAYMENT_DEADLINE_MS = 15 * 60 * 1000;
 
-/** v0.3.0 brief addition #2: 60s grace after a partial balance bump,
- *  mirroring the v0.1.62 claim watchdog. */
-export const DEFAULT_MINT_CONFIRM_TIMEOUT_MS = 60 * 1000;
+/** v0.5.1: 5 minutes. The original 60s grace (v0.3.0) was modeled on
+ *  the claim-watchdog cadence, but production smoke on browser Fedimint
+ *  (v0.5.0 commit message, "Out of scope" notes) showed real federation
+ *  mints regularly take longer than 60s after the gateway acks the
+ *  receive — preimage flows back to the payer instantly, but the
+ *  multi-guardian mint protocol that actually credits the user's wallet
+ *  can take minutes. 60s was too aggressive and killed otherwise-good
+ *  trades. The new cap is paired with `DEFAULT_MINT_SLOW_WARN_MS`
+ *  (below) which surfaces an honest "still waiting — keep waiting or
+ *  cancel" UI well before this hard timeout fires. */
+export const DEFAULT_MINT_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** v0.5.1: 60s into mint-confirming with no further progress, flip
+ *  the UI from the optimistic "crediting…" copy to a "federation is
+ *  slow — keep waiting or cancel" surface. The poll loop keeps running
+ *  until either the threshold lands or the hard `mintConfirmTimeoutMs`
+ *  cap fires. Decoupling the soft warn from the hard cap is what
+ *  v0.5.0's brief asked for: an explicit wait-vs-cancel choice for the
+ *  user, instead of a silent terminal that ate good trades. */
+export const DEFAULT_MINT_SLOW_WARN_MS = 60 * 1000;
 
 /** Same cadence as startClaimWatchdog (5s ticks). Keeps the wallet's
  *  Fedimint state consistent across watchdogs. */
@@ -113,8 +137,15 @@ export interface PollFundingOpts {
   signal?: AbortSignal;
   /** Defaults to DEFAULT_PAYMENT_DEADLINE_MS (15 min). */
   paymentDeadlineMs?: number;
-  /** Defaults to DEFAULT_MINT_CONFIRM_TIMEOUT_MS (60s). */
+  /** Defaults to DEFAULT_MINT_CONFIRM_TIMEOUT_MS (5 min). Hard cap on
+   *  how long the orchestrator stays in mint-confirming before
+   *  resolving with `mint-timeout`. */
   mintConfirmTimeoutMs?: number;
+  /** Defaults to DEFAULT_MINT_SLOW_WARN_MS (60s). Time into
+   *  mint-confirming after which `mint-confirming-slow` fires once so
+   *  the UI can show the wait-vs-cancel surface. The loop continues
+   *  polling until mintConfirmTimeoutMs is reached. */
+  mintSlowWarnMs?: number;
   /** Defaults to DEFAULT_POLL_INTERVAL_MS (5s). */
   pollIntervalMs?: number;
   /** Defaults to DEFAULT_THRESHOLD_PCT (0.9). */
@@ -133,6 +164,7 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
   const now = opts.now ?? defaultNow;
   const paymentDeadlineMs = opts.paymentDeadlineMs ?? DEFAULT_PAYMENT_DEADLINE_MS;
   const mintConfirmTimeoutMs = opts.mintConfirmTimeoutMs ?? DEFAULT_MINT_CONFIRM_TIMEOUT_MS;
+  const mintSlowWarnMs = opts.mintSlowWarnMs ?? DEFAULT_MINT_SLOW_WARN_MS;
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const thresholdPct = opts.thresholdPct ?? DEFAULT_THRESHOLD_PCT;
   const requiredDelta = Math.floor(opts.expectedMsats * thresholdPct);
@@ -140,6 +172,7 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
   const start = now();
   let mintStartedAt: number | null = null;
   let inMintPhase = false;
+  let slowWarnFired = false;
 
   // Initial phase fire so the UI immediately reflects "waiting".
   opts.onPhase({ kind: "awaiting-payment" });
@@ -185,10 +218,20 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
       opts.onPhase(result);
       return result;
     }
-    if (inMintPhase && (now() - (mintStartedAt ?? start)) >= mintConfirmTimeoutMs) {
-      const result: FundingTerminal = { kind: "mint-timeout" };
-      opts.onPhase(result);
-      return result;
+    if (inMintPhase) {
+      const mintElapsed = now() - (mintStartedAt ?? start);
+      // Soft warn — one-time UI flip so the user knows the federation
+      // is slow but we're still waiting. Not a terminal.
+      if (!slowWarnFired && mintElapsed >= mintSlowWarnMs) {
+        slowWarnFired = true;
+        opts.onPhase({ kind: "mint-confirming-slow" });
+      }
+      // Hard cap — terminal.
+      if (mintElapsed >= mintConfirmTimeoutMs) {
+        const result: FundingTerminal = { kind: "mint-timeout" };
+        opts.onPhase(result);
+        return result;
+      }
     }
 
     await sleep(pollIntervalMs);
@@ -223,6 +266,7 @@ export interface RunFundAndLockOpts extends RunFundAndLockDeps {
   // Polling tunables (passthrough to pollForFunding).
   paymentDeadlineMs?: number;
   mintConfirmTimeoutMs?: number;
+  mintSlowWarnMs?: number;
   pollIntervalMs?: number;
   /** Test seams. */
   sleep?: (ms: number) => Promise<void>;
@@ -281,6 +325,7 @@ export async function runFundAndLock(
     signal: opts.signal,
     paymentDeadlineMs: opts.paymentDeadlineMs,
     mintConfirmTimeoutMs: opts.mintConfirmTimeoutMs,
+    mintSlowWarnMs: opts.mintSlowWarnMs,
     pollIntervalMs: opts.pollIntervalMs,
     sleep: opts.sleep,
     now: opts.now,

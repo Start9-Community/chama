@@ -4170,7 +4170,7 @@ console.log("\n── POLL FOR FUNDING ──");
       "No mint-confirming phase emitted when balance never moves");
   }
 
-  // Mint-timeout — partial credit got stuck for the full 60s grace
+  // Mint-timeout — partial credit got stuck for the full grace window
   {
     const h = harness({
       balances: [0, 0, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000],
@@ -4184,6 +4184,7 @@ console.log("\n── POLL FOR FUNDING ──");
       now: h.now,
       paymentDeadlineMs: 60_000,
       mintConfirmTimeoutMs: 5_000,
+      mintSlowWarnMs: 10_000, // higher than mint-confirm cap → no slow-warn fired
       pollIntervalMs: 1_000,
     });
     assert(result.kind === "mint-timeout",
@@ -4192,6 +4193,64 @@ console.log("\n── POLL FOR FUNDING ──");
       "mint-confirming phase fired before timeout");
     assert(h.phases[h.phases.length - 1].kind === "mint-timeout",
       "Terminal phase emitted last is mint-timeout");
+  }
+
+  // v0.5.1 mint-confirming-slow — soft warn that flips the UI to a
+  // wait-vs-cancel surface without terminating the poll loop. Fires
+  // once between mintSlowWarnMs and mintConfirmTimeoutMs, then the
+  // hard cap still terminates if no progress.
+  {
+    const h = harness({
+      balances: [0, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000, 50_000],
+    });
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: h.getBalance,
+      onPhase: h.onPhase,
+      sleep: h.sleep,
+      now: h.now,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 5_000,
+      mintSlowWarnMs: 2_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "mint-timeout",
+      "After slow warn, hard cap still terminates as mint-timeout");
+    const slowIdx = h.phases.findIndex(p => p.kind === "mint-confirming-slow");
+    const confIdx = h.phases.findIndex(p => p.kind === "mint-confirming");
+    assert(confIdx >= 0 && slowIdx > confIdx,
+      "mint-confirming-slow fires after mint-confirming, before the terminal");
+    const slowCount = h.phases.filter(p => p.kind === "mint-confirming-slow").length;
+    assert(slowCount === 1,
+      "mint-confirming-slow fires exactly once (not on every subsequent tick)");
+  }
+
+  // v0.5.1 mint-confirming-slow is not a terminal — late landing still
+  // resolves as payment-confirmed (the federation finishing after the
+  // slow warn).
+  {
+    const h = harness({
+      balances: [0, 50_000, 50_000, 50_000, 50_000, 100_000],
+    });
+    const result = await pollForFunding({
+      baselineMsats: 0,
+      expectedMsats: 100_000,
+      getBalance: h.getBalance,
+      onPhase: h.onPhase,
+      sleep: h.sleep,
+      now: h.now,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      mintSlowWarnMs: 1_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(result.kind === "payment-confirmed",
+      "Late mint completion after slow warn still resolves payment-confirmed");
+    assert(h.phases.some(p => p.kind === "mint-confirming-slow"),
+      "slow warn fired before late completion");
+    assert(h.phases[h.phases.length - 1].kind === "payment-confirmed",
+      "Terminal phase is payment-confirmed, not mint-timeout");
   }
 
   // Mint-confirming countdown is independent of paymentDeadline. Even
@@ -4271,10 +4330,11 @@ console.log("\n── POLL FOR FUNDING ──");
 
   // Defaults match the documented constants
   {
-    // 15min payment deadline, 60s mint-confirm, 5s poll, 0.9 threshold.
-    // We confirm by triggering the deadline path with defaults left in
-    // place. Use a tiny override only on pollIntervalMs so the test
-    // finishes quickly; everything else inherits.
+    // 15min payment deadline, 5min mint-confirm (was 60s pre-v0.5.1),
+    // 60s mint slow-warn, 5s poll, 0.9 threshold. We confirm by
+    // triggering the deadline path with defaults left in place. Use a
+    // tiny override only on pollIntervalMs so the test finishes quickly;
+    // everything else inherits.
     let nowMs = 0;
     const phases: FundingPhase[] = [];
     const result = await pollForFunding({

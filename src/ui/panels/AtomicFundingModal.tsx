@@ -58,6 +58,7 @@ type ModalPhase =
   | { kind: "creating-invoice" }
   | { kind: "awaiting-payment"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming"; bolt11: string; expiresAt: number }
+  | { kind: "mint-confirming-slow"; bolt11: string; expiresAt: number }
   | { kind: "payment-confirmed" }
   | { kind: "locking" }
   | { kind: "locked" }
@@ -136,6 +137,19 @@ export function AtomicFundingModal({
             }
             return;
           }
+          if (p.kind === "mint-confirming-slow") {
+            // v0.5.1: federation has been crediting for a while without
+            // finishing. Flip the UI to the explicit wait-vs-cancel
+            // surface; the poll loop keeps running underneath.
+            if (lastBolt11 && lastExpiresAt) {
+              setPhase({
+                kind: "mint-confirming-slow",
+                bolt11: lastBolt11,
+                expiresAt: lastExpiresAt,
+              });
+            }
+            return;
+          }
           // payment-confirmed / locking / locked / expired / mint-timeout
           // / aborted / lock-failed all map directly.
           setPhase(p as ModalPhase);
@@ -167,7 +181,11 @@ export function AtomicFundingModal({
 
   // 1Hz tick for the countdown timer when an invoice is live.
   useEffect(() => {
-    if (phase.kind !== "awaiting-payment" && phase.kind !== "mint-confirming") {
+    if (
+      phase.kind !== "awaiting-payment" &&
+      phase.kind !== "mint-confirming" &&
+      phase.kind !== "mint-confirming-slow"
+    ) {
       return;
     }
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -238,6 +256,13 @@ export function AtomicFundingModal({
             now={now}
             phaseKind={phase.kind}
             onCopy={copyText}
+          />
+        )}
+
+        {phase.kind === "mint-confirming-slow" && (
+          <MintConfirmingSlowState
+            amountSats={amountSats}
+            onCancel={handleCancel}
           />
         )}
 
@@ -377,6 +402,63 @@ function InvoiceDisplay({
         Copy invoice
       </button>
     </>
+  );
+}
+
+function MintConfirmingSlowState({
+  amountSats, onCancel,
+}: { amountSats: number; onCancel: () => void }) {
+  // v0.5.1: the federation has acknowledged the inbound payment but
+  // hasn't finished crediting our wallet within mintSlowWarnMs (60s by
+  // default). We flip from the optimistic "crediting…" surface to this
+  // honest "keep waiting or cancel" state. The poll loop keeps running
+  // underneath — no extra action needed to keep waiting.
+  return (
+    <div>
+      <div style={{
+        padding: "20px 16px", textAlign: "center",
+        background: T.amberDim, border: `1px solid ${T.amber}66`, borderRadius: T.r,
+        marginBottom: 12,
+      }}>
+        <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: T.amber, fontFamily: T.sans, marginBottom: 4 }}>
+          Federation is taking its time
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, marginBottom: 6 }}>
+          +{amountSats.toLocaleString()} sats inbound
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
+          Your payment was received. The federation's mint protocol can
+          take a few minutes to finish crediting on slow days. We'll
+          keep waiting and LOCK as soon as the credit lands.
+        </div>
+      </div>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        gap: 8, marginBottom: 12, padding: "6px 12px",
+        borderRadius: T.rs, background: T.amberDim,
+        border: `1px solid ${T.amber}44`,
+      }}>
+        <div style={{
+          width: 8, height: 8, borderRadius: "50%",
+          background: T.amber, animation: "pulse 1.4s ease-in-out infinite",
+        }} />
+        <span style={{ fontSize: 10, fontFamily: T.mono, color: T.amber, letterSpacing: 0.5 }}>
+          Still waiting for the mint to settle…
+        </span>
+      </div>
+      <button
+        onClick={onCancel}
+        style={{
+          width: "100%", padding: "10px 16px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+          cursor: "pointer",
+        }}
+      >
+        Cancel & recover later
+      </button>
+    </div>
   );
 }
 
