@@ -21,9 +21,9 @@ export const BP_FEDERATION_INVITE =
 
 /**
  * Bitcoin Life Federation — an explicit federation option, NOT the
- * universal fallback. Iroh-only transport: works perfectly on the APK
- * but is unreliable from browsers (see registry entry's
- * `browserReliable: false`). Selecting BLF in the registry or via a
+ * universal fallback. Iroh-only transport: now reliable from browsers
+ * after the v0.5.0 canary iroh-relay 0.90 bump (see registry entry's
+ * `browserReliable: true`). Selecting BLF in the registry or via a
  * pasted invite is intentional, not ambient.
  */
 export const BLF_FEDERATION_NAME = "Bitcoin Life Federation";

@@ -222,28 +222,27 @@ export function decideAutoInitTarget(inputs: AutoInitInputs): AutoInitTarget {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Browser-support honesty banner
+// Browser-support announcement banner
 // ──────────────────────────────────────────────────────────────────────────
 //
-// Per Pillar 2.7 (educate at every opportunity) + the v0.1.85 reality
-// that every Fedimint federation we currently have access to relies on
-// iroh-relay infrastructure with known browser-WebSocket flakiness. Web
-// users see a one-time honest disclosure regardless of whether they've
-// committed to a federation yet — first-time users encounter it as
-// they're about to tap a community pill, which is the right educational
-// moment.
+// Per Pillar 2.7 (educate at every opportunity). v0.5.0 reframes this
+// from a "temporarily blocked" warning to a positive current-state
+// announcement — the Fedimint canary iroh-relay 0.90 bump cleared the
+// browser-WebSocket gate, so end-to-end browser flows work. Web users
+// see a one-time honest announcement regardless of whether they've
+// committed to a federation yet.
 //
 // Render only when ALL of:
-//   - we're in a browser (native APK has no iroh issue)
+//   - we're in a browser (native APK doesn't need the announcement)
 //   - the user hasn't dismissed the banner before (one-time-per-account)
 
 export interface BrowserBannerInputs {
   isBrowser: boolean;
   dismissed: boolean;
   /** v0.4.2: sim mode swaps the WASM Fedimint client for a localStorage
-   *  mock, so iroh-relay reachability is moot. The "honest browser
-   *  disclosure" copy directly contradicts the SIM MODE pill if shown
-   *  alongside it. Hide unconditionally when sim mode is on. */
+   *  mock, so the browser-Fedimint announcement is moot. The copy
+   *  directly contradicts the SIM MODE pill if shown alongside it.
+   *  Hide unconditionally when sim mode is on. */
   simModeOn?: boolean;
 }
 

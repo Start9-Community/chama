@@ -58,6 +58,19 @@ npm version "$BUMP_TYPE" --no-git-tag-version
 NEW_VERSION=$(node -p "require('./package.json').version")
 git add -A
 
+# ── node_modules drift check ──────────────────────────────────────────
+# Verifies installed deps match package-lock.json. v0.4.4 shipped a bundle
+# built against the wrong Fedimint version because node_modules drifted
+# from package.json after a branch experiment. npm ls --depth=0 catches
+# missing/mismatched top-level deps without doing a destructive reinstall.
+echo "🔎 Checking node_modules sync with package-lock.json..."
+if ! npm ls --depth=0 > /dev/null 2>&1; then
+  echo "❌ node_modules is out of sync with package.json / package-lock.json."
+  echo "   Run: rm -rf node_modules package-lock.json && npm install"
+  echo "   Then re-run release.sh."
+  exit 1
+fi
+
 # ── Pre-deploy gate (typecheck + tests) ────────────────────────────────
 # Refuses to proceed if `tsc --noEmit` or the escrow-engine tests fail.
 # Placed BEFORE commit so a failing gate never produces a public artifact.

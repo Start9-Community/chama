@@ -50,11 +50,12 @@ export interface Community {
   /** ISO country code for the primary flag-display country. `null` for
    *  global / regional aggregators. */
   country: string | null;
-  /** True when the backing federation's guardians expose WebSocket
-   *  endpoints reachable from browsers. False for iroh-only federations
-   *  whose browser support is limited today (BLF, Afribit). APK users
-   *  are unaffected. Browser users joining a `false` community see a
-   *  one-time honest warning per Pillar 2.7. */
+  /** True when the backing federation works reliably from browsers.
+   *  v0.5.0: now true across the board after the Fedimint canary SDK
+   *  bumped iroh-relay to 0.90 and resolved the 400 Bad Request that
+   *  previously gated browser transport. The flag stays in the schema
+   *  so individual entries can flip back to false if a specific
+   *  federation regresses. APK users are unaffected either way. */
   browserReliable: boolean;
   /** Optional internal note, NOT shown to users. Tracks why a federation
    *  has the reliability flag it does, etc. */
@@ -71,18 +72,16 @@ export interface Community {
   hiddenFromPicker: boolean;
 }
 
-/** Shared notes string. v0.1.85 smoke-test reality: every Fedimint
- *  federation we currently have access to relies on the same iroh-relay
- *  infrastructure (use1-1.relay.n0.iroh-canary.iroh.link,
- *  use1-1.relay.elsirion.fedimint.iroh.link). The "BP is browser-
- *  reliable" observation that briefly held was timing-based, not
- *  architectural — api.bitcoinprinciples.xyz is not a live HTTPS-WS
- *  endpoint. Until @fedimint/transport-web lands a fix and we verify
- *  reliability against a specific federation, every entry is honestly
- *  flagged unreliable in browsers. The flag stays in the schema so
- *  individual entries can flip back to true on real evidence. */
+/** Shared notes string. v0.5.0 reality: the Fedimint canary SDK
+ *  (0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031) bumped
+ *  iroh-relay to 0.90, which clears the 400 Bad Request that gated
+ *  browser WebSocket transport across every federation we have access
+ *  to (BP, BLF, Afribit, etc.). End-to-end browser flows — join,
+ *  mint, claim — verified working. The flag stays in the schema so
+ *  individual entries can flip back to false if a specific federation
+ *  ever regresses. */
 const IROH_LIMITATION_NOTE =
-  "Browser support depends on iroh-relay infrastructure (shared with all Fedimint federations today). Best experience on mobile app while we work with @fedimint/transport-web on browser-iroh support.";
+  "Browser Fedimint reliable via canary iroh bump.";
 
 /** v0.1.85 pre-seed list. Curated to federations Jetty operates or
  *  has proven testing history with; permissionless additions go via
@@ -101,7 +100,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     federationInvite: BP_FEDERATION_INVITE,
     flagEmoji: "🇸🇳",
     country: "SN",
-    browserReliable: false,
+    browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: null,
     hiddenFromPicker: false,
@@ -115,7 +114,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     federationInvite: BP_FEDERATION_INVITE,
     flagEmoji: "🌎",
     country: null,
-    browserReliable: false,
+    browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: null,
     hiddenFromPicker: false,
@@ -131,7 +130,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
       "fed11qgqyj3mfwfhksw309ucrxe35vgcryvesxf3nyepsv3jnyepsvgcnxdpjv5urjcfkv4nrydmxxvervef3xcmxxce5x5ergwfnxcukzetr8qen2vnpvsmr2vrzqyqjplegdfhg4qq8f0zeuvjxn8e49sa3tnep7w08dca79wecgjkyszrufgwesp",
     flagEmoji: "🇰🇪",
     country: "KE",
-    browserReliable: false,
+    browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "Afribit",
     hiddenFromPicker: false,
@@ -145,7 +144,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     federationInvite: BLF_FEDERATION_INVITE,
     flagEmoji: "🇺🇸",
     country: "US",
-    browserReliable: false,
+    browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "Bitcoin Life",
     hiddenFromPicker: false,
@@ -162,7 +161,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     federationInvite: null,
     flagEmoji: "🇸🇻",
     country: "SV",
-    browserReliable: false,
+    browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: null,
     hiddenFromPicker: true,
@@ -188,7 +187,7 @@ export function getCommunityBySlug(slug: string | null | undefined): Community |
 /** Default community when the user hasn't picked one yet. global-usd
  *  exists precisely so first-launch users always have a sensible
  *  fallback that won't geofence them out of any listing. */
-export const DEFAULT_COMMUNITY_SLUG = "global-usd";
+export const DEFAULT_COMMUNITY_SLUG = "us-blf";
 
 /** Pre-seeded entries that should appear in the picker (excludes
  *  hiddenFromPicker entries). Custom communities get appended on top

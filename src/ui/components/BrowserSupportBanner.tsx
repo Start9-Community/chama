@@ -1,12 +1,12 @@
 import { T } from "../theme.js";
 
-// One-time-per-account honest disclosure for browser users. Per Pillar
-// 2.7: educate at every opportunity. The v0.1.85 reality is that every
-// Fedimint federation we currently have access to relies on the same
-// iroh-relay infrastructure with known browser-WebSocket flakiness.
-// Acknowledging that openly beats pretending one fed is reliable when
-// none currently are. The banner is non-blocking — users can absolutely
-// still trade from browser, they just need patience occasionally.
+// One-time-per-account positive announcement for browser users.
+// v0.5.0: the Fedimint canary SDK bumped iroh-relay to 0.90 and
+// cleared the 400 Bad Request that previously gated browser-WebSocket
+// transport. End-to-end browser flows — federation join, ecash mint,
+// claim/redeem — verified working. Per Pillar 2.7 (educate at every
+// opportunity), surface the current honest state so returning users
+// who saw the old "temporarily blocked" copy know the gate is gone.
 export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
   return (
     <div style={{
@@ -25,11 +25,10 @@ export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
         fontSize: 13, color: T.text, fontFamily: T.sans,
         lineHeight: 1.55,
       }}>
-	Heads up: Browser Fedimint clients are temporarily blocked on a 
-	known upstream issue (iroh-relay protocol upgrade, Fedimint SDK 
-	catch-up pending). You can sign in and browse, but federation 
-	operations won't complete from browser today. Tracking: 
-	github.com/fedimint/fedimint-sdk/issues/288
+        Browser Fedimint enabled. Chama now runs end-to-end in the
+        browser — federations join, ecash mints, claims redeem.
+        Available on canary SDK pending Fedimint stable release.
+        Tracking: github.com/fedimint/fedimint-sdk/issues/288
       </div>
       <button
         onClick={onDismiss}

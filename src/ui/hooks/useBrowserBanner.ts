@@ -3,9 +3,10 @@
 // ══════════════════════════════════════════════════════════════════════════
 //
 // The browser-support banner (BrowserSupportBanner.tsx) fires once per
-// pubkey to honestly disclose the iroh-relay browser limitation per
-// Pillar 2.7. Dismissal is stored under
-// `chama_browser_support_dismissed_${pubkey}` so:
+// pubkey to announce that browser Fedimint is enabled (v0.5.0 canary
+// iroh bump cleared the prior transport gate), per Pillar 2.7.
+// Dismissal is stored under `chama_browser_support_dismissed_${pubkey}`
+// so:
 //
 //   - A new npub on the same browser sees the banner once until they
 //     dismiss it themselves (Bug E from v0.1.85 smoke testing — global

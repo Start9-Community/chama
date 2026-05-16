@@ -1034,7 +1034,7 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug("sv-usd")?.currency === "USD", "sv-usd is USD");
   assert(getCommunityBySlug("global-usd")?.currency === "USD", "global-usd is USD");
   assert(getCommunityBySlug("us-blf")?.currency === "USD", "us-blf is USD");
-  assert(DEFAULT_COMMUNITY_SLUG === "global-usd", "Default community is global-usd");
+  assert(DEFAULT_COMMUNITY_SLUG === "us-blf", "Default community is us-blf (BLF, v0.5.0)");
 
   // Lookup with valid + missing slug
   assert(getCommunityBySlug("sn-cfa") !== null, "Valid slug returns community");
@@ -1067,17 +1067,18 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     assert(typeof c.hiddenFromPicker === "boolean",
       `${c.slug} has hiddenFromPicker`);
   }
-  // Reliability flags reflect transport reality. v0.1.85 smoke-test
-  // discovery: every Fedimint federation we have access to today
-  // shares the same iroh-relay infrastructure, so browser users hit
-  // the same flakiness regardless of which fed they pick. The flag
-  // stays in the schema so individual entries flip back to true once
-  // upstream @fedimint/transport-web lands a fix and we verify per-fed.
+  // Reliability flags reflect transport reality. v0.5.0: the Fedimint
+  // canary SDK bumped iroh-relay to 0.90 and cleared the 400 Bad
+  // Request that previously gated browser-WebSocket transport across
+  // every federation we have access to. End-to-end browser flows
+  // verified working — flag flips to true across the board. The flag
+  // stays in the schema so individual entries can flip back to false
+  // if a specific federation regresses.
   for (const c of COMMUNITY_REGISTRY) {
-    assert(c.browserReliable === false,
-      `${c.slug} browserReliable=false (universal iroh-relay limitation)`);
-    assert(typeof c.notes === "string" && c.notes.includes("iroh-relay"),
-      `${c.slug} carries the shared iroh-limitation note`);
+    assert(c.browserReliable === true,
+      `${c.slug} browserReliable=true (canary iroh bump cleared the gate)`);
+    assert(typeof c.notes === "string" && c.notes.includes("canary iroh"),
+      `${c.slug} carries the shared browser-reliable note`);
   }
   assert(getCommunityBySlug("ke-kes")?.disambiguator === "Afribit",
     "ke-kes disambiguator=Afribit (multi-fed-per-country prep)");
@@ -1090,10 +1091,10 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(picker.some(c => c.slug === "us-blf"),
     "Picker includes us-blf");
 
-  // Storage roundtrip — defaults to global-usd when nothing set
+  // Storage roundtrip — defaults to us-blf when nothing set (v0.5.0)
   (globalThis as any).localStorage.clear();
-  assert(getUserCommunitySlug() === "global-usd",
-    "getUserCommunitySlug defaults to global-usd when nothing stored");
+  assert(getUserCommunitySlug() === "us-blf",
+    "getUserCommunitySlug defaults to us-blf when nothing stored (BLF, v0.5.0)");
 
   // Set + read
   setUserCommunitySlug("sn-cfa");
@@ -1101,14 +1102,14 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 
   // Stale/invalid slug falls back to default rather than flowing through
   (globalThis as any).localStorage.setItem(COMMUNITY_STORAGE_KEY, "ghost-fed");
-  assert(getUserCommunitySlug() === "global-usd",
+  assert(getUserCommunitySlug() === "us-blf",
     "Unknown stored slug falls back to default (registry validation)");
 
   // Clear via empty string
   setUserCommunitySlug("ke-kes");
   assert(getUserCommunitySlug() === "ke-kes", "Pre-clear: ke-kes set");
   setUserCommunitySlug("");
-  assert(getUserCommunitySlug() === "global-usd", "Empty string clears, falls to default");
+  assert(getUserCommunitySlug() === "us-blf", "Empty string clears, falls to default");
 }
 
 // ── 14b. PERMISSIONLESS COMMUNITY ADDITION (v0.1.85) ─────────────────────
@@ -2484,7 +2485,8 @@ console.log("\n── AUTO-INIT TARGET ──");
     "Balance>0 without currentEscrow → use-home (data-layer guard handles conflict)");
 
   // 6) Truly first-time user — v0.2.0 item 6: no home AND no active →
-  //    use-default (BP + global-usd). Pre-v0.2.0 this fell to "skip"
+  //    use-default (BLF + us-blf, v0.5.0; was BP + global-usd in v0.2.0).
+  //    Pre-v0.2.0 this fell to "skip"
   //    and stranded users in "No Chama" limbo per Pillar 2.1's
   //    "every user has a home" doctrine.
   const firstTime = decideAutoInitTarget({
@@ -2496,10 +2498,10 @@ console.log("\n── AUTO-INIT TARGET ──");
   assert(firstTime.kind === "use-default",
     "First-time user (no home, no active) → use-default (v0.2.0 item 6)");
   if (firstTime.kind === "use-default") {
-    assert(firstTime.defaultCommunity === "global-usd",
-      "First-time default community is global-usd");
-    assert(firstTime.invite === BP_FEDERATION_INVITE,
-      "First-time default invite is BP (browser-friendly fallback)");
+    assert(firstTime.defaultCommunity === "us-blf",
+      "First-time default community is us-blf (BLF, v0.5.0)");
+    assert(firstTime.invite === BLF_FEDERATION_INVITE,
+      "First-time default invite is BLF (v0.5.0 dev-owned federation)");
     assert(firstTime.reason === "first-time-npub",
       "First-time use-default carries the 'first-time-npub' reason");
   }
@@ -2520,10 +2522,12 @@ console.log("\n── AUTO-INIT TARGET ──");
 
 // ── 29. BROWSER SUPPORT BANNER GATE ─────────────────────────────────────
 //
-// One-time-per-account honest disclosure for browser users. v0.1.85
-// hotfix: gate dropped the fedimintJoined requirement so first-time
-// users see the banner BEFORE committing to a federation — that's the
-// right educational moment per Pillar 2.7.
+// One-time-per-account positive announcement for browser users. v0.5.0
+// reframes the banner from a warning ("temporarily blocked") to a
+// current-state announcement ("Browser Fedimint enabled") after the
+// canary iroh bump cleared the transport gate. Gate logic itself is
+// unchanged: show once per browser pubkey, suppress in sim mode, never
+// re-show after dismissal.
 console.log("\n── BROWSER SUPPORT BANNER GATE ──");
 {
   // Browser, never dismissed → show (regardless of join state)
@@ -2534,12 +2538,12 @@ console.log("\n── BROWSER SUPPORT BANNER GATE ──");
     "Browser user (not yet dismissed) sees the banner",
   );
 
-  // Native platform — no iroh issue, never show
+  // Native platform — no need to announce browser support, never show
   assert(
     shouldShowBrowserSupportBanner({
       isBrowser: false, dismissed: false,
     }) === false,
-    "Native (APK) user does NOT see the banner — iroh transport works there",
+    "Native (APK) user does NOT see the banner — only browser users get the announcement",
   );
 
   // Dismissed earlier — never re-show
@@ -2555,7 +2559,7 @@ console.log("\n── BROWSER SUPPORT BANNER GATE ──");
     shouldShowBrowserSupportBanner({
       isBrowser: true, dismissed: false, simModeOn: true,
     }) === false,
-    "Sim mode suppresses the iroh-relay disclosure banner",
+    "Sim mode suppresses the browser-support announcement",
   );
   assert(
     shouldShowBrowserSupportBanner({
@@ -2890,7 +2894,7 @@ console.log("\n── setUserCommunitySlug PERSISTENCE ──");
 //
 // Bug A from v0.1.85 smoke testing: first-time users were seeing the
 // "Global · USD" pill highlighted because `getUserCommunitySlug` falls
-// back to global-usd when nothing is stored. The Raw variant returns
+// back to us-blf when nothing is stored (v0.5.0). The Raw variant returns
 // null in that case so the UI can distinguish "explicit choice" from
 // "default fallback" — pill highlight reads from Raw, resolution paths
 // (createEscrow, initFedimint) keep using the non-null helper.
@@ -2900,8 +2904,8 @@ console.log("\n── getUserCommunitySlugRaw ──");
   (globalThis as any).localStorage.clear();
   assert(getUserCommunitySlugRaw() === null,
     "First-time user (nothing stored) → null (no pill highlight)");
-  assert(getUserCommunitySlug() === "global-usd",
-    "Resolution path still falls back to global-usd default");
+  assert(getUserCommunitySlug() === "us-blf",
+    "Resolution path still falls back to us-blf default (BLF, v0.5.0)");
 
   // After picking: returns the slug
   setUserCommunitySlug("sn-cfa");
@@ -2916,7 +2920,7 @@ console.log("\n── getUserCommunitySlugRaw ──");
   (globalThis as any).localStorage.setItem(COMMUNITY_STORAGE_KEY, "ghost-fed");
   assert(getUserCommunitySlugRaw() === null,
     "Unknown stored slug → null (no stale-pill highlight)");
-  assert(getUserCommunitySlug() === "global-usd",
+  assert(getUserCommunitySlug() === "us-blf",
     "Resolution path falls back to default for stale slug");
 
   // Cleanup
