@@ -106,9 +106,35 @@ const defaultSleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 const defaultNow = () => Date.now();
 
+function moneyDebugEnabled(): boolean {
+  try {
+    return typeof localStorage !== "undefined"
+      && localStorage.getItem("chama_debug_money") !== null;
+  } catch {
+    return false;
+  }
+}
+
+function moneyLog(checkpoint: string, fields: Record<string, unknown>): void {
+  if (!moneyDebugEnabled()) return;
+  const parts: string[] = [`[$$] ${checkpoint}`];
+  for (const [k, v] of Object.entries(fields)) {
+    let val: string;
+    if (v === undefined) val = "undef";
+    else if (v === null) val = "null";
+    else if (typeof v === "string") val = v.length > 64 ? `${v.slice(0, 60)}...(${v.length})` : v;
+    else if (typeof v === "number" || typeof v === "boolean") val = String(v);
+    else val = JSON.stringify(v).slice(0, 80);
+    parts.push(`${k}=${val}`);
+  }
+  // eslint-disable-next-line no-console
+  console.info(parts.join(" "));
+}
+
 // ── waitForBalanceGrowth ─────────────────────────────────────────────────
 
 export interface WaitForBalanceGrowthOpts {
+  debugId?: string;
   baselineMsats: number;
   expectedDeltaMsats: number;
   getBalance: () => Promise<number>;
@@ -134,17 +160,45 @@ export async function waitForBalanceGrowth(
   const thresholdPct = opts.thresholdPct ?? DEFAULT_THRESHOLD_PCT;
   const requiredDelta = Math.floor(opts.expectedDeltaMsats * thresholdPct);
   const start = now();
+  let polls = 0;
 
   while (true) {
     if (opts.signal?.aborted) return "aborted";
+    polls++;
     let balance = opts.baselineMsats;
+    let balanceReadOk = true;
     try {
       balance = await opts.getBalance();
     } catch {
+      balanceReadOk = false;
       // Transient federation hiccups during polling — retry on next tick.
     }
-    if (balance - opts.baselineMsats >= requiredDelta) return "grew";
-    if (now() - start >= timeoutMs) return "timeout";
+    const elapsedMs = now() - start;
+    const delta = balance - opts.baselineMsats;
+    const grew = delta >= requiredDelta;
+    moneyLog("CLAIM-WAIT", {
+      escrowId: opts.debugId,
+      poll: polls,
+      balanceReadOk,
+      balance,
+      baseline: opts.baselineMsats,
+      delta,
+      requiredDelta,
+      elapsedMs,
+      result: grew ? "grew" : "waiting",
+    });
+    if (grew) return "grew";
+    if (elapsedMs >= timeoutMs) {
+      moneyLog("CLAIM-WAIT", {
+        escrowId: opts.debugId,
+        poll: polls,
+        delta,
+        requiredDelta,
+        elapsedMs,
+        result: "timeout",
+      });
+      return "timeout";
+    }
     await sleep(pollIntervalMs);
   }
 }
@@ -154,12 +208,15 @@ export async function waitForBalanceGrowth(
 export interface RunClaimAndPayoutDeps {
   /** Bound to fedimint.getBalance() in the hook. */
   getBalance: () => Promise<number>;
-  /** Bound to the existing claimAndRedeemAction (decrypt + SSS + redeem
-   *  + publish CLAIM). May resolve before balance has fully settled —
-   *  the orchestrator polls separately to handle the watchdog case. */
+  /** Bound to the raw bridge claim path (decrypt + SSS + publish CLAIM
+   *  + redeem). May resolve before balance has fully settled — the
+   *  orchestrator polls separately to handle the watchdog case. */
   claimAndRedeem: (escrowId: string) => Promise<unknown>;
   /** Bound to bridge.payInvoice. Outbound Lightning send. */
   payInvoice: (bolt11: string) => Promise<void>;
+  /** Publish escrow COMPLETE after the wallet balance has actually
+   *  confirmed. Best-effort: failure must not block payout/recovery. */
+  completeClaim?: (escrowId: string) => Promise<void>;
   /** Bound to addOrTouchLightningHandle. Best-effort post-success save. */
   addOrTouchLightningHandle: (address: string) => void;
 }
@@ -214,6 +271,11 @@ export async function runClaimAndPayout(
     emit({ kind: "claim-failed", error });
     return { kind: "claim-failed", error };
   }
+  moneyLog("CLAIM-BASELINE", {
+    escrowId: opts.escrowId,
+    baseline,
+    expectedDeltaMsats: opts.expectedDeltaMsats,
+  });
 
   // Phase 1: claim. Decrypt shares, SSS-combine, redeem ecash, publish
   // CLAIM. May resolve via:
@@ -236,8 +298,20 @@ export async function runClaimAndPayout(
       emit({ kind: "claim-bridge-threw", error });
       return { kind: "claim-bridge-threw", error };
     }
-    emit({ kind: "claim-failed", error });
-    return { kind: "claim-failed", error };
+    // CLAIM already hit relays, but redeem/balance settlement is still
+    // uncertain. This is not a hard claim failure; continue into the
+    // balance-confirming watchdog. If the balance lands, payout proceeds.
+    // If it does not, the terminal remains claim-pending.
+    if (e?.claimPublished) {
+      moneyLog("CLAIM-PUBLISHED-THROW", {
+        escrowId: opts.escrowId,
+        errMsg: error.slice(0, 120),
+      });
+      // Fall through to confirming below.
+    } else {
+      emit({ kind: "claim-failed", error });
+      return { kind: "claim-failed", error };
+    }
   }
 
   // Phase 2: confirm balance landed. Poll for up to confirmTimeoutMs.
@@ -246,6 +320,7 @@ export async function runClaimAndPayout(
   // waits while the federation settles).
   emit({ kind: "confirming" });
   const grew = await waitForBalanceGrowth({
+    debugId: opts.escrowId,
     baselineMsats: baseline,
     expectedDeltaMsats: opts.expectedDeltaMsats,
     getBalance: opts.getBalance,
@@ -254,6 +329,10 @@ export async function runClaimAndPayout(
     sleep: opts.sleep,
     now: opts.now,
   });
+  moneyLog("CLAIM-CONFIRM-OUT", {
+    escrowId: opts.escrowId,
+    result: grew,
+  });
   if (grew !== "grew") {
     const error =
       "Your sats are still arriving from the federation. They'll land shortly — recover them via the banner on Browse if they don't appear within a few minutes.";
@@ -261,17 +340,54 @@ export async function runClaimAndPayout(
     return { kind: "claim-pending", error };
   }
 
+  // COMPLETE is a statement that the escrow sats are under the winner's
+  // control. Publish it only after balance growth confirms that reality.
+  // If the relay publish fails, the money path still continues; the
+  // trade can be healed manually/retried later without blocking payout.
+  if (opts.completeClaim) {
+    try {
+      moneyLog("CLAIM-COMPLETE-IN", {
+        escrowId: opts.escrowId,
+      });
+      await opts.completeClaim(opts.escrowId);
+      moneyLog("CLAIM-COMPLETE-OUT", {
+        escrowId: opts.escrowId,
+        result: "success",
+      });
+    } catch (e: any) {
+      moneyLog("CLAIM-COMPLETE-OUT", {
+        escrowId: opts.escrowId,
+        result: "error",
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+      // Advisory protocol event only; money movement already confirmed.
+    }
+  }
+
   // Phase 3: outbound Lightning. Pay the user's destination invoice.
   // If this throws, the balance is now orphaned in the user's Chama —
   // recovery banner is the next stop.
   emit({ kind: "paying-invoice" });
   try {
+    moneyLog("CLAIM-PAY-IN", {
+      escrowId: opts.escrowId,
+      invoicePrefix: opts.bolt11.slice(0, 24),
+    });
     await opts.payInvoice(opts.bolt11);
   } catch (e: any) {
     const error = e?.message || "Lightning payment failed";
+    moneyLog("CLAIM-PAY-OUT", {
+      escrowId: opts.escrowId,
+      result: "error",
+      errMsg: error.slice(0, 120),
+    });
     emit({ kind: "payout-failed", error });
     return { kind: "payout-failed", error };
   }
+  moneyLog("CLAIM-PAY-OUT", {
+    escrowId: opts.escrowId,
+    result: "success",
+  });
 
   // Phase 4: best-effort handle save. Failures here are cosmetic —
   // the payout already succeeded.
@@ -284,5 +400,8 @@ export async function runClaimAndPayout(
   }
 
   emit({ kind: "done" });
+  moneyLog("CLAIM-DONE", {
+    escrowId: opts.escrowId,
+  });
   return { kind: "done" };
 }

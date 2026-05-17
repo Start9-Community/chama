@@ -714,39 +714,6 @@ export class EscrowClient {
     return this.applyLocally(escrowId, signed, payload);
   }
 
-  /**
-   * Publish COMPLETE if all conditions are met.
-   * Safe to call anytime — no-ops if already completed, not winner, or
-   * not in CLAIMED state.
-   *
-   * Called from two places:
-   *   1. useEscrow's claim action, after a successful claim+redeem
-   *   2. loadEscrow's post-replay hook, to backfill stuck CLAIMED trades
-   *      and reconcile bridge-threw-but-sats-arrived watchdog cases.
-   */
-  private async maybeAutoComplete(escrowId: string): Promise<void> {
-    const state = this.states.get(escrowId);
-    if (!state) return;
-
-    // Only act on CLAIMED escrows
-    if (state.status !== EscrowStatus.CLAIMED) return;
-
-    // Only the winner publishes COMPLETE
-    const pubkey = await this.signer.getPublicKey();
-    const winner = getWinner(state);
-    if (!winner || winner.pubkey !== pubkey) return;
-
-    // Don't re-publish if COMPLETE is already in the chain
-    if (state.eventChain.some(e => e.kind === EscrowEventKind.COMPLETE)) return;
-
-    try {
-      await this.complete(escrowId);
-      console.debug(`[escrow] Auto-completed ${escrowId}`);
-    } catch (e) {
-      console.debug(`[escrow] Auto-complete failed for ${escrowId}:`, (e as Error)?.message || e);
-    }
-  }
-
   // ── Send a chat message ─────────────────────────────────────────────────
 
   async sendChat(escrowId: string, message: string): Promise<void> {
@@ -1014,17 +981,6 @@ export class EscrowClient {
     if (result.state.status === EscrowStatus.EXPIRED) {
       this.maybeAutoRefundExpired(escrowId).catch(e =>
         console.debug("[escrow] Post-reload heal-on-load:", e?.message || e)
-      );
-    }
-
-    // v0.1.66.31: backfill + reconcile. If we're the winner on a CLAIMED
-    // escrow and COMPLETE hasn't been published yet, auto-publish it.
-    // This catches: (a) legacy trades that got stuck at CLAIMED because
-    // no code path ever published COMPLETE, (b) trades where the bridge
-    // threw but the balance watchdog confirmed sats arrived.
-    if (result.state.status === EscrowStatus.CLAIMED) {
-      this.maybeAutoComplete(escrowId).catch(e =>
-        console.debug("[escrow] Post-reload auto-complete:", (e as Error)?.message || e)
       );
     }
 

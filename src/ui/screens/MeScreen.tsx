@@ -22,7 +22,14 @@
 
 import { useState, useEffect } from "react";
 import { type EscrowState } from "../../escrow-engine/types.js";
-import { type AggregateRatings } from "../decisions.js";
+import {
+  MAIN_SURFACE_RECOVERY_MIN_SATS,
+  type AggregateRatings,
+} from "../decisions.js";
+import {
+  lightningPayoutReserveSats,
+  maxLightningPayoutSats,
+} from "../../payments/lightning-fees.js";
 import { T } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 
@@ -50,6 +57,9 @@ export function MeScreen({
   onOpenTrade,
   onOpenSavedHandles,
   onOpenAdvanced,
+  balanceMsats,
+  hasActiveCommitment,
+  onRecoverSats,
   onSignOut,
 }: {
   pubkey: string;
@@ -60,11 +70,19 @@ export function MeScreen({
   onOpenTrade: (id: string) => void;
   onOpenSavedHandles: () => void;
   onOpenAdvanced: () => void;
+  balanceMsats: number;
+  hasActiveCommitment: boolean;
+  onRecoverSats: () => void;
   onSignOut: () => void;
 }) {
   const npubShort = pubkey.slice(0, 8) + "…" + pubkey.slice(-4);
   const [kind0On, setKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
   useEffect(() => { writeKind0Toggle(pubkey, kind0On); }, [pubkey, kind0On]);
+  const localRecoverySats = Math.floor(Math.max(0, balanceMsats) / 1000);
+  const localRecoverableSats = maxLightningPayoutSats(balanceMsats);
+  const localReserveSats = lightningPayoutReserveSats(balanceMsats);
+  const showLocalRecovery = !hasActiveCommitment && localRecoverySats > 0;
+  const isQuietDust = localRecoverySats < MAIN_SURFACE_RECOVERY_MIN_SATS;
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -104,6 +122,50 @@ export function MeScreen({
           </div>
         </div>
       </div>
+
+      {showLocalRecovery && (
+        <div style={{
+          background: T.card, border: `1px solid ${isQuietDust ? T.border : T.amber + "66"}`,
+          borderRadius: T.r, padding: 20, marginBottom: 16,
+        }}>
+          <div style={{
+            fontSize: 11, fontWeight: 600, color: isQuietDust ? T.muted : T.amber,
+            fontFamily: T.mono, letterSpacing: 1, marginBottom: 12,
+          }}>
+            SATS RECOVERY
+          </div>
+          <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
+            {isQuietDust ? (
+              <>
+                {localRecoverySats.toLocaleString()} sat{localRecoverySats !== 1 ? "s" : ""} saved from payout fee dust.
+                Chama keeps tiny leftovers out of the main flow and lets them accumulate here.
+              </>
+            ) : (
+              <>
+                {localRecoverySats.toLocaleString()} sats are ready for recovery before the next trade.
+                {localReserveSats > 0 ? ` About ${localReserveSats.toLocaleString()} sats stay reserved for Lightning fees.` : ""}
+              </>
+            )}
+          </div>
+          <button
+            onClick={onRecoverSats}
+            disabled={localRecoverableSats <= 0}
+            style={{
+              width: "100%", padding: "12px", marginTop: 14,
+              background: localRecoverableSats > 0 ? T.amberDim : T.surface,
+              border: `1px solid ${localRecoverableSats > 0 ? T.amber + "66" : T.border}`,
+              borderRadius: T.rs,
+              color: localRecoverableSats > 0 ? T.amber : T.muted,
+              fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+              cursor: localRecoverableSats > 0 ? "pointer" : "default",
+            }}
+          >
+            {localRecoverableSats > 0
+              ? `Recover ${localRecoverableSats.toLocaleString()} sats`
+              : "Waiting for enough sats to recover"}
+          </button>
+        </div>
+      )}
 
       {/* Ratings — minimal v0.2.0 surface. Per Pillar 2.6 reputation
           is the backbone primitive; the surface ships even before

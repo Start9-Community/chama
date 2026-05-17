@@ -10,11 +10,11 @@
 // Chama, and recovering them is a structural repair — not a routine
 // "withdraw" operation.
 //
-// Trigger contract is unchanged: balance > 0 && !hasActiveBuyerSellerCommitment
-// (see decisions.shouldShowRecoveryBanner). Phase 3's three-way claim
-// failure split (claim-failed / claim-pending / payout-failed) makes
-// the banner more meaningful, not less — payout-failed is the most
-// common path that lands here in real production.
+// Trigger contract: balance is large enough for an outbound Lightning
+// payout && !hasActiveBuyerSellerCommitment (see decisions.
+// shouldShowRecoveryBanner). Phase 3's three-way claim failure split
+// (claim-failed / claim-pending / payout-failed) makes the banner more
+// meaningful, not less — payout-failed is the common path here.
 //
 // Counterparty resolution: identifyStrandedEcashSource walks the local
 // replay to find the most recent CLAIM event the user signed. Generic
@@ -23,6 +23,10 @@
 import { T, fmtSats } from "../theme.js";
 import { displayCounterpartyName, type StrandedEcashSource } from "../decisions.js";
 import { Role } from "../../escrow-engine/types.js";
+import {
+  lightningPayoutReserveSats,
+  maxLightningPayoutSats,
+} from "../../payments/lightning-fees.js";
 
 export function RecoveryBanner({
   balanceMsats,
@@ -38,7 +42,9 @@ export function RecoveryBanner({
    *  repair, not a routine wallet withdrawal. */
   onRecover: () => void;
 }) {
-  const sats = Math.floor(balanceMsats / 1000);
+  const totalSats = Math.floor(balanceMsats / 1000);
+  const recoverableSats = maxLightningPayoutSats(balanceMsats);
+  const reserveSats = lightningPayoutReserveSats(balanceMsats);
   const counterpartyName = source
     ? displayCounterpartyName({
         npub: source.counterpartyPubkey,
@@ -52,8 +58,8 @@ export function RecoveryBanner({
     : "Your last trade didn't finish cleanly";
 
   const explanation = source
-    ? `${sats.toLocaleString()} sats are still in escrow on your local Chama. Send them to your Lightning wallet to recover and free up Chama for your next trade.`
-    : `${sats.toLocaleString()} sats are still in escrow on your local Chama. Send them to your Lightning wallet to recover and free up Chama for your next trade.`;
+    ? `${totalSats.toLocaleString()} sats are still in your local Chama. ${recoverableSats.toLocaleString()} sats can be sent to your Lightning address now${reserveSats > 0 ? `, with about ${reserveSats.toLocaleString()} sats kept for Lightning fees` : ""}.`
+    : `${totalSats.toLocaleString()} sats are still in your local Chama. ${recoverableSats.toLocaleString()} sats can be sent to your Lightning address now${reserveSats > 0 ? `, with about ${reserveSats.toLocaleString()} sats kept for Lightning fees` : ""}.`;
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -143,14 +149,14 @@ export function RecoveryBanner({
             cursor: "pointer", letterSpacing: 0.5,
           }}
         >
-          ⚡ Recover {sats.toLocaleString()} sats →
+          ⚡ Recover {recoverableSats.toLocaleString()} sats →
         </button>
 
         <div style={{
           textAlign: "center", marginTop: 10,
           fontSize: 9, color: T.muted, fontFamily: T.mono,
         }}>
-          Sats land in your Lightning wallet · Chama frees up for the next trade
+          Sats land at your Lightning address · Chama frees up for the next trade
         </div>
       </div>
 

@@ -31,6 +31,10 @@ import { DestinationPicker } from "../components/DestinationPicker.js";
 import type {
   SavedHandle,
 } from "../../payments/saved-handles.js";
+import {
+  lightningPayoutReserveSats,
+  maxLightningPayoutSats,
+} from "../../payments/lightning-fees.js";
 import type {
   ClaimAndPayoutPhase,
   ClaimAndPayoutTerminal,
@@ -39,9 +43,10 @@ import type {
 export interface ClaimPayoutModalProps {
   /** Trade ID being claimed. Passed through to claimAndPayout. */
   escrowId: string;
-  /** Post-fee payout amount the winner receives, in millisatoshis.
-   *  Passed to DestinationPicker as the BOLT11 amount and to
-   *  claimAndPayout as expectedDeltaMsats. */
+  /** Post-escrow-fee payout amount in millisatoshis. claimAndPayout
+   *  uses this as expectedDeltaMsats; the Lightning invoice amount is
+   *  reduced slightly in the modal so the wallet can pay outbound LN
+   *  fees from the same balance. */
   payoutMsats: number;
   /** Saved Lightning Address handles for the picker's Tier 1 list.
    *  Caller fetches via getSavedLightningHandles(); the modal does not
@@ -91,7 +96,8 @@ export function ClaimPayoutModal({
   probeFederation,
   onClose,
 }: ClaimPayoutModalProps) {
-  const payoutSats = Math.floor(payoutMsats / 1000);
+  const payoutSats = maxLightningPayoutSats(payoutMsats);
+  const reserveSats = lightningPayoutReserveSats(payoutMsats);
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
   // Retry state: when claim-bridge-threw terminal is up, the "Try
   // again" button toggles this to render the inline probing spinner.
@@ -156,7 +162,11 @@ export function ClaimPayoutModal({
         amountSats={payoutSats}
         savedHandles={savedHandles}
         title="Claim your sats"
-        subtitle={`Send ${payoutSats.toLocaleString()} sats to your Lightning wallet`}
+        subtitle={
+          reserveSats > 0
+            ? `Send ${payoutSats.toLocaleString()} sats to your Lightning wallet. About ${reserveSats.toLocaleString()} sats stays available for Lightning fees.`
+            : `Send ${payoutSats.toLocaleString()} sats to your Lightning wallet`
+        }
         onResolve={(bolt11, opts) => {
           lastDispatchRef.current = {
             bolt11,

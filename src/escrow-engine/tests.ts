@@ -96,6 +96,7 @@ import {
   BP_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
+import { adaptRealWallet } from "../fedimint/sdk-adapter.js";
 import {
   queryUntilFound,
   SEED_RECOVERY_RETRY_DELAYS_MS,
@@ -171,6 +172,11 @@ import {
   runRecoveryPayout,
   type RecoveryPayoutPhase,
 } from "../payments/balance-recovery.js";
+import {
+  estimateLightningSendFeeMsats,
+  lightningPayoutReserveSats,
+  maxLightningPayoutSats,
+} from "../payments/lightning-fees.js";
 
 // v0.3.0 Phase 5 — ChamaBar label decision
 import {
@@ -2301,6 +2307,7 @@ import {
   identifyStrandedEcashSource,
   decideListingTapEffect,
   decideArbiterWarning,
+  MAIN_SURFACE_RECOVERY_MIN_SATS,
 } from "../ui/decisions.js";
 // BP_FEDERATION_INVITE / BLF_FEDERATION_INVITE already imported above
 // from federation-config (which re-exports from federation-invites).
@@ -2352,6 +2359,17 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
     assert(switchSilent.displayName === "US · Bitcoin Life · USD",
       "Switch-silent carries the community's displayName");
   }
+
+  const dustSwitchSilent = decideCommunityTapEffect({
+    slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 999,
+  });
+  assert(dustSwitchSilent.kind === "switch-silent",
+    "Sub-sat dust does not block community switching");
+  const feeFloorSwitchSilent = decideCommunityTapEffect({
+    slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 2_500,
+  });
+  assert(feeFloorSwitchSilent.kind === "switch-silent",
+    "Sub-fee dust does not block community switching");
 
   // Returning user on a different fed, balance > 0 → destroy-confirm modal.
   const destroyConfirm = decideCommunityTapEffect({
@@ -3158,16 +3176,39 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     "CANCELLED escrow doesn't count as commitment",
   );
 
-  // EXPIRED counts as active (per types.ts: transient healing state,
-  // not truly terminal).
+  // EXPIRED heals in the background, but it no longer blocks the user's
+  // next Create/Fund flow.
   const expired = escrow({
     id: "expired",
     status: EscrowStatus.EXPIRED,
     participants: { buyer: me, seller: other, arbiter: arb },
   });
   assert(
-    hasActiveBuyerSellerCommitment({ escrows: [expired], userPubkey: me }) === true,
-    "EXPIRED still counts (transient healing state, not truly terminal)",
+    hasActiveBuyerSellerCommitment({ escrows: [expired], userPubkey: me }) === false,
+    "EXPIRED does not count as an active user-blocking commitment",
+  );
+
+  const nowSec = 10_000;
+  const expiredLocked = escrow({
+    id: "expired-locked",
+    status: EscrowStatus.LOCKED,
+    participants: { buyer: me, seller: other, arbiter: arb },
+    expiresAt: nowSec - 1,
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [expiredLocked], userPubkey: me, nowSec }) === false,
+    "LOCKED past expiresAt does not block Create/Fund while refund healing catches up",
+  );
+
+  const expiredCreated = escrow({
+    id: "expired-created",
+    status: EscrowStatus.CREATED,
+    participants: { buyer: null, seller: me, arbiter: arb },
+    expiresAt: nowSec - 1,
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [expiredCreated], userPubkey: me, nowSec }) === false,
+    "CREATED past expiresAt does not block Create/Fund",
   );
 
   // Multiple actives → findActiveTrade returns most recent by createdAt.
@@ -3185,6 +3226,10 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     findActiveTrade({ escrows: [older, newer], userPubkey: me })?.id === "newer",
     "findActiveTrade picks the most recent active trade",
   );
+  assert(
+    findActiveTrade({ escrows: [expiredLocked, older], userPubkey: me, nowSec })?.id === "older",
+    "findActiveTrade skips expired LOCKED trades and returns the live trade",
+  );
 }
 
 // ── 31e. shouldShowRecoveryBanner + identifyStrandedEcashSource (item 2)─
@@ -3197,17 +3242,37 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
 // lives on is the source of the orphan ecash.
 console.log("\n── shouldShowRecoveryBanner + identifyStrandedEcashSource ──");
 {
-  // shouldShowRecoveryBanner: only when balance > 0 AND no active trade.
+  // shouldShowRecoveryBanner: only when balance is material enough for
+  // main-flow interruption AND no active trade. Tiny payout dust is
+  // surfaced quietly in Me instead.
   assert(
-    shouldShowRecoveryBanner({ balanceMsats: 50_000, hasCurrentEscrow: false }) === true,
-    "Balance > 0 + no active trade → show banner",
+    shouldShowRecoveryBanner({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasCurrentEscrow: false,
+    }) === true,
+    "Material balance + no active trade → show banner",
+  );
+  assert(
+    shouldShowRecoveryBanner({ balanceMsats: 50_000, hasCurrentEscrow: false }) === false,
+    "Small recovered balance → no main-flow banner",
   );
   assert(
     shouldShowRecoveryBanner({ balanceMsats: 0, hasCurrentEscrow: false }) === false,
     "Zero balance → no banner",
   );
   assert(
-    shouldShowRecoveryBanner({ balanceMsats: 50_000, hasCurrentEscrow: true }) === false,
+    shouldShowRecoveryBanner({ balanceMsats: 999, hasCurrentEscrow: false }) === false,
+    "Sub-sat dust → no recovery banner",
+  );
+  assert(
+    shouldShowRecoveryBanner({ balanceMsats: 2_500, hasCurrentEscrow: false }) === false,
+    "Fee-floor dust → no recovery banner until it accumulates",
+  );
+  assert(
+    shouldShowRecoveryBanner({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasCurrentEscrow: true,
+    }) === false,
     "Balance > 0 but active trade exists → no banner (active trade owns the funds)",
   );
 
@@ -3337,6 +3402,21 @@ console.log("\n── decideListingTapEffect ──");
     assert(switchSilent.displayName === "US · Bitcoin Life · USD",
       "Display name carries community name for narration");
   }
+
+  const dustSwitchSilent = decideListingTapEffect({
+    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 999,
+  });
+  assert(dustSwitchSilent.kind === "switch-silent",
+    "Sub-sat dust does not block listing-fed switching");
+  const feeFloorSwitchSilent = decideListingTapEffect({
+    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 2_500,
+  });
+  assert(feeFloorSwitchSilent.kind === "switch-silent",
+    "Sub-fee dust does not block listing-fed switching");
 
   // Different fed, balance > 0 → destroy-confirm modal.
   const destroyConfirm = decideListingTapEffect({
@@ -4799,6 +4879,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
     const calls = {
       claimAndRedeem: 0,
       payInvoice: 0,
+      completeClaim: 0,
       getBalance: 0,
       saveHandle: 0,
     };
@@ -4818,6 +4899,9 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       payInvoice: async (_b: string) => {
         calls.payInvoice++;
         if (opts.payInvoiceResult instanceof Error) throw opts.payInvoiceResult;
+      },
+      completeClaim: async (_id: string) => {
+        calls.completeClaim++;
       },
       addOrTouchLightningHandle: (address: string) => {
         calls.saveHandle++;
@@ -4839,6 +4923,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       addressUsed: "alice@phoenix.app",
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
+      completeClaim: wallet.completeClaim,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: p => phases.push(p),
@@ -4853,6 +4938,8 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "claimAndRedeem called exactly once");
     assert(wallet.calls.payInvoice === 1,
       "payInvoice called exactly once after claim confirms");
+    assert(wallet.calls.completeClaim === 1,
+      "COMPLETE published exactly once after claim balance confirms");
     assert(wallet.calls.saveHandle === 1,
       "addOrTouchLightningHandle called once on success with saveAfter=true");
     assert(wallet.handlesSaved[0] === "alice@phoenix.app",
@@ -4880,6 +4967,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       addressUsed: "bob@strike.me",
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
+      completeClaim: wallet.completeClaim,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: () => {},
@@ -4892,6 +4980,8 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "Balance never lands → terminal=claim-pending");
     assert(wallet.calls.payInvoice === 0,
       "payInvoice NEVER called when balance doesn't confirm");
+    assert(wallet.calls.completeClaim === 0,
+      "COMPLETE NOT published when claim balance doesn't confirm");
     assert(wallet.calls.saveHandle === 0,
       "addOrTouchLightningHandle NOT called on claim-pending (no successful payout)");
   }
@@ -4933,6 +5023,39 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "Handle NOT saved on claim-failed");
   }
 
+  // ── Claim-published throw: continue watching, then complete + pay ───
+  {
+    const partial: any = new Error("Claim published to relays, redeem still settling");
+    partial.claimPublished = true;
+    const wallet = makeMockWallet({
+      balances: [0, 100_000, 100_000],
+      claimResult: partial,
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_published_then_lands",
+      bolt11: "lnbc100n1pclaimpublished",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      completeClaim: wallet.completeClaim,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "done",
+      "claimPublished throw + later balance growth → done, not claim-failed");
+    assert(wallet.calls.completeClaim === 1,
+      "COMPLETE published after claimPublished path balance confirms");
+    assert(wallet.calls.payInvoice === 1,
+      "payInvoice called after claimPublished path balance confirms");
+  }
+
   // ── Payout-failed: claim confirmed, balance grew, but payInvoice threw
   // This is the orphan-balance case — recovery banner catches it
   // (Phase 4 wiring).
@@ -4950,6 +5073,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       addressUsed: "dave@offline.app",
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
+      completeClaim: wallet.completeClaim,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: () => {},
@@ -4968,6 +5092,8 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "claim was attempted (succeeded)");
     assert(wallet.calls.payInvoice === 1,
       "payInvoice was attempted (failed)");
+    assert(wallet.calls.completeClaim === 1,
+      "COMPLETE still publishes when balance landed but outbound payout failed");
     assert(wallet.calls.saveHandle === 0,
       "Handle NOT saved when payout failed (orphan = recovery banner's job)");
   }
@@ -5235,6 +5361,19 @@ console.log("\n── RUN RECOVERY PAYOUT ──");
   }
 }
 
+// ── 41b. LIGHTNING PAYOUT FEE RESERVE ───────────────────────────────────
+console.log("\n── LIGHTNING PAYOUT FEE RESERVE ──");
+{
+  assert(estimateLightningSendFeeMsats(47_000) === 2_735,
+    "47 sat payout reserves 2 sat base + 0.5% + 0.5 sat buffer");
+  assert(maxLightningPayoutSats(50_000) === 47,
+    "50 sat balance pays a 47 sat invoice, leaving fee headroom");
+  assert(lightningPayoutReserveSats(50_000) === 3,
+    "50 sat balance shows an about-3-sat Lightning fee reserve");
+  assert(maxLightningPayoutSats(2_500) === 0,
+    "Tiny balances below outbound fee floor are not offered as LN payouts");
+}
+
 // ── 42. CHAMA BAR LABEL DECISION (v0.3.0 Phase 5) ────────────────────────
 //
 // decideChamaBarLabel maps (balance, hasActiveBuyerSellerCommitment) to
@@ -5276,16 +5415,28 @@ console.log("\n── CHAMA BAR LABEL ──");
     }
   }
 
-  // Positive balance + NO active commitment → stranded (failure mode)
+  // Small positive balance + NO active commitment → ready. This is
+  // usually post-payout fee dust, and should not occupy the main top UI.
   {
     const r = decideChamaBarLabel({
       balanceMsats: 100_000,
       hasActiveBuyerSellerCommitment: false,
     });
+    assert(r.kind === "ready",
+      "Small idle balance → ready (quiet dust lives in Me)");
+  }
+
+  // Material positive balance + NO active commitment → stranded
+  // (failure mode) with sats.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasActiveBuyerSellerCommitment: false,
+    });
     assert(r.kind === "stranded",
-      "Balance + no commitment → stranded (Pillar 2.1 Option B violation)");
+      "Material balance + no commitment → stranded (Pillar 2.1 Option B violation)");
     if (r.kind === "stranded") {
-      assert(r.sats === 100,
+      assert(r.sats === MAIN_SURFACE_RECOVERY_MIN_SATS,
         "stranded carries sats");
     }
   }
@@ -5313,9 +5464,7 @@ console.log("\n── CHAMA BAR LABEL ──");
   // Phase 5 reminder #3: arbiter-only "commitments" do NOT count as
   // active. The predicate is computed by the caller; this test pins
   // the contract — when the caller passes false (because the user is
-  // arbiter-only), the bar shows the truthful state of their balance.
-  // An arbiter mid-arbitration with a non-zero balance from a PRIOR
-  // trade would correctly see "stranded".
+  // arbiter-only), the bar treats a tiny prior balance as quiet dust.
   {
     const r = decideChamaBarLabel({
       balanceMsats: 25_000,
@@ -5324,8 +5473,8 @@ console.log("\n── CHAMA BAR LABEL ──");
       // count. Their 25 sats is from a previous failed trade.
       hasActiveBuyerSellerCommitment: false,
     });
-    assert(r.kind === "stranded",
-      "Arbiter-only commitments don't shield prior orphans from stranded label");
+    assert(r.kind === "ready",
+      "Arbiter-only commitments don't promote tiny prior dust to top UI");
   }
 
   // ── v0.3.1 Phase 3: bootProbeState routing ───────────────────────────
@@ -5383,15 +5532,23 @@ console.log("\n── CHAMA BAR LABEL ──");
       hasActiveBuyerSellerCommitment: false,
       bootProbeState: "ok",
     });
-    assert(r2.kind === "stranded",
-      "bootProbeState=ok preserves existing 'stranded' kind");
+    assert(r2.kind === "ready",
+      "bootProbeState=ok preserves quiet-dust ready kind");
 
     const r3 = decideChamaBarLabel({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasActiveBuyerSellerCommitment: false,
+      bootProbeState: "ok",
+    });
+    assert(r3.kind === "stranded",
+      "bootProbeState=ok preserves material 'stranded' kind");
+
+    const r4 = decideChamaBarLabel({
       balanceMsats: 100_000,
       hasActiveBuyerSellerCommitment: true,
       bootProbeState: "ok",
     });
-    assert(r3.kind === "in-trade",
+    assert(r4.kind === "in-trade",
       "bootProbeState=ok preserves existing 'in-trade' kind");
   }
 
@@ -5412,8 +5569,8 @@ console.log("\n── CHAMA BAR LABEL ──");
       hasActiveBuyerSellerCommitment: false,
       bootProbeState: "pending",
     });
-    assert(r2.kind === "stranded",
-      "bootProbeState=pending preserves stranded kind (transient state)");
+    assert(r2.kind === "ready",
+      "bootProbeState=pending preserves quiet-dust ready kind (transient state)");
   }
 
   // bootProbeState undefined → backwards-compatible (acts as ok)
@@ -5421,12 +5578,12 @@ console.log("\n── CHAMA BAR LABEL ──");
   // continues to render the three-state surface as before.
   {
     const r = decideChamaBarLabel({
-      balanceMsats: 50_000,
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
       hasActiveBuyerSellerCommitment: false,
       // bootProbeState omitted
     });
     assert(r.kind === "stranded",
-      "bootProbeState undefined → backwards-compatible (renders as if ok)");
+      "bootProbeState undefined → material idle balance renders as if ok");
   }
 
   // Tripwire: failed-state ordering is independent of every other
@@ -5528,7 +5685,13 @@ console.log("\n── CHAMA BAR LABEL ──");
 
   // activeCommittedMsats helper itself: only LOCKED/APPROVED count.
   const { activeCommittedMsats } = await import("../ui/decisions.js");
-  const buildEscrow = (status: EscrowStatus, amount: number, me: string) => ({
+  const committedNowSec = 50_000;
+  const buildEscrow = (
+    status: EscrowStatus,
+    amount: number,
+    me: string,
+    expiresAt = committedNowSec + 3600,
+  ) => ({
     id: "x", status, description: "", amountMsats: amount,
     category: "p2p-trade", fulfillment: "service", community: null,
     mintUrl: BP_FEDERATION_INVITE,
@@ -5538,7 +5701,7 @@ console.log("\n── CHAMA BAR LABEL ──");
     resolvedOutcome: null, resolvedMajority: null, resolvedAt: null,
     completedAt: null, cancelledAt: null, claim: null,
     fees: { platformBps: 50, platformPubkey: me, arbiterFeeMsats: 0 },
-    expiresAt: 0, createdAt: 0, eventChain: [], chatMessages: [],
+    expiresAt, createdAt: 0, eventChain: [], chatMessages: [],
     lock: { handle: null },
   } as unknown as EscrowState);
   const me = "user_pubkey";
@@ -5546,13 +5709,23 @@ console.log("\n── CHAMA BAR LABEL ──");
     activeCommittedMsats({
       escrows: [buildEscrow(EscrowStatus.LOCKED, 50_000_000, me)],
       userPubkey: me,
+      nowSec: committedNowSec,
     }) === 50_000_000,
     "activeCommittedMsats: LOCKED status counted",
   );
   assert(
     activeCommittedMsats({
+      escrows: [buildEscrow(EscrowStatus.LOCKED, 50_000_000, me, committedNowSec - 1)],
+      userPubkey: me,
+      nowSec: committedNowSec,
+    }) === 0,
+    "activeCommittedMsats: expired LOCKED status NOT counted",
+  );
+  assert(
+    activeCommittedMsats({
       escrows: [buildEscrow(EscrowStatus.APPROVED, 50_000_000, me)],
       userPubkey: me,
+      nowSec: committedNowSec,
     }) === 50_000_000,
     "activeCommittedMsats: APPROVED status counted",
   );
@@ -5560,6 +5733,7 @@ console.log("\n── CHAMA BAR LABEL ──");
     activeCommittedMsats({
       escrows: [buildEscrow(EscrowStatus.CLAIMED, 50_000_000, me)],
       userPubkey: me,
+      nowSec: committedNowSec,
     }) === 0,
     "activeCommittedMsats: CLAIMED NOT counted (winner has redeemed; balance reflects it)",
   );
@@ -5567,6 +5741,7 @@ console.log("\n── CHAMA BAR LABEL ──");
     activeCommittedMsats({
       escrows: [buildEscrow(EscrowStatus.COMPLETED, 50_000_000, me)],
       userPubkey: me,
+      nowSec: committedNowSec,
     }) === 0,
     "activeCommittedMsats: COMPLETED NOT counted (terminal)",
   );
@@ -5574,6 +5749,7 @@ console.log("\n── CHAMA BAR LABEL ──");
     activeCommittedMsats({
       escrows: [buildEscrow(EscrowStatus.CREATED, 50_000_000, me)],
       userPubkey: me,
+      nowSec: committedNowSec,
     }) === 0,
     "activeCommittedMsats: CREATED NOT counted (listing exists; no commitment yet)",
   );
@@ -5584,6 +5760,7 @@ console.log("\n── CHAMA BAR LABEL ──");
         buildEscrow(EscrowStatus.APPROVED, 25_000_000, me),
       ],
       userPubkey: me,
+      nowSec: committedNowSec,
     }) === 75_000_000,
     "activeCommittedMsats: sums across multiple active commitments",
   );
@@ -6155,6 +6332,687 @@ console.log("\n── SIM WALLET — balance subscription end-to-end ──");
     (globalThis as any).localStorage?.removeItem?.("chama_sim_wallet_" + npub);
   } finally {
     (globalThis as any).setTimeout = realSetTimeout;
+  }
+}
+
+// ── REAL SDK ADAPTER — Lightning receive watcher ────────────────────────
+//
+// The real Fedimint SDK returns an operation_id with every BOLT11 receive.
+// Chama must keep subscribe_ln_receive alive for that operation so the
+// wallet claims the inbound payment after the payer settles the invoice.
+// A QR without this watcher is a footgun: the payer can send, while the
+// Chama wallet never credits.
+console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
+{
+  type TestGatewayInfo = {
+    gateway_id: string;
+    api: string;
+    lightning_alias: string;
+    supports_private_payments: boolean;
+  };
+  type TestGateway = { info: TestGatewayInfo; vetted: boolean; ttl: number };
+
+  function makeRealWallet(
+    overrides: Record<string, unknown> = {},
+    gatewayList?: TestGateway[],
+  ) {
+    let receiveCb: ((state: "claimed" | "funded") => void) | null = null;
+    const calls = {
+      createInvoice: 0,
+      createInvoiceGatewayId: "",
+      payInvoice: 0,
+      payInvoiceGatewayId: "",
+      updateGatewayCache: 0,
+      listGateways: 0,
+      subscribeLnReceive: 0,
+      subscribeLnPay: 0,
+      subscribeInternalPayment: 0,
+      unsubscribeReceive: 0,
+      unsubscribePay: 0,
+      unsubscribeInternalPay: 0,
+      cleanup: 0,
+      subscribedOperationId: "",
+      subscribedPayOperationId: "",
+    };
+    const unvettedGatewayInfo = {
+      gateway_id: "unvetted_gateway_123",
+      api: "https://unvetted-gateway.example.test",
+      lightning_alias: "Unvetted Gateway",
+      supports_private_payments: true,
+    };
+    const vettedGatewayInfo = {
+      gateway_id: "vetted_gateway_456",
+      api: "https://vetted-gateway.example.test",
+      lightning_alias: "Vetted Gateway",
+      supports_private_payments: false,
+    };
+    const gateways = gatewayList ?? [
+      { info: unvettedGatewayInfo, vetted: false, ttl: 60 },
+      { info: vettedGatewayInfo, vetted: true, ttl: 60 },
+    ];
+
+    const real = {
+      async open() { return true; },
+      isOpen() { return true; },
+      async joinFederation() { return true; },
+      recovery: {
+        async hasPendingRecoveries() { return false; },
+        async waitForAllRecoveries() {},
+      },
+      balance: {
+        async getBalance() { return 0; },
+        subscribeBalance() { return () => {}; },
+      },
+      mint: {
+        async spendNotes() { return { notes: "notes", operation_id: "mint_op" }; },
+        async redeemEcash() { return "mint_op"; },
+        async parseNotes() { return 0; },
+      },
+      lightning: {
+        async createInvoice(
+          _amountMsats: number,
+          _description: string,
+          _expiryTime?: number,
+          gatewayInfo?: { gateway_id?: string },
+        ) {
+          calls.createInvoice++;
+          calls.createInvoiceGatewayId = gatewayInfo?.gateway_id ?? "";
+          return { invoice: "lnbc100n1pchama", operation_id: "ln_op_123" };
+        },
+        async payInvoice(_bolt11: string, gatewayInfo?: { gateway_id?: string }) {
+          calls.payInvoice++;
+          calls.payInvoiceGatewayId = gatewayInfo?.gateway_id ?? "";
+          return {
+            contract_id: "contract_123",
+            fee: 0,
+            payment_type: { lightning: "pay_op_123" },
+          };
+        },
+        subscribeLnPay(
+          this: any,
+          operationId: string,
+          onSuccess?: (state: { success: { preimage: string } }) => void,
+        ) {
+          if (!this || typeof this.updateGatewayCache !== "function") {
+            throw new Error("subscribeLnPay lost this binding");
+          }
+          calls.subscribeLnPay++;
+          calls.subscribedPayOperationId = operationId;
+          setTimeout(() => {
+            onSuccess?.({ success: { preimage: "preimage" } });
+          }, 0);
+          return () => { calls.unsubscribePay++; };
+        },
+        subscribeInternalPayment(
+          operationId: string,
+          onSuccess?: (state: { preimage: string }) => void,
+        ) {
+          calls.subscribeInternalPayment++;
+          calls.subscribedPayOperationId = operationId;
+          setTimeout(() => {
+            onSuccess?.({ preimage: "preimage" });
+          }, 0);
+          return () => { calls.unsubscribeInternalPay++; };
+        },
+        subscribeLnReceive(
+          operationId: string,
+          onSuccess?: (state: "claimed" | "funded") => void,
+        ) {
+          calls.subscribeLnReceive++;
+          calls.subscribedOperationId = operationId;
+          receiveCb = onSuccess ?? null;
+          return () => { calls.unsubscribeReceive++; };
+        },
+        async updateGatewayCache() {
+          calls.updateGatewayCache++;
+        },
+        async listGateways() {
+          calls.listGateways++;
+          return gateways;
+        },
+      },
+      federation: {
+        async getConfig() { return {}; },
+        async getFederationId() { return "fed_real"; },
+        async getInviteCode() { return "fed1real"; },
+        async listTransactions() { return []; },
+      },
+      async cleanup() { calls.cleanup++; },
+      ...overrides,
+    };
+
+    return { real, calls, claim: () => receiveCb?.("claimed"), fund: () => receiveCb?.("funded") };
+  }
+
+  // createInvoice must arm subscribe_ln_receive before returning the QR.
+  {
+    const h = makeRealWallet();
+    const wallet = adaptRealWallet(h.real as any);
+    const result = await wallet.lightning.createInvoice(100_000, "fund");
+
+    assert(result.invoice === "lnbc100n1pchama",
+      "Adapter returns the BOLT11 from real.lightning.createInvoice");
+    assert(result.operationId === "ln_op_123",
+      "Adapter preserves the real receive operation ID");
+    assert(h.calls.createInvoice === 1,
+      "real.lightning.createInvoice called once");
+    assert(h.calls.updateGatewayCache === 1,
+      "Adapter refreshes the gateway cache before creating a receive invoice");
+    assert(h.calls.listGateways === 1,
+      "Adapter lists gateways before creating a receive invoice");
+    assert(h.calls.createInvoiceGatewayId === "vetted_gateway_456",
+      "Adapter passes the first vetted gateway into createInvoice");
+    assert(h.calls.subscribeLnReceive === 1,
+      "Adapter subscribes to the LN receive operation");
+    assert(h.calls.subscribedOperationId === "ln_op_123",
+      "subscribeLnReceive receives the invoice operation_id");
+
+    h.claim();
+    assert(h.calls.unsubscribeReceive === 1,
+      "Receive watcher unsubscribes after claimed");
+  }
+
+  // Outbound LN payout must use the same trusted gateway selection; letting
+  // the SDK pick its default can choose an untrusted gateway and fail after
+  // claim/redeem has already moved sats into Chama.
+  {
+    const h = makeRealWallet();
+    const wallet = adaptRealWallet(h.real as any);
+    const result = await wallet.lightning.payInvoice("lnbc100n1payout");
+
+    assert(result.operationId === "pay_op_123",
+      "Adapter returns the real outbound payment operation ID");
+    assert(h.calls.payInvoice === 1,
+      "real.lightning.payInvoice called once");
+    assert(h.calls.updateGatewayCache === 1,
+      "Adapter refreshes the gateway cache before outbound LN pay");
+    assert(h.calls.listGateways === 1,
+      "Adapter lists gateways before outbound LN pay");
+    assert(h.calls.payInvoiceGatewayId === "vetted_gateway_456",
+      "Adapter passes the first vetted gateway into payInvoice");
+    assert(h.calls.subscribeLnPay === 1,
+      "Adapter subscribes to the LN pay operation");
+    assert(h.calls.subscribedPayOperationId === "pay_op_123",
+      "subscribeLnPay receives payment_type.lightning, not contract_id");
+    assert(h.calls.unsubscribePay === 1,
+      "Pay watcher unsubscribes after success");
+  }
+
+  // The SDK returns two identifiers for external LN sends: contract_id and
+  // payment_type.lightning. The latter is the operation ID expected by
+  // subscribe_ln_pay; using contract_id causes "Operation not found" even
+  // after the invoice actually paid.
+  {
+    const h = makeRealWallet();
+    (h.real.lightning as any).payInvoice = async (_bolt11: string, gatewayInfo?: { gateway_id?: string }) => {
+      h.calls.payInvoice++;
+      h.calls.payInvoiceGatewayId = gatewayInfo?.gateway_id ?? "";
+      return {
+        contract_id: "contract_not_watchable",
+        fee: 123,
+        payment_type: { lightning: "watchable_pay_operation" },
+      };
+    };
+    const wallet = adaptRealWallet(h.real as any);
+    const result = await wallet.lightning.payInvoice("lnbc100n1payout");
+
+    assert(result.operationId === "watchable_pay_operation",
+      "Adapter returns the watchable payment_type.lightning operation ID");
+    assert(h.calls.subscribedPayOperationId === "watchable_pay_operation",
+      "Adapter does not subscribe with the outbound contract_id");
+  }
+
+  // Internal federation LN payments use a different watcher.
+  {
+    const h = makeRealWallet();
+    (h.real.lightning as any).payInvoice = async (_bolt11: string, gatewayInfo?: { gateway_id?: string }) => {
+      h.calls.payInvoice++;
+      h.calls.payInvoiceGatewayId = gatewayInfo?.gateway_id ?? "";
+      return {
+        contract_id: "internal_contract",
+        fee: 0,
+        payment_type: { internal: "internal_pay_operation" },
+      };
+    };
+    const wallet = adaptRealWallet(h.real as any);
+    const result = await wallet.lightning.payInvoice("lnbc100n1payout");
+
+    assert(result.operationId === "internal_pay_operation",
+      "Adapter returns the internal payment operation ID");
+    assert(h.calls.subscribeInternalPayment === 1,
+      "Adapter uses subscribeInternalPayment for payment_type.internal");
+    assert(h.calls.subscribedPayOperationId === "internal_pay_operation",
+      "Internal watcher receives payment_type.internal");
+  }
+
+  // A submitted Lightning payment is only useful to Chama if the SDK hands
+  // back the operation ID needed to watch it. Treat malformed SDK responses as
+  // payout failures instead of silently closing the modal as "done".
+  {
+    const h = makeRealWallet();
+    (h.real.lightning as any).payInvoice = async (_bolt11: string, gatewayInfo?: { gateway_id?: string }) => {
+      h.calls.payInvoice++;
+      h.calls.payInvoiceGatewayId = gatewayInfo?.gateway_id ?? "";
+      return {};
+    };
+    const wallet = adaptRealWallet(h.real as any);
+    let threw = false;
+    try {
+      await wallet.lightning.payInvoice("lnbc100n1payout");
+    } catch (e) {
+      threw = /did not return a payment operation id/.test((e as Error).message);
+    }
+    assert(threw,
+      "Adapter refuses outbound LN pay when SDK omits the payment operation ID");
+    assert(h.calls.subscribeLnPay === 0,
+      "Adapter does not subscribe without a payment operation ID");
+  }
+
+  // The browser SDK should always expose subscribeLnPay, but if that contract
+  // changes we must fail visibly; otherwise claim flow could publish DONE while
+  // the outbound payment is still unobserved.
+  {
+    const h = makeRealWallet();
+    delete (h.real.lightning as any).subscribeLnPay;
+    const wallet = adaptRealWallet(h.real as any);
+    let threw = false;
+    try {
+      await wallet.lightning.payInvoice("lnbc100n1payout");
+    } catch (e) {
+      threw = /cannot watch pay status/.test((e as Error).message);
+    }
+    assert(threw,
+      "Adapter refuses outbound LN pay when pay-status watcher is unavailable");
+  }
+
+  // If no trusted gateways are advertised, refuse to show a lossy invoice.
+  {
+    const h = makeRealWallet({}, [
+      {
+        info: {
+          gateway_id: "dev_gateway_789",
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+      {
+        info: {
+          gateway_id: "henwen_gateway_999",
+          api: "https://gateway.henwen.net/v1",
+          lightning_alias: "Henwen",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    let threw = false;
+    try {
+      await wallet.lightning.createInvoice(100_000, "fund");
+    } catch (e) {
+      threw = /No trusted Lightning receive gateway/.test((e as Error).message);
+    }
+
+    assert(threw,
+      "Adapter refuses receive invoices when all gateways are untrusted");
+    assert(h.calls.createInvoice === 0,
+      "Adapter does not create a QR invoice without a trusted gateway");
+  }
+
+  // The same trust gate applies to outbound payout; the claim can be retried
+  // safely later because redeemed sats stay in the Chama wallet.
+  {
+    const h = makeRealWallet({}, [
+      {
+        info: {
+          gateway_id: "dev_gateway_789",
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    let threw = false;
+    try {
+      await wallet.lightning.payInvoice("lnbc100n1payout");
+    } catch (e) {
+      threw = /No trusted Lightning pay gateway/.test((e as Error).message);
+    }
+
+    assert(threw,
+      "Adapter refuses outbound LN pay when all gateways are untrusted");
+    assert(h.calls.payInvoice === 0,
+      "Adapter does not start payout without a trusted gateway");
+  }
+
+  // Some Fedi-style federations publish gateway trust in meta.vetted_gateways
+  // while list_gateways still reports vetted=false. Treat the meta field as
+  // an additive federation trust signal, matching the Fedi app behavior.
+  {
+    const metaTrustedGatewayId =
+      "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    const h = makeRealWallet({
+      federation: {
+        async getConfig() {
+          return {
+            meta: {
+              vetted_gateways: JSON.stringify([
+                metaTrustedGatewayId,
+              ]),
+            },
+          };
+        },
+        async getFederationId() { return "fed_real"; },
+        async getInviteCode() { return "fed1real"; },
+        async listTransactions() { return []; },
+      },
+    }, [
+      {
+        info: {
+          gateway_id: metaTrustedGatewayId,
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.lightning.createInvoice(100_000, "fund");
+
+    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts a gateway trusted by meta.vetted_gateways even when SDK vetted=false");
+    await wallet.cleanup();
+  }
+
+  // Guardian admin UIs can expose meta fields as key/value records in the
+  // static global config, without installing the fedimint meta module.
+  {
+    const metaTrustedGatewayId =
+      "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    const h = makeRealWallet({
+      federation: {
+        async getConfig() {
+          return {
+            global: {
+              meta: [
+                {
+                  key: "vetted_gateways",
+                  value: JSON.stringify([metaTrustedGatewayId]),
+                },
+              ],
+            },
+            modules: {
+              0: { kind: "ln" },
+              1: { kind: "mint" },
+            },
+          };
+        },
+        async getFederationId() { return "fed_real"; },
+        async getInviteCode() { return "fed1real"; },
+        async listTransactions() { return []; },
+      },
+    }, [
+      {
+        info: {
+          gateway_id: metaTrustedGatewayId,
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.lightning.createInvoice(100_000, "fund");
+
+    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts gateway trust from config meta key/value records without a meta module");
+    await wallet.cleanup();
+  }
+
+  // Newer guardian UIs can store Manage Meta in the meta module consensus,
+  // not in the static federation config returned by get_config.
+  {
+    const metaTrustedGatewayId =
+      "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    const rpcCalls: Array<{
+      module: string;
+      method: string;
+      body: unknown;
+      clientName: string;
+    }> = [];
+    const h = makeRealWallet({
+      federation: {
+        clientName: "test-client",
+        client: {
+          async rpcSingle(
+            module: string,
+            method: string,
+            body: unknown,
+            clientName: string,
+          ) {
+            rpcCalls.push({ module, method, body, clientName });
+            return {
+              revision: 1,
+              value: JSON.stringify({
+                vetted_gateways: [metaTrustedGatewayId],
+              }),
+            };
+          },
+        },
+        async getConfig() {
+          return {
+            modules: {
+              0: { kind: "ln" },
+              2: { kind: "meta" },
+            },
+          };
+        },
+        async getFederationId() { return "fed_real"; },
+        async getInviteCode() { return "fed1real"; },
+        async listTransactions() { return []; },
+      },
+    }, [
+      {
+        info: {
+          gateway_id: metaTrustedGatewayId,
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.lightning.createInvoice(100_000, "fund");
+
+    assert(rpcCalls.some((call) =>
+      call.module === "2" &&
+      call.method === "get_consensus" &&
+      call.body === "default" &&
+      call.clientName === "test-client"
+    ), "Adapter probes the meta module consensus by module instance id for vetted gateways");
+    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts a gateway trusted by meta.get_consensus even when SDK vetted=false");
+    await wallet.cleanup();
+  }
+
+  // BLF exposes vetted_gateways in guardian admin meta, but older browser SDK
+  // get_config/meta RPC paths may not surface that value to wallet clients.
+  // Keep the fallback scoped to the curated federation ID and exact gateway ID.
+  {
+    const blfFederationId =
+      "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
+    const blfTrustedGatewayId =
+      "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    const h = makeRealWallet({
+      federation: {
+        async getConfig() {
+          return {
+            modules: {
+              0: { kind: "ln" },
+              1: { kind: "mint" },
+            },
+          };
+        },
+        async getFederationId() { return blfFederationId; },
+        async getInviteCode() { return "fed1blf"; },
+        async listTransactions() { return []; },
+      },
+    }, [
+      {
+        info: {
+          gateway_id: blfTrustedGatewayId,
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+      {
+        info: {
+          gateway_id: "039d1e06e6b10f3d18bbb76bb67f38a7088679c9a5e5914f4efe839298cb17e5e1",
+          api: "https://gateway.henwen.net/v1",
+          lightning_alias: "Henwen",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.lightning.createInvoice(100_000, "fund");
+
+    assert(h.calls.createInvoiceGatewayId === blfTrustedGatewayId,
+      "Adapter uses BLF's curated guardian-vetted gateway instead of untrusted Henwen");
+    await wallet.cleanup();
+  }
+
+  // The BLF curated trust fallback must also cover the claim payout leg.
+  {
+    const blfFederationId =
+      "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
+    const blfTrustedGatewayId =
+      "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    const h = makeRealWallet({
+      federation: {
+        async getConfig() {
+          return {
+            modules: {
+              0: { kind: "ln" },
+              1: { kind: "mint" },
+            },
+          };
+        },
+        async getFederationId() { return blfFederationId; },
+        async getInviteCode() { return "fed1blf"; },
+        async listTransactions() { return []; },
+      },
+    }, [
+      {
+        info: {
+          gateway_id: blfTrustedGatewayId,
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+      {
+        info: {
+          gateway_id: "039d1e06e6b10f3d18bbb76bb67f38a7088679c9a5e5914f4efe839298cb17e5e1",
+          api: "https://gateway.henwen.net/v1",
+          lightning_alias: "Henwen",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.lightning.payInvoice("lnbc100n1payout");
+
+    assert(h.calls.payInvoiceGatewayId === blfTrustedGatewayId,
+      "Adapter uses BLF's curated gateway for outbound payout instead of untrusted Henwen");
+    await wallet.cleanup();
+  }
+
+  // Non-terminal receive states stay watched; cleanup cancels the watcher.
+  {
+    const h = makeRealWallet();
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.lightning.createInvoice(100_000, "fund");
+    h.fund();
+    assert(h.calls.unsubscribeReceive === 0,
+      "Receive watcher remains active after funded");
+
+    await wallet.cleanup();
+    assert(h.calls.unsubscribeReceive === 1,
+      "cleanup cancels an active receive watcher");
+    assert(h.calls.cleanup === 1,
+      "real wallet cleanup still runs");
+  }
+
+  // If the SDK refuses the receive subscription, do not show an invoice.
+  {
+    const h = makeRealWallet({
+      lightning: {
+        async createInvoice() {
+          return { invoice: "lnbc100n1punwatched", operation_id: "ln_op_bad" };
+        },
+        async payInvoice() { return {}; },
+        subscribeLnReceive() {
+          throw new Error("stream unavailable");
+        },
+      },
+    });
+    const wallet = adaptRealWallet(h.real as any);
+    let threw = false;
+    try {
+      await wallet.lightning.createInvoice(100_000, "fund");
+    } catch (e) {
+      threw = /Couldn't watch Lightning receive operation/.test((e as Error).message);
+    }
+    assert(threw,
+      "Adapter refuses to return an invoice when the receive watcher cannot start");
+  }
+
+  // Existing pending receive operations are re-armed when an OPFS wallet opens.
+  {
+    const h = makeRealWallet({
+      federation: {
+        async getFederationId() { return "fed_real"; },
+        async getInviteCode() { return "fed1real"; },
+        async listTransactions() {
+          return [
+            { kind: "ln", type: "receive", operationId: "old_receive", outcome: "funded" },
+            { kind: "ln", type: "receive", operationId: "done_receive", outcome: "claimed" },
+            { kind: "ln", type: "send", operationId: "send_op", outcome: "success" },
+          ];
+        },
+      },
+    });
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.open();
+
+    assert(h.calls.subscribeLnReceive === 1,
+      "open() resumes exactly one pending LN receive");
+    assert(h.calls.subscribedOperationId === "old_receive",
+      "open() resumes the pending receive operation_id from the transaction log");
+    await wallet.cleanup();
   }
 }
 

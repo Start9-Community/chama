@@ -17,6 +17,10 @@ import { useState } from "react";
 import { T } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
 import type { SavedHandle } from "../../payments/saved-handles.js";
+import {
+  lightningPayoutReserveSats,
+  maxLightningPayoutSats,
+} from "../../payments/lightning-fees.js";
 import type {
   RecoveryPayoutPhase,
   RecoveryPayoutTerminal,
@@ -56,16 +60,28 @@ export function RecoveryPayoutModal({
   addOrTouchLightningHandle,
   onClose,
 }: RecoveryPayoutModalProps) {
-  const sats = Math.floor(balanceMsats / 1000);
+  const payoutSats = maxLightningPayoutSats(balanceMsats);
+  const reserveSats = lightningPayoutReserveSats(balanceMsats);
+  const feeReserveNote = reserveSats > 0
+    ? `About ${reserveSats.toLocaleString()} sats stays available for Lightning fees.`
+    : "";
+  const pickerSubtitle =
+    subtitle
+      ? [subtitle, feeReserveNote].filter(Boolean).join(" ")
+      : (
+          reserveSats > 0
+            ? `Send ${payoutSats.toLocaleString()} sats to your Lightning address. ${feeReserveNote}`
+            : `Send ${payoutSats.toLocaleString()} sats to your Lightning address`
+        );
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
 
   if (stage.kind === "picking") {
     return (
       <DestinationPicker
-        amountSats={sats}
+        amountSats={payoutSats}
         savedHandles={savedHandles}
         title={title}
-        subtitle={subtitle ?? `Send ${sats.toLocaleString()} sats to your Lightning wallet`}
+        subtitle={pickerSubtitle}
         onResolve={async (bolt11, opts) => {
           setStage({ kind: "running", phase: { kind: "paying-invoice" } });
           // Lazy-import the orchestrator so the modal stays light
@@ -114,7 +130,7 @@ export function RecoveryPayoutModal({
               {title.toUpperCase()}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
-              {sats.toLocaleString()} <span style={{ color: T.muted, fontWeight: 600, fontSize: 14 }}>sats</span>
+              {payoutSats.toLocaleString()} <span style={{ color: T.muted, fontWeight: 600, fontSize: 14 }}>sats</span>
             </div>
           </div>
           {stage.kind === "terminal" && (

@@ -203,8 +203,8 @@ export default function App() {
   // switch (explicit abandonment).
   useEffect(() => {
     if (!pendingSwitchAfterWithdraw) return;
-    if ((fedimint.balanceMsats ?? 0) > 0) return;
-    // Balance reached zero — dispatch the switch.
+    if ((fedimint.balanceMsats ?? 0) >= 1000) return;
+    // Balance reached zero or only sub-sat dust remains — dispatch the switch.
     const target = pendingSwitchAfterWithdraw;
     setPendingSwitchAfterWithdraw(null);
     (async () => {
@@ -342,17 +342,17 @@ export default function App() {
   // seller commitments; arbiter status triggers warnings (item 10),
   // not blocks. activeTrade drives the pill's tap target.
   const activeTrade = pubkey
-    ? findActiveTrade({ escrows: escrows.values(), userPubkey: pubkey })
+    ? findActiveTrade({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : null;
   const hasActiveCommitment = pubkey
-    ? hasActiveBuyerSellerCommitment({ escrows: escrows.values(), userPubkey: pubkey })
+    ? hasActiveBuyerSellerCommitment({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : false;
   // v0.4.2 hotfix round 3: msats locked in active escrows where the
   // user is buyer/seller. Drives the ChamaBar "X sats in escrow" pill
   // during LOCKED state, when balance is correctly 0 (ecash spent
   // into SSS shares) but the commitment is still live.
   const committedMsats = pubkey
-    ? activeCommittedMsats({ escrows: escrows.values(), userPubkey: pubkey })
+    ? activeCommittedMsats({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : 0;
 
   // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND no
@@ -782,7 +782,7 @@ export default function App() {
               setToast({ message: "Invoice expired — no payment received.", type: "info" });
             } else if (terminal.kind === "mint-timeout") {
               setToast({
-                message: "Mint stalled. If sats are stranded, recover via the banner on Browse.",
+                message: "Mint stalled. If sats need recovery, use Me or the Browse recovery prompt.",
                 type: "info",
               });
             }
@@ -862,10 +862,9 @@ export default function App() {
               navigateToEscrowAfter: pendingDestroyConfirm.navigateToEscrowAfter,
             });
             setPendingDestroyConfirm(null);
-            const sats = Math.floor(pendingDestroyConfirm.balanceMsats / 1000);
             setPendingRecovery({
               title: "Recover & switch Chama",
-              subtitle: `Send ${sats.toLocaleString()} sats to your Lightning wallet, then switch to ${pendingDestroyConfirm.label}.`,
+              subtitle: `Send to your Lightning wallet, then switch to ${pendingDestroyConfirm.label}.`,
             });
           }}
           onCancel={() => {
@@ -1095,6 +1094,9 @@ export default function App() {
             pubkey={pubkey!}
             myTrades={myTrades}
             ratings={null /* v0.2.0: no rating events yet; v0.2.1 wires the aggregator */}
+            balanceMsats={fedimint.balanceMsats ?? 0}
+            hasActiveCommitment={hasActiveCommitment}
+            onRecoverSats={() => setPendingRecovery({ title: "Recover sats" })}
             onOpenTrade={openEscrow}
             onOpenSavedHandles={() => setView("saved-handles")}
             onOpenAdvanced={() => setView("advanced")}
@@ -1314,4 +1316,3 @@ function LoginSuccessSplash() {
     </div>
   );
 }
-

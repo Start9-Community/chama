@@ -43,6 +43,7 @@ import {
   type EscrowState,
   type ParsedEscrowEvent,
   type ChatPayload,
+  EscrowStatus,
   Role,
   Outcome,
 } from "../escrow-engine/types.js";
@@ -67,6 +68,15 @@ import {
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
 import { isSimModeOn } from "../sim/simMode.js";
+
+function isExpiredUnfundedEscrow(escrowState: EscrowState, nowSec = Math.floor(Date.now() / 1000)): boolean {
+  return (
+    escrowState.status === EscrowStatus.CREATED
+    && typeof escrowState.expiresAt === "number"
+    && escrowState.expiresAt > 0
+    && nowSec > escrowState.expiresAt
+  );
+}
 
 // ── Hook state ────────────────────────────────────────────────────────────
 
@@ -431,6 +441,18 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // ── State updater helpers ───────────────────────────────────────────────
 
   const updateEscrow = useCallback((escrowId: string, escrowState: EscrowState) => {
+    if (isExpiredUnfundedEscrow(escrowState)) {
+      removeEscrowId(escrowId);
+      setState(prev => {
+        if (!prev.escrows.has(escrowId)) return prev;
+        const next = new Map(prev.escrows);
+        next.delete(escrowId);
+        return { ...prev, escrows: next };
+      });
+      console.info(`[chama] Pruned expired unfunded escrow ${escrowId} from local state`);
+      return;
+    }
+
     setState(prev => {
       const next = new Map(prev.escrows);
       next.set(escrowId, escrowState);
@@ -560,9 +582,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // ── v0.1.67: Mechanism B sentinel ─────────────────────────────
       //
       // Background heal for stuck trades the user is a participant in.
-      // Three heals: stuck-LOCKED-past-expiry (publish my REFUND vote),
-      // CLAIMED-without-COMPLETE (publish COMPLETE), stuck-FUNDED-past-
-      // expiry as initiator (publish CANCEL).
+      // Two heals: stuck-LOCKED-past-expiry (publish my REFUND vote)
+      // and stuck-FUNDED-past-expiry as initiator (publish CANCEL).
+      // COMPLETE is deliberately not auto-healed here: it is a money
+      // statement and must wait for the claim balance to actually land.
       //
       // In-memory dedup prevents retrying the same heal every tick.
       // Accepts duplicates across clients (state machine dedupes at
@@ -626,25 +649,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
             continue;
           }
 
-          // ── Heal #2: CLAIMED without COMPLETE on chain ──
-          const hasCompleteEvent = escrowState.eventChain?.some?.((e: any) => e.kind === 38106);
-          if (
-            escrowState.status === "CLAIMED" &&
-            !hasCompleteEvent &&
-            !alreadyAttempted(escrowId, "complete")
-          ) {
-            markAttempted(escrowId, "complete");
-            try {
-              await escrowClient.complete(escrowId);
-              heals++;
-              console.log(`[chama] sentinel: published COMPLETE on ${escrowId}`);
-            } catch (e) {
-              console.debug(`[chama] sentinel: COMPLETE on ${escrowId} suppressed:`, (e as Error)?.message);
-            }
-            continue;
-          }
-
-          // ── Heal #3: CREATED past expiry, no LOCK, I'm the initiator ──
+          // ── Heal #2: CREATED past expiry, no LOCK, I'm the initiator ──
           // Atomic-funding model: trades sit in CREATED until LOCK fires.
           // If a buyer never paid by the deadline, the initiator cancels.
           const isInitiator = escrowState.initiator?.pubkey === myPubkey;
@@ -689,7 +694,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         // escrows skipped on cold start, causing stale-forever state.
         for (const id of savedIds.slice(0, 50)) {
           try {
-            await client.loadEscrow(id);
+            const loaded = await client.loadEscrow(id);
+            if (loaded && isExpiredUnfundedEscrow(loaded)) {
+              removeEscrowId(id);
+              (client as any).states?.delete?.(id);
+              (client as any).rawEvents?.delete?.(id);
+            }
           } catch (e) {
             console.debug(`[chama] Could not reload ${id}:`, e);
           }
@@ -1004,20 +1014,43 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         )
       : 0;
 
+    const finishWhenBalanceConfirms = (viaWatchdog: boolean) => {
+      startClaimWatchdog(escrowId, balanceBefore, expectedDeltaMsats).then(
+        (outcome) => {
+          if (outcome === "success") {
+            vibrate([100, 50, 100, 50, 200]);
+            refreshBalanceRef.current?.().catch(() => {});
+            notify?.({
+              phase: "success",
+              escrowId,
+              deltaMsats: expectedDeltaMsats,
+              viaWatchdog,
+            });
+          } else {
+            notify?.({ phase: "timeout", escrowId });
+          }
+        },
+        (err) => {
+          console.warn("[chama] watchdog rejected unexpectedly:", err);
+          notify?.({ phase: "timeout", escrowId });
+        },
+      );
+    };
+
     notify?.({ phase: "submitted", escrowId });
 
     try {
       const result = await bridge.claimAndRedeem(escrowId);
-      // Happy path: federation responded before any timeout. Victory haptic.
-      vibrate([100, 50, 100, 50, 200]);
-      // Refresh balance immediately; subscription callback will also fire.
+      // The bridge can resolve as soon as redeemEcash is accepted, before
+      // the wallet balance stream has fully caught up. Keep legacy callers
+      // from auto-publishing COMPLETE until the same watchdog sees money.
       refreshBalanceRef.current?.().catch(() => {});
       notify?.({
-        phase: "success",
+        phase: "watching",
         escrowId,
-        deltaMsats: expectedDeltaMsats,
-        viaWatchdog: false,
+        reason: "Waiting for federation balance confirmation",
       });
+      finishWhenBalanceConfirms(false);
       return result;
     } catch (e: any) {
       const msg = e?.message || String(e);
@@ -1035,25 +1068,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           msg,
         );
         notify?.({ phase: "watching", escrowId, reason: msg });
-        startClaimWatchdog(escrowId, balanceBefore, expectedDeltaMsats).then(
-          (outcome) => {
-            if (outcome === "success") {
-              vibrate([100, 50, 100, 50, 200]);
-              notify?.({
-                phase: "success",
-                escrowId,
-                deltaMsats: expectedDeltaMsats,
-                viaWatchdog: true,
-              });
-            } else {
-              notify?.({ phase: "timeout", escrowId });
-            }
-          },
-          (err) => {
-            console.warn("[chama] watchdog rejected unexpectedly:", err);
-            notify?.({ phase: "timeout", escrowId });
-          },
-        );
+        finishWhenBalanceConfirms(true);
         return client.getState(escrowId)!;
       }
 
@@ -1096,25 +1111,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
       // Kick the watchdog off, but return immediately so the UI doesn't hang.
       // When watchdog resolves, we notify success/timeout.
-      startClaimWatchdog(escrowId, balanceBefore, expectedDeltaMsats).then(
-        (outcome) => {
-          if (outcome === "success") {
-            vibrate([100, 50, 100, 50, 200]);
-            notify?.({
-              phase: "success",
-              escrowId,
-              deltaMsats: expectedDeltaMsats,
-              viaWatchdog: true,
-            });
-          } else {
-            notify?.({ phase: "timeout", escrowId });
-          }
-        },
-        (err) => {
-          console.warn("[chama] watchdog rejected unexpectedly:", err);
-          notify?.({ phase: "timeout", escrowId });
-        },
-      );
+      finishWhenBalanceConfirms(true);
 
       // Return the local state so the UI doesn't show an error state.
       // The state will update naturally as the CLAIM event echoes back
@@ -1803,6 +1800,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   ): Promise<import("../payments/claim-and-payout.js").ClaimAndPayoutTerminal> => {
     const fedimint = fedimintRef.current;
     const bridge = requireBridge();
+    const client = requireClient();
     if (!fedimint) {
       const err = "Wallet not initialized";
       args.onPhase({ kind: "claim-failed", error: err });
@@ -1817,7 +1815,26 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       saveAfter: args.saveAfter,
       addressUsed: args.addressUsed,
       getBalance: () => fedimint.getBalance(),
-      claimAndRedeem: claimAndRedeemAction,
+      // Production claim+payout uses the raw bridge claim, not
+      // claimAndRedeemAction, because claimAndRedeemAction emits the
+      // legacy success progress that auto-publishes COMPLETE. COMPLETE
+      // belongs after the balance-confirming watchdog below, not merely
+      // after redeemEcash returns.
+      claimAndRedeem: async (id: string) => {
+        try {
+          return await bridge.claimAndRedeem(id);
+        } catch (e: any) {
+          const msg = e?.message || String(e);
+          if (isStaleClaim(msg)) {
+            console.debug("[chama] Claim suppressed (stale):", msg);
+            return client.getState(id)!;
+          }
+          throw e;
+        }
+      },
+      completeClaim: async (id: string) => {
+        await client.complete(id);
+      },
       payInvoice: async (bolt11: string) => {
         await bridge.payInvoice(bolt11);
         refreshBalanceRef.current?.().catch(() => {});
@@ -1825,7 +1842,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       addOrTouchLightningHandle,
       onPhase: args.onPhase,
     });
-  }, [claimAndRedeemAction]);
+  }, []);
 
   // ── Return ──────────────────────────────────────────────────────────────
 

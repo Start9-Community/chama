@@ -13,6 +13,18 @@
 // Notable API deltas handled here:
 //   - mint.spendNotes returns { notes, operation_id }  → unwrap .notes
 //   - mint.parseNotes returns number (msats)           → wrap as { total_amount }
+//   - ln.createInvoice returns { invoice, operation_id } and must keep
+//     subscribe_ln_receive alive until the receive is claimed
+//   - ln.createInvoice receives an explicit federation-vetted gateway.
+//     Unvetted receive gateways can fund the HTLC and still have the claim
+//     transaction rejected before ecash is minted, so we refuse to show an
+//     invoice when no federation-trusted receive gateway is available.
+//   - ln.payInvoice also receives an explicit federation-trusted gateway.
+//     Leaving outbound payment to the SDK default can pick an untrusted gateway
+//     and fail after claim/redeem succeeds.
+//     Some Fedi-era federations publish gateway trust in config meta
+//     (`vetted_gateways`) while the SDK still reports gateway.vetted=false,
+//     so we accept either signal.
 //   - federation.getInviteCode returns string | null   → throw if null
 //   - joinFederation returns boolean                   → unwrap
 //   - subscribeBalance(onSuccess, onError) => CancelFn → one-arg wrapper
@@ -41,18 +53,106 @@ interface RealMintService {
   parseNotes(oobNotes: string): Promise<number>;
 }
 
+type RealLnReceiveState =
+  | "created"
+  | { waiting_for_payment: { invoice: string; timeout: number } }
+  | { canceled: { reason: string } }
+  | "funded"
+  | "awaiting_funds"
+  | "claimed";
+
+type RealLnPayState =
+  | "created"
+  | "canceled"
+  | "awaiting_change"
+  | { funded: { block_height: number } }
+  | { waiting_for_refund: { error_reason: string } }
+  | { success: { preimage: string } }
+  | { refunded: { gateway_error: string } }
+  | { unexpected_error: { error_message: string } };
+
+type RealLnInternalPayState =
+  | "funding"
+  | { preimage: string }
+  | { refund_success: { out_points?: unknown[]; error?: string } }
+  | { refund_error: { error_message?: string; error?: string } }
+  | { funding_failed: { error?: string } }
+  | { unexpected_error: string };
+
+type RealGatewayInfo = {
+  gateway_id?: string;
+  api?: string;
+  lightning_alias?: string;
+  supports_private_payments?: boolean;
+  [key: string]: unknown;
+};
+
+type RealLightningGateway = {
+  info?: RealGatewayInfo;
+  vetted?: boolean;
+  ttl?: unknown;
+};
+
+type RealOutgoingLightningPayment = {
+  contract_id?: string;
+  operation_id?: string;
+  operationId?: string;
+  payment_type?: { lightning?: unknown; internal?: unknown };
+  [key: string]: unknown;
+};
+
+type RealPayOperation =
+  | { kind: "lightning"; operationId: string; source: string; contractId?: string }
+  | { kind: "internal"; operationId: string; source: string; contractId?: string };
+
+type RealLightningTransaction = {
+  kind: "ln";
+  type: "send" | "receive";
+  operationId: string;
+  outcome?: string;
+};
+
 interface RealLightningService {
   createInvoice(
     amountMsats: number,
     description: string,
-    expiryTime?: number
+    expiryTime?: number,
+    gatewayInfo?: RealGatewayInfo
   ): Promise<{ invoice: string; operation_id: string }>;
-  payInvoice(invoice: string): Promise<unknown>;
+  payInvoice(
+    invoice: string,
+    gatewayInfo?: RealGatewayInfo
+  ): Promise<RealOutgoingLightningPayment | unknown>;
+  payInvoiceSync?(
+    invoice: string,
+    timeoutMs?: number,
+    gatewayInfo?: RealGatewayInfo
+  ): Promise<unknown>;
+  subscribeLnPay?(
+    operationId: string,
+    onSuccess?: (state: RealLnPayState) => void,
+    onError?: (error: string) => void
+  ): () => void;
+  subscribeInternalPayment?(
+    operationId: string,
+    onSuccess?: (state: RealLnInternalPayState) => void,
+    onError?: (error: string) => void
+  ): () => void;
+  subscribeLnReceive(
+    operationId: string,
+    onSuccess?: (state: RealLnReceiveState) => void,
+    onError?: (error: string) => void
+  ): () => void;
+  updateGatewayCache?(): Promise<unknown>;
+  listGateways?(): Promise<RealLightningGateway[]>;
 }
 
 interface RealFederationService {
+  getConfig?(): Promise<unknown>;
   getFederationId(): Promise<string>;
   getInviteCode(peer?: number): Promise<string | null>;
+  listTransactions?(limit?: number): Promise<RealLightningTransaction[]>;
+  [key: string]: unknown;
 }
 
 interface RealRecoveryService {
@@ -76,13 +176,689 @@ export interface RealFedimintWallet {
 // ADAPTER
 // ══════════════════════════════════════════════════════════════════════════
 
+const RECEIVE_WATCH_TIMEOUT_MS = 16 * 60 * 1000;
+const PAY_WATCH_TIMEOUT_MS = 60 * 1000;
+
+const CURATED_LIGHTNING_GATEWAY_TRUST: Record<string, string[]> = {
+  // Bitcoin Life Federation. The guardian admin UI exposes this gateway in
+  // Manage Meta as `vetted_gateways`, but older browser SDK paths do not expose
+  // that admin metadata to wallet clients. Keep this list tiny and
+  // federation-scoped: it mirrors the guardian-published trust signal, it does
+  // not make Chama trust every public gateway.
+  "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e": [
+    "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4",
+  ],
+};
+
+function isReceiveTerminal(state: RealLnReceiveState): boolean {
+  return state === "claimed" ||
+    (typeof state === "object" && state !== null && "canceled" in state);
+}
+
+function formatReceiveState(state: RealLnReceiveState): string {
+  if (typeof state === "string") return state;
+  if ("canceled" in state) return `canceled:${state.canceled.reason}`;
+  return Object.keys(state)[0] ?? "unknown";
+}
+
+function formatPayState(state: RealLnPayState): string {
+  if (typeof state === "string") return state;
+  if ("waiting_for_refund" in state) {
+    return `waiting_for_refund:${state.waiting_for_refund.error_reason}`;
+  }
+  if ("refunded" in state) return `refunded:${state.refunded.gateway_error}`;
+  if ("unexpected_error" in state) {
+    return `unexpected_error:${state.unexpected_error.error_message}`;
+  }
+  return Object.keys(state)[0] ?? "unknown";
+}
+
+function payStateError(state: RealLnPayState): Error | null {
+  if (state === "canceled") return new Error("Lightning payment canceled");
+  if (typeof state !== "object" || state === null) return null;
+  if ("refunded" in state) {
+    return new Error(state.refunded.gateway_error || "Lightning payment refunded");
+  }
+  if ("unexpected_error" in state) {
+    return new Error(
+      state.unexpected_error.error_message || "Lightning payment failed",
+    );
+  }
+  return null;
+}
+
+function formatInternalPayState(state: RealLnInternalPayState): string {
+  if (typeof state === "string") return state;
+  if ("preimage" in state) return "preimage";
+  if ("refund_success" in state) {
+    return `refund_success:${state.refund_success.error ?? ""}`;
+  }
+  if ("refund_error" in state) {
+    return `refund_error:${state.refund_error.error_message ?? state.refund_error.error ?? ""}`;
+  }
+  if ("funding_failed" in state) {
+    return `funding_failed:${state.funding_failed.error ?? ""}`;
+  }
+  if ("unexpected_error" in state) return `unexpected_error:${state.unexpected_error}`;
+  return Object.keys(state)[0] ?? "unknown";
+}
+
+function internalPayStateError(state: RealLnInternalPayState): Error | null {
+  if (typeof state !== "object" || state === null) return null;
+  if ("refund_error" in state) {
+    return new Error(
+      state.refund_error.error_message ||
+        state.refund_error.error ||
+        "Internal Lightning payment refund failed",
+    );
+  }
+  if ("funding_failed" in state) {
+    return new Error(state.funding_failed.error || "Internal Lightning payment funding failed");
+  }
+  if ("unexpected_error" in state) {
+    return new Error(state.unexpected_error || "Internal Lightning payment failed");
+  }
+  return null;
+}
+
+function isInternalPaySuccess(state: RealLnInternalPayState): boolean {
+  return typeof state === "object" && state !== null && "preimage" in state;
+}
+
+function extractPaymentTypeOperation(
+  paymentType: unknown,
+): Pick<RealPayOperation, "kind" | "operationId" | "source"> | null {
+  if (!paymentType || typeof paymentType !== "object") return null;
+  const record = paymentType as Record<string, unknown>;
+  if (typeof record.lightning === "string") {
+    return {
+      kind: "lightning",
+      operationId: record.lightning,
+      source: "payment_type.lightning",
+    };
+  }
+  if (typeof record.internal === "string") {
+    return {
+      kind: "internal",
+      operationId: record.internal,
+      source: "payment_type.internal",
+    };
+  }
+  return null;
+}
+
+function extractPayOperation(result: unknown): RealPayOperation | null {
+  if (!result || typeof result !== "object") return null;
+  const record = result as Record<string, unknown>;
+  const contractId = typeof record.contract_id === "string"
+    ? record.contract_id
+    : undefined;
+  const paymentTypeOperation = extractPaymentTypeOperation(record.payment_type);
+  if (paymentTypeOperation) return { ...paymentTypeOperation, contractId };
+
+  const explicitOperationId = record.operation_id ?? record.operationId;
+  if (typeof explicitOperationId === "string") {
+    return {
+      kind: "lightning",
+      operationId: explicitOperationId,
+      source: "operation_id",
+      contractId,
+    };
+  }
+
+  if (contractId) {
+    return {
+      kind: "lightning",
+      operationId: contractId,
+      source: "contract_id",
+      contractId,
+    };
+  }
+  return null;
+}
+
+function summarizePaySubmitResult(result: unknown): string {
+  if (result === null) return "null";
+  if (result === undefined) return "undefined";
+  if (typeof result !== "object") return `${typeof result}:${String(result).slice(0, 120)}`;
+  try {
+    const record = result as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const operation = extractPayOperation(record);
+    const fee = record.fee ?? record.fee_msats ?? record.feeMsats;
+    return JSON.stringify({
+      keys,
+      operationId: operation?.operationId,
+      operationKind: operation?.kind,
+      operationSource: operation?.source,
+      contractId: record.contract_id,
+      fee,
+      payment_type: record.payment_type,
+    }).slice(0, 400);
+  } catch {
+    return "[unserializable pay result]";
+  }
+}
+
+function shouldResumeReceive(tx: RealLightningTransaction): boolean {
+  if (tx.kind !== "ln" || tx.type !== "receive" || !tx.operationId) return false;
+  return tx.outcome !== "claimed" &&
+    tx.outcome !== "canceled" &&
+    tx.outcome !== "unexpected_error";
+}
+
+function normalizeGatewayId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return /^[0-9a-f]{66}$/.test(normalized) ? normalized : null;
+}
+
+function normalizeFederationId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(normalized) ? normalized : null;
+}
+
+function addGatewayIds(value: unknown, out: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const id = normalizeGatewayId(item);
+      if (id) out.add(id);
+    }
+    return;
+  }
+
+  if (typeof value === "string") {
+    const direct = normalizeGatewayId(value);
+    if (direct) {
+      out.add(direct);
+      return;
+    }
+    try {
+      addGatewayIds(JSON.parse(value), out);
+    } catch {}
+  }
+}
+
+function isVettedGatewaysKey(value: unknown): boolean {
+  return typeof value === "string" &&
+    (value.trim() === "vetted_gateways" || value.trim() === "vettedGateways");
+}
+
+function collectVettedGatewayIds(value: unknown, out: Set<string>, depth = 0): void {
+  if (!value || depth > 8) return;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        collectVettedGatewayIds(JSON.parse(trimmed), out, depth + 1);
+      } catch {}
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length >= 2 && isVettedGatewaysKey(value[0])) {
+      addGatewayIds(value[1], out);
+    }
+    for (const item of value) collectVettedGatewayIds(item, out, depth + 1);
+    return;
+  }
+  if (typeof value !== "object") return;
+
+  const record = value as Record<string, unknown>;
+  const metaKey = record.key ?? record.name ?? record.field ??
+    record.meta_key ?? record.metaKey;
+  if (isVettedGatewaysKey(metaKey)) {
+    addGatewayIds(
+      record.value ?? record.values ?? record.meta_value ??
+        record.metaValue ?? record.content ?? record.data,
+      out,
+    );
+  }
+
+  for (const [key, child] of Object.entries(record)) {
+    if (isVettedGatewaysKey(key)) addGatewayIds(child, out);
+    collectVettedGatewayIds(child, out, depth + 1);
+  }
+}
+
+function configHasModuleKind(value: unknown, moduleKind: string, depth = 0): boolean {
+  if (!value || depth > 8) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => configHasModuleKind(item, moduleKind, depth + 1));
+  }
+  if (typeof value !== "object") return false;
+
+  const record = value as Record<string, unknown>;
+  if (
+    record.kind === moduleKind ||
+    record.module_kind === moduleKind ||
+    record.moduleKind === moduleKind
+  ) {
+    return true;
+  }
+  return Object.values(record).some((child) =>
+    configHasModuleKind(child, moduleKind, depth + 1)
+  );
+}
+
+function moduleKindOf(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const kind = record.kind ?? record.module_kind ?? record.moduleKind;
+  return typeof kind === "string" ? kind : null;
+}
+
+function addModuleRef(value: unknown, out: Set<string>): void {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    out.add(String(value));
+    return;
+  }
+  if (typeof value !== "string") return;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) out.add(trimmed);
+}
+
+function collectModuleRefs(
+  value: unknown,
+  moduleKind: string,
+  out: Set<string>,
+  depth = 0,
+): void {
+  if (!value || depth > 8) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectModuleRefs(item, moduleKind, out, depth + 1);
+    return;
+  }
+  if (typeof value !== "object") return;
+
+  const record = value as Record<string, unknown>;
+  if (moduleKindOf(record) === moduleKind) {
+    addModuleRef(
+      record.id ?? record.module_id ?? record.moduleId ??
+        record.instance_id ?? record.instanceId,
+      out,
+    );
+  }
+
+  for (const [key, child] of Object.entries(record)) {
+    if (moduleKindOf(child) === moduleKind) addModuleRef(key, out);
+    collectModuleRefs(child, moduleKind, out, depth + 1);
+  }
+}
+
+type LowLevelRpcClient = {
+  rpcSingle<Response = unknown>(
+    module: string,
+    method: string,
+    body: unknown,
+    clientName: string,
+  ): Promise<Response>;
+};
+
+function getLowLevelRpc(real: RealFedimintWallet): {
+  client: LowLevelRpcClient;
+  clientName: string;
+} | null {
+  const federation = real.federation as Record<string, unknown>;
+  const wallet = real as unknown as Record<string, unknown>;
+  const client = federation.client ?? federation._client ?? wallet._client;
+  const clientName = federation.clientName ?? federation._clientName ?? wallet._clientName;
+  if (!client || typeof (client as LowLevelRpcClient).rpcSingle !== "function") {
+    return null;
+  }
+  return {
+    client: client as LowLevelRpcClient,
+    clientName: typeof clientName === "string"
+      ? clientName
+      : "dd5135b2-c228-41b7-a4f9-3b6e7afe3088",
+  };
+}
+
+async function getMetaModuleConsensus(
+  real: RealFedimintWallet,
+  moduleRefs: Set<string>,
+): Promise<unknown[]> {
+  const lowLevel = getLowLevelRpc(real);
+  if (!lowLevel) return [];
+
+  const modules = [...moduleRefs];
+  if (modules.length === 0) return [];
+  const payloads: unknown[] = ["default"];
+  const values: unknown[] = [];
+  for (const moduleRef of modules) {
+    for (const payload of payloads) {
+      try {
+        const result = await lowLevel.client.rpcSingle(
+          moduleRef,
+          "get_consensus",
+          payload,
+          lowLevel.clientName,
+        );
+        if (result !== null && result !== undefined) values.push(result);
+        return values;
+      } catch (e) {
+        console.debug("[chama] meta.get_consensus probe failed:", moduleRef, payload, e);
+      }
+    }
+  }
+  return values;
+}
+
+async function addCuratedGatewayTrust(
+  real: RealFedimintWallet,
+  trusted: Set<string>,
+  purpose: "receive" | "pay",
+): Promise<void> {
+  try {
+    const federationId = normalizeFederationId(await real.federation.getFederationId());
+    if (!federationId) return;
+    const curated = CURATED_LIGHTNING_GATEWAY_TRUST[federationId];
+    if (!curated) return;
+    for (const gatewayId of curated) trusted.add(gatewayId);
+    console.info(
+      `[chama] LN ${purpose} curated-vetted gateway IDs for ${federationId}: ${curated.join(", ")}`,
+    );
+  } catch (e) {
+    console.debug("[chama] Could not read federation ID for curated gateway trust:", e);
+  }
+}
+
+async function getMetaVettedGatewayIds(
+  real: RealFedimintWallet,
+  purpose: "receive" | "pay",
+): Promise<Set<string>> {
+  const trusted = new Set<string>();
+  let configContainsMetaModule = false;
+  const metaModuleRefs = new Set<string>();
+
+  if (typeof real.federation.getConfig === "function") {
+    try {
+      const config = await real.federation.getConfig();
+      collectVettedGatewayIds(config, trusted);
+      configContainsMetaModule = configHasModuleKind(config, "meta");
+      collectModuleRefs(config, "meta", metaModuleRefs);
+    } catch (e) {
+      console.debug("[chama] Could not read federation config meta for gateway vetting:", e);
+    }
+  }
+
+  if (configContainsMetaModule) {
+    if (metaModuleRefs.size === 0) {
+      console.debug(
+        "[chama] Federation config mentions meta but exposes no callable meta module id",
+      );
+    } else {
+      const consensusValues = await getMetaModuleConsensus(real, metaModuleRefs);
+      for (const value of consensusValues) collectVettedGatewayIds(value, trusted);
+    }
+  }
+
+  if (trusted.size === 0) {
+    await addCuratedGatewayTrust(real, trusted, purpose);
+  }
+
+  if (trusted.size > 0) {
+    console.info(
+      `[chama] LN ${purpose} meta-vetted gateway IDs: ${[...trusted].join(", ")}`,
+    );
+  } else {
+    console.info(`[chama] LN ${purpose} found no meta-vetted gateway IDs`);
+  }
+  return trusted;
+}
+
 export function adaptRealWallet(
   real: RealFedimintWallet,
   onCleanup?: () => void
 ): IFedimintWallet {
+  const activeReceiveWatches = new Set<() => void>();
+  const armedReceiveOperationIds = new Set<string>();
+
+  const summarizeGateway = (
+    gateway: RealLightningGateway,
+    index: number,
+    total: number
+  ): string => {
+    const info = gateway.info;
+    const alias = info?.lightning_alias || "unknown alias";
+    const id = info?.gateway_id || "unknown id";
+    const api = info?.api || "unknown api";
+    const vetted = typeof gateway.vetted === "boolean"
+      ? `vetted=${gateway.vetted}`
+      : "vetted=?";
+    const privatePayments = typeof info?.supports_private_payments === "boolean"
+      ? `private=${info.supports_private_payments}`
+      : "private=?";
+
+    return `${index + 1}/${total} ${alias} ${id} ${vetted} ${privatePayments} ${api}`;
+  };
+
+  const getTrustedLightningGateway = async (
+    purpose: "receive" | "pay",
+  ): Promise<RealGatewayInfo | undefined> => {
+    if (typeof real.lightning.listGateways !== "function") return undefined;
+
+    try {
+      if (typeof real.lightning.updateGatewayCache === "function") {
+        await real.lightning.updateGatewayCache();
+      }
+
+      const gateways = await real.lightning.listGateways();
+      for (const [index, candidate] of gateways.entries()) {
+        console.info(
+          `[chama] LN ${purpose} gateway candidate: ${summarizeGateway(
+            candidate,
+            index,
+            gateways.length,
+          )}`,
+        );
+      }
+
+      const selectableGateways = gateways.filter((candidate) => candidate.info);
+      const metaVettedGatewayIds = await getMetaVettedGatewayIds(real, purpose);
+      const vettedGateway = selectableGateways.find((candidate) =>
+        candidate.vetted === true && candidate.info
+      );
+      const metaVettedGateway = selectableGateways.find((candidate) =>
+        candidate.info &&
+        metaVettedGatewayIds.has(candidate.info.gateway_id?.toLowerCase() ?? "")
+      );
+      const trustedGateway = vettedGateway ?? metaVettedGateway;
+      if (!trustedGateway?.info) {
+        if (selectableGateways.length > 0) {
+          throw new Error(
+            purpose === "receive"
+              ? "No trusted Lightning receive gateway is available for this federation. " +
+                "Refusing to show a QR code that may take payment and reject the claim."
+              : "No trusted Lightning pay gateway is available for this federation. " +
+                "Your claimed sats are still in your Chama wallet; payout can be retried.",
+          );
+        }
+        console.warn(`[chama] LN ${purpose} gateway selection found no gateways`);
+        return undefined;
+      }
+
+      console.info(
+        `[chama] LN ${purpose} using ${vettedGateway ? "SDK-vetted" : "meta-vetted"} gateway: ${summarizeGateway(
+          trustedGateway,
+          gateways.indexOf(trustedGateway),
+          gateways.length,
+        )}`,
+      );
+      return trustedGateway.info;
+    } catch (e) {
+      console.warn(`[chama] LN ${purpose} gateway selection failed:`, e);
+      throw e;
+    }
+  };
+
+  const waitForPay = async (operation: RealPayOperation): Promise<void> => {
+    const operationId = operation.operationId;
+    const subscribe =
+      operation.kind === "internal"
+        ? real.lightning.subscribeInternalPayment?.bind(real.lightning)
+        : real.lightning.subscribeLnPay?.bind(real.lightning);
+    if (typeof subscribe !== "function") {
+      throw new Error(
+        operation.kind === "internal"
+          ? "Lightning payment was submitted as an internal federation payment, but this browser Fedimint SDK cannot watch internal pay status."
+          : "Lightning payment was submitted, but this browser Fedimint SDK cannot watch pay status. Your sats are still in your Chama wallet if the payment refunds.",
+      );
+    }
+
+    console.info(
+      `[chama] LN pay ${operationId}: watching ${operation.kind} status via ${operation.source}`,
+    );
+    await new Promise<void>((resolve, reject) => {
+      let done = false;
+      let unsubscribe: (() => void) | null = null;
+      let unsubscribeAfterAssign = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        timeoutId = null;
+        if (unsubscribe) {
+          try { unsubscribe(); }
+          catch (e) { console.debug("[chama] LN pay unsubscribe threw:", e); }
+        } else {
+          unsubscribeAfterAssign = true;
+        }
+      };
+
+      const finish = (error?: Error) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve();
+      };
+
+      timeoutId = setTimeout(() => {
+        finish(new Error("Lightning payment timed out"));
+      }, PAY_WATCH_TIMEOUT_MS);
+      (timeoutId as { unref?: () => void }).unref?.();
+
+      try {
+        unsubscribe = subscribe(
+          operationId,
+          (state: RealLnPayState | RealLnInternalPayState) => {
+            console.info(
+              `[chama] LN pay ${operationId}: ${
+                operation.kind === "internal"
+                  ? formatInternalPayState(state as RealLnInternalPayState)
+                  : formatPayState(state as RealLnPayState)
+              }`,
+              state,
+            );
+            const error = operation.kind === "internal"
+              ? internalPayStateError(state as RealLnInternalPayState)
+              : payStateError(state as RealLnPayState);
+            if (error) {
+              finish(error);
+            } else if (
+              operation.kind === "internal"
+                ? isInternalPaySuccess(state as RealLnInternalPayState)
+                : typeof state === "object" && state !== null && "success" in state
+            ) {
+              finish();
+            }
+          },
+          (error) => {
+            console.warn(`[chama] LN pay ${operationId}: stream error`, error);
+            finish(new Error(error || "Lightning payment failed"));
+          },
+        );
+        if (unsubscribeAfterAssign) {
+          try { unsubscribe(); }
+          catch (e) { console.debug("[chama] LN pay unsubscribe threw:", e); }
+        }
+      } catch (e) {
+        console.warn(`[chama] LN pay ${operationId}: subscribe failed`, e);
+        finish(e instanceof Error ? e : new Error(String(e)));
+      }
+    });
+  };
+
+  const armReceiveWatch = (operationId: string, strict = true): void => {
+    if (armedReceiveOperationIds.has(operationId)) return;
+    armedReceiveOperationIds.add(operationId);
+
+    let stopped = false;
+    let unsubscribe: (() => void) | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      if (unsubscribe) {
+        try { unsubscribe(); }
+        catch (e) { console.debug("[chama] LN receive unsubscribe threw:", e); }
+      }
+      activeReceiveWatches.delete(stop);
+    };
+
+    try {
+      timeoutId = setTimeout(() => {
+        console.warn(
+          `[chama] LN receive watch timed out before claimed: ${operationId}`,
+        );
+        stop();
+      }, RECEIVE_WATCH_TIMEOUT_MS);
+      (timeoutId as { unref?: () => void }).unref?.();
+
+      unsubscribe = real.lightning.subscribeLnReceive(
+        operationId,
+        (state) => {
+          console.info(
+            `[chama] LN receive ${operationId}: ${formatReceiveState(state)}`,
+            state,
+          );
+          if (isReceiveTerminal(state)) stop();
+        },
+        (error) => {
+          console.warn(`[chama] LN receive watch failed for ${operationId}:`, error);
+          stop();
+        },
+      );
+      if (!stopped) activeReceiveWatches.add(stop);
+    } catch (e) {
+      if (timeoutId) clearTimeout(timeoutId);
+      activeReceiveWatches.delete(stop);
+      armedReceiveOperationIds.delete(operationId);
+      const error = new Error(
+        "Couldn't watch Lightning receive operation; refusing to show an invoice " +
+        "that Chama may not be able to claim. " +
+        (e instanceof Error ? e.message : String(e)),
+      );
+      if (strict) throw error;
+      console.warn(`[chama] Couldn't resume LN receive ${operationId}:`, error);
+    }
+  };
+
+  const armPendingReceiveWatches = async (source: "open" | "join"): Promise<void> => {
+    if (typeof real.federation.listTransactions !== "function") return;
+    try {
+      const txs = await real.federation.listTransactions(100);
+      for (const tx of txs) {
+        if (shouldResumeReceive(tx)) {
+          console.info(
+            `[chama] Resuming pending LN receive from ${source}: ${tx.operationId}`,
+          );
+          armReceiveWatch(tx.operationId, false);
+        }
+      }
+    } catch (e) {
+      console.debug(`[chama] Pending LN receive scan failed on ${source}:`, e);
+    }
+  };
+
   return {
     async open() {
       await real.open();
+      await armPendingReceiveWatches("open");
     },
 
     isOpen() {
@@ -91,6 +867,7 @@ export function adaptRealWallet(
 
     async joinFederation(inviteCode: string) {
       await real.joinFederation(inviteCode);
+      await armPendingReceiveWatches("join");
     },
 
     recovery: {
@@ -133,18 +910,54 @@ export function adaptRealWallet(
 
     lightning: {
       async createInvoice(amountMsats: number, description: string) {
+        const gateway = await getTrustedLightningGateway("receive");
         const result = await real.lightning.createInvoice(
           amountMsats,
-          description
+          description,
+          undefined,
+          gateway,
         );
+        armReceiveWatch(result.operation_id);
         return {
           invoice: result.invoice,
           operationId: result.operation_id,
         };
       },
       async payInvoice(bolt11: string) {
-        await real.lightning.payInvoice(bolt11);
-        return { operationId: "" };
+        const gateway = await getTrustedLightningGateway("pay");
+        let result: unknown;
+        const startedAt = Date.now();
+        console.info(
+          `[chama] LN pay submit-in gateway=${gateway?.gateway_id ?? "default"} invoiceLen=${bolt11.length}`,
+        );
+        try {
+          result = await real.lightning.payInvoice(bolt11, gateway);
+        } catch (e: any) {
+          console.warn(
+            `[chama] LN pay submit failed via ${gateway?.gateway_id ?? "default gateway"}: ${e?.message || e}`,
+            e,
+          );
+          throw e;
+        }
+        console.info(
+          `[chama] LN pay submit-out gateway=${gateway?.gateway_id ?? "default"} durationMs=${Date.now() - startedAt} result=${summarizePaySubmitResult(result)}`,
+        );
+        const operation = extractPayOperation(result);
+        if (!operation) {
+          throw new Error(
+            `Lightning payment submission did not return a payment operation id: ${summarizePaySubmitResult(result)}`,
+          );
+        }
+        try {
+          await waitForPay(operation);
+        } catch (e: any) {
+          console.warn(
+            `[chama] LN pay ${operation.operationId}: failed after submit: ${e?.message || e}`,
+            e,
+          );
+          throw e;
+        }
+        return { operationId: operation.operationId };
       },
     },
 
@@ -165,6 +978,7 @@ export function adaptRealWallet(
 
     async cleanup() {
       try {
+        for (const stop of [...activeReceiveWatches]) stop();
         await real.cleanup();
       } finally {
         onCleanup?.();
@@ -430,7 +1244,7 @@ export async function createRealWallet(
   const attemptInit = async (fname: string) => {
     const t = new WasmWorkerTransport();
     registerTransport(t as unknown as AnyTransport);
-    const d = new WalletDirector(t, undefined, /* lazy */ true);
+    const d = new WalletDirector(t, /* lazy */ true);
     // _client is protected; cast through unknown to reach initialize()
     const tc = (d as unknown as {
       _client: { initialize(testFilename?: string): Promise<boolean> };
@@ -603,7 +1417,7 @@ export async function createRealWallet(
           const { WasmWorkerTransport: WT2 } = await import("@fedimint/transport-web");
           const t2 = new WT2();
           registerTransport(t2 as unknown as AnyTransport);
-          const d2 = new WD2(t2, undefined, /* lazy */ true);
+          const d2 = new WD2(t2, /* lazy */ true);
           const tc2 = (d2 as unknown as {
             _client: { initialize(testFilename?: string): Promise<boolean> };
           })._client;

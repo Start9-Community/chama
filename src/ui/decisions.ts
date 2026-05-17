@@ -15,13 +15,25 @@ import {
   DEFAULT_COMMUNITY_SLUG,
 } from "../communities/registry.js";
 import { BP_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
+import { maxLightningPayoutSats } from "../payments/lightning-fees.js";
 import {
   type EscrowState,
   EscrowStatus,
   EscrowEventKind,
   Role,
-  TRULY_TERMINAL_STATES,
+  TERMINAL_STATES,
 } from "../escrow-engine/types.js";
+
+function hasLightningWithdrawableBalance(balanceMsats: number): boolean {
+  return maxLightningPayoutSats(balanceMsats) > 0;
+}
+
+export const MAIN_SURFACE_RECOVERY_MIN_SATS = 1_000;
+
+function hasMainSurfaceRecoveryBalance(balanceMsats: number): boolean {
+  const sats = Math.floor(Math.max(0, balanceMsats) / 1000);
+  return sats >= MAIN_SURFACE_RECOVERY_MIN_SATS && hasLightningWithdrawableBalance(balanceMsats);
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 // Community-pill tap → identity + federation effect
@@ -103,9 +115,11 @@ export function decideCommunityTapEffect(inputs: CommunityTapInputs): CommunityT
     return { kind: "switch-silent", slug: inputs.slug, targetInvite, displayName };
   }
 
-  // Returning user, fed differs. Balance == 0 → silent re-init is safe;
-  // balance > 0 → must surface the destroy-confirm modal.
-  if (inputs.balanceMsats === 0) {
+  // Returning user, fed differs. Sub-fee dust is not recoverable through
+  // the Lightning payout UI, so treat it as zero for switch safety and
+  // recovery blockers until small balances accumulate into something
+  // withdrawable.
+  if (!hasLightningWithdrawableBalance(inputs.balanceMsats)) {
     return { kind: "switch-silent", slug: inputs.slug, targetInvite, displayName };
   }
 
@@ -360,25 +374,42 @@ export function canOfferSubscription(inputs: {
 // ──────────────────────────────────────────────────────────────────────────
 //
 // Per the v0.2.0 brief + Q3 evolution: hard-block Create + Fund when
-// the user is a participant (buyer or seller) in a non-terminal
-// escrow. Arbiter status doesn't trigger the hard block — it triggers
-// the soft/hard arbiter warnings via decideArbiterWarning.
+// the user is a participant (buyer or seller) in a live escrow.
+// Arbiter status doesn't trigger the hard block — it triggers the
+// soft/hard arbiter warnings via decideArbiterWarning.
 //
-// "Non-terminal" here means status not in TRULY_TERMINAL_STATES
-// (COMPLETED / CANCELLED). EXPIRED is included as an active state
-// because per types.ts the engine treats EXPIRED as a transient
-// healing state, not a settled terminal one.
+// Expired trades are not live UI commitments. EXPIRED can still heal
+// in the background, and a LOCKED trade that has crossed expiresAt can
+// still publish refund votes, but neither should strand the user behind
+// the one-trade-at-a-time gate while cleanup catches up.
+
+function isPastEscrowDeadline(e: EscrowState, nowSec: number): boolean {
+  return typeof e.expiresAt === "number" && e.expiresAt > 0 && nowSec > e.expiresAt;
+}
+
+function isLiveBuyerSellerCommitment(e: EscrowState, nowSec: number): boolean {
+  if (TERMINAL_STATES.has(e.status)) return false;
+  if (
+    (e.status === EscrowStatus.CREATED || e.status === EscrowStatus.LOCKED)
+    && isPastEscrowDeadline(e, nowSec)
+  ) {
+    return false;
+  }
+  return true;
+}
 
 export function hasActiveBuyerSellerCommitment(inputs: {
   escrows: Iterable<EscrowState>;
   userPubkey: string;
+  nowSec?: number;
 }): boolean {
+  const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
   for (const e of inputs.escrows) {
     const isBuyerOrSeller =
       e.participants.buyer === inputs.userPubkey
       || e.participants.seller === inputs.userPubkey;
     if (!isBuyerOrSeller) continue;
-    if (TRULY_TERMINAL_STATES.has(e.status)) continue;
+    if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
     return true;
   }
   return false;
@@ -410,7 +441,9 @@ export function hasActiveBuyerSellerCommitment(inputs: {
 export function activeCommittedMsats(inputs: {
   escrows: Iterable<EscrowState>;
   userPubkey: string;
+  nowSec?: number;
 }): number {
+  const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
   let sum = 0;
   for (const e of inputs.escrows) {
     const isBuyerOrSeller =
@@ -418,6 +451,7 @@ export function activeCommittedMsats(inputs: {
       || e.participants.seller === inputs.userPubkey;
     if (!isBuyerOrSeller) continue;
     if (e.status !== EscrowStatus.LOCKED && e.status !== EscrowStatus.APPROVED) continue;
+    if (e.status === EscrowStatus.LOCKED && isPastEscrowDeadline(e, nowSec)) continue;
     sum += e.amountMsats;
   }
   return sum;
@@ -433,9 +467,10 @@ export function activeCommittedMsats(inputs: {
 //                   floor for any other meaningful state.
 //   - in-trade    : balance > 0 AND user is buyer/seller in an active
 //                   trade ("Active funds in escrow: N sats")
-//   - stranded    : balance > 0 AND no active commitment (failure-mode;
+//   - stranded    : material balance AND no active commitment (failure-mode;
 //                   tappable → opens RecoveryPayoutModal directly)
-//   - ready       : balance == 0 (neutral, "Chama: ready")
+//   - ready       : balance == 0 OR only tiny post-payout dust
+//                   (neutral, "Chama: ready")
 //
 // Per Phase 5 reminder #3: arbiter-only commitments do NOT count as
 // active. Arbiters mid-arbitration see "Chama: ready" because the
@@ -480,7 +515,7 @@ export function decideChamaBarLabel(opts: {
   const sats = Math.floor(opts.balanceMsats / 1000);
   if (sats > 0) {
     if (opts.hasActiveBuyerSellerCommitment) return { kind: "in-trade", sats };
-    return { kind: "stranded", sats };
+    if (sats >= MAIN_SURFACE_RECOVERY_MIN_SATS) return { kind: "stranded", sats };
   }
   // Balance is 0. If there's an active LOCKED/APPROVED commitment,
   // surface its amount as the in-trade pill — the escrow ledger is
@@ -496,14 +531,16 @@ export function decideChamaBarLabel(opts: {
 export function findActiveTrade(inputs: {
   escrows: Iterable<EscrowState>;
   userPubkey: string;
+  nowSec?: number;
 }): EscrowState | null {
+  const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
   let best: EscrowState | null = null;
   for (const e of inputs.escrows) {
     const isBuyerOrSeller =
       e.participants.buyer === inputs.userPubkey
       || e.participants.seller === inputs.userPubkey;
     if (!isBuyerOrSeller) continue;
-    if (TRULY_TERMINAL_STATES.has(e.status)) continue;
+    if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
     if (!best || e.createdAt > best.createdAt) best = e;
   }
   return best;
@@ -514,17 +551,16 @@ export function findActiveTrade(inputs: {
 // ──────────────────────────────────────────────────────────────────────────
 //
 // Per Pillar 2.1's "no sats stranded, ever" promise: when the user's
-// OPFS holds a balance but they have no active trade, that's a
-// recovery state — surface a banner that replaces Browse and forces
-// resolution before any other commitment can be created. The banner
-// shows the user's last counterparty (resolved via the most recent
-// CLAIM event they signed) and a "withdraw via Lightning" CTA.
+// OPFS holds a material Lightning-withdrawable balance but they have no
+// active trade, that's a recovery state. Tiny post-payout dust may
+// accumulate quietly in Me; the main-flow banner reappears once the
+// aggregate balance is large enough to deserve interrupting the user.
 
 export function shouldShowRecoveryBanner(inputs: {
   balanceMsats: number;
   hasCurrentEscrow: boolean;
 }): boolean {
-  return inputs.balanceMsats > 0 && !inputs.hasCurrentEscrow;
+  return hasMainSurfaceRecoveryBalance(inputs.balanceMsats) && !inputs.hasCurrentEscrow;
 }
 
 export interface StrandedEcashSource {
@@ -659,7 +695,7 @@ export function decideListingTapEffect(inputs: ListingTapInputs): ListingTapEffe
   if (inputs.currentInvite === targetInvite) {
     return { kind: "matching" };
   }
-  if (!inputs.currentInvite || inputs.balanceMsats === 0) {
+  if (!inputs.currentInvite || !hasLightningWithdrawableBalance(inputs.balanceMsats)) {
     return { kind: "switch-silent", targetInvite, displayName };
   }
   return {

@@ -10,7 +10,7 @@
 //
 // State-aware right-side label per the Phase 5 brief:
 //   - in-trade  : "Active funds in escrow: N sats" (accent pill)
-//   - stranded  : "N sats stranded · Recover →" (amber pill, tappable)
+//   - stranded  : "Recover N sats →" (amber pill, tappable)
 //   - ready     : "Chama: ready" (muted neutral)
 //
 // The label decision lives in decisions.decideChamaBarLabel as a pure
@@ -204,7 +204,7 @@ function ChamaBarLabelPill({
         letterSpacing: 0.3, whiteSpace: "nowrap", cursor: "pointer",
       }}
     >
-      ⚠ {label.sats.toLocaleString()} sats stranded · Recover →
+      ⚠ Recover {label.sats.toLocaleString()} sats →
     </button>
   );
 }

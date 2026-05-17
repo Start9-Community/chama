@@ -533,7 +533,12 @@ export class FedimintClient {
 
   /** Get current ecash balance in msats */
   async getBalance(): Promise<number> {
-    return this.requireWallet().balance.getBalance();
+    const balance = await this.requireWallet().balance.getBalance();
+    mlog("BAL-GET", {
+      fed: this._federationId,
+      balance,
+    });
+    return balance;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -658,7 +663,39 @@ export class FedimintClient {
    */
   async payInvoice(bolt11: string): Promise<void> {
     const wallet = this.requireWallet();
-    await wallet.lightning.payInvoice(bolt11);
+    let balanceBefore: number | undefined;
+    try { balanceBefore = await wallet.balance.getBalance(); } catch {}
+    mlog("PAY-IN", {
+      fed: this._federationId,
+      invoicePrefix: bolt11.slice(0, 24),
+      invoiceLen: bolt11.length,
+      balanceBefore,
+    });
+    try {
+      await wallet.lightning.payInvoice(bolt11);
+      let balanceAfter: number | undefined;
+      try { balanceAfter = await wallet.balance.getBalance(); } catch {}
+      mlog("PAY-OUT", {
+        fed: this._federationId,
+        result: "success",
+        balanceBefore,
+        balanceAfter,
+        balanceDelta: balanceBefore !== undefined && balanceAfter !== undefined
+          ? balanceAfter - balanceBefore
+          : undefined,
+      });
+    } catch (e: any) {
+      let balanceAfter: number | undefined;
+      try { balanceAfter = await wallet.balance.getBalance(); } catch {}
+      mlog("PAY-OUT", {
+        fed: this._federationId,
+        result: "error",
+        balanceBefore,
+        balanceAfter,
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+      throw e;
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
