@@ -1,5 +1,7 @@
 # Chama
 
+[![CI](https://github.com/jesuspirate/chama/actions/workflows/ci.yml/badge.svg)](https://github.com/jesuspirate/chama/actions/workflows/ci.yml)
+
 Nostr-native P2P escrow client. Non-custodial. No server.
 
 Built on Nostr events (kinds 38100-38108), Fedimint ecash (WASM), and 2-of-3 Shamir Secret Sharing.
