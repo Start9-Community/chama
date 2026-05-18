@@ -3,30 +3,57 @@
 // ══════════════════════════════════════════════════════════════════════════
 
 // ── localStorage helpers for escrow ID persistence ────────────────────────
-const STORAGE_KEY = "chama_escrow_ids";
+const LEGACY_STORAGE_KEY = "chama_escrow_ids";
+const MAX_SAVED_ESCROW_IDS = 50;
 
-function getSavedEscrowIds(): string[] {
+function escrowStorageKey(pubkey?: string | null): string {
+  return pubkey ? `${LEGACY_STORAGE_KEY}:${pubkey}` : LEGACY_STORAGE_KEY;
+}
+
+function parseSavedEscrowIds(raw: string | null): string[] {
+  if (!raw) return [];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
   } catch { return []; }
 }
 
-function saveEscrowId(id: string) {
+function getSavedEscrowIds(pubkey?: string | null): string[] {
   try {
-    const ids = getSavedEscrowIds();
+    return parseSavedEscrowIds(localStorage.getItem(escrowStorageKey(pubkey)));
+  } catch { return []; }
+}
+
+function saveEscrowId(id: string, pubkey?: string | null) {
+  try {
+    const ids = getSavedEscrowIds(pubkey);
     if (!ids.includes(id)) {
       ids.unshift(id); // newest first
-      // Keep max 50 IDs
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(ids.slice(0, 50)));
+      localStorage.setItem(escrowStorageKey(pubkey), JSON.stringify(ids.slice(0, MAX_SAVED_ESCROW_IDS)));
+    }
+
+    // Once a scoped user touches the trade, remove that ID from the old
+    // global bucket so multi-npub browsers do not briefly resurrect past
+    // active-trade pills for the wrong signer on reload.
+    if (pubkey) {
+      const legacy = parseSavedEscrowIds(localStorage.getItem(LEGACY_STORAGE_KEY))
+        .filter(savedId => savedId !== id);
+      if (legacy.length > 0) {
+        localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(legacy.slice(0, MAX_SAVED_ESCROW_IDS)));
+      } else {
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+      }
     }
   } catch {}
 }
 
-function removeEscrowId(id: string) {
+function removeEscrowId(id: string, pubkey?: string | null) {
   try {
-    const ids = getSavedEscrowIds().filter(i => i !== id);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+    for (const key of new Set([escrowStorageKey(pubkey), LEGACY_STORAGE_KEY])) {
+      const ids = parseSavedEscrowIds(localStorage.getItem(key)).filter(i => i !== id);
+      if (ids.length > 0) localStorage.setItem(key, JSON.stringify(ids));
+      else localStorage.removeItem(key);
+    }
   } catch {}
 }
 
@@ -67,6 +94,7 @@ import {
 } from "../fedimint/index.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
+import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { isSimModeOn } from "../sim/simMode.js";
 
 function isExpiredUnfundedEscrow(escrowState: EscrowState, nowSec = Math.floor(Date.now() / 1000)): boolean {
@@ -198,6 +226,7 @@ export interface UseEscrowActions {
     paymentMethods?: string[];
     arbiterFeeMsats?: number;
     expirySeconds?: number;
+    communityArbiters?: string[];
   }) => Promise<{ escrowId: string; state: EscrowState }>;
   /** Join an existing escrow as buyer or arbiter (ACK only — does not gate state) */
   joinEscrow: (escrowId: string, role: Role) => Promise<EscrowState>;
@@ -359,16 +388,6 @@ export interface UseEscrowActions {
   setCommunity: (slug: string) => void;
 }
 
-// ── Default relay list ────────────────────────────────────────────────────
-
-const DEFAULT_RELAYS = [
-  "wss://relay.primal.net",
-  "wss://nos.lol",
-  "wss://relay.damus.io",
-  "wss://relay.nostr.band",
-  "wss://purplepag.es",
-];
-
 // ── Haptic feedback ───────────────────────────────────────────────────────
 
 function vibrate(pattern: number | number[] = 50) {
@@ -442,7 +461,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
   const updateEscrow = useCallback((escrowId: string, escrowState: EscrowState) => {
     if (isExpiredUnfundedEscrow(escrowState)) {
-      removeEscrowId(escrowId);
+      removeEscrowId(escrowId, stateRef.current?.pubkey ?? null);
       setState(prev => {
         if (!prev.escrows.has(escrowId)) return prev;
         const next = new Map(prev.escrows);
@@ -675,7 +694,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       (clientRef as any)._sentinelInterval = sentinelInterval;
 
       // Auto-reload saved escrows — wait for relays to connect first
-      const savedIds = getSavedEscrowIds();
+      const savedIds = getSavedEscrowIds(pubkey);
       if (savedIds.length > 0) {
         // Wait for at least 2 relays to connect (up to 5 seconds)
         let waited = 0;
@@ -696,7 +715,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           try {
             const loaded = await client.loadEscrow(id);
             if (loaded && isExpiredUnfundedEscrow(loaded)) {
-              removeEscrowId(id);
+              removeEscrowId(id, pubkey);
               (client as any).states?.delete?.(id);
               (client as any).rawEvents?.delete?.(id);
             }
@@ -803,7 +822,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       fedPrefix: fedTags.fedPrefix,
       fed: fedTags.fed,
     });
-    saveEscrowId(result.escrowId);
+    saveEscrowId(result.escrowId, stateRef.current?.pubkey ?? null);
     vibrate([40, 20, 40, 20, 80]); // Celebratory haptic
     return result;
   }, []);
@@ -847,7 +866,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
     try {
       const result = await client.joinEscrow(escrowId, role);
-      saveEscrowId(escrowId);
+      saveEscrowId(escrowId, stateRef.current?.pubkey ?? null);
       vibrate([30, 20, 30]);
       return result;
     } catch (e: any) {
@@ -859,7 +878,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       if (msg.includes("Cannot JOIN") || msg.includes("already a participant") ||
           msg.includes("TERMINAL")) {
         console.debug("[chama] Join suppressed:", msg);
-        saveEscrowId(escrowId);
+        saveEscrowId(escrowId, stateRef.current?.pubkey ?? null);
         return client.getState(escrowId)!;
       }
       throw e;
@@ -1160,7 +1179,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     setState(prev => ({ ...prev, loading: true }));
     try {
       const result = await client.loadEscrow(escrowId);
-      if (result) saveEscrowId(escrowId);
+      if (result) saveEscrowId(escrowId, stateRef.current?.pubkey ?? null);
       setState(prev => ({ ...prev, loading: false }));
       return result;
     } catch (e) {
@@ -1243,8 +1262,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         : await getOrCreateSeed(clientRef.current!, signerRef.current!);
       // Sim wallet keys its persisted state by npub so multiple
       // identities in the same browser don't share a sim balance.
+      const activePubkey = await signerRef.current!.getPublicKey().catch(() => null);
       const simNpub = isSimModeOn()
-        ? (await signerRef.current!.getPublicKey().catch(() => null))
+        ? activePubkey
+        : null;
+      const storageScope = !skipMnemonic
+        ? activePubkey
         : null;
 
       const buildClient = () => new FedimintClient({
@@ -1263,7 +1286,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       let fedimint = fedimintRef.current;
       if (!fedimint) {
         fedimint = buildClient();
-        await fedimint.init({ mnemonic, simNpub });
+        await fedimint.init({ mnemonic, storageScope, simNpub });
         fedimintRef.current = fedimint;
         updateFedimint({ initialized: true });
       }

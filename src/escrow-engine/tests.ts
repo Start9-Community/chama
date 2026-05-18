@@ -72,6 +72,12 @@ import {
   sortEventChain,
   buildEscrowFilter,
 } from "./event-parser.js";
+import {
+  EscrowClient,
+  type Signer,
+  type UnsignedEvent,
+} from "./escrow-client.js";
+import { RelayManager } from "./relay-manager.js";
 
 // PR 2 imports
 import {
@@ -148,6 +154,8 @@ import {
   classifyDestinationInput,
   decideDispatch,
 } from "../ui/components/destination-picker-logic.js";
+import { DEFAULT_RELAYS } from "./default-relays.js";
+import { normalizeTrustedArbiterInput } from "../arbiters/pool.js";
 
 // v0.3.0 Phase 2 — atomic fund-and-lock orchestrator
 import {
@@ -1041,6 +1049,11 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug("global-usd")?.currency === "USD", "global-usd is USD");
   assert(getCommunityBySlug("us-blf")?.currency === "USD", "us-blf is USD");
   assert(DEFAULT_COMMUNITY_SLUG === "us-blf", "Default community is us-blf (BLF, v0.5.0)");
+  assert(DEFAULT_RELAYS.length >= 5, "Default relay pool has at least 5 stable relays");
+  assert(
+    normalizeTrustedArbiterInput(` ${ARBITER_PK},${ARBITER_PK.toUpperCase()} invalid ${ARBITER2_PK} `).length === 2,
+    "Trusted arbiter input normalizes, dedupes, and ignores invalid entries"
+  );
 
   // Lookup with valid + missing slug
   assert(getCommunityBySlug("sn-cfa") !== null, "Valid slug returns community");
@@ -3128,6 +3141,35 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
   assert(
     findActiveTrade({ escrows: [], userPubkey: me }) === null,
     "Empty escrows → no active trade",
+  );
+
+  const listingOnly = escrow({
+    id: "listing-only",
+    status: EscrowStatus.CREATED,
+    participants: { buyer: null, seller: me, arbiter: arb },
+    eventChain: [{ kind: EscrowEventKind.CREATE } as any],
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [listingOnly], userPubkey: me }) === false,
+    "CREATE-only public listing does not count as an active trade",
+  );
+  assert(
+    findActiveTrade({ escrows: [listingOnly], userPubkey: me }) === null,
+    "findActiveTrade ignores CREATE-only public listing ghosts",
+  );
+
+  const joinedCreated = escrow({
+    id: "joined-created",
+    status: EscrowStatus.CREATED,
+    participants: { buyer: other, seller: me, arbiter: arb },
+    eventChain: [
+      { kind: EscrowEventKind.CREATE } as any,
+      { kind: EscrowEventKind.JOIN } as any,
+    ],
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [joinedCreated], userPubkey: me }) === true,
+    "CREATED trade with a JOIN event counts as active",
   );
 
   // User as buyer, LOCKED → commitment.
@@ -7074,6 +7116,194 @@ console.log("\n── SIM MODE — cross-mode policy + BOLT11 parser ──");
     "Parser returns null for non-bolt11 strings");
   assert(parseBolt11Msats("") === null,
     "Parser returns null for empty string");
+}
+
+console.log("\n── RELAY MANAGER — one-shot fetch isolation ──");
+{
+  class FakeWebSocket {
+    static instances: FakeWebSocket[] = [];
+    sent: string[] = [];
+    onopen: ((event: Event) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor(public url: string) {
+      FakeWebSocket.instances.push(this);
+    }
+
+    send(message: string) {
+      this.sent.push(message);
+    }
+
+    close() {}
+
+    emit(message: unknown[]) {
+      this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent);
+    }
+  }
+
+  const relayManager = new RelayManager(
+    ["wss://relay.test"],
+    {},
+    FakeWebSocket as unknown as typeof WebSocket
+  );
+  relayManager.connect();
+
+  const socket = FakeWebSocket.instances[0]!;
+  socket.onopen?.({} as Event);
+
+  const fetchPromise = relayManager.fetchOnce({
+    kinds: [30078],
+    authors: ["seed-pubkey"],
+    "#d": ["chama-fedimint-seed-v1"],
+    limit: 4,
+  }, 1_000);
+
+  const fetchReq = socket.sent
+    .map(raw => JSON.parse(raw))
+    .find(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_once_"));
+  assert(!!fetchReq, "fetchOnce sends an isolated temporary REQ");
+
+  const fetchSubId = fetchReq[1];
+  const unrelatedLiveEvent = {
+    id: "live-escrow-event",
+    pubkey: "seed-pubkey",
+    created_at: 1,
+    kind: EscrowEventKind.CREATE,
+    tags: [["d", "some-escrow"]],
+    content: JSON.stringify({ type: "escrow:create" }),
+    sig: "sig",
+  } as NostrEvent;
+  const seedEvent = {
+    id: "seed-event",
+    pubkey: "seed-pubkey",
+    created_at: 2,
+    kind: 30078,
+    tags: [["d", "chama-fedimint-seed-v1"]],
+    content: "encrypted-seed",
+    sig: "sig",
+  } as NostrEvent;
+
+  socket.emit(["EVENT", "sm_sub_live", unrelatedLiveEvent]);
+  socket.emit(["EVENT", fetchSubId, seedEvent]);
+  socket.emit(["EOSE", fetchSubId]);
+
+  const fetched = await fetchPromise;
+  assert(
+    fetched.length === 1 && fetched[0].id === "seed-event",
+    "fetchOnce ignores unrelated live-subscription events while seed recovery is running"
+  );
+}
+
+console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
+{
+  class FakeWebSocket {
+    static instances: FakeWebSocket[] = [];
+    sent: string[] = [];
+    onopen: ((event: Event) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+
+    constructor(public url: string) {
+      FakeWebSocket.instances.push(this);
+    }
+
+    send(message: string) {
+      this.sent.push(message);
+    }
+
+    close() {}
+
+    emit(message: unknown[]) {
+      this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent);
+    }
+  }
+
+  const waitUntil = async (predicate: () => boolean, timeoutMs = 1_000): Promise<boolean> => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (predicate()) return true;
+      await new Promise(r => setTimeout(r, 5));
+    }
+    return predicate();
+  };
+
+  const rawFromParsed = (event: ParsedEscrowEvent<EscrowPayload>): NostrEvent => ({
+    ...event.raw,
+    content: JSON.stringify(event.payload),
+  });
+
+  const signerPubkey = "ff".repeat(32);
+  const fakeSigner: Signer = {
+    async getPublicKey() { return signerPubkey; },
+    async signEvent(event: UnsignedEvent) {
+      return {
+        ...event,
+        id: `signed_${event.kind}_${Date.now()}`,
+        pubkey: signerPubkey,
+        sig: "sig",
+      };
+    },
+    async nip44Encrypt(plaintext: string) { return plaintext; },
+    async nip44Decrypt(ciphertext: string) { return ciphertext; },
+  };
+
+  const updates: EscrowState[] = [];
+  const client = new EscrowClient(
+    fakeSigner,
+    { relays: ["wss://relay.test"], wsImpl: FakeWebSocket as unknown as typeof WebSocket },
+    { onStateUpdate: (_id, state) => updates.push(state) },
+  );
+
+  client.connect();
+  const socket = FakeWebSocket.instances[0]!;
+  socket.onopen?.({} as Event);
+  client.watchPublicListings();
+
+  const publicReq = socket.sent
+    .map(raw => JSON.parse(raw))
+    .find(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_sub_"));
+  assert(!!publicReq, "Browse public-listing subscription is active");
+
+  const create = createEvent();
+  const lock = lockEvent(create.raw.id);
+  const voteBuyer = voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, lock.raw.id);
+  const voteSeller = voteEvent(Role.SELLER, SELLER_PK, Outcome.RELEASE, voteBuyer.raw.id);
+  const resolve = resolveEvent(Outcome.RELEASE, [Role.BUYER, Role.SELLER], false, voteSeller.raw.id);
+  const claim = claimEvent(Role.BUYER, BUYER_PK, resolve.raw.id);
+  const complete = completeEvent(claim.raw.id);
+
+  socket.emit(["EVENT", publicReq[1], rawFromParsed(create)]);
+  await waitUntil(() => socket.sent.some(raw => {
+    const msg = JSON.parse(raw);
+    return msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_");
+  }));
+
+  assert(
+    updates.length === 0,
+    "Public CREATE does not surface a CREATE-only Browse card before full-chain hydration"
+  );
+
+  const fetchReq = socket.sent
+    .map(raw => JSON.parse(raw))
+    .find(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_"));
+  assert(!!fetchReq, "Public CREATE triggers a full escrow-chain fetch");
+
+  const fetchSubId = fetchReq[1];
+  for (const event of [create, lock, voteBuyer, voteSeller, resolve, claim, complete]) {
+    socket.emit(["EVENT", fetchSubId, rawFromParsed(event)]);
+  }
+  socket.emit(["EOSE", fetchSubId]);
+
+  await waitUntil(() => updates.some(s => s.status === EscrowStatus.COMPLETED));
+  assert(
+    updates.length === 1 && updates[0].status === EscrowStatus.COMPLETED,
+    "Hydrated completed trade reaches UI only as COMPLETED, never stale OPEN"
+  );
+
+  client.disconnect();
 }
 
 // ══════════════════════════════════════════════════════════════════════════

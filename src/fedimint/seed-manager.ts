@@ -35,6 +35,14 @@ export const CHAMA_SEED_KIND = 30078;
 /** Parameterized `d`-tag — version suffix lets us rotate the format later */
 export const CHAMA_SEED_D_TAG = "chama-fedimint-seed-v1";
 
+function isChamaSeedEvent(event: NostrEvent, pubkey: string): boolean {
+  return (
+    event.kind === CHAMA_SEED_KIND &&
+    event.pubkey === pubkey &&
+    event.tags?.some(tag => tag[0] === "d" && tag[1] === CHAMA_SEED_D_TAG) === true
+  );
+}
+
 // ── v0.1.69: Seed resilience constants ──────────────────────────────────
 
 /**
@@ -217,7 +225,8 @@ export async function getOrCreateSeed(
     "#d": [CHAMA_SEED_D_TAG],
     limit: 4,
   };
-  let existing = await client.queryOnce(seedFilter, SEED_RECOVERY_TIMEOUT_MS);
+  let existing = (await client.queryOnce(seedFilter, SEED_RECOVERY_TIMEOUT_MS))
+    .filter(event => isChamaSeedEvent(event, pubkey));
   mlog("SEED-RECOVERY-RESULT", {
     pubkey: pubkey.slice(0, 8),
     eventCount: existing.length,
@@ -238,7 +247,8 @@ export async function getOrCreateSeed(
       delaysMs: SEED_RECOVERY_RETRY_DELAYS_MS.join(","),
     });
     existing = await queryUntilFound(
-      () => client.queryOnce(seedFilter, SEED_RECOVERY_TIMEOUT_MS),
+      async () => (await client.queryOnce(seedFilter, SEED_RECOVERY_TIMEOUT_MS))
+        .filter(event => isChamaSeedEvent(event, pubkey)),
       SEED_RECOVERY_RETRY_DELAYS_MS,
     );
     mlog("SEED-RECOVERY-RETRY-RESULT", {
@@ -498,7 +508,7 @@ export async function checkAndMaybeRepublishSeed(
     const pubkey = await signer.getPublicKey();
 
     // Query relays for the current seed event(s)
-    const existing = await client.queryOnce(
+    const existing = (await client.queryOnce(
       {
         kinds: [CHAMA_SEED_KIND],
         authors: [pubkey],
@@ -506,7 +516,7 @@ export async function checkAndMaybeRepublishSeed(
         limit: 4,
       },
       5_000
-    );
+    )).filter(event => isChamaSeedEvent(event, pubkey));
 
     health.relaysReturnedSeed = existing.length;
 

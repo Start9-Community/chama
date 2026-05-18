@@ -39,6 +39,7 @@ import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
 import { getUserCommunitySlug } from "../../communities/storage.js";
 import { resolveFederationForCommunity } from "../../fedimint/federation-config.js";
+import { getTrustedArbiterPool } from "../../arbiters/pool.js";
 import { type ArbiterWarning, displayCounterpartyName } from "../decisions.js";
 import { T, inputStyle } from "../theme.js";
 
@@ -182,6 +183,10 @@ export function CreateForm({
     try {
       const amountMsats = parseInt(form.sats) * 1000;
       const mintUrl = resolveFederationForCommunity(community);
+      const communityArbiters = getTrustedArbiterPool({
+        community,
+        excludePubkeys: [userPubkey],
+      });
       const params: any = {
         description: form.desc,
         amountMsats: form.isSubscription
@@ -193,6 +198,7 @@ export function CreateForm({
         community,
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
+        communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,
       };
       if (form.isSubscription) {
         params.subscription = {

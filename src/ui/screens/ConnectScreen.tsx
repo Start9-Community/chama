@@ -131,7 +131,7 @@ export function ConnectScreen({
               transition: "all 0.2s",
             }}
           >
-            {loading ? "Connecting..." : "Sign in with Extension"}
+            {loading ? "Connecting..." : "Sign in with Fedi or extension"}
           </button>
         )}
 
@@ -153,6 +153,23 @@ export function ConnectScreen({
           </button>
         )}
 
+        {!isNative && !showAdvanced && (
+          <button
+            onClick={() => setShowAdvanced(true)}
+            disabled={loading}
+            style={{
+              width: "100%", padding: "12px", borderRadius: T.r,
+              background: T.surface,
+              border: `1px solid ${T.border}`,
+              color: T.text, fontFamily: T.sans, fontSize: 13, fontWeight: 650,
+              cursor: loading ? "default" : "pointer",
+              transition: "all 0.2s",
+            }}
+          >
+            New here? Create a key
+          </button>
+        )}
+
         {/* Desktop: show nsec option as advanced */}
         {!isNative && (
           <>
@@ -165,9 +182,9 @@ export function ConnectScreen({
               onMouseEnter={(e) => (e.currentTarget.style.color = T.text)}
               onMouseLeave={(e) => (e.currentTarget.style.color = T.muted)}
             >
-              {showAdvanced ? "▲ Hide advanced" : "▼ More sign-in options"}
+              {showAdvanced ? "▲ Hide key options" : "▼ More sign-in options"}
             </div>
-            {showAdvanced && <NsecLogin onSubmit={onConnectNsec} />}
+            {showAdvanced && <NsecLogin onSubmit={onConnectNsec} defaultOpen />}
           </>
         )}
       </div>

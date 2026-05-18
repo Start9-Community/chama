@@ -138,6 +138,8 @@ export class EscrowClient {
   private notifier: EscrowNotifier | null = null;
   /** Track which escrows are currently being reloaded to avoid duplicate reloads */
   private _reloading: Set<string> = new Set();
+  /** CREATE-only public listings being hydrated before they reach Browse. */
+  private _listingHydration: Set<string> = new Set();
   /** Buffer for events that arrived before their predecessors */
   private retryBuffer: Map<string, { event: NostrEvent; relay: string; attempts: number }[]> = new Map();
   private callbacks: EscrowClientCallbacks;
@@ -1068,8 +1070,26 @@ export class EscrowClient {
       return;
     }
 
-    // Apply to state machine
     const currentState = this.states.get(escrowId) || null;
+
+    // Public Browse discovery starts from plaintext CREATE events, but a
+    // CREATE by itself is not proof the listing is still open. Hydrate the
+    // full chain before surfacing a never-seen escrow so completed/cancelled
+    // trades do not resurrect as stale OPEN tiles on login.
+    if (parsed.kind === EscrowEventKind.CREATE && !currentState) {
+      if (!this._listingHydration.has(escrowId)) {
+        this._listingHydration.add(escrowId);
+        this.loadEscrow(escrowId)
+          .catch(e => console.debug(
+            `[escrow] Listing hydration failed for ${escrowId}:`,
+            (e as Error)?.message || e,
+          ))
+          .finally(() => this._listingHydration.delete(escrowId));
+      }
+      return;
+    }
+
+    // Apply to state machine
     const result = applyEvent(currentState, parsed);
 
     if (result.ok) {

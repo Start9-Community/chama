@@ -390,6 +390,12 @@ function isPastEscrowDeadline(e: EscrowState, nowSec: number): boolean {
 function isLiveBuyerSellerCommitment(e: EscrowState, nowSec: number): boolean {
   if (TERMINAL_STATES.has(e.status)) return false;
   if (
+    e.status === EscrowStatus.CREATED &&
+    !e.eventChain?.some(event => event.kind !== EscrowEventKind.CREATE)
+  ) {
+    return false;
+  }
+  if (
     (e.status === EscrowStatus.CREATED || e.status === EscrowStatus.LOCKED)
     && isPastEscrowDeadline(e, nowSec)
   ) {

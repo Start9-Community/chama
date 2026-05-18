@@ -4,6 +4,7 @@ import { Preferences } from "@capacitor/preferences";
 
 import { useEscrow } from "../hooks/useEscrow.js";
 import { type EscrowState, EscrowStatus, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
+import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { getActiveInvite } from "../fedimint/index.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
@@ -77,7 +78,7 @@ export default function App() {
   const toastRef = useRef<((t: { message: string; type: "success" | "error" | "info" }) => void) | null>(null);
 
   const [{ connected, pubkey, escrows, relayStatuses, connectedRelays, error, loading, fedimint }, actions] = useEscrow({
-    relays: ["wss://relay.damus.io", "wss://relay.primal.net", "wss://nos.lol"],
+    relays: DEFAULT_RELAYS,
     defaultPlatformFeeBps: 50,
     onClaimProgress: (p) => {
       const t = toastRef.current;

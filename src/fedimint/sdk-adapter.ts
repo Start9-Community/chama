@@ -1162,6 +1162,12 @@ export interface CreateRealWalletOptions {
    * seed-manager so the wallet is deterministic across devices.
    */
   mnemonic?: string[];
+  /**
+   * Browser OPFS storage scope, normally the user's Nostr pubkey. This
+   * prevents one browser profile with multiple identities from opening the
+   * wrong local Fedimint file and hitting seed-mismatch safety.
+   */
+  storageScope?: string | null;
 }
 
 // ── OPFS filename rotation ───────────────────────────────────────────────
@@ -1182,20 +1188,49 @@ export interface CreateRealWalletOptions {
 const FILENAME_STORAGE_KEY = "chama_fedimint_opfs_file_v1";
 const DEFAULT_FILENAME = "fedimint.db";
 
-function getStoredFilename(): string {
+type FilenameSource = "scoped" | "legacy";
+
+function scopedFilenameKey(scope: string | null | undefined): string | null {
+  const clean = scope?.trim().toLowerCase();
+  if (!clean) return null;
+  return `${FILENAME_STORAGE_KEY}:${clean}`;
+}
+
+function getStoredFilenameEntry(scope?: string | null): { filename: string; source: FilenameSource } {
   try {
-    return localStorage.getItem(FILENAME_STORAGE_KEY) || DEFAULT_FILENAME;
+    const scopedKey = scopedFilenameKey(scope);
+    if (scopedKey) {
+      const scoped = localStorage.getItem(scopedKey);
+      if (scoped) return { filename: scoped, source: "scoped" };
+    }
+    return {
+      filename: localStorage.getItem(FILENAME_STORAGE_KEY) || DEFAULT_FILENAME,
+      source: "legacy",
+    };
   } catch {
-    return DEFAULT_FILENAME;
+    return { filename: DEFAULT_FILENAME, source: "legacy" };
   }
 }
 
-function rotateFilename(): string {
+function getStoredFilename(scope?: string | null): string {
+  return getStoredFilenameEntry(scope).filename;
+}
+
+function rememberFilename(scope: string | null | undefined, name: string): void {
+  try {
+    const scopedKey = scopedFilenameKey(scope);
+    if (scopedKey) {
+      localStorage.setItem(scopedKey, name);
+    } else {
+      localStorage.setItem(FILENAME_STORAGE_KEY, name);
+    }
+  } catch {}
+}
+
+function rotateFilename(scope?: string | null): string {
   const suffix = Math.random().toString(36).slice(2, 10);
   const name = `chama-fedimint-${suffix}.db`;
-  try {
-    localStorage.setItem(FILENAME_STORAGE_KEY, name);
-  } catch {}
+  rememberFilename(scope, name);
   return name;
 }
 
@@ -1237,7 +1272,9 @@ export async function createRealWallet(
   // Try the stored filename first. If the worker can't open it (stale
   // sync handle from a previous page load that didn't release), rotate
   // to a fresh name and retry once.
-  let filename = getStoredFilename();
+  let filenameEntry = getStoredFilenameEntry(opts.storageScope);
+  let filename = filenameEntry.filename;
+  let filenameSource = filenameEntry.source;
   let director: any;
   let transport: any;
 
@@ -1269,7 +1306,8 @@ export async function createRealWallet(
       // Give the browser a tick to finalize the failed worker's teardown
       // before spinning up a new one. Some Firefox builds need this.
       await new Promise((r) => setTimeout(r, 50));
-      filename = rotateFilename();
+      filename = rotateFilename(opts.storageScope);
+      filenameSource = opts.storageScope ? "scoped" : "legacy";
       try {
         ({ d: director, t: transport } = await attemptInit(filename));
         console.info(`[chama] Fedimint OPFS file (rotated): ${filename}`);
@@ -1298,10 +1336,50 @@ export async function createRealWallet(
   //   3. Existing seed differs  → throw an actionable error asking the
   //      user to reset their local wallet (which we also provide a
   //      one-click button for in the UI).
-  const directorTyped = director as unknown as {
+  let directorTyped = director as unknown as {
     setMnemonic(words: string[]): Promise<boolean>;
     getMnemonic(): Promise<string[]>;
     generateMnemonic(): Promise<string[]>;
+  };
+
+  const installMnemonicInFreshFile = async (deleteCurrentFile: boolean, reason: string) => {
+    console.warn(`[chama] ${reason}`);
+    terminateCurrentWorker();
+
+    if (deleteCurrentFile) {
+      try {
+        const root = await navigator.storage.getDirectory();
+        const oldName = getStoredFilename(opts.storageScope);
+        try { await (root as any).removeEntry(oldName, { recursive: true }); } catch {}
+        try { await (root as any).removeEntry("fedimint.db", { recursive: true }); } catch {}
+      } catch {}
+    }
+
+    const freshName = rotateFilename(opts.storageScope);
+    console.info("[chama] OPFS fresh file selected:", freshName);
+
+    const { WalletDirector: WD2 } = await import("@fedimint/core");
+    const { WasmWorkerTransport: WT2 } = await import("@fedimint/transport-web");
+    const t2 = new WT2();
+    registerTransport(t2 as unknown as AnyTransport);
+    const d2 = new WD2(t2, /* lazy */ true);
+    const tc2 = (d2 as unknown as {
+      _client: { initialize(testFilename?: string): Promise<boolean> };
+    })._client;
+    await tc2.initialize(freshName);
+
+    const dt2 = d2 as unknown as {
+      setMnemonic(words: string[]): Promise<boolean>;
+      getMnemonic(): Promise<string[]>;
+      generateMnemonic(): Promise<string[]>;
+    };
+    await dt2.setMnemonic(opts.mnemonic!);
+    console.info("[chama] Nostr-backed seed installed in fresh OPFS file");
+
+    director = d2;
+    directorTyped = dt2;
+    filename = freshName;
+    filenameSource = opts.storageScope ? "scoped" : "legacy";
   };
 
   if (opts.mnemonic && opts.mnemonic.length > 0) {
@@ -1368,78 +1446,60 @@ export async function createRealWallet(
             );
           }
           if (orphanBalanceMsats !== null && orphanBalanceMsats > 0) {
-            const orphanFingerprint = (existing ?? []).slice(0, 4).join(" ");
-            const nostrFingerprint = (opts.mnemonic ?? []).slice(0, 4).join(" ");
-            const sats = Math.floor(orphanBalanceMsats / 1000);
-            const refuseErr = new Error(
-              `Refusing to reset local Fedimint wallet: ${sats} sats are ` +
-              `held under a seed that differs from your Nostr backup. ` +
-              `Resetting destroys them permanently because Fedimint ecash ` +
-              `is bearer cash and is not recoverable from the federation. ` +
-              `Local seed: "${orphanFingerprint}…". ` +
-              `Nostr seed: "${nostrFingerprint}…".`,
+            if (opts.storageScope && filenameSource === "legacy") {
+              const sats = Math.floor(orphanBalanceMsats / 1000);
+              await installMnemonicInFreshFile(
+                false,
+                `Legacy OPFS file '${filename}' holds ${sats} sats under a different seed. ` +
+                "Preserving it and starting a scoped Fedimint file for this Nostr key."
+              );
+            } else {
+              const orphanFingerprint = (existing ?? []).slice(0, 4).join(" ");
+              const nostrFingerprint = (opts.mnemonic ?? []).slice(0, 4).join(" ");
+              const sats = Math.floor(orphanBalanceMsats / 1000);
+              const refuseErr = new Error(
+                `Refusing to reset local Fedimint wallet: ${sats} sats are ` +
+                `held under a seed that differs from your Nostr backup. ` +
+                `Resetting destroys them permanently because Fedimint ecash ` +
+                `is bearer cash and is not recoverable from the federation. ` +
+                `Local seed: "${orphanFingerprint}…". ` +
+                `Nostr seed: "${nostrFingerprint}…".`,
+              );
+              (refuseErr as Error & {
+                code?: string;
+                orphanBalanceMsats?: number;
+              }).code = "ORPHAN_BALANCE_REFUSED";
+              (refuseErr as Error & {
+                code?: string;
+                orphanBalanceMsats?: number;
+              }).orphanBalanceMsats = orphanBalanceMsats;
+              throw refuseErr;
+            }
+          } else {
+            // Safe to reset — no orphan balance OR balance unknown and
+            // user has implicitly accepted the risk by reaching this
+            // path (which only fires when seed is already mismatched).
+            await installMnemonicInFreshFile(
+              true,
+              "setMnemonic rejected overwrite — auto-resetting OPFS " +
+              `(orphan balance: ${orphanBalanceMsats ?? "unknown"} msats): ${setErr?.message}`
             );
-            (refuseErr as Error & {
-              code?: string;
-              orphanBalanceMsats?: number;
-            }).code = "ORPHAN_BALANCE_REFUSED";
-            (refuseErr as Error & {
-              code?: string;
-              orphanBalanceMsats?: number;
-            }).orphanBalanceMsats = orphanBalanceMsats;
-            throw refuseErr;
           }
-
-          // Safe to reset — no orphan balance OR balance unknown and
-          // user has implicitly accepted the risk by reaching this
-          // path (which only fires when seed is already mismatched).
-          console.warn(
-            "[chama] setMnemonic rejected overwrite — auto-resetting OPFS " +
-            `(orphan balance: ${orphanBalanceMsats ?? "unknown"} msats):`,
-            setErr?.message,
-          );
-
-          // Terminate the current worker so OPFS handle is released
-          terminateCurrentWorker();
-          
-          // Delete the OPFS file and rotate to a fresh filename
-          try {
-            const root = await navigator.storage.getDirectory();
-            const oldName = getStoredFilename();
-            try { await (root as any).removeEntry(oldName, { recursive: true }); } catch {}
-            try { await (root as any).removeEntry("fedimint.db", { recursive: true }); } catch {}
-          } catch {}
-          const freshName = rotateFilename();
-          console.info("[chama] OPFS reset complete, retrying with fresh file:", freshName);
-          
-          // Retry: create a brand new director + transport with the fresh OPFS file
-          const { WalletDirector: WD2 } = await import("@fedimint/core");
-          const { WasmWorkerTransport: WT2 } = await import("@fedimint/transport-web");
-          const t2 = new WT2();
-          registerTransport(t2 as unknown as AnyTransport);
-          const d2 = new WD2(t2, /* lazy */ true);
-          const tc2 = (d2 as unknown as {
-            _client: { initialize(testFilename?: string): Promise<boolean> };
-          })._client;
-          await tc2.initialize(freshName);
-          
-          // Fresh DB — no existing seed, install the Nostr-backed one
-          const dt2 = d2 as unknown as {
-            setMnemonic(words: string[]): Promise<boolean>;
-            getMnemonic(): Promise<string[]>;
-          };
-          await dt2.setMnemonic(opts.mnemonic!);
-          console.info("[chama] Nostr-backed seed installed in fresh OPFS file");
-          
-          // Replace the director reference for the rest of the factory
-          director = d2;
         }
       }
-      // Same seed already installed — nothing to do
-      console.info("[chama] Fedimint seed already matches Nostr backup — reusing");
+	      // Same seed already installed — nothing to do
+	      if (allMatch && opts.storageScope && filenameSource === "legacy") {
+	        rememberFilename(opts.storageScope, filename);
+	      }
+	      if (allMatch) {
+	        console.info("[chama] Fedimint seed already matches Nostr backup — reusing");
+	      }
     } else {
       // No existing seed → install ours
       await directorTyped.setMnemonic(opts.mnemonic);
+      if (opts.storageScope && filenameSource === "legacy") {
+        rememberFilename(opts.storageScope, filename);
+      }
     }
   } else {
     // No seed supplied — let the director generate one, unless it already

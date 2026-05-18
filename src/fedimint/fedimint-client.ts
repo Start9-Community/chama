@@ -142,6 +142,10 @@ export interface FedimintClientCallbacks {
 export interface FedimintWalletFactoryOptions {
   /** BIP-39 mnemonic words, if a deterministic seed should be installed */
   mnemonic?: string[];
+  /** Stable browser-storage scope. Real wallets use this to isolate OPFS
+   *  files per Nostr identity so one profile can test multiple npubs without
+   *  tripping seed-mismatch safety. */
+  storageScope?: string | null;
   /** v0.4.2 sim mode: hex pubkey of the active signer. Sim-wallet keys
    *  its persistent state by this so multiple identities in one browser
    *  don't share a sim balance. Ignored by the real wallet factory. */
@@ -151,6 +155,8 @@ export interface FedimintWalletFactoryOptions {
 export interface FedimintInitOptions {
   /** BIP-39 mnemonic words, if a deterministic seed should be installed */
   mnemonic?: string[];
+  /** Stable browser-storage scope. See FedimintWalletFactoryOptions. */
+  storageScope?: string | null;
   /** v0.4.2 sim mode: hex pubkey of the active signer. See
    *  FedimintWalletFactoryOptions.simNpub. */
   simNpub?: string | null;
@@ -211,7 +217,10 @@ export class FedimintClient {
     // Dynamic import of the adapter keeps WASM out of the initial bundle.
     // The adapter maps @fedimint/core 0.1.x onto our IFedimintWallet shape.
     const { createRealWallet } = await import("./sdk-adapter.js");
-    return createRealWallet({ mnemonic: opts.mnemonic });
+    return createRealWallet({
+      mnemonic: opts.mnemonic,
+      storageScope: opts.storageScope,
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -231,6 +240,7 @@ export class FedimintClient {
     try {
       this.wallet = await this.walletFactory({
         mnemonic: opts.mnemonic,
+        storageScope: opts.storageScope,
         simNpub: opts.simNpub,
       });
 

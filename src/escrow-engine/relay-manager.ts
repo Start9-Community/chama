@@ -67,6 +67,15 @@ interface RelayConnection {
   subscriptions: Map<string, NostrFilter>;
 }
 
+interface PendingOnceFetch {
+  events: NostrEvent[];
+  seenIds: Set<string>;
+  eoseCount: number;
+  connectedCount: number;
+  resolve: (events: NostrEvent[]) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────
 
 const MAX_RETRY_COUNT = 8;
@@ -191,6 +200,7 @@ export class RelayManager {
       case "EVENT": {
         // ["EVENT", subscription_id, event]
         if (data.length < 3) return;
+        const subId = data[1] as string;
         const event = data[2] as NostrEvent;
         if (!event?.id) return;
 
@@ -202,6 +212,16 @@ export class RelayManager {
         // filter alone wasn't enough: fetchEscrowEvents / fetchOnce
         // route raw events directly to their callers, bypassing it.
         if (this.callbacks.shouldDropEvent?.(event)) return;
+
+        // Route arbitrary one-shot fetches by their exact temporary
+        // subscription ID. This must happen before global live-event dedup,
+        // otherwise a live Browse/watch subscription can contaminate seed
+        // recovery and other queryOnce callers with unrelated events.
+        const onceFetch = this._pendingOnceFetches.get(subId);
+        if (onceFetch && !onceFetch.seenIds.has(event.id)) {
+          onceFetch.seenIds.add(event.id);
+          onceFetch.events.push(event);
+        }
 
         // Route to pending fetch subscriptions FIRST (before global dedup)
         // Match by escrow ID from the event's d-tag, NOT by subscription ID.
@@ -237,6 +257,20 @@ export class RelayManager {
       case "EOSE": {
         // ["EOSE", subscription_id]
         const subId = data[1] as string;
+
+        if (this._pendingOnceFetches.has(subId)) {
+          const fetchState = this._pendingOnceFetches.get(subId)!;
+          fetchState.eoseCount++;
+          if (fetchState.eoseCount >= fetchState.connectedCount) {
+            if (fetchState.timer) clearTimeout(fetchState.timer);
+            this.unsubscribe(subId);
+            const events = fetchState.events;
+            const resolveFn = fetchState.resolve;
+            this._pendingOnceFetches.delete(subId);
+            resolveFn(events);
+          }
+        }
+
         // Route to pending fetch if this EOSE matches
         if (this._pendingFetches?.has(subId)) {
           const fetchState = this._pendingFetches.get(subId)!;
@@ -500,6 +534,9 @@ export class RelayManager {
     escrowId: string;
   }> = new Map();
 
+  /** Pending arbitrary fetchOnce state keyed by subscription ID. */
+  private _pendingOnceFetches: Map<string, PendingOnceFetch> = new Map();
+
   // ── One-shot fetch with an arbitrary filter ─────────────────────────────
 
   /**
@@ -510,7 +547,6 @@ export class RelayManager {
     return new Promise((resolve) => {
       const events: NostrEvent[] = [];
       const seenIds = new Set<string>();
-      let eoseCount = 0;
       const connectedCount = [...this.relays.values()].filter(
         r => r.status === RelayStatus.CONNECTED
       ).length;
@@ -521,40 +557,26 @@ export class RelayManager {
       }
 
       const subId = `sm_fetch_once_${++this.subscriptionCounter}`;
-
-      const origOnEvent = this.callbacks.onEvent;
-      const origOnEose = this.callbacks.onEose;
+      const fetchState: PendingOnceFetch = {
+        events,
+        seenIds,
+        eoseCount: 0,
+        connectedCount,
+        resolve,
+        timer: null,
+      };
+      this._pendingOnceFetches.set(subId, fetchState);
 
       const cleanup = () => {
-        clearTimeout(timer);
+        if (fetchState.timer) clearTimeout(fetchState.timer);
         this.unsubscribe(subId);
-        this.callbacks.onEvent = origOnEvent;
-        this.callbacks.onEose = origOnEose;
+        this._pendingOnceFetches.delete(subId);
       };
 
-      const timer = setTimeout(() => {
+      fetchState.timer = setTimeout(() => {
         cleanup();
         resolve(events);
       }, timeoutMs);
-
-      this.callbacks.onEvent = (event, relayUrl) => {
-        origOnEvent?.(event, relayUrl);
-        if (!seenIds.has(event.id)) {
-          seenIds.add(event.id);
-          events.push(event);
-        }
-      };
-
-      this.callbacks.onEose = (sid, relayUrl) => {
-        origOnEose?.(sid, relayUrl);
-        if (sid === subId) {
-          eoseCount++;
-          if (eoseCount >= connectedCount) {
-            cleanup();
-            resolve(events);
-          }
-        }
-      };
 
       for (const [, relay] of this.relays) {
         relay.subscriptions.set(subId, filter);
