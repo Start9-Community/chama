@@ -25,9 +25,45 @@ const NIP46_RELAYS = [
   "wss://relay.satoshimarket.app",  // Our own relay — only relay needed for NIP-46
 ];
 
+const NIP46_CONNECT_TIMEOUT_MS = 90_000;
+
 export interface NIP46ConnectResult {
   signer: Signer;
   pubkey: string;
+}
+
+interface BunkerSignerLike {
+  getPublicKey: () => Promise<string>;
+  signEvent: (event: UnsignedEvent) => Promise<NostrEvent>;
+  nip44Encrypt?: (thirdPartyPubkey: string, plaintext: string) => Promise<string>;
+  nip44Decrypt?: (thirdPartyPubkey: string, ciphertext: string) => Promise<string>;
+  nip04Encrypt?: (thirdPartyPubkey: string, plaintext: string) => Promise<string>;
+  nip04Decrypt?: (thirdPartyPubkey: string, ciphertext: string) => Promise<string>;
+}
+
+export function adaptNIP46BunkerSigner(bunkerSigner: BunkerSignerLike): Signer {
+  return {
+    getPublicKey: () => bunkerSigner.getPublicKey(),
+    signEvent: (event: UnsignedEvent) => bunkerSigner.signEvent(event),
+    nip44Encrypt: async (plaintext: string, recipientPubkey: string) => {
+      if (bunkerSigner.nip44Encrypt) {
+        return bunkerSigner.nip44Encrypt(recipientPubkey, plaintext);
+      }
+      if (bunkerSigner.nip04Encrypt) {
+        return bunkerSigner.nip04Encrypt(recipientPubkey, plaintext);
+      }
+      throw new Error("Signer app does not support encrypted Chama messages");
+    },
+    nip44Decrypt: async (ciphertext: string, senderPubkey: string) => {
+      if (bunkerSigner.nip44Decrypt) {
+        return bunkerSigner.nip44Decrypt(senderPubkey, ciphertext);
+      }
+      if (bunkerSigner.nip04Decrypt) {
+        return bunkerSigner.nip04Decrypt(senderPubkey, ciphertext);
+      }
+      throw new Error("Signer app does not support encrypted Chama messages");
+    },
+  };
 }
 
 /**
@@ -60,7 +96,7 @@ export async function createNostrConnectSession(): Promise<{
     relays: NIP46_RELAYS,
     secret,
     name: "Chama",
-    perms: ["sign_event", "nip44_encrypt", "nip44_decrypt", "nip04_encrypt", "nip04_decrypt"],
+    perms: ["get_public_key", "sign_event", "nip44_encrypt", "nip44_decrypt", "nip04_encrypt", "nip04_decrypt"],
   });
 
   console.debug("[chama] NIP-46 URI generated:", uri.slice(0, 60) + "...");
@@ -68,39 +104,15 @@ export async function createNostrConnectSession(): Promise<{
   return {
     uri,
     waitForConnection: async (): Promise<NIP46ConnectResult> => {
-      const pool = new SimplePool();
+      const pool = new SimplePool({ enableReconnect: true });
 
       try {
-        // Race: attempt connection with a 15s timeout.
-        // If the relay is slow, retry with a fresh pool.
-        let bunkerSigner: any;
-        const attempt = (p: any) => BunkerSigner.fromURI(localSecretKey, uri, { pool: p });
-
-        const withTimeout = (p: any, ms: number) =>
-          Promise.race([
-            attempt(p),
-            new Promise((_, reject) => setTimeout(() => reject(new Error("NIP46_TIMEOUT")), ms)),
-          ]);
-
-        try {
-          bunkerSigner = await withTimeout(pool, 12000);
-        } catch (e: any) {
-          if (e?.message === "NIP46_TIMEOUT") {
-            console.debug("[chama] NIP-46 first attempt timed out, retrying with fresh pool...");
-            pool.close(NIP46_RELAYS);
-            const pool2 = new SimplePool();
-            try {
-              bunkerSigner = await withTimeout(pool2, 20000);
-            } catch (e2: any) {
-              pool2.close(NIP46_RELAYS);
-              throw e2?.message === "NIP46_TIMEOUT"
-                ? new Error("Connection timed out. Please try scanning again.")
-                : e2;
-            }
-          } else {
-            throw e;
-          }
-        }
+        const bunkerSigner = await BunkerSigner.fromURI(
+          localSecretKey,
+          uri,
+          { pool },
+          NIP46_CONNECT_TIMEOUT_MS
+        );
 
         // Get the user's actual pubkey (different from the bunker's key)
         const userPubkey = await bunkerSigner.getPublicKey();
@@ -111,41 +123,14 @@ export async function createNostrConnectSession(): Promise<{
 
         console.debug("[chama] NIP-46 connected! User pubkey:", userPubkey.slice(0, 12) + "...");
 
-        // Wrap in our Signer interface
-        const signer: Signer = {
-          getPublicKey: () => bunkerSigner.getPublicKey(),
-          signEvent: (event: UnsignedEvent) => bunkerSigner.signEvent(event) as Promise<NostrEvent>,
-          nip44Encrypt: async (plaintext: string, recipientPubkey: string) => {
-            // BunkerSigner may support nip44 encrypt
-            try {
-              return await (bunkerSigner as any).nip44Encrypt(plaintext, recipientPubkey);
-            } catch {
-              // Fallback to nip04
-              try {
-                return await (bunkerSigner as any).nip04Encrypt(plaintext, recipientPubkey);
-              } catch {
-                // Last resort: return plaintext (testing mode)
-                console.warn("[chama] NIP-46 signer does not support encryption — using plaintext");
-                return plaintext;
-              }
-            }
-          },
-          nip44Decrypt: async (ciphertext: string, senderPubkey: string) => {
-            try {
-              return await (bunkerSigner as any).nip44Decrypt(ciphertext, senderPubkey);
-            } catch {
-              try {
-                return await (bunkerSigner as any).nip04Decrypt(ciphertext, senderPubkey);
-              } catch {
-                return ciphertext;
-              }
-            }
-          },
-        };
+        const signer = adaptNIP46BunkerSigner(bunkerSigner);
 
         return { signer, pubkey: userPubkey };
-      } catch (e) {
+      } catch (e: any) {
         pool.close(NIP46_RELAYS);
+        if (e?.message?.includes("subscription closed")) {
+          throw new Error("Signer connection closed before approval. Please scan again.");
+        }
         throw e;
       }
     },

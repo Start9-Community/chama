@@ -2,18 +2,48 @@
 set -euo pipefail
 
 # Usage:
-#   ./scripts/release.sh "subject line"                       # short message
-#   ./scripts/release.sh -F /tmp/chama-pr-a-commit.txt        # long message from file
+#   ./scripts/release.sh [--patch|--minor|--major] "subject line"
+#   ./scripts/release.sh [--patch|--minor|--major] -F /tmp/chama-commit.txt
+#   ./scripts/release.sh --patch --no-deploy -F /tmp/chama-commit.txt
 
-# ── Detect bump type FIRST and shift it off ──────────────────────────
+# ── Parse release options FIRST and shift them off ─────────────────────
 BUMP_TYPE="patch"
-if [ "${1:-}" = "--minor" ]; then
-  BUMP_TYPE="minor"
-  shift
-elif [ "${1:-}" = "--major" ]; then
-  BUMP_TYPE="major"
-  shift
-fi
+DEPLOY=1
+
+while [ $# -gt 0 ]; do
+  case "${1:-}" in
+    --patch)
+      BUMP_TYPE="patch"
+      shift
+      ;;
+    --minor)
+      BUMP_TYPE="minor"
+      shift
+      ;;
+    --major)
+      BUMP_TYPE="major"
+      shift
+      ;;
+    --no-deploy)
+      DEPLOY=0
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      if [ "${1:-}" = "-F" ]; then
+        break
+      fi
+      echo "❌ Unknown option: $1"
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 # ── NOW parse remaining args ─────────────────────────────────────────
 COMMIT_MSG=""
@@ -31,10 +61,35 @@ if [ "${1:-}" = "-F" ]; then
   fi
 elif [ -n "${1:-}" ]; then
   COMMIT_MSG="$1"
+  if [[ "$COMMIT_MSG" == --* ]]; then
+    echo "❌ Commit message looks like an option: $COMMIT_MSG"
+    echo "   Did you mean to pass it before -F, or use -- to end options?"
+    exit 1
+  fi
 else
   echo "❌ Commit message required."
-  echo "   Usage: ./scripts/release.sh \"subject line\""
-  echo "          ./scripts/release.sh -F /tmp/commit.txt"
+  echo "   Usage: ./scripts/release.sh [--patch|--minor|--major] \"subject line\""
+  echo "          ./scripts/release.sh [--patch|--minor|--major] -F /tmp/commit.txt"
+  exit 1
+fi
+
+# ── Git safety checks ──────────────────────────────────────────────────
+CURRENT_BRANCH=$(git branch --show-current)
+if [ "$CURRENT_BRANCH" != "main" ]; then
+  echo "❌ release.sh must run from main. Current branch: $CURRENT_BRANCH"
+  exit 1
+fi
+
+echo "🔎 Fetching origin/main and tags..."
+git fetch --prune origin main --tags
+
+LOCAL_HEAD=$(git rev-parse HEAD)
+REMOTE_HEAD=$(git rev-parse origin/main)
+if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+  echo "❌ Local main is not exactly origin/main."
+  echo "   local : $LOCAL_HEAD"
+  echo "   remote: $REMOTE_HEAD"
+  echo "   Pull/rebase or push existing commits before releasing."
   exit 1
 fi
 
@@ -56,7 +111,15 @@ fi
 # ── Bump version (no git tag yet — we'll do it after commit) ──────────
 npm version "$BUMP_TYPE" --no-git-tag-version
 NEW_VERSION=$(node -p "require('./package.json').version")
-git add -A
+
+if git rev-parse -q --verify "refs/tags/v$NEW_VERSION" >/dev/null; then
+  echo "❌ Local tag v$NEW_VERSION already exists."
+  exit 1
+fi
+if git ls-remote --exit-code --tags origin "refs/tags/v$NEW_VERSION" >/dev/null 2>&1; then
+  echo "❌ Remote tag v$NEW_VERSION already exists on origin."
+  exit 1
+fi
 
 # ── node_modules drift check ──────────────────────────────────────────
 # Verifies installed deps match package-lock.json. v0.4.4 shipped a bundle
@@ -77,19 +140,52 @@ fi
 echo "🔎 Running predeploy gate (typecheck + tests)..."
 npm run predeploy
 
+# ── Build gate ─────────────────────────────────────────────────────────
+# Build before commit/tag/push so a broken bundle never becomes a public
+# release commit. The dist/ output is ignored; this checks the artifact.
+echo "🔎 Running production build..."
+npm run build
+
 # ── Commit ─────────────────────────────────────────────────────────────
+git add -A
 if [ -n "$COMMIT_FILE" ]; then
   git commit -F "$COMMIT_FILE"
 else
   git commit -m "$COMMIT_MSG"
 fi
 
+COMMIT_SHA=$(git rev-parse HEAD)
 git tag "v$NEW_VERSION"
-git push origin main
+git push origin HEAD:main
 git push origin "v$NEW_VERSION"
 
-# ── Build + deploy ────────────────────────────────────────────────────
-npm run build
+# ── Remote verification ────────────────────────────────────────────────
+REMOTE_MAIN_SHA=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+REMOTE_TAG_SHA=$(git ls-remote origin "refs/tags/v$NEW_VERSION" | awk '{print $1}')
+
+if [ "$REMOTE_MAIN_SHA" != "$COMMIT_SHA" ]; then
+  echo "❌ origin/main did not land on the release commit."
+  echo "   expected: $COMMIT_SHA"
+  echo "   got     : $REMOTE_MAIN_SHA"
+  exit 1
+fi
+
+if [ "$REMOTE_TAG_SHA" != "$COMMIT_SHA" ]; then
+  echo "❌ origin tag v$NEW_VERSION did not land on the release commit."
+  echo "   expected: $COMMIT_SHA"
+  echo "   got     : $REMOTE_TAG_SHA"
+  exit 1
+fi
+
+echo "✅ GitHub has main@$COMMIT_SHA and tag v$NEW_VERSION"
+
+# ── Deploy ─────────────────────────────────────────────────────────────
+if [ "$DEPLOY" = "0" ]; then
+  echo "↷ Skipping deploy because --no-deploy was passed."
+  echo "✅ Released v$NEW_VERSION"
+  exit 0
+fi
+
 npx cap sync android
 scp -r -i ~/.ssh/.id_satoshi_market dist/* satoshi@satoshimarket.app:~/chama-dist/
 

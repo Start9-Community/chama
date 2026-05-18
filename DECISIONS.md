@@ -882,3 +882,50 @@ Unblock path:
 
 Nairobi feasibility depends on (1) or (2). Architecturally Chama is
 ready; transport layer is upstream-blocked.
+
+**2026-05-18 update:** A working canary was confirmed, but the latest
+published npm packages remain `@fedimint/core@0.1.3`,
+`@fedimint/transport-web@0.1.2`, and
+`@fedimint/fedimint-client-wasm-bundler@0.1.1`. Fedimint SDK
+maintainers replied on issue #288 that the larger active effort is
+moving away from `wasm-pack` toward fully UniFFI-based builds across
+the SDK stack, so they are not promising an exact stable release
+timeline for the iroh bump.
+
+**Implication:** Continue Chama v1 as planned. The Chama architecture
+stays correct because it isolates Fedimint behind `IFedimintWallet`,
+keeps runtime detection at the edge, and treats SDK transport as a
+replaceable adapter concern. Do not rewrite toward UniFFI preemptively;
+wait for the SDK API/package shape to land, then adapt the factory.
+In the meantime, canary testing is now an upstream contribution track:
+smoke BP, BLF, Afribit, and the browser/Fedi surfaces, then report
+regressions with package hashes, federation, browser, and console logs.
+
+---
+
+## 2026-05-18 — NIP-46 signer app is advanced desktop-only until proven reliable
+
+**Context:** The "Use a signer app" button was sitting beside the
+primary sign-in CTA, but current NIP-46 attempts can stall and produce
+`WebSocket is already in CLOSING or CLOSED state` followed by a Chama
+timeout. The flow may still become the best desktop privacy path
+because it signs every event without embedding a browser key, but it
+has not earned primary placement yet.
+
+**Decision:** Hide NIP-46 under "More sign-in options" and offer it
+only in standalone desktop web sessions. Do not show it in native
+Capacitor builds, mobile browser sessions, or Fedi webviews.
+
+**Rationale:** Fedi webview already supplies `window.nostr`; mobile
+users need the least fragile sign-in surface; and desktop is where a
+remote signer can plausibly become the power-user default after real
+testing. This preserves the option without letting a flaky path define
+the first impression.
+
+**Promotion criteria:** Before making NIP-46 the desktop king, prove
+at least two signer implementations, verify relay behavior over
+`wss://relay.satoshimarket.app`, confirm NIP-44 encrypt/decrypt support
+or document fallback limits, and add user-visible timeout/retry copy
+that distinguishes signer rejection from relay failure.
+
+**Status:** Active in the next post-v0.6.1 wave.

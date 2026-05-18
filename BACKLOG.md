@@ -268,6 +268,13 @@ content lives here.
 
 Independent of Chama versioning. File when natural breaks appear.
 
+- [ ] **Fedimint SDK canary regression matrix during UniFFI transition.**
+      Track canary hashes against BP, BLF, Afribit, and the Chama
+      browser/Fedi surfaces. Upstream issue #288 confirmed the team is
+      moving from `wasm-pack` to UniFFI-based builds and explicitly
+      values downstream canary coverage. File regressions with exact
+      package versions, federation, browser, and console/network logs.
+
 - [ ] **OPFS resilience PR for `@fedimint/transport-web`.** Draft
       `PR.md` exists. Chama runs this fix in production since v0.1.11.
       File first as small fast-yes. Primary contact: alexlwn123.
@@ -297,6 +304,13 @@ Independent of Chama versioning. File when natural breaks appear.
 
 Items that need inspection before they can be scoped. Move to a
 version target once the shape is clear.
+
+- [ ] **NIP-46 signer app reliability and promotion test.** The button
+      now lives under More sign-in options and is desktop-only. Before
+      promoting it to the primary desktop private-login path, test
+      Amber/nsecBunker or equivalent signer apps, relay behavior on
+      `wss://relay.satoshimarket.app`, NIP-44 support, timeout/retry
+      copy, and session restoration.
 
 - [ ] **Multi-relay loadEscrow over-eager pruning.** v0.1.88 smoke
       caught a "Removed broken escrow from saved list" warning during

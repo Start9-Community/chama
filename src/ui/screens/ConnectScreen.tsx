@@ -2,6 +2,7 @@ import { useState, lazy, Suspense } from "react";
 import { Capacitor } from "@capacitor/core";
 import { T } from "../theme.js";
 import { NsecLogin } from "../panels/NsecLogin.js";
+import { getSignInEnvironment, shouldOfferNIP46Signer } from "../sign-in-environment.js";
 
 const QRCode = lazy(() => import("../QRCode.js"));
 
@@ -17,6 +18,11 @@ export function ConnectScreen({
   nip46Waiting?: boolean;
 }) {
   const isNative = Capacitor.isNativePlatform();
+  const signInEnvironment = {
+    ...getSignInEnvironment(),
+    isNativePlatform: isNative,
+  };
+  const offerNIP46Signer = shouldOfferNIP46Signer(signInEnvironment);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   return (
@@ -135,24 +141,6 @@ export function ConnectScreen({
           </button>
         )}
 
-        {/* Secondary: NIP-46 signer — desktop only (on native, nsec is the full path) */}
-        {!isNative && !nip46Uri && (
-          <button
-            onClick={onConnectNIP46}
-            disabled={loading}
-            style={{
-              width: "100%", padding: "14px", borderRadius: T.r,
-              background: "transparent",
-              border: `1px solid ${T.border}`,
-              color: T.muted, fontFamily: T.sans, fontSize: 13, fontWeight: 600,
-              cursor: loading ? "default" : "pointer",
-              transition: "all 0.2s",
-            }}
-          >
-            {loading ? "Waiting..." : "Use a signer app"}
-          </button>
-        )}
-
         {!isNative && !showAdvanced && (
           <button
             onClick={() => setShowAdvanced(true)}
@@ -184,7 +172,27 @@ export function ConnectScreen({
             >
               {showAdvanced ? "▲ Hide key options" : "▼ More sign-in options"}
             </div>
-            {showAdvanced && <NsecLogin onSubmit={onConnectNsec} defaultOpen />}
+            {showAdvanced && (
+              <>
+                {offerNIP46Signer && !nip46Uri && (
+                  <button
+                    onClick={onConnectNIP46}
+                    disabled={loading || nip46Waiting}
+                    style={{
+                      width: "100%", padding: "14px", borderRadius: T.r,
+                      background: "transparent",
+                      border: `1px solid ${T.border}`,
+                      color: T.muted, fontFamily: T.sans, fontSize: 13, fontWeight: 600,
+                      cursor: loading || nip46Waiting ? "default" : "pointer",
+                      transition: "all 0.2s",
+                    }}
+                  >
+                    {nip46Waiting ? "Waiting..." : "Use a signer app"}
+                  </button>
+                )}
+                <NsecLogin onSubmit={onConnectNsec} defaultOpen />
+              </>
+            )}
           </>
         )}
       </div>

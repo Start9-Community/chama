@@ -190,6 +190,14 @@ import {
 import {
   decideChamaBarLabel,
 } from "../ui/decisions.js";
+import {
+  isFediWebViewSignInEnvironment,
+  isMobileSignInEnvironment,
+  shouldOfferNIP46Signer,
+} from "../ui/sign-in-environment.js";
+import {
+  adaptNIP46BunkerSigner,
+} from "./nip46-signer.js";
 
 // v0.3.0 Phase 6 — Trinity Ring participant order (theme.ts)
 // v0.3.1 Phase 2 — extends §43 with a grep tripwire over src/ui/
@@ -5806,6 +5814,115 @@ console.log("\n── CHAMA BAR LABEL ──");
     }) === 75_000_000,
     "activeCommittedMsats: sums across multiple active commitments",
   );
+}
+
+// ── 42b. SIGN-IN OPTION ENVIRONMENT GATE ────────────────────────────────
+//
+// NIP-46 is a strong privacy candidate for desktop if the signer flow
+// proves reliable, but it should not be promoted on constrained mobile
+// or Fedi-webview sessions. Keep it behind More sign-in options and
+// offer it only where it is most plausible today: standalone desktop web.
+console.log("\n── SIGN-IN OPTION ENVIRONMENT GATE ──");
+{
+  const desktop = {
+    isNativePlatform: false,
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/134.0.0.0",
+    maxTouchPoints: 0,
+    hasFediInternal: false,
+  };
+  const androidChrome = {
+    isNativePlatform: false,
+    userAgent: "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 Mobile Safari/537.36",
+    maxTouchPoints: 5,
+    hasFediInternal: false,
+  };
+  const fediWebView = {
+    isNativePlatform: false,
+    userAgent: "Mozilla/5.0 (Linux; Android 15) Fedi Mobile",
+    maxTouchPoints: 5,
+    hasFediInternal: true,
+  };
+  const capacitorNative = {
+    ...androidChrome,
+    isNativePlatform: true,
+  };
+  const ipadDesktopUA = {
+    isNativePlatform: false,
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+    maxTouchPoints: 5,
+    hasFediInternal: false,
+  };
+
+  assert(isMobileSignInEnvironment(androidChrome),
+    "Android browser is detected as mobile for sign-in gating");
+  assert(isMobileSignInEnvironment(ipadDesktopUA),
+    "Touch Macintosh/iPad desktop UA is detected as mobile for sign-in gating");
+  assert(isFediWebViewSignInEnvironment(fediWebView),
+    "Fedi webview is detected from fediInternal/user-agent hints");
+  assert(shouldOfferNIP46Signer(desktop),
+    "NIP-46 signer app is offered on standalone desktop web");
+  assert(!shouldOfferNIP46Signer(androidChrome),
+    "NIP-46 signer app is hidden on mobile browser");
+  assert(!shouldOfferNIP46Signer(fediWebView),
+    "NIP-46 signer app is hidden inside Fedi webview");
+  assert(!shouldOfferNIP46Signer(capacitorNative),
+    "NIP-46 signer app is hidden in native Capacitor builds");
+
+  const nip46Calls: string[] = [];
+  const adapted = adaptNIP46BunkerSigner({
+    async getPublicKey() { return BUYER_PK; },
+    async signEvent(event: UnsignedEvent) {
+      return { ...event, id: "nip46_signed", sig: "sig" } as NostrEvent;
+    },
+    async nip44Encrypt(pubkey: string, plaintext: string) {
+      nip46Calls.push(`nip44_encrypt:${pubkey}:${plaintext}`);
+      return "nip44-ciphertext";
+    },
+    async nip44Decrypt(pubkey: string, ciphertext: string) {
+      nip46Calls.push(`nip44_decrypt:${pubkey}:${ciphertext}`);
+      return "nip44-plaintext";
+    },
+  });
+  assert(await adapted.nip44Encrypt("secret", SELLER_PK) === "nip44-ciphertext",
+    "NIP-46 adapter encrypts through signer");
+  assert(nip46Calls.includes(`nip44_encrypt:${SELLER_PK}:secret`),
+    "NIP-46 adapter passes args as signer(pubkey, plaintext), not reversed");
+  assert(await adapted.nip44Decrypt("cipher", SELLER_PK) === "nip44-plaintext",
+    "NIP-46 adapter decrypts through signer");
+  assert(nip46Calls.includes(`nip44_decrypt:${SELLER_PK}:cipher`),
+    "NIP-46 adapter passes args as signer(pubkey, ciphertext), not reversed");
+
+  const nip04Fallback = adaptNIP46BunkerSigner({
+    async getPublicKey() { return BUYER_PK; },
+    async signEvent(event: UnsignedEvent) {
+      return { ...event, id: "nip46_signed", sig: "sig" } as NostrEvent;
+    },
+    async nip04Encrypt(pubkey: string, plaintext: string) {
+      return `nip04:${pubkey}:${plaintext}`;
+    },
+    async nip04Decrypt(pubkey: string, ciphertext: string) {
+      return `nip04:${pubkey}:${ciphertext}`;
+    },
+  });
+  assert(await nip04Fallback.nip44Encrypt("secret", SELLER_PK) === `nip04:${SELLER_PK}:secret`,
+    "NIP-46 adapter falls back to NIP-04 encryption when NIP-44 is unavailable");
+  assert(await nip04Fallback.nip44Decrypt("cipher", SELLER_PK) === `nip04:${SELLER_PK}:cipher`,
+    "NIP-46 adapter falls back to NIP-04 decryption when NIP-44 is unavailable");
+
+  const noEncryption = adaptNIP46BunkerSigner({
+    async getPublicKey() { return BUYER_PK; },
+    async signEvent(event: UnsignedEvent) {
+      return { ...event, id: "nip46_signed", sig: "sig" } as NostrEvent;
+    },
+  });
+  let missingEncryptionThrew = false;
+  try {
+    await noEncryption.nip44Encrypt("secret", SELLER_PK);
+  } catch {
+    missingEncryptionThrew = true;
+  }
+  assert(missingEncryptionThrew,
+    "NIP-46 adapter refuses plaintext fallback when signer lacks encryption");
 }
 
 // ── 43. TRINITY RING PARTICIPANT ORDER (v0.3.0 Phase 6 + v0.3.1 Phase 2) ─
