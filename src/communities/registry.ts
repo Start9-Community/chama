@@ -92,6 +92,20 @@ const IROH_LIMITATION_NOTE =
  *  PRE-SEED ORDER MATTERS: this is the order they render in the picker. */
 export const COMMUNITY_REGISTRY: Community[] = [
   {
+    slug: "us-blf",
+    displayName: "US · Bitcoin Life · USD",
+    currency: "USD",
+    countries: ["US"],
+    languages: ["en"],
+    federationInvite: BLF_FEDERATION_INVITE,
+    flagEmoji: "🇺🇸",
+    country: "US",
+    browserReliable: true,
+    notes: IROH_LIMITATION_NOTE,
+    disambiguator: "Bitcoin Life",
+    hiddenFromPicker: false,
+  },
+  {
     slug: "sn-cfa",
     displayName: "Senegal · CFA",
     currency: "XOF",
@@ -133,20 +147,6 @@ export const COMMUNITY_REGISTRY: Community[] = [
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "Afribit",
-    hiddenFromPicker: false,
-  },
-  {
-    slug: "us-blf",
-    displayName: "US · Bitcoin Life · USD",
-    currency: "USD",
-    countries: ["US"],
-    languages: ["en"],
-    federationInvite: BLF_FEDERATION_INVITE,
-    flagEmoji: "🇺🇸",
-    country: "US",
-    browserReliable: true,
-    notes: IROH_LIMITATION_NOTE,
-    disambiguator: "Bitcoin Life",
     hiddenFromPicker: false,
   },
   // Sunset entry — kept alive so old listings carrying community: "sv-usd"

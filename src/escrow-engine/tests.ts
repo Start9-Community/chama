@@ -1113,6 +1113,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
   assert(picker.length === 4, "Picker shows 4 visible entries (sv-usd hidden)");
+  assert(picker[0]?.slug === DEFAULT_COMMUNITY_SLUG,
+    "Picker starts with the default BLF community (active pill visible first)");
   assert(!picker.some(c => c.slug === "sv-usd"),
     "Picker excludes sv-usd");
   assert(picker.some(c => c.slug === "us-blf"),
