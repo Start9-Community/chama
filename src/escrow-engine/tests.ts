@@ -133,11 +133,17 @@ import {
   maskHandle,
   publicHandleDisplay,
   handleDisplayForViewer,
-  addOrTouchLightningHandle,
-  getSavedLightningHandles,
   LIGHTNING_RAIL,
   type SavedHandle,
 } from "../payments/saved-handles.js";
+import {
+  PAYOUT_DESTINATIONS_STORAGE_KEY,
+  addOrTouchPayoutDestination,
+  listPayoutDestinations,
+  deletePayoutDestination,
+  migrateLegacyLightningHandles,
+  type PayoutDestination,
+} from "../payments/payout-destinations.js";
 
 // v0.3.0 Phase 1 — LNURL + DestinationPicker logic
 import {
@@ -150,7 +156,7 @@ import {
   type LnurlPayMetadata,
 } from "../payments/lnurl.js";
 import {
-  decorateSavedHandlesForPicker,
+  decoratePayoutDestinationsForPicker,
   classifyDestinationInput,
   decideDispatch,
 } from "../ui/components/destination-picker-logic.js";
@@ -1474,6 +1480,8 @@ console.log("\n── RAIL REGISTRY ──");
 
   // Sensitive rails (phone-number-based, bank, email-based) MUST NOT
   // allow public handles. This is the defense-in-depth invariant.
+  assert(railAllowsPublicHandle("phone-number") === false,
+    "Phone number does NOT allow public handles");
   assert(railAllowsPublicHandle("wave") === false,
     "Wave (Senegal mobile money) does NOT allow public handles");
   assert(railAllowsPublicHandle("orange-money") === false,
@@ -1517,16 +1525,22 @@ console.log("\n── RAIL REGISTRY ──");
     "sn-cfa community shows Orange Money");
   assert(senegal.some(r => r.key === "revtag"),
     "sn-cfa community ALSO shows global rails (Revtag)");
+  assert(senegal.some(r => r.key === "phone-number"),
+    "sn-cfa community shows universal Phone number rail");
   assert(!senegal.some(r => r.key === "m-pesa"),
     "sn-cfa community does NOT show m-pesa (Kenya-only)");
 
   const kenya = railsForCommunity("ke-kes");
   assert(kenya.some(r => r.key === "m-pesa"),
     "ke-kes community shows M-Pesa");
+  assert(kenya.some(r => r.key === "phone-number"),
+    "ke-kes community shows universal Phone number rail");
   assert(!kenya.some(r => r.key === "wave"),
     "ke-kes community does NOT show Wave (Senegal-only)");
 
   // Lookup
+  assert(getRailByKey("phone-number")?.displayName === "Phone number",
+    "getRailByKey returns the universal phone-number rail");
   assert(getRailByKey("revtag")?.displayName === "Revtag (Revolut)",
     "getRailByKey returns the right rail");
   assert(getRailByKey("xyz") === null, "Unknown key → null");
@@ -1570,6 +1584,11 @@ console.log("\n── SAVED HANDLES (CRUD + visibility) ──");
 
   // getSavedHandlesByRail filters and orders newest-first
   const senegal = addSavedHandle("wave", "+221 77 555 1234");
+  const phone = addSavedHandle("phone-number", "+254 712 345 678");
+  assert(phone.visibility === "private",
+    "Phone number handle defaults to private");
+  assert(getSavedHandlesByRail("phone-number").length === 1,
+    "One universal phone-number handle");
   const byRevtag = getSavedHandlesByRail("revtag");
   assert(byRevtag.length === 2, "Two revtag handles");
   assert(byRevtag.every(h => h.rail === "revtag"),
@@ -1607,6 +1626,12 @@ console.log("\n── SAVED HANDLES (CRUD + visibility) ──");
   assert(getSavedHandle(senegal.id)?.visibility === "private",
     "Sensitive handle remains private after rejected upgrade");
 
+  const setPublicPhone = setHandleVisibility(phone.id, "public");
+  assert(setPublicPhone.ok === false,
+    "Setting Phone number handle to public is REJECTED (private by default)");
+  assert(getSavedHandle(phone.id)?.visibility === "private",
+    "Phone number remains private after rejected upgrade");
+
   // Setting back to private is always allowed
   const back = setHandleVisibility(a.id, "private");
   assert(back.ok === true, "Setting back to private always allowed");
@@ -1620,7 +1645,7 @@ console.log("\n── SAVED HANDLES (CRUD + visibility) ──");
   // Delete
   deleteSavedHandle(a.id);
   assert(getSavedHandle(a.id) === null, "deleteSavedHandle removes the entry");
-  assert(listSavedHandles().length === 2, "Other entries unaffected by delete");
+  assert(listSavedHandles().length === 3, "Other entries unaffected by delete");
 }
 
 // ── 20. MASKING + handleDisplayForViewer ─────────────────────────────────
@@ -3937,95 +3962,120 @@ console.log("\n── LNURL RESOLVER ──");
   }
 }
 
-// ── 35. SAVED HANDLES — Lightning rail (v0.3.0 Phase 1) ─────────────────
+// ── 35. PAYOUT DESTINATIONS — Lightning Address store ───────────────────
 //
-// addOrTouchLightningHandle is idempotent: re-saving the same address
-// bumps lastUsedAt rather than duplicating. getSavedLightningHandles
-// returns LN handles sorted by most-recent-used, falling back to
-// createdAt for handles missing lastUsedAt.
-console.log("\n── SAVED HANDLES — Lightning rail ──");
+// addOrTouchPayoutDestination is idempotent: re-saving the same address
+// bumps lastUsedAt rather than duplicating. listPayoutDestinations
+// returns LN destinations sorted by most-recent-used, falling back to
+// createdAt for destinations missing lastUsedAt.
+console.log("\n── PAYOUT DESTINATIONS — Lightning Address store ──");
 {
   (globalThis as any).localStorage.clear();
 
   // First save creates new entry
-  const a = addOrTouchLightningHandle("alice@phoenix.app");
-  assert(a.rail === LIGHTNING_RAIL,
-    "First save uses LIGHTNING_RAIL key");
-  assert(a.handle === "alice@phoenix.app",
+  const a = addOrTouchPayoutDestination("alice@phoenix.app");
+  assert(a.id.startsWith("pd_"),
+    "First save uses payout-destination ID prefix");
+  assert(a.address === "alice@phoenix.app",
     "Address stored as-typed (lowercase normalized)");
   assert(typeof a.lastUsedAt === "number",
     "First save sets lastUsedAt");
-  assert(a.visibility === "private",
-    "Lightning handles default to private (never published)");
+  assert(listSavedHandles().length === 0,
+    "Payout destination is NOT stored as a saved payment handle");
 
   // Mixed-case input normalized
-  const b = addOrTouchLightningHandle("Bob@Strike.ME");
-  assert(b.handle === "bob@strike.me",
+  const b = addOrTouchPayoutDestination("Bob@Strike.ME");
+  assert(b.address === "bob@strike.me",
     "Mixed case normalized to lowercase on save");
 
   // ── Idempotency: same address (same case) bumps lastUsedAt, no dup ───
   // Wait at least 1 second so the second save's lastUsedAt is strictly
   // greater than the first (the storage uses 1-second resolution).
   await new Promise(r => setTimeout(r, 1100));
-  const aTouched = addOrTouchLightningHandle("alice@phoenix.app");
+  const aTouched = addOrTouchPayoutDestination("alice@phoenix.app");
   assert(aTouched.id === a.id,
     "Re-saving same address returns same id (no dup)");
   assert((aTouched.lastUsedAt ?? 0) > (a.lastUsedAt ?? 0),
     "Re-saving bumps lastUsedAt forward");
-  assert(getSavedLightningHandles().length === 2,
-    "Storage still holds 2 LN handles after touch (no duplicate row)");
+  assert(listPayoutDestinations().length === 2,
+    "Storage still holds 2 payout destinations after touch (no duplicate row)");
 
   // Idempotency is case-insensitive
-  const aCaseTouched = addOrTouchLightningHandle("ALICE@PHOENIX.APP");
+  const aCaseTouched = addOrTouchPayoutDestination("ALICE@PHOENIX.APP");
   assert(aCaseTouched.id === a.id,
-    "Case-insensitive match against existing handle (no dup)");
+    "Case-insensitive match against existing destination (no dup)");
 
   // Empty rejected
   let threwEmpty = false;
-  try { addOrTouchLightningHandle("   "); } catch { threwEmpty = true; }
+  try { addOrTouchPayoutDestination("   "); } catch { threwEmpty = true; }
   assert(threwEmpty,
-    "addOrTouchLightningHandle rejects empty/whitespace input");
+    "addOrTouchPayoutDestination rejects empty/whitespace input");
 
   // ── Sort: most-recent-used first ─────────────────────────────────────
   // After touching alice last, alice should be first in the picker list.
-  const sorted = getSavedLightningHandles();
+  const sorted = listPayoutDestinations();
   assert(sorted.length === 2,
-    "Two LN handles in storage");
-  assert(sorted[0].handle === "alice@phoenix.app",
-    "Most-recently-used handle (alice) sorts first");
-  assert(sorted[1].handle === "bob@strike.me",
-    "Older handle (bob) sorts second");
+    "Two payout destinations in storage");
+  assert(sorted[0].address === "alice@phoenix.app",
+    "Most-recently-used destination (alice) sorts first");
+  assert(sorted[1].address === "bob@strike.me",
+    "Older destination (bob) sorts second");
 
   // ── Other rails unaffected ───────────────────────────────────────────
   addSavedHandle("revtag", "@charlie");
-  const lnOnly = getSavedLightningHandles();
-  assert(lnOnly.length === 2,
-    "getSavedLightningHandles excludes non-LN rails");
-  assert(lnOnly.every(h => h.rail === LIGHTNING_RAIL),
-    "All returned entries have rail=LIGHTNING_RAIL");
+  assert(listPayoutDestinations().length === 2,
+    "listPayoutDestinations excludes saved payment handles");
+  assert(listSavedHandles().length === 1,
+    "Saved payment handles stay separate from payout destinations");
 
   // ── Fallback to createdAt when lastUsedAt missing ────────────────────
-  // Simulate a pre-v0.3.0 handle that lacks lastUsedAt by writing
-  // directly to storage. getSavedLightningHandles must not crash and
+  // Simulate an older destination that lacks lastUsedAt by writing
+  // directly to storage. listPayoutDestinations must not crash and
   // must use createdAt as the sort key.
-  const raw = (globalThis as any).localStorage.getItem(SAVED_HANDLES_STORAGE_KEY);
+  const raw = (globalThis as any).localStorage.getItem(PAYOUT_DESTINATIONS_STORAGE_KEY);
   const all = JSON.parse(raw);
   all.push({
-    id: "h_legacy",
-    rail: LIGHTNING_RAIL,
-    handle: "legacy@old.app",
-    visibility: "private",
+    id: "pd_legacy",
+    address: "legacy@old.app",
     createdAt: 1, // very old
     // no lastUsedAt
   });
   (globalThis as any).localStorage.setItem(
-    SAVED_HANDLES_STORAGE_KEY, JSON.stringify(all),
+    PAYOUT_DESTINATIONS_STORAGE_KEY, JSON.stringify(all),
   );
-  const withLegacy = getSavedLightningHandles();
+  const withLegacy = listPayoutDestinations();
   assert(withLegacy.length === 3,
-    "Legacy LN handle (no lastUsedAt) read without crash");
-  assert(withLegacy[withLegacy.length - 1].handle === "legacy@old.app",
-    "Handle missing lastUsedAt sorts last (createdAt fallback works)");
+    "Destination with no lastUsedAt read without crash");
+  assert(withLegacy[withLegacy.length - 1].address === "legacy@old.app",
+    "Destination missing lastUsedAt sorts last (createdAt fallback works)");
+
+  // ── Migration from legacy saved_handles LIGHTNING_RAIL rows ─────────
+  (globalThis as any).localStorage.clear();
+  (globalThis as any).localStorage.setItem(SAVED_HANDLES_STORAGE_KEY, JSON.stringify([
+    {
+      id: "h_old_ln",
+      rail: LIGHTNING_RAIL,
+      handle: "Legacy@Wallet.App",
+      visibility: "private",
+      createdAt: 5,
+      lastUsedAt: 10,
+    },
+    {
+      id: "h_fiat",
+      rail: "wave",
+      handle: "+221 77 555 1234",
+      visibility: "private",
+      createdAt: 6,
+    },
+  ]));
+  assert(migrateLegacyLightningHandles() === 1,
+    "Migration moves legacy LIGHTNING_RAIL handles into payout destinations");
+  const migrated = listPayoutDestinations();
+  assert(migrated.length === 1 && migrated[0].address === "legacy@wallet.app",
+    "Migrated destination is normalized and readable from new store");
+  const remainingHandles = listSavedHandles();
+  assert(remainingHandles.length === 1 && remainingHandles[0].rail === "wave",
+    "Migration removes legacy Lightning rows from saved payment handles");
 }
 
 // ── 36. DESTINATION PICKER — pure decision logic (v0.3.0 Phase 1) ───────
@@ -4035,40 +4085,40 @@ console.log("\n── SAVED HANDLES — Lightning rail ──");
 // destroy modal) per the brief.
 console.log("\n── DESTINATION PICKER — logic ──");
 {
-  // ── decorateSavedHandlesForPicker ────────────────────────────────────
+  // ── decoratePayoutDestinationsForPicker ──────────────────────────────
   // Empty list → empty array
-  assert(decorateSavedHandlesForPicker([]).length === 0,
-    "Empty saved-handles input → empty decorated list");
+  assert(decoratePayoutDestinationsForPicker([]).length === 0,
+    "Empty payout-destinations input → empty decorated list");
 
   // Default badge on first (most-recent-used)
-  const handles = [
-    { id: "h1", rail: LIGHTNING_RAIL, handle: "alice@phoenix.app",
-      visibility: "private" as const, createdAt: 100, lastUsedAt: 200 },
-    { id: "h2", rail: LIGHTNING_RAIL, handle: "bob@strike.me",
-      visibility: "private" as const, createdAt: 100, lastUsedAt: 100 },
-    { id: "h3", rail: LIGHTNING_RAIL, handle: "carol@wallet.io",
-      visibility: "private" as const, createdAt: 100, lastUsedAt: 150 },
+  const destinations: PayoutDestination[] = [
+    { id: "pd1", address: "alice@phoenix.app",
+      createdAt: 100, lastUsedAt: 200 },
+    { id: "pd2", address: "bob@strike.me",
+      createdAt: 100, lastUsedAt: 100 },
+    { id: "pd3", address: "carol@wallet.io",
+      createdAt: 100, lastUsedAt: 150 },
   ];
-  const decorated = decorateSavedHandlesForPicker(handles);
+  const decorated = decoratePayoutDestinationsForPicker(destinations);
   assert(decorated.length === 3,
-    "Decorator preserves all input handles");
-  assert(decorated[0].handle.id === "h1" && decorated[0].isDefault === true,
-    "Most-recent-used handle (h1, lastUsedAt=200) gets isDefault=true");
+    "Decorator preserves all input destinations");
+  assert(decorated[0].destination.id === "pd1" && decorated[0].isDefault === true,
+    "Most-recent-used destination (pd1, lastUsedAt=200) gets isDefault=true");
   assert(decorated[1].isDefault === false && decorated[2].isDefault === false,
-    "Non-first handles all have isDefault=false");
-  assert(decorated[1].handle.id === "h3",
-    "Sort: lastUsedAt 200 > 150 > 100 (h1, h3, h2)");
+    "Non-first destinations all have isDefault=false");
+  assert(decorated[1].destination.id === "pd3",
+    "Sort: lastUsedAt 200 > 150 > 100 (pd1, pd3, pd2)");
 
   // Fallback to createdAt when lastUsedAt missing on some entries
   const mixed = [
-    { id: "h_old", rail: LIGHTNING_RAIL, handle: "old@a.app",
-      visibility: "private" as const, createdAt: 50 /* no lastUsedAt */ },
-    { id: "h_new", rail: LIGHTNING_RAIL, handle: "new@b.app",
-      visibility: "private" as const, createdAt: 100, lastUsedAt: 100 },
+    { id: "pd_old", address: "old@a.app",
+      createdAt: 50 /* no lastUsedAt */ },
+    { id: "pd_new", address: "new@b.app",
+      createdAt: 100, lastUsedAt: 100 },
   ];
-  const mixedDec = decorateSavedHandlesForPicker(mixed);
-  assert(mixedDec[0].handle.id === "h_new",
-    "Handles with lastUsedAt sort above bare createdAt entries");
+  const mixedDec = decoratePayoutDestinationsForPicker(mixed);
+  assert(mixedDec[0].destination.id === "pd_new",
+    "Destinations with lastUsedAt sort above bare createdAt entries");
 
   // ── classifyDestinationInput ─────────────────────────────────────────
   assert(classifyDestinationInput("").kind === "empty",
@@ -4098,20 +4148,20 @@ console.log("\n── DESTINATION PICKER — logic ──");
 
   // ── decideDispatch ───────────────────────────────────────────────────
   // Tier 1: tapped saved row wins regardless of typed/paste content
-  const sample: SavedHandle = {
-    id: "h_sample", rail: LIGHTNING_RAIL, handle: "alice@phoenix.app",
-    visibility: "private", createdAt: 100, lastUsedAt: 100,
+  const sample: PayoutDestination = {
+    id: "pd_sample", address: "alice@phoenix.app",
+    createdAt: 100, lastUsedAt: 100,
   };
   {
     const r = decideDispatch({
-      tappedSavedHandle: sample,
+      tappedSavedDestination: sample,
       typedInput: classifyDestinationInput("ignored@host.com"),
       saveToggleOn: false,
     });
     assert(r.ok && r.decision.tier === "saved-row",
       "Tapped saved row → tier=saved-row");
     assert(r.ok && r.decision.addressUsed === "alice@phoenix.app",
-      "Tapped saved row → addressUsed = the saved handle");
+      "Tapped saved row → addressUsed = the saved destination");
     assert(r.ok && r.decision.saveAfter === true,
       "Tapped saved row → saveAfter true (bumps lastUsedAt)");
   }
@@ -6328,71 +6378,52 @@ console.log("\n── CLAIM-BRIDGE-THREW DISCRIMINATION ──");
   }
 }
 
-// ── 46. SAVED HANDLES PANEL — partition contract (v0.3.1 Phase 4) ────────
+// ── 46. PAYMENT HANDLES / PAYOUT DESTINATIONS — split contract ───────────
 //
-// The Payment Handles UI partitions saved handles into TWO subsections:
-//   - Lightning Addresses (top)  → getSavedLightningHandles()
-//   - Fiat rails (below)         → listSavedHandles().filter(h => h.rail !== LIGHTNING_RAIL)
-//
-// This test pins the partition contract: the two subsections must be
-// disjoint AND complete (every saved handle appears in exactly one).
-// If a future refactor changes either source-of-truth in a way that
-// breaks the partition, the panel would either double-render handles
-// or hide some from the user entirely — the test fires immediately.
-// Same shape as §43's grep tripwire: a forever-asset for UI doctrine.
-console.log("\n── SAVED HANDLES PANEL — partition ──");
+// Lightning Addresses are payout destinations, not counterparty handles.
+// This test pins the storage/UI split: listSavedHandles() feeds the
+// trade-time handle reveal surface and must contain only fiat/payment
+// rails; listPayoutDestinations() feeds claim/recovery and must contain
+// only Lightning Addresses.
+console.log("\n── PAYMENT HANDLES / PAYOUT DESTINATIONS — split ──");
 {
   (globalThis as any).localStorage.clear();
 
-  // Seed a mixed handle set: 2 LN, 2 fiat
-  addOrTouchLightningHandle("alice@phoenix.app");
-  addOrTouchLightningHandle("bob@strike.me");
+  // Seed a mixed set: 2 payout destinations, 2 payment handles
+  addOrTouchPayoutDestination("alice@phoenix.app");
+  addOrTouchPayoutDestination("bob@strike.me");
   addSavedHandle("revtag", "@carol");
   addSavedHandle("wave", "+221 77 555 1234");
 
-  const all = listSavedHandles();
-  const lnSubsection = getSavedLightningHandles();
-  const fiatSubsection = all.filter(h => h.rail !== LIGHTNING_RAIL);
+  const paymentHandles = listSavedHandles();
+  const payoutDestinations = listPayoutDestinations();
 
-  // ── Disjoint: no id appears in both subsections ────────────────────
-  const lnIds = new Set(lnSubsection.map(h => h.id));
-  const fiatIds = new Set(fiatSubsection.map(h => h.id));
-  for (const id of lnIds) {
-    assert(!fiatIds.has(id),
-      `Partition disjoint: LN handle ${id} does NOT appear in fiat subsection`);
-  }
-  for (const id of fiatIds) {
-    assert(!lnIds.has(id),
-      `Partition disjoint: fiat handle ${id} does NOT appear in LN subsection`);
-  }
+  assert(paymentHandles.length === 2,
+    "Payment handles list contains only counterparty handles");
+  assert(payoutDestinations.length === 2,
+    "Payout destination list contains Lightning Addresses");
+  assert(paymentHandles.every(h => h.rail !== LIGHTNING_RAIL),
+    "Payment handles never include legacy LIGHTNING_RAIL rows");
+  assert(payoutDestinations.every(d => d.address.includes("@")),
+    "Payout destinations carry Lightning Address strings");
 
-  // ── Complete: every saved handle appears in exactly one subsection
-  assert(lnSubsection.length + fiatSubsection.length === all.length,
-    "Partition complete: |LN| + |fiat| === |all| (no handle dropped or duplicated)");
+  // ── Delete operations are scoped to their stores ────────────────────
+  const targetDestination = payoutDestinations[0];
+  deletePayoutDestination(targetDestination.id);
+  const destinationsAfter = listPayoutDestinations();
+  assert(destinationsAfter.length === payoutDestinations.length - 1,
+    "deletePayoutDestination removes one payout destination");
+  assert(destinationsAfter.every(d => d.id !== targetDestination.id),
+    "Deleted payout destination is gone from destination list");
+  assert(listSavedHandles().length === paymentHandles.length,
+    "Deleting a payout destination leaves payment handles unchanged");
 
-  // ── LN subsection only contains LIGHTNING_RAIL handles ─────────────
-  assert(lnSubsection.every(h => h.rail === LIGHTNING_RAIL),
-    "LN subsection contains only LIGHTNING_RAIL handles");
-
-  // ── Fiat subsection excludes LIGHTNING_RAIL ────────────────────────
-  assert(fiatSubsection.every(h => h.rail !== LIGHTNING_RAIL),
-    "Fiat subsection excludes LIGHTNING_RAIL (no double-render with LN subsection)");
-
-  // ── deleteSavedHandle works for LN handles (panel Delete button) ──
-  // Pins the contract that the panel's onDelete handler, which calls
-  // deleteSavedHandle(id), correctly removes an LN handle from
-  // getSavedLightningHandles() on the next refresh.
-  const targetLn = lnSubsection[0];
-  deleteSavedHandle(targetLn.id);
-  const lnAfter = getSavedLightningHandles();
-  assert(lnAfter.length === lnSubsection.length - 1,
-    "deleteSavedHandle removes one LN handle from getSavedLightningHandles");
-  assert(lnAfter.every(h => h.id !== targetLn.id),
-    "Deleted LN handle is gone from the subsection after delete");
-  // Fiat subsection unchanged by the LN delete
-  const fiatAfter = listSavedHandles().filter(h => h.rail !== LIGHTNING_RAIL);
-  assert(fiatAfter.length === fiatSubsection.length,
-    "Fiat subsection unchanged when an LN handle is deleted");
+  const targetHandle = paymentHandles[0];
+  deleteSavedHandle(targetHandle.id);
+  assert(listSavedHandles().length === paymentHandles.length - 1,
+    "deleteSavedHandle removes one payment handle");
+  assert(listPayoutDestinations().length === destinationsAfter.length,
+    "Deleting a payment handle leaves payout destinations unchanged");
 
   (globalThis as any).localStorage.clear();
 }

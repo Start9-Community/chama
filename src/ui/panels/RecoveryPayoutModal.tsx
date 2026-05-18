@@ -16,7 +16,7 @@
 import { useState } from "react";
 import { T } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
-import type { SavedHandle } from "../../payments/saved-handles.js";
+import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
@@ -29,8 +29,8 @@ import type {
 export interface RecoveryPayoutModalProps {
   /** Stranded balance in millisatoshis. */
   balanceMsats: number;
-  /** Saved Lightning Address handles for the picker's Tier 1 list. */
-  savedHandles: SavedHandle[];
+  /** Saved Lightning Address payout destinations for the picker's Tier 1 list. */
+  savedDestinations: PayoutDestination[];
   /** Title shown in the modal header. Caller customizes per surface
    *  (e.g. "Recover sats", "Recover & switch Chama"). */
   title: string;
@@ -38,8 +38,8 @@ export interface RecoveryPayoutModalProps {
   subtitle?: string;
   /** Bound to actions.payInvoice. */
   payInvoice: (bolt11: string) => Promise<void>;
-  /** Bound to addOrTouchLightningHandle from saved-handles.ts. */
-  addOrTouchLightningHandle: (address: string) => void;
+  /** Bound to addOrTouchPayoutDestination from payout-destinations.ts. */
+  addOrTouchPayoutDestination: (address: string) => void;
   /** Closed when the modal terminates (success, cancel, or error).
    *  terminal=undefined means the user dismissed the picker before
    *  resolving — nothing happened, no orphan was created. */
@@ -53,11 +53,11 @@ type Stage =
 
 export function RecoveryPayoutModal({
   balanceMsats,
-  savedHandles,
+  savedDestinations,
   title,
   subtitle,
   payInvoice,
-  addOrTouchLightningHandle,
+  addOrTouchPayoutDestination,
   onClose,
 }: RecoveryPayoutModalProps) {
   const payoutSats = maxLightningPayoutSats(balanceMsats);
@@ -79,7 +79,7 @@ export function RecoveryPayoutModal({
     return (
       <DestinationPicker
         amountSats={payoutSats}
-        savedHandles={savedHandles}
+        savedDestinations={savedDestinations}
         title={title}
         subtitle={pickerSubtitle}
         onResolve={async (bolt11, opts) => {
@@ -92,7 +92,7 @@ export function RecoveryPayoutModal({
             saveAfter: opts.saveAfter,
             addressUsed: opts.addressUsed,
             payInvoice,
-            addOrTouchLightningHandle,
+            addOrTouchLightningHandle: addOrTouchPayoutDestination,
             onPhase: (phase) => setStage({ kind: "running", phase }),
           });
           setStage({ kind: "terminal", terminal });

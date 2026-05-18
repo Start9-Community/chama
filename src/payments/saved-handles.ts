@@ -9,7 +9,8 @@
 // the LOCK event payload.
 //
 // This module owns:
-//   - Persistence of saved handles in localStorage (`chama_saved_handles`)
+//   - Persistence of counterparty payment handles in localStorage
+//     (`chama_saved_handles`)
 //   - CRUD over saved handles
 //   - The visibility-setter guard that refuses "public" for rails whose
 //     allowPublicHandle === false. The Settings UI is the first line
@@ -29,11 +30,10 @@ import { railAllowsPublicHandle } from "./rail-registry.js";
 
 export const SAVED_HANDLES_STORAGE_KEY = "chama_saved_handles";
 
-/** v0.3.0 — special rail key for Lightning Address destinations saved at
- *  claim time. Intentionally NOT in RAIL_REGISTRY: LN addresses aren't a
- *  fiat rail you advertise on a listing; they're recipient identifiers
- *  the user accumulates as a side-effect of claiming trade winnings.
- *  Surfaced via getSavedLightningHandles(), never via the rail picker. */
+/** Legacy rail key for pre-v0.6.3 Lightning Address rows. New payout
+ *  destinations live in payments/payout-destinations.ts under
+ *  `chama_payout_destinations`; this constant remains only so migration
+ *  code can identify and remove old rows from saved handles. */
 export const LIGHTNING_RAIL = "lightning";
 
 export type HandleVisibility = "private" | "public";
@@ -41,7 +41,7 @@ export type HandleVisibility = "private" | "public";
 export interface SavedHandle {
   /** Local UUID — used as the `handleId` audit reference in LOCK events. */
   id: string;
-  /** Rail key — must match an entry in rail-registry.ts (or LIGHTNING_RAIL). */
+  /** Rail key — must match an entry in rail-registry.ts. */
   rail: string;
   /** Cleartext handle (phone number, username, account, etc.). Stored
    *  locally only; flows into LOCK payloads via the bridge's resolver. */
@@ -53,17 +53,14 @@ export interface SavedHandle {
   visibility: HandleVisibility;
   /** Unix seconds — for stable list ordering and audit. */
   createdAt: number;
-  /** v0.3.0 — Unix seconds, last time this handle was actively used as a
-   *  destination (claim, recovery, etc.). Drives "default" badge in
-   *  DestinationPicker. Optional for backwards compat with pre-v0.3.0
-   *  fiat handles; missing means "never explicitly used as destination,
-   *  fall back to createdAt for ordering". */
+  /** Legacy optional field from the era where Lightning destinations
+   *  were stored here. Kept so old rows validate long enough to migrate. */
   lastUsedAt?: number;
 }
 
 // ── Storage I/O ───────────────────────────────────────────────────────────
 
-function readAll(): SavedHandle[] {
+function readStoredAll(): SavedHandle[] {
   try {
     if (typeof localStorage === "undefined") return [];
     const raw = localStorage.getItem(SAVED_HANDLES_STORAGE_KEY);
@@ -78,10 +75,20 @@ function readAll(): SavedHandle[] {
   }
 }
 
+function readAll(): SavedHandle[] {
+  return readStoredAll().filter(h => h.rail !== LIGHTNING_RAIL);
+}
+
 function writeAll(handles: SavedHandle[]): void {
   try {
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(SAVED_HANDLES_STORAGE_KEY, JSON.stringify(handles));
+    // Preserve legacy Lightning rows until payout-destinations.ts has a
+    // chance to migrate them into `chama_payout_destinations`.
+    const legacyLightning = readStoredAll().filter(h => h.rail === LIGHTNING_RAIL);
+    localStorage.setItem(
+      SAVED_HANDLES_STORAGE_KEY,
+      JSON.stringify([...handles.filter(h => h.rail !== LIGHTNING_RAIL), ...legacyLightning]),
+    );
   } catch {
     // localStorage unavailable / quota exceeded — no-op. The Settings
     // UI surfaces persistence failures via the next read returning the
@@ -264,58 +271,4 @@ export function handleDisplayForViewer(
 ): string {
   if (viewerIsParticipant) return handle;
   return maskHandle(handle);
-}
-
-// ── Lightning Address handles (v0.3.0) ───────────────────────────────────
-
-/** Idempotent save for a Lightning Address used as a claim destination.
- *  - First time seen: create a new entry with rail=LIGHTNING_RAIL,
- *    visibility=private, lastUsedAt=now.
- *  - Already saved (case-insensitive match): bump lastUsedAt to now,
- *    no duplicate row.
- *
- *  Lightning Addresses are receive-only by protocol; they're saved here
- *  so the user can one-tap them on subsequent claims, not so they appear
- *  on listings. They are never published — visibility stays private and
- *  no public-toggle path exists (LIGHTNING_RAIL isn't in RAIL_REGISTRY,
- *  so railAllowsPublicHandle returns false defensively). */
-export function addOrTouchLightningHandle(address: string): SavedHandle {
-  const normalized = address.trim().toLowerCase();
-  if (!normalized) {
-    throw new Error("Lightning Address cannot be empty");
-  }
-  const handles = readAll();
-  const idx = handles.findIndex(
-    h => h.rail === LIGHTNING_RAIL && h.handle.toLowerCase() === normalized,
-  );
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (idx !== -1) {
-    const next: SavedHandle = { ...handles[idx], lastUsedAt: nowSec };
-    handles[idx] = next;
-    writeAll(handles);
-    return next;
-  }
-  const entry: SavedHandle = {
-    id: generateId(),
-    rail: LIGHTNING_RAIL,
-    handle: normalized,
-    visibility: "private",
-    createdAt: nowSec,
-    lastUsedAt: nowSec,
-  };
-  writeAll([entry, ...handles]);
-  return entry;
-}
-
-/** All saved Lightning Address handles, sorted by most-recently-used.
- *  Handles missing lastUsedAt fall back to createdAt for ordering. The
- *  first entry is the "default" candidate for the DestinationPicker. */
-export function getSavedLightningHandles(): SavedHandle[] {
-  return readAll()
-    .filter(h => h.rail === LIGHTNING_RAIL)
-    .sort((a, b) => {
-      const aTime = a.lastUsedAt ?? a.createdAt;
-      const bTime = b.lastUsedAt ?? b.createdAt;
-      return bTime - aTime;
-    });
 }

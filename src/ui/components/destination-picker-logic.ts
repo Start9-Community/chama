@@ -13,23 +13,23 @@
 //   - Destroy modal (item 6): user recovers sats before federation switch
 //
 // Three input tiers, in priority order:
-//   Tier 1 — saved Lightning Address rows (one-tap)
+//   Tier 1 — saved payout destination rows (one-tap)
 //   Tier 2 — Lightning Address text input + "Save for next time" toggle
 //   Tier 3 — BOLT11 paste (under "More options")
 
-import type { SavedHandle } from "../../payments/saved-handles.js";
+import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import { isLightningAddress } from "../../payments/lnurl.js";
 
-/** A saved Lightning Address row decorated with the "default" badge flag.
+/** A saved payout destination row decorated with the "default" badge flag.
  *  The first entry (most-recent-used) is the default, rendered with a
  *  visual emphasis in the picker. */
-export interface PickerSavedHandle {
-  handle: SavedHandle;
+export interface PickerPayoutDestination {
+  destination: PayoutDestination;
   isDefault: boolean;
 }
 
-/** Sort + decorate saved Lightning Address handles for the picker:
- *   - input is whatever getSavedLightningHandles() returned (already
+/** Sort + decorate saved payout destinations for the picker:
+ *   - input is whatever listPayoutDestinations() returned (already
  *     sorted by lastUsedAt desc, but we re-sort defensively)
  *   - first entry gets isDefault: true; others false
  *   - empty list returns []
@@ -37,16 +37,16 @@ export interface PickerSavedHandle {
  *  Stable in face of equal lastUsedAt — preserves input order for ties.
  *  No cap — per Q3, sort by most-recent-used and lean on the default
  *  badge to keep the list usable. */
-export function decorateSavedHandlesForPicker(
-  handles: SavedHandle[],
-): PickerSavedHandle[] {
-  if (handles.length === 0) return [];
-  const sorted = [...handles].sort((a, b) => {
+export function decoratePayoutDestinationsForPicker(
+  destinations: PayoutDestination[],
+): PickerPayoutDestination[] {
+  if (destinations.length === 0) return [];
+  const sorted = [...destinations].sort((a, b) => {
     const aTime = a.lastUsedAt ?? a.createdAt;
     const bTime = b.lastUsedAt ?? b.createdAt;
     return bTime - aTime;
   });
-  return sorted.map((h, i) => ({ handle: h, isDefault: i === 0 }));
+  return sorted.map((destination, i) => ({ destination, isDefault: i === 0 }));
 }
 
 /** Synchronous classification of free-form input the user typed (or
@@ -90,7 +90,7 @@ export function classifyDestinationInput(raw: string): InputClassification {
 
 /** Tier of action the picker is dispatching. Consumers of onResolve use
  *  this (indirectly, via `addressUsed` being set) to decide whether to
- *  call addOrTouchLightningHandle for save/touch. */
+ *  call addOrTouchPayoutDestination for save/touch. */
 export type DispatchTier =
   | "saved-row"          // Tier 1: tapped a saved row
   | "typed-address"      // Tier 2: typed an address into the picker
@@ -108,7 +108,7 @@ export interface DispatchDecision {
    *  address — creates new entry on first use, bumps thereafter). Unset
    *  for Tier 3 (BOLT11 paste — no address to save). */
   addressUsed?: string;
-  /** Whether the consumer should call addOrTouchLightningHandle.
+  /** Whether the consumer should call addOrTouchPayoutDestination.
    *  - Tier 1: always true (touching a saved row bumps default badge).
    *  - Tier 2: true iff the "Save for next time" toggle is on.
    *  - Tier 3: always false. */
@@ -121,13 +121,13 @@ export interface DispatchDecision {
  *  plus the data this function returned.
  *
  *  Inputs:
- *   - tappedSavedHandle: the saved-row handle the user tapped (if any)
+ *   - tappedSavedDestination: the saved-row destination the user tapped
  *   - typedInput: classifyDestinationInput result for the LN-address field
  *   - bolt11PasteInput: classifyDestinationInput result for the BOLT11
  *     paste field (unset/empty if user is using Tier 1 or Tier 2)
  *   - saveToggleOn: state of the Tier 2 "Save for next time" toggle */
 export type DispatchInputs = {
-  tappedSavedHandle?: SavedHandle | null;
+  tappedSavedDestination?: PayoutDestination | null;
   typedInput?: InputClassification;
   bolt11PasteInput?: InputClassification;
   saveToggleOn: boolean;
@@ -139,12 +139,12 @@ export type DispatchResult =
 
 export function decideDispatch(inputs: DispatchInputs): DispatchResult {
   // Tier 1 wins: tapping a saved row is the strongest signal of intent.
-  if (inputs.tappedSavedHandle) {
+  if (inputs.tappedSavedDestination) {
     return {
       ok: true,
       decision: {
         tier: "saved-row",
-        addressUsed: inputs.tappedSavedHandle.handle,
+        addressUsed: inputs.tappedSavedDestination.address,
         saveAfter: true,
       },
     };

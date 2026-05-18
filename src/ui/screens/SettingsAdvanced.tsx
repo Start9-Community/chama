@@ -85,7 +85,7 @@ export function SettingsAdvanced({
               Power-user mode
             </div>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 4, lineHeight: 1.5 }}>
-              Reveals power-user surfaces: Chama switching, custom invite
+              Reveals power-user surfaces: route switching, external invite
               paste, OPFS reset. Off by default.
               {isDev && (
                 <span style={{ color: T.amber, display: "block", marginTop: 4 }}>
@@ -111,7 +111,7 @@ export function SettingsAdvanced({
 
       {(powerUserOn || isDev) && (
         <>
-          {/* Federation switching */}
+          {/* Route switching */}
           <div style={{
             background: T.card, border: `1px solid ${T.border}`,
             borderRadius: T.r, padding: 16, marginBottom: 16,
@@ -120,7 +120,7 @@ export function SettingsAdvanced({
               fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
               letterSpacing: 1, marginBottom: 8,
             }}>
-              CHAMA
+              ROUTE
             </div>
             {/* SwitchFederationPanel renders for both joined and pre-join
                 states — the shell's onSwitchFederation handler dispatches

@@ -45,6 +45,17 @@ export interface Rail {
  *  rails (phone-number-based mobile money, bank transfers) are private-
  *  only; public-by-design tags get the opt-in path. */
 export const RAIL_REGISTRY: Rail[] = [
+  // ── universal default ──────────────────────────────────────────────
+  // Mobile money, bank-transfer coordination, and cash-in/cash-out
+  // workflows default to phone numbers across much of the global south.
+  // Phone numbers are sensitive identifiers, so they are locked private.
+  {
+    key: "phone-number",
+    displayName: "Phone number",
+    allowPublicHandle: false,
+    placeholder: "+254 712 345 678",
+  },
+
   // ── sn-cfa (Senegal · CFA) ─────────────────────────────────────────
   // Mobile money in Francophone West Africa is phone-number-based —
   // sensitive by definition.

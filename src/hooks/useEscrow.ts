@@ -96,6 +96,7 @@ import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/stora
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { isSimModeOn } from "../sim/simMode.js";
+import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
 
 function isExpiredUnfundedEscrow(escrowState: EscrowState, nowSec = Math.floor(Date.now() / 1000)): boolean {
   return (
@@ -436,7 +437,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       initialized: false,
       joined: false,
       federationId: null,
-      federationName: hasCustomFederation() ? "Custom federation" : BP_FEDERATION_NAME,
+      federationName: hasCustomFederation() ? "External route" : BP_FEDERATION_NAME,
       isCustom: hasCustomFederation(),
       balanceMsats: 0,
       busy: false,
@@ -757,7 +758,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         initialized: false,
         joined: false,
         federationId: null,
-        federationName: hasCustomFederation() ? "Custom federation" : BP_FEDERATION_NAME,
+        federationName: hasCustomFederation() ? "External route" : BP_FEDERATION_NAME,
         isCustom: hasCustomFederation(),
         balanceMsats: 0,
         busy: false,
@@ -1477,7 +1478,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         initialized: true,
         joined: true,
         federationId,
-        federationName: usingCustom ? "Custom federation" : BP_FEDERATION_NAME,
+        federationName: usingCustom ? "External route" : BP_FEDERATION_NAME,
         isCustom: usingCustom,
         balanceMsats,
         busy: false,
@@ -1540,7 +1541,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     setCustomFederationInvite(inviteCode);
     updateFedimint({
       isCustom: !!inviteCode.trim(),
-      federationName: inviteCode.trim() ? "Custom federation" : BP_FEDERATION_NAME,
+      federationName: inviteCode.trim() ? "External route" : BP_FEDERATION_NAME,
     });
   }, [updateFedimint]);
 
@@ -1830,7 +1831,6 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       return { kind: "claim-failed", error: err };
     }
     const { runClaimAndPayout } = await import("../payments/claim-and-payout.js");
-    const { addOrTouchLightningHandle } = await import("../payments/saved-handles.js");
     return runClaimAndPayout({
       escrowId,
       bolt11: args.bolt11,
@@ -1862,7 +1862,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         await bridge.payInvoice(bolt11);
         refreshBalanceRef.current?.().catch(() => {});
       },
-      addOrTouchLightningHandle,
+      addOrTouchLightningHandle: addOrTouchPayoutDestination,
       onPhase: args.onPhase,
     });
   }, []);

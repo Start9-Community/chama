@@ -11,7 +11,7 @@ import { T, inputStyle } from "../theme.js";
 
 // Renders inside Sandbox mode (Settings → Advanced) when the user is
 // already joined to a federation. Lets the user pick a different
-// federation (curated, observer, or custom invite) and commit the
+// route (curated, observer, or pasted invite) and commit the
 // switch. v0.1.85: relocated out of the home screen — too dangerous
 // for normie users to encounter incidentally.
 export function SwitchFederationPanel({
@@ -51,7 +51,7 @@ export function SwitchFederationPanel({
   const requestCustomSwitch = () => {
     if (!customValid) return;
     setConfirming({
-      name: `Custom Chama (${customTrimmed.slice(4, 12)}…)`,
+      name: `External route (${customTrimmed.slice(4, 12)}…)`,
       invite: customTrimmed,
     });
   };
@@ -80,7 +80,7 @@ export function SwitchFederationPanel({
         fontSize: 10, fontWeight: 600, color: T.muted, fontFamily: T.mono,
         letterSpacing: 1, marginBottom: 8,
       }}>
-        SWITCH CHAMA
+        SWITCH ROUTE
       </div>
       <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 10, lineHeight: 1.5 }}>
         Now on: <span style={{ color: T.text }}>{fedimint.federationName}</span>
@@ -104,7 +104,7 @@ export function SwitchFederationPanel({
             ))}
           </optgroup>
           {presets.some((p) => p.source === "observer") && (
-            <optgroup label="Public (fedimint-observer)">
+            <optgroup label="Public routes">
               {presets.filter((p) => p.source === "observer").map((p) => (
                 <option key={p.inviteCode} value={p.inviteCode}>{p.name}</option>
               ))}
@@ -128,7 +128,7 @@ export function SwitchFederationPanel({
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
         <input
           type="text"
-          placeholder="…or paste custom fed1 invite"
+          placeholder="…or paste fed1 invite"
           value={customInvite}
           onChange={(e) => setCustomInvite(e.target.value)}
           disabled={busy}
@@ -170,7 +170,7 @@ export function SwitchFederationPanel({
             background: T.card, border: `1px solid ${T.border}`,
           }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: T.text, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-              CONFIRM CHAMA SWITCH
+              CONFIRM ROUTE SWITCH
             </div>
             <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 16 }}>
               Switch from <strong>{fedimint.federationName}</strong> to{" "}
@@ -193,7 +193,7 @@ export function SwitchFederationPanel({
                 {refusalCode === "balance" && (
                   <div style={{ marginTop: 8, color: T.amber }}>
                     Click <strong>Switch and destroy ecash</strong> to override.
-                    This permanently destroys the balance held under this fed.
+                    This permanently destroys the balance held under this route.
                   </div>
                 )}
               </div>
@@ -226,7 +226,7 @@ export function SwitchFederationPanel({
               >
                 {busy ? "Switching…"
                   : refusalCode === "balance" ? "Switch and destroy ecash"
-                  : "Switch Chama"}
+                  : "Switch route"}
               </button>
             </div>
           </div>

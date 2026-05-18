@@ -12,15 +12,15 @@
 // not this picker):
 //
 //   props.amountSats     — the exact amount the consumer needs to receive
-//   props.savedHandles   — getSavedLightningHandles() result, passed in
-//                          so the consumer controls when to refresh
+//   props.savedDestinations — listPayoutDestinations() result, passed in
+//                            so the consumer controls when to refresh
 //   props.title          — header text (caller-customized: "Claim",
 //                          "Recover sats", etc.)
 //   props.onResolve      — fired with (bolt11, { saveAfter, addressUsed })
 //                          once the picker has a BOLT11 to hand off; the
 //                          consumer dispatches the actual outbound LN
 //                          send and decides whether to call
-//                          addOrTouchLightningHandle based on saveAfter
+//                          addOrTouchPayoutDestination based on saveAfter
 //   props.onCancel       — modal dismissed without committing
 //
 // The picker handles its own LNURL resolution + error rendering; the
@@ -28,19 +28,19 @@
 
 import { useMemo, useState } from "react";
 import { T, inputStyle } from "../theme.js";
-import type { SavedHandle } from "../../payments/saved-handles.js";
+import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import {
   resolveLightningAddressToInvoice,
   LnurlError,
 } from "../../payments/lnurl.js";
 import {
-  decorateSavedHandlesForPicker,
+  decoratePayoutDestinationsForPicker,
   classifyDestinationInput,
   decideDispatch,
 } from "./destination-picker-logic.js";
 
 export interface DestinationPickerResolveOpts {
-  /** Whether the consumer should call addOrTouchLightningHandle. */
+  /** Whether the consumer should call addOrTouchPayoutDestination. */
   saveAfter: boolean;
   /** The Lightning Address used (if any) — passed back so the consumer
    *  doesn't need to re-derive it from the BOLT11. Unset for Tier 3
@@ -52,10 +52,9 @@ export interface DestinationPickerProps {
   /** Exact amount the consumer needs to receive. Passed into LNURL
    *  metadata validation and into the callback URL. */
   amountSats: number;
-  /** Lightning Address handles previously saved by the user. Caller
-   *  fetches these via getSavedLightningHandles() and re-fetches after
-   *  a successful resolve to reflect addOrTouchLightningHandle bumps. */
-  savedHandles: SavedHandle[];
+  /** Lightning Address payout destinations previously saved by the user.
+   *  Caller fetches these via listPayoutDestinations(). */
+  savedDestinations: PayoutDestination[];
   /** Modal header. "Claim", "Recover sats", etc. */
   title: string;
   /** Optional one-line subtitle below the title. */
@@ -69,7 +68,7 @@ export interface DestinationPickerProps {
 
 export function DestinationPicker({
   amountSats,
-  savedHandles,
+  savedDestinations,
   title,
   subtitle,
   onResolve,
@@ -83,19 +82,19 @@ export function DestinationPicker({
   const [err, setErr] = useState<string | null>(null);
 
   const decoratedRows = useMemo(
-    () => decorateSavedHandlesForPicker(savedHandles),
-    [savedHandles],
+    () => decoratePayoutDestinationsForPicker(savedDestinations),
+    [savedDestinations],
   );
 
-  const dispatchSavedRow = async (handle: SavedHandle) => {
+  const dispatchSavedRow = async (destination: PayoutDestination) => {
     setErr(null);
     setBusy(true);
     try {
       const invoice = await resolveLightningAddressToInvoice(
-        handle.handle,
+        destination.address,
         amountSats,
       );
-      onResolve(invoice, { saveAfter: true, addressUsed: handle.handle });
+      onResolve(invoice, { saveAfter: true, addressUsed: destination.address });
     } catch (e) {
       setErr(formatLnurlError(e));
     } finally {
@@ -169,11 +168,11 @@ export function DestinationPicker({
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
               SAVED DESTINATIONS
             </div>
-            {decoratedRows.map(({ handle, isDefault }) => (
+            {decoratedRows.map(({ destination, isDefault }) => (
               <button
-                key={handle.id}
+                key={destination.id}
                 disabled={busy}
-                onClick={() => dispatchSavedRow(handle)}
+                onClick={() => dispatchSavedRow(destination)}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between",
                   width: "100%", padding: "10px 12px", marginBottom: 6,
@@ -184,7 +183,7 @@ export function DestinationPicker({
                 <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ color: T.accent, fontFamily: T.mono, fontSize: 12 }}>⚡</span>
                   <span style={{ color: T.text, fontFamily: T.mono, fontSize: 11 }}>
-                    {handle.handle}
+                    {destination.address}
                   </span>
                 </span>
                 {isDefault && (

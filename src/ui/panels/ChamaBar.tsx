@@ -78,7 +78,7 @@ export function ChamaBar({
     if (matched) {
       displayName = matched.name;
     } else if (fedimint.federationId) {
-      displayName = `Custom Chama (${fedimint.federationId.slice(0, 8)})`;
+      displayName = `External route (${fedimint.federationId.slice(0, 8)})`;
     } else {
       displayName = fedimint.federationName;
     }

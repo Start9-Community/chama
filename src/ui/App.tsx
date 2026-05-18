@@ -45,8 +45,9 @@ import { FundWalletModal } from "./panels/FundWalletModal.js";
 import { AtomicFundingModal } from "./panels/AtomicFundingModal.js";
 import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
-import { addOrTouchLightningHandle, getSavedLightningHandles } from "../payments/saved-handles.js";
+import { addOrTouchPayoutDestination, listPayoutDestinations } from "../payments/payout-destinations.js";
 import { SavedHandlesPanel } from "./panels/SavedHandlesPanel.js";
+import { PayoutDestinationsPanel } from "./panels/PayoutDestinationsPanel.js";
 import { SimModePill, SimEntryModal, SIM_PILL_HEIGHT } from "../sim/SimModeBanner.js";
 import { isSimModeOn } from "../sim/simMode.js";
 
@@ -60,6 +61,7 @@ type View =
   | "create"
   | "me"
   | "saved-handles"
+  | "payout-destinations"
   | "advanced";
 
 const TAB_FOR_VIEW: Record<View, Tab> = {
@@ -68,6 +70,7 @@ const TAB_FOR_VIEW: Record<View, Tab> = {
   create: "create",
   me: "me",
   "saved-handles": "me",
+  "payout-destinations": "me",
   advanced: "me",
 };
 
@@ -803,7 +806,7 @@ export default function App() {
         <ClaimPayoutModal
           escrowId={pendingClaim.escrowId}
           payoutMsats={pendingClaim.payoutMsats}
-          savedHandles={getSavedLightningHandles()}
+          savedDestinations={listPayoutDestinations()}
           claimAndPayout={actions.claimAndPayout}
           probeFederation={actions.probeFederation}
           onClose={(terminal) => {
@@ -885,11 +888,11 @@ export default function App() {
       {pendingRecovery && (
         <RecoveryPayoutModal
           balanceMsats={fedimint.balanceMsats ?? 0}
-          savedHandles={getSavedLightningHandles()}
+          savedDestinations={listPayoutDestinations()}
           title={pendingRecovery.title}
           subtitle={pendingRecovery.subtitle}
           payInvoice={(bolt11) => actions.payInvoice(bolt11)}
-          addOrTouchLightningHandle={(addr) => { addOrTouchLightningHandle(addr); }}
+          addOrTouchPayoutDestination={(addr) => { addOrTouchPayoutDestination(addr); }}
           onClose={(terminal) => {
             setPendingRecovery(null);
             if (!terminal) {
@@ -1100,6 +1103,7 @@ export default function App() {
             onRecoverSats={() => setPendingRecovery({ title: "Recover sats" })}
             onOpenTrade={openEscrow}
             onOpenSavedHandles={() => setView("saved-handles")}
+            onOpenPayoutDestinations={() => setView("payout-destinations")}
             onOpenAdvanced={() => setView("advanced")}
             onSignOut={handleSignOut}
           />
@@ -1114,6 +1118,18 @@ export default function App() {
           )}
           <SavedHandlesPanel
             communitySlug={actions.getCommunity()}
+            onClose={() => setView("me")}
+          />
+        </div>
+      ) : view === "payout-destinations" ? (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          {activeTrade && (
+            <ActiveTradePill
+              trade={activeTrade}
+              onTap={() => openEscrow(activeTrade.id)}
+            />
+          )}
+          <PayoutDestinationsPanel
             onClose={() => setView("me")}
           />
         </div>

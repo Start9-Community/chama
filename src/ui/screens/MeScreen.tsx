@@ -56,6 +56,7 @@ export function MeScreen({
   ratings,
   onOpenTrade,
   onOpenSavedHandles,
+  onOpenPayoutDestinations,
   onOpenAdvanced,
   balanceMsats,
   hasActiveCommitment,
@@ -69,6 +70,7 @@ export function MeScreen({
   ratings: AggregateRatings | null;
   onOpenTrade: (id: string) => void;
   onOpenSavedHandles: () => void;
+  onOpenPayoutDestinations: () => void;
   onOpenAdvanced: () => void;
   balanceMsats: number;
   hasActiveCommitment: boolean;
@@ -275,6 +277,7 @@ export function MeScreen({
         borderRadius: T.r, padding: 0, marginBottom: 16, overflow: "hidden",
       }}>
         <SettingsRow label="Payment handles" hint="Saved handles for fast trade-time fill" onClick={onOpenSavedHandles} />
+        <SettingsRow label="Payout destinations" hint="Lightning addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
         <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
         <SettingsRow label="Sign out" hint={null} onClick={onSignOut} danger />
       </div>

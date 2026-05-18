@@ -928,4 +928,48 @@ at least two signer implementations, verify relay behavior over
 or document fallback limits, and add user-visible timeout/retry copy
 that distinguishes signer rejection from relay failure.
 
+---
+
+## 2026-05-18 — Nairobi is demo context, not the primary roadmap goal
+
+**Context:** Older backlog entries treated Adopting Bitcoin Nairobi as
+the v1 forcing function. That was useful while the product surface was
+coalescing, but it became too restrictive: it encouraged demo-readiness
+to compete with product correctness, privacy boundaries, recovery
+semantics, and long-term maintainability.
+
+**Decision:** Chama's primary goal is an integrity-first v1, not a
+Nairobi launch date. Nairobi can still supply feedback, demos, partner
+stories, or useful pressure, but it does not define scope, sequencing,
+or quality bars.
+
+**Implications:**
+- Privacy/category fixes beat deadline-driven polish.
+- Launch can slip when the right architecture or user-safety work needs
+  more time.
+- Backlog language should refer to production feedback or real usage
+  rather than "Nairobi data" as the deciding input.
+- Demo plans live below product integrity work and should never block a
+  more important trust fix.
+
 **Status:** Active in the next post-v0.6.1 wave.
+
+---
+
+## 2026-05-18 — Lightning Addresses are payout destinations, not payment handles
+
+**Context:** The v0.3.x claim/recovery flow saved Lightning Addresses
+inside `chama_saved_handles` under a synthetic `LIGHTNING_RAIL`. That
+made implementation easy, but it blurred a privacy boundary: payment
+handles are counterparty-facing data that can be revealed in a LOCK
+event, while Lightning Addresses are self-payout destinations used only
+after claim or recovery.
+
+**Decision:** Move Lightning Address persistence into
+`chama_payout_destinations`. Migrate legacy `LIGHTNING_RAIL` rows out of
+`chama_saved_handles`, keep payment handles limited to fiat/public rails,
+and expose a separate Me → Settings row called "Payout destinations."
+
+**Implication:** Claim and recovery can still offer one-tap saved
+destinations, but the trade-time handle reveal picker no longer has any
+path to show or publish the user's Lightning wallet address.

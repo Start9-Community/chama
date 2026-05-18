@@ -174,7 +174,7 @@ export function BrowseView({
               cursor: "pointer", letterSpacing: 0.3,
             }}
           >
-            {showAdvanced ? "▲" : "▼"} Advanced — paste a custom invite
+            {showAdvanced ? "▲" : "▼"} Advanced — paste invite code
           </button>
           {showAdvanced && (
             <div style={{ display: "flex", gap: 6, marginTop: 8 }}>

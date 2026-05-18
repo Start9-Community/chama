@@ -2,7 +2,7 @@
 // Chama — ClaimPayoutModal (v0.3.0 send-side atomic flow)
 // ══════════════════════════════════════════════════════════════════════════
 //
-// User taps Claim → DestinationPicker presents saved LN handles + new-
+// User taps Claim → DestinationPicker presents payout destinations + new-
 // address input + BOLT11 paste (Tier 1/2/3) → user picks destination
 // → claimAndPayout dispatches decrypt-shares → SSS-combine →
 // redeemEcash → outbound LN payment. The user never holds an
@@ -28,9 +28,7 @@
 import { useRef, useState } from "react";
 import { T } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
-import type {
-  SavedHandle,
-} from "../../payments/saved-handles.js";
+import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
@@ -48,10 +46,10 @@ export interface ClaimPayoutModalProps {
    *  reduced slightly in the modal so the wallet can pay outbound LN
    *  fees from the same balance. */
   payoutMsats: number;
-  /** Saved Lightning Address handles for the picker's Tier 1 list.
-   *  Caller fetches via getSavedLightningHandles(); the modal does not
-   *  re-fetch. */
-  savedHandles: SavedHandle[];
+  /** Saved Lightning Address payout destinations for the picker's Tier 1
+   *  list. Caller fetches via listPayoutDestinations(); the modal does
+   *  not re-fetch. */
+  savedDestinations: PayoutDestination[];
   /** Bound to actions.claimAndPayout from useEscrow. */
   claimAndPayout: (
     escrowId: string,
@@ -91,7 +89,7 @@ interface DispatchArgs {
 export function ClaimPayoutModal({
   escrowId,
   payoutMsats,
-  savedHandles,
+  savedDestinations,
   claimAndPayout,
   probeFederation,
   onClose,
@@ -160,7 +158,7 @@ export function ClaimPayoutModal({
     return (
       <DestinationPicker
         amountSats={payoutSats}
-        savedHandles={savedHandles}
+        savedDestinations={savedDestinations}
         title="Claim your sats"
         subtitle={
           reserveSats > 0
