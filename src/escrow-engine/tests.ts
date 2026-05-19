@@ -98,6 +98,8 @@ import {
 } from "../communities/storage.js";
 import {
   resolveFederationForCommunity,
+  getActiveInvite,
+  setActiveInvite,
   setCustomFederationInvite,
   shouldReconcileFederation,
   BP_FEDERATION_ID,
@@ -1377,6 +1379,19 @@ console.log("\n── FEDERATION DRIFT DETECTION ──");
     }) === false,
     "Tracked match (previousActiveInvite === desiredInvite) → no reconcile",
   );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: `${BLF_FEDERATION_INVITE}\n`,
+      desiredInvite: ` ${BLF_FEDERATION_INVITE} `,
+      walletIsJoined: true,
+      walletFederationId: null,
+    }) === false,
+    "Tracked match tolerates localStorage/clipboard whitespace before reconciling",
+  );
+  setActiveInvite(`${BLF_FEDERATION_INVITE}\n`);
+  assert(getActiveInvite() === BLF_FEDERATION_INVITE,
+    "getActiveInvite trims stored invite whitespace before returning");
+  setActiveInvite("");
   assert(
     shouldReconcileFederation({
       previousActiveInvite: BP_FEDERATION_INVITE,
@@ -5408,21 +5423,22 @@ console.log("\n── RUN FUND AND LOCK ──");
       "Receive-watch dedup: at most one watch-driven + one poll-driven mint-confirming");
   }
 
-  // ── v0.6.5: receive-watch `canceled:rejected` → lock-failed terminal
-  // The federation can refuse to credit a payment even after the
-  // gateway accepted the HTLC. Pre-this-commit we ignored canceled
-  // and the modal sat on mint-confirming for 5 min until mint-
-  // timeout. Now we surface the cancellation immediately, abort
-  // pollForFunding, and the orchestrator returns lock-failed with
-  // an honest "federation didn't accept the payment" message.
+  // ── v0.6.5: post-funded receive-watch `canceled:rejected` does NOT
+  // outrank balance polling. Prod v0.6.4 ignored canceled receive states
+  // and used balance as the LOCK-readiness source of truth. Local dev
+  // briefly regressed by aborting as soon as the watch reported
+  // canceled:rejected after funded, even though BLF payments can still
+  // credit shortly after that watch transition. Preserve the prod behavior:
+  // once the gateway reports funded, keep polling for actual balance.
   {
-    const wallet = makeMockWallet({ balances: [0, 0, 0] });
+    const wallet = makeMockWallet({ balances: [0, 0, 100_000] });
     const phases: FundAndLockPhase[] = [];
     let nowMs = 0;
+    let firedCancel = false;
     const sleep = async (ms: number) => {
       nowMs += ms;
-      if (wallet.calls.getBalance >= 1) {
-        // Federation rejects right after gateway funded.
+      if (!firedCancel && wallet.calls.getBalance >= 1) {
+        firedCancel = true;
         wallet.fireReceiveState("funded");
         wallet.fireReceiveState({ canceled: { reason: "rejected" } });
       }
@@ -5441,16 +5457,47 @@ console.log("\n── RUN FUND AND LOCK ──");
       mintConfirmTimeoutMs: 300_000, // long, must not fire
       pollIntervalMs: 1_000,
     });
+    assert(terminal.kind === "locked",
+      "Post-funded canceled:rejected does not abort if balance later credits");
+    assert(wallet.calls.lockAndPublish === 1,
+      "LOCK still dispatches after balance confirms");
+    assert(phases.some(p => p.kind === "mint-confirming"),
+      "funded receive state still advances the modal to mint-confirming");
+  }
+
+  // ── v0.6.5: pre-funded receive-watch `canceled:rejected` → lock-failed
+  // If the gateway/federation cancels before any funded signal, no HTLC has
+  // been accepted from Chama's perspective. This is safe to surface early.
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 0] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    let firedCancel = false;
+    const sleep = async (ms: number) => {
+      nowMs += ms;
+      if (!firedCancel && wallet.calls.getBalance >= 1) {
+        firedCancel = true;
+        wallet.fireReceiveState({ canceled: { reason: "rejected" } });
+      }
+    };
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_receive_rejected_prefund",
+      amountMsats: 100_000,
+      description: "receive-watch rejected before funded",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep,
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 300_000,
+      pollIntervalMs: 1_000,
+    });
     assert(terminal.kind === "lock-failed",
-      "Federation-rejected receive → terminal lock-failed (no 5-min wait)");
-    if (terminal.kind === "lock-failed") {
-      assert(/rejected/i.test(terminal.error),
-        "Lock-failed error carries the cancel reason");
-      assert(/federation/i.test(terminal.error),
-        "Error names the federation as the source of the refusal");
-    }
+      "Pre-funded canceled:rejected remains an early lock-failed terminal");
     assert(wallet.calls.lockAndPublish === 0,
-      "LOCK never dispatched when federation canceled the receive");
+      "LOCK never dispatches for pre-funded cancellation");
   }
 
   // ── v0.6.5: receive-watch `canceled:expired` → expired terminal
@@ -7603,7 +7650,7 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
     try {
       await wallet.lightning.createInvoice(100_000, "fund");
     } catch (e) {
-      threw = /No trusted Lightning receive gateway/.test((e as Error).message);
+      threw = /No wallet-verifiable Lightning receive gateway/.test((e as Error).message);
     }
 
     assert(threw,
@@ -7730,10 +7777,17 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
   }
 
   // Newer guardian UIs can store Manage Meta in the meta module consensus,
-  // not in the static federation config returned by get_config.
+  // not in the static federation config returned by get_config. Fedimint's
+  // meta module uses numeric default key 0; `vetted_gateways` lives inside
+  // the JSON value stored at that key.
   {
     const metaTrustedGatewayId =
       "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    const hexJson = Array.from(JSON.stringify({
+      vetted_gateways: [metaTrustedGatewayId],
+    }))
+      .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+      .join("");
     const rpcCalls: Array<{
       module: string;
       method: string;
@@ -7751,11 +7805,16 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
             clientName: string,
           ) {
             rpcCalls.push({ module, method, body, clientName });
+            if (
+              module !== "meta" ||
+              method !== "get_consensus_value" ||
+              (body as { key?: unknown })?.key !== 0
+            ) {
+              return null;
+            }
             return {
               revision: 1,
-              value: JSON.stringify({
-                vetted_gateways: [metaTrustedGatewayId],
-              }),
+              value: hexJson,
             };
           },
         },
@@ -7787,19 +7846,87 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
     await wallet.lightning.createInvoice(100_000, "fund");
 
     assert(rpcCalls.some((call) =>
-      call.module === "2" &&
-      call.method === "get_consensus" &&
-      call.body === "default" &&
+      call.module === "meta" &&
+      call.method === "get_consensus_value" &&
+      (call.body as { key?: unknown })?.key === 0 &&
       call.clientName === "test-client"
-    ), "Adapter probes the meta module consensus by module instance id for vetted gateways");
+    ), "Adapter probes the browser meta module RPC by kind + numeric default key");
     assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
-      "Adapter accepts a gateway trusted by meta.get_consensus even when SDK vetted=false");
+      "Adapter accepts a gateway trusted by hex-encoded meta.get_consensus default value even when SDK vetted=false");
     await wallet.cleanup();
   }
 
-  // BLF exposes vetted_gateways in guardian admin meta, but older browser SDK
-  // get_config/meta RPC paths may not surface that value to wallet clients.
-  // Keep the fallback scoped to the curated federation ID and exact gateway ID.
+  // The meta default value can also come back as byte-array JSON depending on
+  // the SDK path. Keep decoding both shapes.
+  {
+    const metaTrustedGatewayId =
+      "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    const rpcCalls: Array<{ body: unknown }> = [];
+    const byteJson = Array.from(
+      JSON.stringify({ vetted_gateways: [metaTrustedGatewayId] }),
+    ).map((c) => c.charCodeAt(0));
+    const h = makeRealWallet({
+      federation: {
+        clientName: "test-client",
+        client: {
+          async rpcSingle(
+            module: string,
+            method: string,
+            body: unknown,
+          ) {
+            rpcCalls.push({ body });
+            if (
+              module !== "meta" ||
+              method !== "get_consensus_value" ||
+              (body as { key?: unknown })?.key !== 0
+            ) {
+              return null;
+            }
+            return {
+              revision: 1,
+              value: byteJson,
+            };
+          },
+        },
+        async getConfig() {
+          return {
+            modules: {
+              0: { kind: "ln" },
+              2: { kind: "meta" },
+            },
+          };
+        },
+        async getFederationId() { return "fed_real"; },
+        async getInviteCode() { return "fed1real"; },
+        async listTransactions() { return []; },
+      },
+    }, [
+      {
+        info: {
+          gateway_id: metaTrustedGatewayId,
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.lightning.createInvoice(100_000, "fund");
+
+    assert(rpcCalls.some((call) => (call.body as { key?: unknown })?.key === 0),
+      "Adapter probes the numeric default meta key for object-style gateway trust");
+    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts byte-array gateway trust from meta.get_consensus(default)");
+    await wallet.cleanup();
+  }
+
+  // Receive invoices are different from outbound payout: if the wallet cannot
+  // verify gateway trust itself, a QR can take payment and then reject before
+  // ecash mints. BLF's curated fallback is therefore NOT allowed on receive
+  // unless the federation config advertises the meta module and the browser
+  // SDK simply cannot call that module.
   {
     const blfFederationId =
       "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
@@ -7842,10 +7969,77 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       },
     ]);
     const wallet = adaptRealWallet(h.real as any);
+    let threw = false;
+    try {
+      await wallet.lightning.createInvoice(100_000, "fund");
+    } catch (e) {
+      threw = /No wallet-verifiable Lightning receive gateway/.test((e as Error).message);
+    }
+
+    assert(threw,
+      "Adapter refuses BLF receive invoices when only curated trust exists");
+    assert(h.calls.createInvoice === 0,
+      "Adapter does not create a BLF receive QR from curated-only trust");
+    await wallet.cleanup();
+  }
+
+  // BLF's current browser SDK advertises a meta module in get_config, but the
+  // WASM client can answer "module not found" for client-rpc(meta). In that
+  // specific case, use the tiny federation-scoped curated fallback so the
+  // known Fedi gateway remains selectable without trusting Henwen.
+  {
+    const blfFederationId =
+      "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
+    const blfTrustedGatewayId =
+      "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    const h = makeRealWallet({
+      federation: {
+        clientName: "test-client",
+        client: {
+          async rpcSingle() {
+            throw new Error("module not found: meta");
+          },
+        },
+        async getConfig() {
+          return {
+            modules: {
+              0: { kind: "ln" },
+              1: { kind: "mint" },
+              4: { kind: "meta" },
+            },
+          };
+        },
+        async getFederationId() { return blfFederationId; },
+        async getInviteCode() { return "fed1blf"; },
+        async listTransactions() { return []; },
+      },
+    }, [
+      {
+        info: {
+          gateway_id: blfTrustedGatewayId,
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+      {
+        info: {
+          gateway_id: "039d1e06e6b10f3d18bbb76bb67f38a7088679c9a5e5914f4efe839298cb17e5e1",
+          api: "https://gateway.henwen.net/v1",
+          lightning_alias: "Henwen",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
     await wallet.lightning.createInvoice(100_000, "fund");
 
     assert(h.calls.createInvoiceGatewayId === blfTrustedGatewayId,
-      "Adapter uses BLF's curated guardian-vetted gateway instead of untrusted Henwen");
+      "Adapter uses BLF's exact curated gateway for receive when meta exists but this SDK cannot call it");
     await wallet.cleanup();
   }
 

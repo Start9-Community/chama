@@ -113,7 +113,8 @@ export function getActiveInvite(): string | null {
   try {
     if (typeof localStorage === "undefined") return null;
     const v = localStorage.getItem(ACTIVE_INVITE_STORAGE_KEY);
-    return v && v.startsWith("fed1") ? v : null;
+    const trimmed = v?.trim();
+    return trimmed && trimmed.startsWith("fed1") ? trimmed : null;
   } catch {
     return null;
   }
@@ -181,13 +182,15 @@ export function shouldReconcileFederation(inputs: {
   walletFederationId?: string | null;
 }): boolean {
   if (!inputs.walletIsJoined) return false;
-  const expectedFedId = expectedFederationIdForInvite(inputs.desiredInvite);
+  const previousInvite = inputs.previousActiveInvite?.trim() || null;
+  const desiredInvite = inputs.desiredInvite.trim();
+  const expectedFedId = expectedFederationIdForInvite(desiredInvite);
   const walletFedId = normalizeFederationId(inputs.walletFederationId);
   if (expectedFedId && walletFedId) {
     return expectedFedId !== walletFedId;
   }
-  if (inputs.previousActiveInvite === null) return true;
-  return inputs.previousActiveInvite !== inputs.desiredInvite;
+  if (previousInvite === null) return true;
+  return previousInvite !== desiredInvite;
 }
 
 // ══════════════════════════════════════════════════════════════════════════

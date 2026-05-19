@@ -260,6 +260,32 @@ Independent of Chama versioning. File when natural breaks appear.
       surfaces. Report regressions with package versions, federation,
       browser, and console/network logs.
 
+- [ ] **Fedimint browser meta / Manage Meta access report.** Capture the
+      v0.6.5 BLF gateway-vetting debugging trail for the Fedimint team.
+      In the browser SDK, `get_config` can advertise a `meta` module at
+      instance id `4`, but `rpcSingle("meta", "get_consensus_value",
+      { key: 0 })` and `rpcSingle("4", "get_consensus_value", { key: 0 })`
+      can both fail with `module not found`. Chama now treats this as a
+      browser-SDK access gap and uses a tiny federation-scoped fallback only
+      for BLF's known Fedi gateway.
+
+      Suggested upstream asks:
+
+      - Document when wallet clients should address modules by kind
+        (`"meta"`) versus instance id (`"4"`), especially from browser WASM.
+      - Provide a stable typed helper for reading guardian Manage Meta /
+        `vetted_gateways` from wallet clients.
+      - Clarify that `vetted_gateways` lives inside the default meta value
+        at `MetaKey(0)`, not as a direct meta key.
+      - Document the browser serialization shape for `MetaValue` (JSON
+        string, hex-encoded JSON, byte-array JSON, or object wrapper).
+      - Expose a receive-safe gateway trust bit in `listGateways`, or explain
+        why a gateway can be guardian-vetted while the SDK reports
+        `vetted=false`.
+      - Add a browser canary test where a federation advertises `meta` in
+        config and a wallet client successfully reads Manage Meta through
+        the public SDK surface.
+
 - [ ] **OPFS resilience PR for `@fedimint/transport-web`.** Draft `PR.md`
       exists. Chama runs this fix in production since v0.1.11. File first
       as the small fast-yes upstream contribution.

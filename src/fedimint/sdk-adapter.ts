@@ -401,10 +401,21 @@ function normalizeFederationId(value: unknown): string | null {
 }
 
 function addGatewayIds(value: unknown, out: Set<string>): void {
+  addGatewayIdsInner(value, out, 0);
+}
+
+function addGatewayIdsInner(value: unknown, out: Set<string>, depth: number): void {
+  if (!value || depth > 6) return;
   if (Array.isArray(value)) {
+    const decoded = parseByteArrayEncodedJson(value);
+    if (decoded !== null) {
+      addGatewayIdsInner(decoded, out, depth + 1);
+      return;
+    }
     for (const item of value) {
       const id = normalizeGatewayId(item);
       if (id) out.add(id);
+      else addGatewayIdsInner(item, out, depth + 1);
     }
     return;
   }
@@ -416,14 +427,66 @@ function addGatewayIds(value: unknown, out: Set<string>): void {
       return;
     }
     try {
-      addGatewayIds(JSON.parse(value), out);
+      addGatewayIdsInner(JSON.parse(value), out, depth + 1);
     } catch {}
+    const decoded = parseHexEncodedJson(value);
+    if (decoded !== null) addGatewayIdsInner(decoded, out, depth + 1);
+    return;
+  }
+
+  if (typeof value === "object") {
+    for (const child of Object.values(value as Record<string, unknown>)) {
+      addGatewayIdsInner(child, out, depth + 1);
+    }
+  }
+}
+
+function parseByteArrayEncodedJson(value: unknown[]): unknown | null {
+  if (
+    value.length === 0 ||
+    !value.every((byte) =>
+      typeof byte === "number" &&
+      Number.isInteger(byte) &&
+      byte >= 0 &&
+      byte <= 255
+    )
+  ) {
+    return null;
+  }
+  const bytes = new Uint8Array(value as number[]);
+  if (bytes[0] !== 0x7b && bytes[0] !== 0x5b) return null;
+  try {
+    const decoded = new TextDecoder().decode(bytes).trim();
+    if (!decoded.startsWith("{") && !decoded.startsWith("[")) return null;
+    return JSON.parse(decoded);
+  } catch {
+    return null;
   }
 }
 
 function isVettedGatewaysKey(value: unknown): boolean {
   return typeof value === "string" &&
     (value.trim() === "vetted_gateways" || value.trim() === "vettedGateways");
+}
+
+function parseHexEncodedJson(value: string): unknown | null {
+  const hex = value.trim().toLowerCase();
+  if (!/^[0-9a-f]+$/.test(hex) || hex.length % 2 !== 0) return null;
+  // MetaValue serializes as bytes on some SDK paths. JSON objects/arrays begin
+  // with "{" / "[" (0x7b / 0x5b), so avoid treating ordinary gateway ids as
+  // encoded meta.
+  if (!hex.startsWith("7b") && !hex.startsWith("5b")) return null;
+  try {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    const decoded = new TextDecoder().decode(bytes).trim();
+    if (!decoded.startsWith("{") && !decoded.startsWith("[")) return null;
+    return JSON.parse(decoded);
+  } catch {
+    return null;
+  }
 }
 
 function collectVettedGatewayIds(value: unknown, out: Set<string>, depth = 0): void {
@@ -435,9 +498,16 @@ function collectVettedGatewayIds(value: unknown, out: Set<string>, depth = 0): v
         collectVettedGatewayIds(JSON.parse(trimmed), out, depth + 1);
       } catch {}
     }
+    const decoded = parseHexEncodedJson(trimmed);
+    if (decoded !== null) collectVettedGatewayIds(decoded, out, depth + 1);
     return;
   }
   if (Array.isArray(value)) {
+    const decoded = parseByteArrayEncodedJson(value);
+    if (decoded !== null) {
+      collectVettedGatewayIds(decoded, out, depth + 1);
+      return;
+    }
     if (value.length >= 2 && isVettedGatewaysKey(value[0])) {
       addGatewayIds(value[1], out);
     }
@@ -537,6 +607,46 @@ type LowLevelRpcClient = {
   ): Promise<Response>;
 };
 
+// Fedimint's meta module stores the full Manage Meta JSON object under
+// DEFAULT_META_KEY = MetaKey(0). Fields like `vetted_gateways` live inside
+// that JSON value; they are not themselves meta-module keys.
+const META_DEFAULT_KEY = 0;
+
+function summarizeMetaProbeResult(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") {
+    return value.length > 64 ? `${value.slice(0, 64)}...` : value;
+  }
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).join(",");
+    const inner = record.value;
+    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+      return `object(${keys}; valueKeys=${Object.keys(inner as Record<string, unknown>).join(",")})`;
+    }
+    if (Array.isArray(inner)) {
+      return `object(${keys}; value=array(${inner.length}))`;
+    }
+    if (typeof inner === "string") {
+      return `object(${keys}; value=${inner.length > 48 ? `${inner.slice(0, 48)}...` : inner})`;
+    }
+    return `object(${keys})`;
+  }
+  return typeof value;
+}
+
+function summarizeError(value: unknown): string {
+  if (value instanceof Error) return value.message;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value).slice(0, 240);
+  } catch {
+    return String(value);
+  }
+}
+
 function getLowLevelRpc(real: RealFedimintWallet): {
   client: LowLevelRpcClient;
   clientName: string;
@@ -563,25 +673,35 @@ async function getMetaModuleConsensus(
   const lowLevel = getLowLevelRpc(real);
   if (!lowLevel) return [];
 
-  const modules = [...moduleRefs];
+  const modules = [...new Set(["meta", ...moduleRefs])];
   if (modules.length === 0) return [];
-  const payloads: unknown[] = ["default"];
+  const payloads: unknown[] = [META_DEFAULT_KEY];
   const values: unknown[] = [];
+  console.info(
+    `[chama] LN meta module probe: modules=${modules.join(", ")} keys=${payloads.join(", ")}`,
+  );
   for (const moduleRef of modules) {
     for (const payload of payloads) {
       try {
         const result = await lowLevel.client.rpcSingle(
           moduleRef,
-          "get_consensus",
-          payload,
+          "get_consensus_value",
+          { key: payload },
           lowLevel.clientName,
         );
-        if (result !== null && result !== undefined) values.push(result);
-        return values;
+        console.info(
+          `[chama] meta.get_consensus_value module=${moduleRef} key=${String(payload)}(default) -> ${summarizeMetaProbeResult(result)}`,
+        );
+        if (result !== null && result !== undefined) {
+          values.push(result);
+        }
       } catch (e) {
-        console.debug("[chama] meta.get_consensus probe failed:", moduleRef, payload, e);
+        console.info(
+          `[chama] meta.get_consensus_value failed module=${moduleRef} key=${String(payload)}(default): ${summarizeError(e)}`,
+        );
       }
     }
+    if (values.length > 0) return values;
   }
   return values;
 }
@@ -619,24 +739,33 @@ async function getMetaVettedGatewayIds(
       collectVettedGatewayIds(config, trusted);
       configContainsMetaModule = configHasModuleKind(config, "meta");
       collectModuleRefs(config, "meta", metaModuleRefs);
+      console.info(
+        `[chama] LN ${purpose} federation config meta probe: metaModule=${configContainsMetaModule} refs=${[...metaModuleRefs].join(", ") || "none"} ids=${[...trusted].join(", ") || "none"}`,
+      );
     } catch (e) {
       console.debug("[chama] Could not read federation config meta for gateway vetting:", e);
     }
   }
 
   if (configContainsMetaModule) {
-    if (metaModuleRefs.size === 0) {
-      console.debug(
-        "[chama] Federation config mentions meta but exposes no callable meta module id",
-      );
-    } else {
-      const consensusValues = await getMetaModuleConsensus(real, metaModuleRefs);
-      for (const value of consensusValues) collectVettedGatewayIds(value, trusted);
-    }
+    const consensusValues = await getMetaModuleConsensus(real, metaModuleRefs);
+    for (const value of consensusValues) collectVettedGatewayIds(value, trusted);
   }
 
-  if (trusted.size === 0) {
+  if (
+    trusted.size === 0 &&
+    (purpose === "pay" || (purpose === "receive" && configContainsMetaModule))
+  ) {
+    if (purpose === "receive") {
+      console.warn(
+        "[chama] LN receive using curated gateway fallback because this browser SDK exposes the federation meta module in config but cannot call it",
+      );
+    }
     await addCuratedGatewayTrust(real, trusted, purpose);
+  } else if (trusted.size === 0 && purpose === "receive") {
+    console.warn(
+      "[chama] LN receive skipped curated gateway fallback; receive invoices require wallet-verifiable gateway trust",
+    );
   }
 
   if (trusted.size > 0) {
@@ -710,8 +839,8 @@ export function adaptRealWallet(
         if (selectableGateways.length > 0) {
           throw new Error(
             purpose === "receive"
-              ? "No trusted Lightning receive gateway is available for this federation. " +
-                "Refusing to show a QR code that may take payment and reject the claim."
+              ? "No wallet-verifiable Lightning receive gateway is available for this federation. " +
+                "Refusing to show a QR code that may take payment and reject before ecash mints."
               : "No trusted Lightning pay gateway is available for this federation. " +
                 "Your claimed sats are still in your Chama wallet; payout can be retried.",
           );

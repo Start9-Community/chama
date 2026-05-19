@@ -715,6 +715,15 @@ function MintTimeoutState({
 function LockFailedState({
   error, onCancel,
 }: { error: string; onCancel: () => void }) {
+  const isWalletVerifiableGatewayError =
+    /wallet-verifiable Lightning receive gateway/i.test(error);
+  const title = isWalletVerifiableGatewayError
+    ? "Funding unavailable here"
+    : "Couldn't lock the trade";
+  const detail = isWalletVerifiableGatewayError
+    ? "This federation is listing Lightning receive gateways, but none are wallet-verifiable from this browser. Chama did not create an invoice, so no sats were requested."
+    : error;
+
   return (
     <div>
       <div style={{
@@ -724,10 +733,10 @@ function LockFailedState({
       }}>
         <div style={{ fontSize: 24, marginBottom: 8 }}>✕</div>
         <div style={{ fontSize: 12, fontWeight: 700, color: T.red, fontFamily: T.sans, marginBottom: 4 }}>
-          Couldn't lock the trade
+          {title}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, wordBreak: "break-word" }}>
-          {error}
+          {detail}
         </div>
       </div>
       <button

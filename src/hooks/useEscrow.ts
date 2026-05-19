@@ -1382,6 +1382,18 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       });
 
       if (driftDetected) {
+        const fundingSignal = fundingInProgressRef.current;
+        const fundingInFlight = !!fundingSignal && !fundingSignal.aborted;
+        if (fundingInFlight || claimPayoutInProgressRef.current) {
+          const err = new Error(
+            fundingInFlight
+              ? "Refusing to switch federations while a funding operation is in progress."
+              : "Refusing to switch federations while a claim payout is in progress.",
+          );
+          (err as Error & { code?: string }).code = "RECONCILE_REFUSED_MONEY_FLOW_IN_PROGRESS";
+          throw err;
+        }
+
         let opfsBalanceMsats = 0;
         try {
           opfsBalanceMsats = await fedimint.getBalance();
