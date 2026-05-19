@@ -56,6 +56,7 @@ export interface AtomicFundingModalProps {
 
 type ModalPhase =
   | { kind: "creating-invoice" }
+  | { kind: "creating-invoice-slow" }
   | { kind: "awaiting-payment"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming-slow"; bolt11: string; expiresAt: number }
@@ -113,6 +114,14 @@ export function AtomicFundingModal({
           }
           if (p.kind === "creating-invoice") {
             setPhase({ kind: "creating-invoice" });
+            return;
+          }
+          if (p.kind === "creating-invoice-slow") {
+            // v0.6.5: flip to the honest "still trying, federation
+            // is slow" surface. The orchestrator keeps racing the
+            // createFundingInvoice call against the hard timeout
+            // underneath; this just keeps the user informed.
+            setPhase({ kind: "creating-invoice-slow" });
             return;
           }
           if (p.kind === "awaiting-payment") {
@@ -253,7 +262,11 @@ export function AtomicFundingModal({
           }}>×</button>
         </div>
 
-        {phase.kind === "creating-invoice" && <CreatingInvoice />}
+        {phase.kind === "creating-invoice" && <CreatingInvoice slow={false} />}
+
+        {phase.kind === "creating-invoice-slow" && (
+          <CreatingInvoice slow={true} onCancel={handleCancel} />
+        )}
 
         {(phase.kind === "awaiting-payment" || phase.kind === "mint-confirming") && (
           <InvoiceDisplay
@@ -306,21 +319,67 @@ export function AtomicFundingModal({
 
 // ── Sub-components ──────────────────────────────────────────────────────
 
-function CreatingInvoice() {
+function CreatingInvoice({
+  slow,
+  onCancel,
+}: {
+  slow: boolean;
+  onCancel?: () => void;
+}) {
+  // v0.6.5: pre-this-fix the tiny 8x8 dot + 9px text was hard to spot
+  // at all, and at the modal scale read as "empty modal." Bumped to a
+  // visible spinner + larger label so users know we're actively
+  // working. The `slow` variant fires at DEFAULT_INVOICE_SLOW_WARN_MS
+  // (10s) and surfaces an honest "federation is slow" message plus a
+  // cancel affordance — the hard 45s timeout still fires underneath
+  // and will flip to lock-failed if nothing comes back.
   return (
     <div style={{
       padding: "32px 16px", textAlign: "center",
-      background: T.surface, border: `1px solid ${T.border}`,
+      background: slow ? T.amberDim : T.surface,
+      border: `1px solid ${slow ? T.amber + "44" : T.border}`,
       borderRadius: T.r,
     }}>
       <div style={{
-        width: 8, height: 8, borderRadius: "50%",
-        background: T.accent, animation: "pulse 1.4s ease-in-out infinite",
-        margin: "0 auto 12px",
+        width: 28, height: 28, borderRadius: "50%",
+        border: `3px solid ${slow ? T.amber : T.accent}`,
+        borderTopColor: "transparent",
+        animation: "spin 1s linear infinite",
+        margin: "0 auto 14px",
       }} />
-      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>
-        GENERATING INVOICE…
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{
+        fontSize: 12, fontWeight: 700,
+        color: slow ? T.amber : T.accent,
+        fontFamily: T.mono, letterSpacing: 1,
+        marginBottom: slow ? 8 : 0,
+      }}>
+        {slow ? "FEDERATION IS SLOW…" : "GENERATING INVOICE…"}
       </div>
+      {slow && (
+        <>
+          <div style={{
+            fontSize: 11, color: T.text, fontFamily: T.sans,
+            lineHeight: 1.5, marginTop: 6, marginBottom: 12,
+          }}>
+            Still trying to reach your federation's Lightning gateway.
+            We'll keep at it for a few more seconds.
+          </div>
+          {onCancel && (
+            <button
+              onClick={onCancel}
+              style={{
+                padding: "8px 16px", borderRadius: T.rs,
+                background: T.surface, border: `1px solid ${T.border}`,
+                color: T.muted, fontFamily: T.mono, fontSize: 10,
+                fontWeight: 700, cursor: "pointer", letterSpacing: 0.3,
+              }}
+            >
+              Cancel
+            </button>
+          )}
+        </>
+      )}
     </div>
   );
 }

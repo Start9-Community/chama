@@ -5233,6 +5233,77 @@ console.log("\n── RUN FUND AND LOCK ──");
       "No invoice-created phase emitted on invoice-creation failure");
   }
 
+  // ── v0.6.5: createFundingInvoice timeout
+  // Hangs forever → hard cap fires → terminal lock-failed with a clear
+  // "couldn't reach federation" message. Before this guard, the modal
+  // could sit indefinitely on the CreatingInvoice spinner when the
+  // federation's WebSocket transport was broken.
+  {
+    const wallet = makeMockWallet({ balances: [0] });
+    const phases: FundAndLockPhase[] = [];
+    const hangingInvoice = () => new Promise<string>(() => {
+      // never resolves, never rejects — simulates hanging gateway lookup
+    });
+    let nowMs = 0;
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_invoice_hang",
+      amountMsats: 100_000,
+      description: "hang test",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: hangingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      invoiceTimeoutMs: 30,
+      invoiceSlowWarnMs: 10,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "lock-failed",
+      "Hung createFundingInvoice → terminal lock-failed via hard timeout");
+    if (terminal.kind === "lock-failed") {
+      assert(/reach the federation/i.test(terminal.error),
+        "Timeout error message points at federation reachability");
+    }
+    assert(phases.some(p => p.kind === "creating-invoice-slow"),
+      "Slow-warn phase emitted before the hard timeout");
+    assert(!phases.some(p => p.kind === "invoice-created"),
+      "No invoice-created phase when createFundingInvoice never resolved");
+    assert(wallet.calls.lockAndPublish === 0,
+      "LOCK never dispatched when invoice timed out");
+  }
+
+  // ── v0.6.5: fast invoice → no slow-warn phase
+  // A warm federation responds in <slow-warn ms, so the user never sees
+  // the "federation is slow" surface.
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_invoice_fast",
+      amountMsats: 100_000,
+      description: "fast invoice test",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice, // resolves immediately
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      invoiceTimeoutMs: 5_000,
+      invoiceSlowWarnMs: 50,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "locked",
+      "Fast invoice → happy path still works");
+    assert(!phases.some(p => p.kind === "creating-invoice-slow"),
+      "No slow-warn phase when invoice resolves before slow-warn timer");
+  }
+
   // ── Aborted mid-flow: signal triggered while polling
   {
     const ctrl = new AbortController();

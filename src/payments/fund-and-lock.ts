@@ -57,9 +57,16 @@ export type FundingPhase =
   | { kind: "aborted" };
 
 /** Full phase model emitted by runFundAndLock. Includes invoice creation
- *  and lock dispatch in addition to FundingPhase. */
+ *  and lock dispatch in addition to FundingPhase.
+ *  v0.6.5: `creating-invoice-slow` fires when invoice creation has been
+ *  in flight for more than DEFAULT_INVOICE_SLOW_WARN_MS without
+ *  resolving — typically because the federation's WebSocket transport
+ *  is flaky and the gateway-lookup call is hanging. The poll loop
+ *  keeps trying until the hard timeout (DEFAULT_INVOICE_TIMEOUT_MS)
+ *  fires. */
 export type FundAndLockPhase =
   | { kind: "creating-invoice" }
+  | { kind: "creating-invoice-slow" }
   | { kind: "invoice-created"; bolt11: string; expiresAt: number }
   | FundingPhase
   | { kind: "locking" }
@@ -116,6 +123,20 @@ export const DEFAULT_POLL_INTERVAL_MS = 5_000;
  *  variance from gateway routing fees, and we'd rather false-positive
  *  a success than false-negative into timeout territory. */
 export const DEFAULT_THRESHOLD_PCT = 0.9;
+
+/** v0.6.5: hard cap on createFundingInvoice. The Fedimint WASM
+ *  client's gateway-lookup + invoice-create chain can hang silently
+ *  when the federation's WebSocket transport is unreliable (see the
+ *  iroh-canary failure spam in cold-start reports). Without a cap the
+ *  modal sits forever on the small "GENERATING INVOICE…" spinner with
+ *  no QR and no error — a black-hole UX. 45s is generous enough for a
+ *  warm federation while still failing fast on a broken one. */
+export const DEFAULT_INVOICE_TIMEOUT_MS = 45_000;
+
+/** v0.6.5: at 10s into invoice creation, flip the modal to a
+ *  "creating-invoice-slow" surface so the user sees we're still
+ *  trying. The poll loop keeps going until the hard cap above. */
+export const DEFAULT_INVOICE_SLOW_WARN_MS = 10_000;
 
 const defaultSleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -268,6 +289,9 @@ export interface RunFundAndLockOpts extends RunFundAndLockDeps {
   mintConfirmTimeoutMs?: number;
   mintSlowWarnMs?: number;
   pollIntervalMs?: number;
+  /** v0.6.5: createFundingInvoice tunables. */
+  invoiceTimeoutMs?: number;
+  invoiceSlowWarnMs?: number;
   /** Test seams. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -305,13 +329,49 @@ export async function runFundAndLock(
     return { kind: "lock-failed", error: err };
   }
 
+  // v0.6.5: race createFundingInvoice against a hard timeout. The
+  // Fedimint WASM client's gateway-lookup + invoice-create chain can
+  // hang silently when the federation's WebSocket transport is broken
+  // (iroh-canary relay failures in cold-start reports). Without this
+  // race the modal sat forever on the tiny "GENERATING INVOICE…"
+  // spinner with no QR and no error. A slow-warn at 10s gives the
+  // user honest progress while we keep trying; the hard timeout at
+  // 45s fails fast with a recoverable lock-failed error.
+  const invoiceTimeoutMs = opts.invoiceTimeoutMs ?? DEFAULT_INVOICE_TIMEOUT_MS;
+  const invoiceSlowWarnMs = opts.invoiceSlowWarnMs ?? DEFAULT_INVOICE_SLOW_WARN_MS;
+  let slowWarnTimer: ReturnType<typeof setTimeout> | null = null;
+  let hardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   let bolt11: string;
   try {
-    bolt11 = await opts.createFundingInvoice(opts.amountMsats, opts.description);
+    const slowWarnPromise = new Promise<void>((resolve) => {
+      slowWarnTimer = setTimeout(() => {
+        emit({ kind: "creating-invoice-slow" });
+        resolve();
+      }, invoiceSlowWarnMs);
+    });
+    void slowWarnPromise; // suppress unused-warning; emits a side-effect phase
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      hardTimeoutTimer = setTimeout(() => {
+        reject(new Error(
+          "Couldn't reach the federation to generate an invoice. " +
+          "The connection looks unreliable right now — try again in a moment, " +
+          "or switch communities if it persists.",
+        ));
+      }, invoiceTimeoutMs);
+    });
+
+    bolt11 = await Promise.race([
+      opts.createFundingInvoice(opts.amountMsats, opts.description),
+      timeoutPromise,
+    ]);
   } catch (e: any) {
     const err = e?.message || "Couldn't create funding invoice";
     emit({ kind: "lock-failed", error: err });
     return { kind: "lock-failed", error: err };
+  } finally {
+    if (slowWarnTimer) clearTimeout(slowWarnTimer);
+    if (hardTimeoutTimer) clearTimeout(hardTimeoutTimer);
   }
   const expiresAt = (opts.now ?? defaultNow)() +
     (opts.paymentDeadlineMs ?? DEFAULT_PAYMENT_DEADLINE_MS);
