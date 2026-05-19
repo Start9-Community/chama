@@ -220,14 +220,22 @@ function formatReceiveState(state: RealLnReceiveState): string {
 export type LnReceiveStateKind =
   | "created"
   | "waiting_for_payment"
-  | "canceled"
+  | { canceled: { reason: string } }
   | "funded"
   | "awaiting_funds"
   | "claimed";
 
 function classifyReceiveState(state: RealLnReceiveState): LnReceiveStateKind {
   if (typeof state === "string") return state;
-  if ("canceled" in state) return "canceled";
+  // v0.6.5: preserve the cancel reason so the orchestrator can
+  // surface federation-side rejections immediately (canceled:rejected)
+  // and distinguish invoice expiry (canceled:expired) from gateway
+  // rejection. Without the reason every cancel collapsed to a
+  // generic "canceled" and the modal had no way to render an
+  // accurate error.
+  if ("canceled" in state) {
+    return { canceled: { reason: state.canceled.reason } };
+  }
   if ("waiting_for_payment" in state) return "waiting_for_payment";
   // Defensive default — any unknown object shape gets bucketed as
   // claimed terminal so the orchestrator doesn't hang waiting.

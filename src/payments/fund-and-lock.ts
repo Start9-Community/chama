@@ -270,7 +270,7 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
 export type LnReceiveWatchKind =
   | "created"
   | "waiting_for_payment"
-  | "canceled"
+  | { canceled: { reason: string } }
   | "funded"
   | "awaiting_funds"
   | "claimed";
@@ -371,8 +371,41 @@ export async function runFundAndLock(
   // noticed the same fact within 5s, but the watch is the lower-
   // latency signal. Deduped so re-fires (awaiting_funds, claimed
   // arriving after funded) don't spam onPhase.
+  //
+  // Cancellation handling: when the federation rejects the credit
+  // (canceled:rejected) or the invoice expires (canceled:expired),
+  // the receive watch fires `canceled` with a reason. Without
+  // handling this, the orchestrator would sit on mint-confirming
+  // for up to 5 min waiting for mint-timeout to fire — the
+  // federation has already terminated the operation. We surface
+  // the failure immediately, and abort an internal signal so
+  // pollForFunding stops looping.
   let mintConfirmingEmittedByWatch = false;
+  let watchOverride: FundAndLockTerminal | null = null;
+  const watchAbort = new AbortController();
   const onReceiveState = (kind: LnReceiveWatchKind) => {
+    if (typeof kind === "object" && "canceled" in kind) {
+      // Already overridden — keep the first reason; subsequent
+      // events from the SDK after a cancel are no-ops anyway.
+      if (watchOverride) return;
+      const reason = kind.canceled.reason;
+      if (reason === "expired") {
+        watchOverride = { kind: "expired" };
+        emit({ kind: "expired" });
+      } else {
+        const msg =
+          `Federation didn't accept the payment (reason: ${reason}). ` +
+          "Your sats may be held at the gateway — try again, or " +
+          "switch communities if it persists.";
+        watchOverride = { kind: "lock-failed", error: msg };
+        emit({ kind: "lock-failed", error: msg });
+      }
+      // Force pollForFunding to bail on its next tick. We can't
+      // touch opts.signal (caller owns it); the local watchAbort is
+      // chained into pollForFunding's signal below.
+      watchAbort.abort();
+      return;
+    }
     if (mintConfirmingEmittedByWatch) return;
     if (kind === "funded" || kind === "awaiting_funds" || kind === "claimed") {
       mintConfirmingEmittedByWatch = true;
@@ -415,12 +448,25 @@ export async function runFundAndLock(
     (opts.paymentDeadlineMs ?? DEFAULT_PAYMENT_DEADLINE_MS);
   emit({ kind: "invoice-created", bolt11, expiresAt });
 
+  // v0.6.5: pollForFunding's signal is the OR of the caller's signal
+  // and watchAbort (set when the receive watch reports canceled).
+  // Whichever fires first ends the poll loop; runFundAndLock then
+  // returns either the caller-initiated `aborted` or the watch-
+  // initiated terminal (lock-failed / expired) — whichever is set.
+  if (opts.signal) {
+    if (opts.signal.aborted) watchAbort.abort();
+    else opts.signal.addEventListener(
+      "abort",
+      () => watchAbort.abort(),
+      { once: true },
+    );
+  }
   const polled = await pollForFunding({
     baselineMsats: baseline,
     expectedMsats: opts.amountMsats,
     getBalance: opts.getBalance,
     onPhase: emit,
-    signal: opts.signal,
+    signal: watchAbort.signal,
     paymentDeadlineMs: opts.paymentDeadlineMs,
     mintConfirmTimeoutMs: opts.mintConfirmTimeoutMs,
     mintSlowWarnMs: opts.mintSlowWarnMs,
@@ -428,6 +474,13 @@ export async function runFundAndLock(
     sleep: opts.sleep,
     now: opts.now,
   });
+
+  // Receive watch override takes precedence: if the federation
+  // canceled the credit, return that terminal regardless of what
+  // pollForFunding decided. Without this the orchestrator would
+  // return polled.kind="aborted" (because watchAbort fired the
+  // signal), losing the actual cancel reason for the modal.
+  if (watchOverride) return watchOverride;
 
   if (polled.kind !== "payment-confirmed") {
     return polled;

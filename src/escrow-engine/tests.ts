@@ -5408,6 +5408,85 @@ console.log("\n── RUN FUND AND LOCK ──");
       "Receive-watch dedup: at most one watch-driven + one poll-driven mint-confirming");
   }
 
+  // ── v0.6.5: receive-watch `canceled:rejected` → lock-failed terminal
+  // The federation can refuse to credit a payment even after the
+  // gateway accepted the HTLC. Pre-this-commit we ignored canceled
+  // and the modal sat on mint-confirming for 5 min until mint-
+  // timeout. Now we surface the cancellation immediately, abort
+  // pollForFunding, and the orchestrator returns lock-failed with
+  // an honest "federation didn't accept the payment" message.
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 0] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    const sleep = async (ms: number) => {
+      nowMs += ms;
+      if (wallet.calls.getBalance >= 1) {
+        // Federation rejects right after gateway funded.
+        wallet.fireReceiveState("funded");
+        wallet.fireReceiveState({ canceled: { reason: "rejected" } });
+      }
+    };
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_receive_rejected",
+      amountMsats: 100_000,
+      description: "receive-watch rejected",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep,
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 300_000, // long, must not fire
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "lock-failed",
+      "Federation-rejected receive → terminal lock-failed (no 5-min wait)");
+    if (terminal.kind === "lock-failed") {
+      assert(/rejected/i.test(terminal.error),
+        "Lock-failed error carries the cancel reason");
+      assert(/federation/i.test(terminal.error),
+        "Error names the federation as the source of the refusal");
+    }
+    assert(wallet.calls.lockAndPublish === 0,
+      "LOCK never dispatched when federation canceled the receive");
+  }
+
+  // ── v0.6.5: receive-watch `canceled:expired` → expired terminal
+  // Invoice expiry observed via the watch fires earlier than the
+  // poll-loop's deadline check. Same shape: surface immediately,
+  // emit expired, abort pollForFunding.
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 0] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    const sleep = async (ms: number) => {
+      nowMs += ms;
+      if (wallet.calls.getBalance >= 1) {
+        wallet.fireReceiveState({ canceled: { reason: "expired" } });
+      }
+    };
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_receive_expired",
+      amountMsats: 100_000,
+      description: "receive-watch expired",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep,
+      now: () => nowMs,
+      paymentDeadlineMs: 600_000, // long, must not be the trigger
+      mintConfirmTimeoutMs: 300_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "expired",
+      "canceled:expired → terminal expired");
+    assert(phases.some(p => p.kind === "expired"),
+      "expired phase emitted by the watch handler, not by the poll deadline");
+  }
+
   // ── v0.6.5: created/waiting_for_payment don't trigger mint-confirming
   // Only `funded` and later should advance the modal. The earlier
   // states are the QR-display phase — flipping to mint-confirming
