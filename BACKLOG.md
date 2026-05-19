@@ -77,6 +77,55 @@ candidate list with the older roadmap.
       health probe are ready before they tap Fund. Smoke-session source:
       2026-05-19 cold-start glitch report.
 
+- [ ] **Turn-gated vote buttons by category (v0.6.6).** Today both
+      buyer and seller see RELEASE + REFUND simultaneously after LOCK;
+      a seller can accidentally tap "I received the fiat" before the
+      buyer has actually sent it. Gate the UI so exactly one user has
+      their action surfaced at a time, with the order set by category:
+
+      - **P2P trade**: buyer-first (buyer sends fiat → votes RELEASE
+        first → seller's RELEASE button unlocks). Buyer is the actor
+        who has to physically move money out-of-band.
+      - **Bill Pay**: buyer-first (same logic — buyer pays the bill,
+        seller confirms receipt at the utility).
+      - **Lending**: buyer-first (follows P2P pattern; lender disburses
+        first, borrower acknowledges).
+      - **Marketplace**: seller-first (seller ships → votes RELEASE
+        first → buyer's RELEASE unlocks on delivery).
+
+      Second voter UI before first vote: **vote buttons fully hidden**,
+      replaced with "Waiting on buyer to confirm payment sent" /
+      "Waiting on seller to ship" copy. Chat stays available — that's
+      where the clarification happens. After the first user votes,
+      the second user's buttons appear.
+
+      Arbiter: NO buttons until disagreement (buyer and seller voted
+      differently). Arbiter can still see chat and uploaded images
+      throughout — they're observer-only until the dispute path
+      triggers. Image upload for chat is a separate prerequisite —
+      see sub-item below.
+
+      Protocol stays unchanged: the state machine still accepts
+      votes in any order. Gating is UI-only, in a new
+      `decideVotePrompt(state, pubkey)` helper alongside
+      decideArbiterWarning in `src/ui/decisions.ts`. Hard timeout +
+      arbiter still resolve stuck trades — this is purely about
+      preventing accidental wrong-direction votes during the
+      happy path.
+
+      v0.6.6 alongside NWC. Source: 2026-05-19 design session.
+
+- [ ] **Chat image upload + viewer (prerequisite for v0.6.6 arbiter).**
+      Buyer and seller need to be able to share receipts, screenshots,
+      and proof-of-payment images in trade chat. Arbiter needs to view
+      them during dispute resolution. Today chat is text-only.
+      Wire image upload (Blossom or NIP-94 file metadata), inline
+      thumbnail rendering, and tap-to-expand. Encryption follows the
+      existing CHAT NIP-44 path so non-participants can't read
+      receipts. Specifically required by v0.6.6's turn-gated vote
+      flow above — without images, "chat clears the doubt" is half-
+      true.
+
 ---
 
 ## Scratched Off
