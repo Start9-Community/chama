@@ -65,6 +65,20 @@ candidate list with the older roadmap.
 - [ ] **APK rebuild + Zapstore listing.** Rebuild and list after the core
       product surface is stable enough to invite non-developer testers.
 
+- [ ] **v0.6.6 onboarding + NWC.** Next product push: make first-run feel
+      intentional instead of discovered by wandering. Guide a new user
+      through Nostr signer connection, community choice, the built-in
+      Fedimint wallet, payment handles, payout destinations, and the basic
+      escrow lifecycle without turning the app into a marketing page.
+
+      Add NWC as an optional power-user adapter for fund/claim flows while
+      keeping Chama's browser Fedimint wallet as the default path. The user
+      should understand which wallet is holding sats, which wallet is only a
+      remote signer/payment source, and when Chama has or has not requested
+      money. No silent wallet switching.
+
+      Source: 2026-05-19 release planning after v0.6.5.
+
 - [ ] **Pre-warm Fund flow on TradeDetail mount.** First-fire on a fundable
       CREATED listing has the AtomicFundingModal sitting on its
       CreatingInvoice spinner for a noticeable beat while the Fedimint WASM
@@ -113,18 +127,28 @@ candidate list with the older roadmap.
       preventing accidental wrong-direction votes during the
       happy path.
 
-      v0.6.6 alongside NWC. Source: 2026-05-19 design session.
+      Minor-version candidate after onboarding/NWC. Source: 2026-05-19
+      design session.
 
-- [ ] **Chat image upload + viewer (prerequisite for v0.6.6 arbiter).**
+- [ ] **Chat image upload + viewer (prerequisite for dispute polish).**
       Buyer and seller need to be able to share receipts, screenshots,
       and proof-of-payment images in trade chat. Arbiter needs to view
       them during dispute resolution. Today chat is text-only.
       Wire image upload (Blossom or NIP-94 file metadata), inline
       thumbnail rendering, and tap-to-expand. Encryption follows the
       existing CHAT NIP-44 path so non-participants can't read
-      receipts. Specifically required by v0.6.6's turn-gated vote
-      flow above — without images, "chat clears the doubt" is half-
+      receipts. Specifically required by the turn-gated vote flow
+      above — without images, "chat clears the doubt" is half-
       true.
+
+- [ ] **Notifications grand finale.** Treat notifications as a major final
+      polish layer, not a tiny toast sweep. Users need to know when a trade
+      needs action, when sats are locked, when the counterparty voted, when
+      an arbiter is needed, when claim/payout/recovery needs attention, and
+      when a funding invoice is about to expire. Design this privacy-first:
+      opt-in browser/native push, minimal lock-screen text, local in-app
+      notification center, and graceful fallback when push is unavailable.
+      Target after onboarding/NWC and dispute polish are shaped.
 
 ---
 
@@ -143,8 +167,9 @@ codebase. Keep these here briefly so the consolidation has memory.
       testing remains in the investigation queue before any promotion.
 
 - [x] **Release script package-version ordering.** `scripts/release.sh`
-      bumps `package.json` before typecheck/test/build, commits after the
-      gates, then tags and pushes the bumped version.
+      runs typecheck/test/build on a clean tree before bumping, rebuilds
+      after the bump so deployed assets embed the tagged app version,
+      commits only package metadata, then tags and pushes the release.
 
 - [x] **Trusted arbiter pool foundation.** `src/arbiters/pool.ts` reads
       configured arbiters, Create includes community arbiter pools, and
@@ -221,9 +246,9 @@ codebase. Keep these here briefly so the consolidation has memory.
 - [ ] **EcashProvider interface.** Abstract the bearer-cash backend once a
       second provider is concrete enough to shape the interface.
 
-- [ ] **NWC as IN/OUT adapter.** Power-user option for fund and claim,
-      bypassing LN Address / BOLT11 paste where a connected wallet can
-      programmatically pay or receive.
+- [ ] **NWC advanced wallet automation.** After the v0.6.6 NWC foundation,
+      evaluate deeper NWC flows beyond basic fund/claim: recurring payments,
+      saved permissions, policy limits, and richer wallet capability checks.
 
 - [ ] **Arbiter healing powers.** Bounded stale-trade repair without
       consensus, especially for lending repayment timelines.

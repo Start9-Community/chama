@@ -155,8 +155,10 @@ npm run predeploy
 
 # ── Build gate — also PRE-BUMP ─────────────────────────────────────────
 # Same reasoning: keep the working tree untouched until every gate has
-# proven the code is shippable. dist/ is ignored anyway.
-echo "🔎 Running production build..."
+# proven the code is shippable. This is only the shippability gate; after
+# the version bump below, release.sh rebuilds dist so the deployed web bundle
+# embeds the new __APP_VERSION__ value.
+echo "🔎 Running production build gate..."
 npm run build
 
 # ── Bump version (no git tag yet — we'll do it after commit) ──────────
@@ -189,6 +191,20 @@ if git rev-parse -q --verify "refs/tags/v$NEW_VERSION" >/dev/null; then
 fi
 if git ls-remote --exit-code --tags origin "refs/tags/v$NEW_VERSION" >/dev/null 2>&1; then
   echo "❌ Remote tag v$NEW_VERSION already exists on origin."
+  exit 1
+fi
+
+# ── Post-bump build for deploy artifacts ───────────────────────────────
+# Vite reads package.json in vite.config.ts to define __APP_VERSION__.
+# Building only before npm version produces correct code with a stale
+# version badge in dist. Rebuild after the bump so the exact release version
+# is what ships to the web host and Capacitor asset sync.
+echo "🔎 Rebuilding production bundle with v$NEW_VERSION..."
+npm run build
+
+if ! grep -R "$NEW_VERSION" dist/*.html dist/assets/*.js >/dev/null 2>&1; then
+  echo "❌ Built dist does not appear to contain app version $NEW_VERSION."
+  echo "   Refusing to tag/deploy a bundle with a stale version badge."
   exit 1
 fi
 
