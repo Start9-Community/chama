@@ -90,6 +90,23 @@ codebase. Keep these here briefly so the consolidation has memory.
       LOCK validation enforces selected arbiters against the pool. Arbiter
       dashboard and open availability events remain later trust work.
 
+- [x] **Round-robin arbiter selection from the community pool.** v0.6.5
+      replaces the `communityArbiters[0]` always-pick with
+      `pickArbiterFromPool()` keyed by escrow id — deterministic, idempotent
+      on relay replay, and spreads load across the trusted pool without
+      requiring server-side state.
+
+- [x] **Relax one-trade-at-a-time gate to one-funding-operation-at-a-time.**
+      v0.6.5 removes the hard Create + Fund block on active trades.
+      Sellers can serve multiple buyers, buyers can browse for the next
+      trade while a previous one is in LOCKED/voting/approved state. The
+      only remaining gate is `fundingInProgress`, which protects the
+      shared OPFS wallet from concurrent `spendNotes` calls. ChamaBar
+      pill and ActiveTradePill are now plural-aware ("3 active trades ·
+      150k sats in escrow"). Recovery banner narrowed: suppressed while
+      the fund-and-lock or claim-and-payout flows are mid-flight, since
+      those flows own the transient balance.
+
 - [x] **Lightning Address subsection in Me.** The old saved-handles
       subsection is now a separate Payout destinations panel backed by
       `chama_payout_destinations`.
@@ -114,7 +131,9 @@ codebase. Keep these here briefly so the consolidation has memory.
 
 - [ ] **Manual arbiter selection.** Surface arbiter stats and let sellers
       choose from a graduated pool with backup assignment so a missing
-      arbiter cannot deadlock a trade.
+      arbiter cannot deadlock a trade. v0.6.5 round-robin pool selection
+      is the automatic default; manual override remains the graduated-
+      seller affordance.
 
 - [ ] **Recurring payments unlock.** Reveal subscription listings only for
       graduated sellers once aggregate ratings are populated.

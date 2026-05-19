@@ -2,8 +2,8 @@
 // Chama — Recovery banner (v0.3.0 Phase 4 — failure-mode framing)
 // ══════════════════════════════════════════════════════════════════════════
 //
-// Per Pillar 2.1 Option B: balance > 0 between trades is ALWAYS a
-// failure state. ecash exists only during LOCK→CLAIM. v0.3.0 retunes
+// Per Pillar 2.1 Option B: unexplained balance > 0 is a failure state.
+// ecash exists only during LOCK→CLAIM. v0.3.0 retunes
 // this banner from "Continue your trade · withdraw N sats" (v0.2.0)
 // to a failure-mode framing that names the state correctly: the user's
 // last trade didn't finish cleanly, sats are stranded on their local
@@ -11,10 +11,11 @@
 // "withdraw" operation.
 //
 // Trigger contract: balance is large enough for an outbound Lightning
-// payout && !hasActiveBuyerSellerCommitment (see decisions.
-// shouldShowRecoveryBanner). Phase 3's three-way claim failure split
-// (claim-failed / claim-pending / payout-failed) makes the banner more
-// meaningful, not less — payout-failed is the common path here.
+// payout and no active escrow, funding flow, or claim sweep explains it
+// (see decisions.shouldShowRecoveryBanner). Phase 3's three-way claim
+// failure split (claim-failed / claim-pending / payout-failed) makes
+// the banner more meaningful, not less — payout-failed is the common
+// path here.
 //
 // Counterparty resolution: identifyStrandedEcashSource walks the local
 // replay to find the most recent CLAIM event the user signed. Generic
@@ -156,19 +157,20 @@ export function RecoveryBanner({
           textAlign: "center", marginTop: 10,
           fontSize: 9, color: T.muted, fontFamily: T.mono,
         }}>
-          Sats land at your Lightning address · Chama frees up for the next trade
+          Sats land at your Lightning address · Chama keeps your local wallet empty
         </div>
       </div>
 
-      {/* Bottom paragraph — half-opacity per the spec. */}
+      {/* Bottom paragraph — half-opacity per the spec. v0.6.5: with the
+          one-trade gate retired, the old "Browse opens once recovered"
+          framing is misleading — Browse is always open. Reframe to
+          name the actual repair: unexplained sats out of OPFS. */}
       <div style={{
         textAlign: "center", padding: "8px 16px",
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         opacity: 0.5, lineHeight: 1.5,
       }}>
-        {source
-          ? <>Browse opens once your sats are recovered — Chama keeps it simple, one trade at a time.</>
-          : <>Browse opens once your sats are recovered — Chama keeps it simple, one trade at a time.</>}
+        You can keep using Chama. Recovering just clears unexplained sats out of OPFS.
       </div>
     </div>
   );

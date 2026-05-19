@@ -17,6 +17,7 @@ import { stashPendingRedemption, clearPendingRedemption } from "./pending-redemp
 import { type EscrowState, type LockShareEntry, Role, Outcome } from "../escrow-engine/types.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
+import { pickArbiterFromPool } from "../arbiters/pool.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // BRIDGE
@@ -108,9 +109,13 @@ export class EscrowFedimintBridge {
     //
     // Buyer:   if a JOIN ACK landed pre-LOCK, use that pubkey. Otherwise
     //          we don't know who's paying yet and refuse to spend.
-    // Arbiter: prefer a JOINed arbiter; fall back to picking the first
-    //          entry in the trade's communityArbiters pool. If both are
-    //          empty there's no one to assign and we refuse to spend.
+    // Arbiter: prefer a JOINed arbiter; fall back to deterministic
+    //          round-robin selection across the trade's communityArbiters
+    //          pool keyed by escrow id (v0.6.5). Same escrow id always
+    //          maps to the same pool slot, so relay replay is idempotent
+    //          and load distributes evenly across arbiters at trade
+    //          creation. If both are empty there's no one to assign and
+    //          we refuse to spend.
     const buyerPubkey = state.participants[Role.BUYER];
     if (!buyerPubkey) {
       throw new Error(
@@ -120,7 +125,7 @@ export class EscrowFedimintBridge {
       );
     }
     const arbiterPubkey = state.participants[Role.ARBITER]
-      ?? state.communityArbiters[0];
+      ?? pickArbiterFromPool(state.communityArbiters, state.id);
     if (!arbiterPubkey) {
       throw new Error(
         "Cannot lock — no arbiter available. The trade has no JOINed arbiter " +

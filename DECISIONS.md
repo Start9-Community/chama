@@ -973,3 +973,59 @@ and expose a separate Me → Settings row called "Payout destinations."
 **Implication:** Claim and recovery can still offer one-tap saved
 destinations, but the trade-time handle reveal picker no longer has any
 path to show or publish the user's Lightning wallet address.
+
+---
+
+## 2026-05-19 — One funding operation at a time replaces one trade at a time
+
+**Context:** The 2026-05-05 three-tab decision was built on top of a
+hard "one trade at a time" gate: while any user-as-buyer-or-seller
+escrow was live, Create and Fund were blocked. The gate was designed
+for an earlier architecture where concurrent trades risked ecash
+collisions in the shared OPFS wallet. Option B's full wiring (BOLT11
+IN → mint → `spendNotes` → LOCK → OPFS drains to 0) closes that risk:
+the wallet sits at zero between trades, and ecash only exists for the
+milliseconds spanning `runFundAndLock`. The hard gate now over-blocks
+— sellers can't serve multiple buyers, buyers can't browse for the
+next trade while a previous one is in LOCKED/voting/approved.
+
+**Decision:** Retire the one-trade-at-a-time hard gate. Replace it
+with a `fundingInProgress` flag that disables only a second Fund tap
+while `runFundAndLock` is mid-flight. Create + Browse stay open
+always. ChamaBar and ActiveTradePill become plural-aware ("3 active
+trades · 150k sats in escrow"). The recovery banner narrows to skip
+the expected-transient cases — mid-fund and mid-claim hold the
+balance briefly and shouldn't race the very flow that's about to
+drain it.
+
+**Rationale:**
+- The architectural risk the original gate protected against is gone.
+  What remains is one wallet-race scenario (two concurrent
+  `spendNotes` on the shared OPFS wallet), and that's local to the
+  funding flow, not the trade lifecycle. The AtomicFundingModal is
+  already exclusive by nature (one modal at a time); the flag is the
+  programmatic backstop.
+- Users complete trades because sats are locked, not because the UI
+  hid the rest of the app. The commitment is financial. Patience
+  still belongs in the design, but via education and nudges — the
+  pill, claim notifications, the ChamaBar "in escrow" surface — not
+  hard blocks.
+- Multi-trade is a real use case: a seller running three listings,
+  an arbiter watching two LOCKED trades, a buyer browsing for the
+  next thing while waiting on a counterparty to release the current
+  one. The old gate forced these users into a serial workflow that
+  didn't match either the architecture or their lived activity.
+
+**Implications:**
+- Tab routing still puts Browse / Create / Me at the same level.
+  The pill is now informational rather than gating; the only
+  visible "no, not yet" surface is the Fund button briefly greying
+  out while another funding flow is mid-flight.
+- The state machine is unchanged. Each trade's event chain remains
+  independent; concurrency was always a UI-layer concern, never a
+  protocol concern.
+- The "patience as a feature" language in PHILOSOPHY §2.1 is
+  retained but reframed: patience now lives in trade completion
+  speed and user judgment, not in interface gates.
+
+**Status:** Active. Shipped v0.6.5.

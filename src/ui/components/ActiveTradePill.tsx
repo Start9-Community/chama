@@ -1,18 +1,14 @@
 // ══════════════════════════════════════════════════════════════════════════
-// Chama — Active-trade pill (v0.2.0 item 3)
+// Chama — Active-trade pill
 // ══════════════════════════════════════════════════════════════════════════
 //
-// Per the v0.2.0 brief: when the user has an active trade, every
-// non-trade screen surfaces a sticky pill at the top reminding them
-// the trade exists and offering one-tap navigation back to it.
-// Browse and Me stay accessible (per Q2: research listings, update
-// payment handles, etc.), but the pill ensures the active trade is
-// never out of reach.
-//
-// Per Q2, the pill also renders on Create (where the surrounding
-// content explains *why* Create is hard-blocked) and on Sandbox
-// (because Sandbox lives under Me, which is fully accessible during
-// active trade).
+// Informational only: active trades never close Browse, Create, chat, or
+// vote surfaces. The pill keeps live commitments visible and gives the
+// user a quick route back to the most recent active trade. v0.6.5 made
+// it plural-aware — sellers serving multiple buyers, or buyers waiting
+// on one trade while browsing for the next, see "3 active trades · 150k
+// sats in escrow" rather than a singular pill that suggests there's
+// only one.
 
 import { type EscrowState, EscrowStatus } from "../../escrow-engine/types.js";
 import { T, fmtSats } from "../theme.js";
@@ -27,12 +23,24 @@ const STATUS_LABEL: Partial<Record<EscrowStatus, string>> = {
 
 export function ActiveTradePill({
   trade,
+  activeTradeCount = 1,
+  activeTradeMsats,
   onTap,
 }: {
   trade: EscrowState;
+  /** Total live buyer/seller commitments. When > 1 the headline reads
+   *  "N active trades"; tap target stays the most recent trade. */
+  activeTradeCount?: number;
+  /** Aggregate msats committed across all live trades. When the wallet
+   *  balance is correctly 0 (post-LOCK), this surfaces the in-escrow
+   *  total instead of falling back to this single trade's amount. */
+  activeTradeMsats?: number;
   onTap: () => void;
 }) {
   const statusLabel = STATUS_LABEL[trade.status] ?? trade.status.toLowerCase();
+  const count = Math.max(1, activeTradeCount);
+  const amountMsats = activeTradeMsats ?? trade.amountMsats;
+  const tradeWord = count === 1 ? "active trade" : "active trades";
   return (
     <button
       onClick={onTap}
@@ -60,14 +68,14 @@ export function ActiveTradePill({
           fontSize: 11, color: T.purple, fontFamily: T.mono,
           letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700,
         }}>
-          Active trade · {statusLabel}
+          {count} {tradeWord} · {fmtSats(amountMsats)} sats
         </div>
         <div style={{
           fontSize: 13, color: T.text, fontFamily: T.sans,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const,
           marginTop: 2,
         }}>
-          {trade.description} · {fmtSats(trade.amountMsats)} sats
+          {trade.description} · {statusLabel}
         </div>
       </div>
       <span style={{ color: T.muted, fontSize: 18, flexShrink: 0 }}>›</span>

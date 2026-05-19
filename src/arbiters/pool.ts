@@ -112,3 +112,25 @@ export function getTrustedArbiterPool(options: TrustedArbiterPoolOptions = {}): 
 export function normalizeTrustedArbiterInput(raw: string): string[] {
   return unique(splitConfiguredPubkeys(raw));
 }
+
+/**
+ * v0.6.5: deterministic round-robin selection from a community arbiter
+ * pool. Same escrow id always picks the same arbiter — important so
+ * repeated relay replays of LOCK pick a consistent slot rather than
+ * drifting. No server-side state required.
+ *
+ * Algorithm is intentionally simple (charcode sum mod pool length):
+ * the input is a UUID-ish escrow id and the pool is tiny (≤ a few
+ * dozen). A cryptographic hash would be overkill — distribution is
+ * close enough to uniform for fair load-spreading across the pool.
+ */
+export function pickArbiterFromPool(pool: string[], escrowId: string): string | undefined {
+  if (pool.length === 0) return undefined;
+  if (pool.length === 1) return pool[0];
+  let hash = 0;
+  for (let i = 0; i < escrowId.length; i++) {
+    hash = (hash + escrowId.charCodeAt(i)) | 0;
+  }
+  const idx = Math.abs(hash) % pool.length;
+  return pool[idx];
+}

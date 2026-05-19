@@ -9,7 +9,7 @@
 // Advanced → Sandbox for power-user testing.
 //
 // State-aware right-side label per the Phase 5 brief:
-//   - in-trade  : "Active funds in escrow: N sats" (accent pill)
+//   - in-trade  : "N active trade(s) · X sats in escrow" (accent pill)
 //   - stranded  : "Recover N sats →" (amber pill, tappable)
 //   - ready     : "Chama: ready" (muted neutral)
 //
@@ -182,6 +182,11 @@ function ChamaBarLabelPill({
     );
   }
   if (label.kind === "in-trade") {
+    // v0.6.5 plural-aware copy: multiple concurrent trades are allowed,
+    // so the pill aggregates count + total in-escrow sats.
+    const tradeCopy = label.activeTradeCount === 1
+      ? "1 active trade"
+      : `${label.activeTradeCount.toLocaleString()} active trades`;
     return (
       <span style={{
         padding: "5px 12px", borderRadius: 20,
@@ -189,7 +194,7 @@ function ChamaBarLabelPill({
         color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
         letterSpacing: 0.3, whiteSpace: "nowrap",
       }}>
-        ⚡ {label.sats.toLocaleString()} sats in escrow
+        ⚡ {tradeCopy} · {label.sats.toLocaleString()} sats in escrow
       </span>
     );
   }

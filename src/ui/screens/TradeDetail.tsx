@@ -18,6 +18,7 @@ import {
   fmtSats, refundRecipientFor, inputStyle,
 } from "../theme.js";
 import { decideTradeDetailFraming } from "../decisions.js";
+import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import {
   hasStateBExplained,
   markStateBExplained,
@@ -29,7 +30,7 @@ import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 
 export function TradeDetail({
-  state, pubkey, homeCommunity, bootProbeFailed,
+  state, pubkey, homeCommunity, bootProbeFailed, fundingInProgress,
   onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings,
 }: {
   state: EscrowState; pubkey: string;
@@ -45,6 +46,11 @@ export function TradeDetail({
    *  computed by App.tsx from fedimint.bootProbeState — passing the
    *  bool keeps TradeDetail's API minimal and explicit. */
   bootProbeFailed: boolean;
+  /** v0.6.5: true while another runFundAndLock flow is mid-flight on
+   *  the shared OPFS wallet. Disables Fund and swaps its label to
+   *  "{lockLabel} unavailable" + explanatory subtitle so users see
+   *  why the button is greyed rather than just dead. */
+  fundingInProgress: boolean;
   onBack: () => void;
   onVote: (outcome: Outcome) => void;
   onClaim: () => Promise<void>;
@@ -81,6 +87,16 @@ export function TradeDetail({
   const myRole = state.participants.buyer === pubkey ? Role.BUYER
     : state.participants.seller === pubkey ? Role.SELLER
     : state.participants.arbiter === pubkey ? Role.ARBITER : null;
+  // v0.6.5: deterministic preview of which arbiter LOCK will pick from
+  // the community pool, used purely for the Trinity-Ring "auto-assigned"
+  // dot on CREATED listings that don't yet have a JOINed arbiter. Same
+  // function escrow-bridge.ts uses at LOCK time, so the predicted
+  // pubkey matches the eventual real assignment.
+  const previewArbiterPk = state.status === EscrowStatus.CREATED
+    && !state.participants[Role.ARBITER]
+    && state.communityArbiters.length > 0
+    ? (pickArbiterFromPool(state.communityArbiters, state.id) ?? null)
+    : null;
   const voteCheck = myRole ? canVote(state, pubkey) : { canVote: false };
   const winner = getWinner(state);
   const iAmWinner = winner?.pubkey === pubkey;
@@ -333,14 +349,30 @@ export function TradeDetail({
           §5.2 places the arbiter at the apex with buyer/seller flanking
           below; this row mirrors that arrangement. v0.2.0 shipped with
           B/S/A — the §43 test pins B/A/S so future refactors can't
-          silently revert the order. */}
+          silently revert the order.
+
+          v0.6.5 — auto-assigned arbiter preview (see previewArbiterPk
+          above the return). For freshly-created listings on communities
+          with a recruited arbiter pool (BLF etc.), the arbiter slot
+          would otherwise read "Empty" until LOCK lands. Pre-filling
+          with the same pubkey LOCK will pick (via pickArbiterFromPool
+          keyed on escrow id) is honest, not speculative — the round-
+          robin is deterministic. The Dot renders this slot dimmer +
+          italic "Auto · xxxx" so a real JOIN remains distinguishable. */}
       <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 16 }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 16 }}>PARTICIPANTS</div>
         <div style={{ display: "flex", justifyContent: "space-around" }}>
-          {TRINITY_RING_ORDER.map(role => (
-            <Dot key={role} role={role} pk={state.participants[role]} isYou={myRole === role}
-              voted={!!state.votes[role]} outcome={state.votes[role]} />
-          ))}
+          {TRINITY_RING_ORDER.map(role => {
+            const realPk = state.participants[role];
+            const isAutoArbiter = role === Role.ARBITER && !realPk && !!previewArbiterPk;
+            return (
+              <Dot key={role} role={role}
+                pk={realPk ?? (isAutoArbiter ? previewArbiterPk : null)}
+                isYou={myRole === role}
+                voted={!!state.votes[role]} outcome={state.votes[role]}
+                autoAssigned={isAutoArbiter} />
+            );
+          })}
         </div>
       </div>
 
@@ -367,7 +399,13 @@ export function TradeDetail({
                 {joining ? "Joining..." : "Join as Buyer"}
               </button>
             )}
-            {!state.participants.arbiter && (
+            {/* v0.6.5: hide the Join-as-Arbiter affordance when the
+                community pool will auto-assign one. The slot reads as
+                filled (Trinity Ring dot is solid + "Auto · xxxx"), so
+                offering volunteer-join would contradict that and create
+                two competing arbiters. Communities without a recruited
+                pool still show this button. */}
+            {!state.participants.arbiter && !previewArbiterPk && (
               <button disabled={joining} onClick={async () => {
                 setJoining(true);
                 try { await onJoin(Role.ARBITER); } finally { setJoining(false); }
@@ -471,13 +509,16 @@ export function TradeDetail({
             </div>
           )}
 
-          {/* v0.3.1 Phase 3: Fund button gates on bootProbeFailed in
-              addition to its existing locking/buyer guards. The
-              Reconnect CTA lives in ChamaBar (single source of truth
-              per Phase 3 directive); this button just disables with
-              the subtitle below. */}
+          {/* v0.3.1 Phase 3 + v0.6.5: Fund disables on bootProbeFailed
+              (federation unreachable) and on fundingInProgress (another
+              runFundAndLock flow holds the shared OPFS wallet), in
+              addition to its existing locking/buyer guards. When mid-
+              funding, the button label itself changes to "{lockLabel}
+              unavailable" so the disabled state reads as intentional
+              rather than broken. */}
           <button
-            disabled={locking || !state.participants.buyer || bootProbeFailed}
+            disabled={locking || fundingInProgress || !state.participants.buyer || bootProbeFailed}
+            title={fundingInProgress ? "Another funding operation is in progress. Complete it first." : undefined}
             onClick={async () => {
               setLocking(true);
               try {
@@ -488,19 +529,27 @@ export function TradeDetail({
             }}
             style={{
               width: "100%", padding: "16px", borderRadius: T.rs,
-              background: locking || !state.participants.buyer || bootProbeFailed
+              background: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed
                 ? T.surface
                 : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
               border: "none",
-              color: locking || !state.participants.buyer || bootProbeFailed ? T.muted : T.bg,
+              color: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed ? T.muted : T.bg,
               fontFamily: T.mono, fontSize: 14, fontWeight: 800,
-              cursor: locking || !state.participants.buyer || bootProbeFailed ? "default" : "pointer",
+              cursor: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed ? "default" : "pointer",
               letterSpacing: 0.5, transition: "all 0.2s",
             }}
           >
-            {locking ? "Locking..." : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
+            {locking ? "Locking..." : fundingInProgress ? lockLabel + " unavailable" : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
           </button>
-          {bootProbeFailed && (
+          {fundingInProgress && (
+            <div style={{
+              textAlign: "center", marginTop: 8,
+              fontSize: 10, color: T.amber, fontFamily: T.mono,
+            }}>
+              Another funding operation is in progress. Complete it first.
+            </div>
+          )}
+          {bootProbeFailed && !fundingInProgress && (
             <div style={{
               textAlign: "center", marginTop: 8,
               fontSize: 10, color: T.amber, fontFamily: T.mono,

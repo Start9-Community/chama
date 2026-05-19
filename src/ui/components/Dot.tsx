@@ -1,17 +1,35 @@
 import { T, ROLE_COLOR, ROLE_ICON } from "../theme.js";
 
-export function Dot({ role, pk, isYou, voted, outcome }: {
+export function Dot({ role, pk, isYou, voted, outcome, autoAssigned }: {
   role: string; pk: string | null; isYou: boolean; voted: boolean; outcome?: string;
+  /** v0.6.5: when true, `pk` is a pool-derived preview (same arbiter
+   *  LOCK will pick) rather than a confirmed JOIN. Renders solid so the
+   *  Trinity Ring reads as "two of three filled" instead of stranding
+   *  the slot empty for trades whose communities have a recruited
+   *  arbiter pool, but uses a dimmer fill + "auto" label so it remains
+   *  visually distinguishable from a JOINed participant. */
+  autoAssigned?: boolean;
 }) {
   const c = ROLE_COLOR[role as keyof typeof ROLE_COLOR] || T.muted;
+  const filled = !!pk;
+  const fillBg = filled ? (autoAssigned ? `${c}14` : `${c}22`) : T.surface;
+  const borderStyle = filled ? "solid" : "dashed";
+  const borderColor = filled ? c : T.border;
+  const label = isYou
+    ? "You"
+    : pk
+      ? (autoAssigned ? "Auto · " + pk.slice(0, 4) + "…" : pk.slice(0, 6) + "…")
+      : "Empty";
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
       <div style={{
         width: 36, height: 36, borderRadius: "50%",
-        background: pk ? `${c}22` : T.surface,
-        border: `1.5px ${pk ? "solid" : "dashed"} ${pk ? c : T.border}`,
+        background: fillBg,
+        border: `1.5px ${borderStyle} ${borderColor}`,
         display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 13, fontWeight: 700, color: pk ? c : T.muted,
+        fontSize: 13, fontWeight: 700,
+        color: filled ? c : T.muted,
+        opacity: autoAssigned ? 0.78 : 1,
         fontFamily: T.mono, position: "relative",
       }}>
         {ROLE_ICON[role as keyof typeof ROLE_ICON] || "?"}
@@ -27,8 +45,14 @@ export function Dot({ role, pk, isYou, voted, outcome }: {
           </div>
         )}
       </div>
-      <span style={{ fontSize: 9, color: isYou ? c : T.muted, fontFamily: T.mono, fontWeight: isYou ? 700 : 400 }}>
-        {isYou ? "You" : pk ? pk.slice(0, 6) + "…" : "Empty"}
+      <span style={{
+        fontSize: 9,
+        color: isYou ? c : T.muted,
+        fontFamily: T.mono,
+        fontWeight: isYou ? 700 : 400,
+        fontStyle: autoAssigned ? "italic" : "normal",
+      }}>
+        {label}
       </span>
     </div>
   );

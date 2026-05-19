@@ -18,10 +18,12 @@ import {
   shouldShowBrowserSupportBanner,
   shouldShowRecoveryBanner,
   hasActiveBuyerSellerCommitment,
+  countActiveBuyerSellerCommitments,
   activeCommittedMsats,
   decideChamaBarLabel,
   findActiveTrade,
   identifyStrandedEcashSource,
+  isMidFunding,
   listingMatchesActiveRoute,
 } from "./decisions.js";
 import { Toast } from "./components/Toast.js";
@@ -81,7 +83,18 @@ export default function App() {
   // so the hook gets a stable reference and doesn't re-wire on every render.
   const toastRef = useRef<((t: { message: string; type: "success" | "error" | "info" }) => void) | null>(null);
 
-  const [{ connected, pubkey, escrows, relayStatuses, connectedRelays, error, loading, fedimint }, actions] = useEscrow({
+  const [{
+    connected,
+    pubkey,
+    escrows,
+    relayStatuses,
+    connectedRelays,
+    error,
+    loading,
+    fedimint,
+    fundingInProgress,
+    claimPayoutInProgress,
+  }, actions] = useEscrow({
     relays: DEFAULT_RELAYS,
     defaultPlatformFeeBps: 50,
     onClaimProgress: (p) => {
@@ -343,15 +356,20 @@ export default function App() {
 
   const myTrades = visibleTrades.filter(isParticipant);
 
-  // v0.2.0 item 3: one-trade-at-a-time. Hard-block applies to buyer/
-  // seller commitments; arbiter status triggers warnings (item 10),
-  // not blocks. activeTrade drives the pill's tap target.
+  // v0.6.5: hasActiveBuyerSellerCommitment + findActiveTrade are now
+  // informational only — they still drive the ChamaBar "in escrow"
+  // pill and the ActiveTradePill, but no longer gate Create or Fund.
+  // The only gate is isMidFunding (one funding *operation* at a time;
+  // see decisions.ts header comment).
   const activeTrade = pubkey
     ? findActiveTrade({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : null;
   const hasActiveCommitment = pubkey
     ? hasActiveBuyerSellerCommitment({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : false;
+  const activeCommitmentCount = pubkey
+    ? countActiveBuyerSellerCommitments({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
+    : 0;
   // v0.4.2 hotfix round 3: msats locked in active escrows where the
   // user is buyer/seller. Drives the ChamaBar "X sats in escrow" pill
   // during LOCKED state, when balance is correctly 0 (ecash spent
@@ -360,15 +378,23 @@ export default function App() {
     ? activeCommittedMsats({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : 0;
 
-  // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND no
-  // active trade — orphan ecash from a previous trade that didn't
-  // finish cleanly. The banner intercepts Browse + Create routes;
-  // Me/Settings stay accessible (per the brief, users may need to
-  // update LN address / fetch counterparty kind:0 / check history
-  // as part of resolving the recovery itself).
+  // v0.6.5 funding-operation gate. The single backstop against two
+  // concurrent runFundAndLock calls racing on the shared OPFS wallet.
+  // Disables the Fund button on the active listing detail; everything
+  // else stays open. isMidFunding accepts either spelling — passing
+  // the state field directly keeps the call site terse.
+  const midFunding = isMidFunding({ fundingInProgress });
+
+  // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND nothing
+  // else explains the balance — no active trade, no mid-funding flow,
+  // no mid-claim sweep. The expected-transient cases (balance held
+  // briefly by the atomic fund or claim flows) suppress the banner
+  // so it doesn't race the flow that's about to drain.
   const showRecoveryBanner = shouldShowRecoveryBanner({
     balanceMsats: fedimint.balanceMsats ?? 0,
-    hasCurrentEscrow: hasActiveCommitment,
+    hasAnyActiveEscrow: hasActiveCommitment,
+    fundingInProgress: midFunding,
+    claimPayoutInProgress,
   });
   const strandedSource = pubkey && showRecoveryBanner
     ? identifyStrandedEcashSource({ escrows: escrows.values(), userPubkey: pubkey })
@@ -712,6 +738,7 @@ export default function App() {
           balanceMsats: fedimint.balanceMsats ?? 0,
           hasActiveBuyerSellerCommitment: hasActiveCommitment,
           activeCommittedMsats: committedMsats,
+          activeTradeCount: activeCommitmentCount,
           // v0.3.1 Phase 3: bootProbeState routes the "unreachable"
           // ChamaBar variant. Failed → "⚠ Chama unreachable ·
           // Reconnect →"; pending/ok pass through to the existing
@@ -959,6 +986,7 @@ export default function App() {
             // reconnect first" subtitle when this is true. Reconnect
             // dispatch lives in ChamaBar only.
             bootProbeFailed={fedimint.bootProbeState === "failed"}
+            fundingInProgress={midFunding}
             onBack={() => { setView("browse"); setSelectedId(null); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
@@ -1014,12 +1042,12 @@ export default function App() {
                 setToast({ message: "Join a Chama first — tap a community pill.", type: "error" });
                 return;
               }
-              // v0.2.0 item 3: hard-block Fund when the user has another
-              // active commitment. The active-trade pill at the top of
-              // the detail screen offers the navigation back to it.
-              if (hasActiveCommitment && activeTrade && activeTrade.id !== selectedId!) {
+              // v0.6.5: the only Fund gate is mid-funding — multiple
+              // concurrent trades are fine, but two concurrent atomic
+              // funding flows would race the shared OPFS wallet.
+              if (midFunding) {
                 setToast({
-                  message: "Finish your active trade first — Chama is one trade at a time.",
+                  message: "Another funding operation is in progress. Complete it first.",
                   type: "error",
                 });
                 return;
@@ -1049,13 +1077,14 @@ export default function App() {
         </div>
       ) : view === "create" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          {/* Active-trade pill on Create — visible alongside the
-              gate card so the user understands *why* Create is
-              blocked (per Q2). Browse keeps the pill for research-
-              while-waiting; Create swaps the form for the gate. */}
+          {/* v0.6.5: Create no longer hard-blocks on active trades.
+              The pill stays as the informational "you have N active
+              trades" reminder; the form is always available below. */}
           {activeTrade && (
             <ActiveTradePill
               trade={activeTrade}
+              activeTradeCount={activeCommitmentCount}
+              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1072,11 +1101,6 @@ export default function App() {
                   title: "Recover sats",
                 });
               }}
-            />
-          ) : hasActiveCommitment && activeTrade ? (
-            <CreateBlockedCard
-              trade={activeTrade}
-              onGoToTrade={() => openEscrow(activeTrade.id)}
             />
           ) : (
             <CreateForm
@@ -1095,6 +1119,8 @@ export default function App() {
           {activeTrade && (
             <ActiveTradePill
               trade={activeTrade}
+              activeTradeCount={activeCommitmentCount}
+              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1117,6 +1143,8 @@ export default function App() {
           {activeTrade && (
             <ActiveTradePill
               trade={activeTrade}
+              activeTradeCount={activeCommitmentCount}
+              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1130,6 +1158,8 @@ export default function App() {
           {activeTrade && (
             <ActiveTradePill
               trade={activeTrade}
+              activeTradeCount={activeCommitmentCount}
+              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1142,6 +1172,8 @@ export default function App() {
           {activeTrade && (
             <ActiveTradePill
               trade={activeTrade}
+              activeTradeCount={activeCommitmentCount}
+              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1182,6 +1214,8 @@ export default function App() {
           {activeTrade && (
             <ActiveTradePill
               trade={activeTrade}
+              activeTradeCount={activeCommitmentCount}
+              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1253,63 +1287,6 @@ const globalCss = `
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:${T.border};border-radius:4px}
 `;
-
-// v0.2.0 item 3: Create-block gate. When the user is buyer/seller in a
-// non-terminal escrow, Create renders this gate-card instead of the
-// form. The active-trade pill above (separately rendered) provides
-// the navigation; this card explains the why and offers a redundant
-// CTA for users who don't see the pill or want explicit confirmation.
-function CreateBlockedCard({
-  trade,
-  onGoToTrade,
-}: {
-  trade: EscrowState;
-  onGoToTrade: () => void;
-}) {
-  return (
-    <div style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
-      <div style={{
-        background: T.purpleDim, border: `1px solid ${T.purple}66`,
-        borderRadius: T.r, padding: 24,
-        textAlign: "center" as const,
-      }}>
-        <div style={{ fontSize: 36, marginBottom: 12 }}>⏳</div>
-        <div style={{
-          fontSize: 16, fontWeight: 700, color: T.text, fontFamily: T.sans,
-          marginBottom: 12,
-        }}>
-          Finish your active trade first
-        </div>
-        <div style={{
-          fontSize: 13, color: T.text, fontFamily: T.sans,
-          lineHeight: 1.55, marginBottom: 16,
-        }}>
-          Chama is one trade at a time, on purpose. Patience is the
-          feature — a good trade is one where both users felt safe and
-          left a positive rating, not one that completed at high
-          frequency.
-        </div>
-        <button
-          onClick={onGoToTrade}
-          style={{
-            padding: "12px 20px", borderRadius: T.rs,
-            background: T.purple, border: "none",
-            color: T.bg, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-            cursor: "pointer", letterSpacing: 0.3,
-          }}
-        >
-          Go to active trade ›
-        </button>
-        <div style={{
-          fontSize: 10, color: T.muted, fontFamily: T.mono,
-          marginTop: 12, lineHeight: 1.5,
-        }}>
-          {trade.description}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function LoginSuccessSplash() {
   return (

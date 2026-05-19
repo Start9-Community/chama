@@ -370,18 +370,27 @@ export function canOfferSubscription(inputs: {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Active-trade detection (item 3 — one-trade-at-a-time gate)
+// Active-trade detection (v0.6.5 — informational, not a gate)
 // ──────────────────────────────────────────────────────────────────────────
 //
-// Per the v0.2.0 brief + Q3 evolution: hard-block Create + Fund when
-// the user is a participant (buyer or seller) in a live escrow.
-// Arbiter status doesn't trigger the hard block — it triggers the
-// soft/hard arbiter warnings via decideArbiterWarning.
+// History: through v0.6.4 these helpers backed a hard "one trade at a
+// time" gate on Create + Fund. v0.6.5 retires that gate. With Option B
+// fully wired (BOLT11 IN → mint → spendNotes → LOCK → OPFS drains to 0),
+// the wallet sits at zero between trades; ecash exists only for the
+// milliseconds spanning runFundAndLock. There is no architectural
+// reason a seller can't serve three buyers, or a buyer can't browse
+// for the next trade while a previous one is in LOCKED/voting/approved.
 //
-// Expired trades are not live UI commitments. EXPIRED can still heal
-// in the background, and a LOCKED trade that has crossed expiresAt can
-// still publish refund votes, but neither should strand the user behind
-// the one-trade-at-a-time gate while cleanup catches up.
+// What blocks now: one *funding operation* at a time (isMidFunding
+// below). The AtomicFundingModal is already an exclusive modal, so the
+// UI guarantees this in practice; isMidFunding is the programmatic
+// backstop that protects the shared OPFS wallet from two concurrent
+// spendNotes calls racing.
+//
+// hasActiveBuyerSellerCommitment + findActiveTrade survive as display
+// helpers: ChamaBar's "X sats in escrow" pill and the ActiveTradePill
+// strip both need to know about live commitments. They just no longer
+// gate Create or Fund.
 
 function isPastEscrowDeadline(e: EscrowState, nowSec: number): boolean {
   return typeof e.expiresAt === "number" && e.expiresAt > 0 && nowSec > e.expiresAt;
@@ -419,6 +428,51 @@ export function hasActiveBuyerSellerCommitment(inputs: {
     return true;
   }
   return false;
+}
+
+/**
+ * v0.6.5: how many live buyer/seller commitments the user is in. Drives
+ * the plural-aware ActiveTradePill copy ("1 active trade" vs "3 active
+ * trades") now that multiple concurrent trades are allowed.
+ */
+export function countActiveBuyerSellerCommitments(inputs: {
+  escrows: Iterable<EscrowState>;
+  userPubkey: string;
+  nowSec?: number;
+}): number {
+  const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
+  let n = 0;
+  for (const e of inputs.escrows) {
+    const isBuyerOrSeller =
+      e.participants.buyer === inputs.userPubkey
+      || e.participants.seller === inputs.userPubkey;
+    if (!isBuyerOrSeller) continue;
+    if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
+    n += 1;
+  }
+  return n;
+}
+
+/**
+ * v0.6.5 funding-operation gate. True while runFundAndLock is mid-flight
+ * (between creating-invoice and the locked/lock-failed/expired/aborted
+ * terminal phases). The only condition that should disable a second
+ * Fund tap.
+ *
+ * This is a UI-layer concern, not a state-machine concern: each trade's
+ * event chain is independent. The gate exists because the Fedimint WASM
+ * client shares one OPFS wallet, and two concurrent spendNotes calls on
+ * that wallet could race.
+ *
+ * Accepts either `fundAndLockInProgress` (literal brief name) or
+ * `fundingInProgress` (the state-field name used in useEscrow) so
+ * callers don't need to translate.
+ */
+export function isMidFunding(inputs: {
+  fundAndLockInProgress?: boolean;
+  fundingInProgress?: boolean;
+}): boolean {
+  return inputs.fundAndLockInProgress ?? inputs.fundingInProgress ?? false;
 }
 
 /**
@@ -494,7 +548,7 @@ export function activeCommittedMsats(inputs: {
 
 export type ChamaBarLabel =
   | { kind: "ready" }
-  | { kind: "in-trade"; sats: number }
+  | { kind: "in-trade"; sats: number; activeTradeCount: number }
   | { kind: "stranded"; sats: number }
   | { kind: "unreachable" };
 
@@ -515,19 +569,24 @@ export function decideChamaBarLabel(opts: {
    *  (ecash was spent into SSS shares). Pure helper above:
    *  `activeCommittedMsats`. Optional for backwards compatibility. */
   activeCommittedMsats?: number;
+  /** v0.6.5: count of live buyer/seller commitments. Drives plural-
+   *  aware in-trade pill copy ("1 active trade" vs "3 active trades").
+   *  Optional/defaulted to 1 for backwards compatibility. */
+  activeTradeCount?: number;
 }): ChamaBarLabel {
   if (opts.bootProbeState === "failed") return { kind: "unreachable" };
+  const activeTradeCount = Math.max(1, opts.activeTradeCount ?? 1);
   // Floor to whole sats — the bar always speaks in sats, never msats.
   const sats = Math.floor(opts.balanceMsats / 1000);
   if (sats > 0) {
-    if (opts.hasActiveBuyerSellerCommitment) return { kind: "in-trade", sats };
+    if (opts.hasActiveBuyerSellerCommitment) return { kind: "in-trade", sats, activeTradeCount };
     if (sats >= MAIN_SURFACE_RECOVERY_MIN_SATS) return { kind: "stranded", sats };
   }
   // Balance is 0. If there's an active LOCKED/APPROVED commitment,
   // surface its amount as the in-trade pill — the escrow ledger is
   // the source of truth here, not the (correctly-zero) wallet.
   const committedSats = Math.floor((opts.activeCommittedMsats ?? 0) / 1000);
-  if (committedSats > 0) return { kind: "in-trade", sats: committedSats };
+  if (committedSats > 0) return { kind: "in-trade", sats: committedSats, activeTradeCount };
   return { kind: "ready" };
 }
 
@@ -553,7 +612,7 @@ export function findActiveTrade(inputs: {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Recovery banner (item 2)
+// Recovery banner (item 2; v0.6.5 narrowing)
 // ──────────────────────────────────────────────────────────────────────────
 //
 // Per Pillar 2.1's "no sats stranded, ever" promise: when the user's
@@ -561,12 +620,39 @@ export function findActiveTrade(inputs: {
 // active trade, that's a recovery state. Tiny post-payout dust may
 // accumulate quietly in Me; the main-flow banner reappears once the
 // aggregate balance is large enough to deserve interrupting the user.
+//
+// v0.6.5: also suppress while expected-transient flows hold a balance
+// briefly — mid-runFundAndLock (the ecash that's about to be SSS-split)
+// and mid-claim-payout (winnings between redemption and outbound LN
+// sweep). Either of those firing the banner would race with the flow
+// that's about to drain the balance.
 
 export function shouldShowRecoveryBanner(inputs: {
   balanceMsats: number;
-  hasCurrentEscrow: boolean;
+  /** v0.6.5 preferred name: true when ANY non-terminal escrow exists
+   *  that could explain a non-zero balance (buyer, seller, or arbiter
+   *  participation — though arbiter-only commitments rarely produce
+   *  local OPFS balance). The pre-v0.6.5 alias `hasCurrentEscrow` is
+   *  still honored for callers that haven't migrated. */
+  hasAnyActiveEscrow?: boolean;
+  /** Deprecated alias for `hasAnyActiveEscrow`. Kept so older callers
+   *  (and tests) continue to work without touching every site. */
+  hasCurrentEscrow?: boolean;
+  /** v0.6.5: true while runFundAndLock is between creating-invoice and
+   *  a terminal phase. Suppresses the banner — the atomic flow owns
+   *  the balance. Optional/defaulted for backwards compatibility. */
+  fundingInProgress?: boolean;
+  /** v0.6.5: true while runClaimAndPayout is between claim and the
+   *  outbound LN send. Suppresses the banner — the claim flow owns
+   *  the balance. Optional/defaulted for backwards compatibility. */
+  claimPayoutInProgress?: boolean;
 }): boolean {
-  return hasMainSurfaceRecoveryBalance(inputs.balanceMsats) && !inputs.hasCurrentEscrow;
+  if (!hasMainSurfaceRecoveryBalance(inputs.balanceMsats)) return false;
+  const hasActiveEscrow = inputs.hasAnyActiveEscrow ?? inputs.hasCurrentEscrow ?? false;
+  if (hasActiveEscrow) return false;
+  if (inputs.fundingInProgress) return false;
+  if (inputs.claimPayoutInProgress) return false;
+  return true;
 }
 
 export interface StrandedEcashSource {

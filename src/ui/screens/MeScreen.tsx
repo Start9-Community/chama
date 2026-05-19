@@ -144,7 +144,7 @@ export function MeScreen({
               </>
             ) : (
               <>
-                {localRecoverySats.toLocaleString()} sats are ready for recovery before the next trade.
+                {localRecoverySats.toLocaleString()} sats are ready to recover so OPFS stays empty.
                 {localReserveSats > 0 ? ` About ${localReserveSats.toLocaleString()} sats stay reserved for Lightning fees.` : ""}
               </>
             )}

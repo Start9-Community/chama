@@ -210,6 +210,20 @@ export interface UseEscrowState {
   loading: boolean;
   /** Fedimint wallet state */
   fedimint: FedimintState;
+  /**
+   * v0.6.5: true while runFundAndLock is mid-flight (between
+   * creating-invoice and a terminal phase). Drives the funding-
+   * operation gate that replaces the old one-trade-at-a-time block:
+   * Fund taps grey out, but Create + Browse remain open. Suppresses
+   * the recovery banner so the atomic flow owns the transient balance.
+   */
+  fundingInProgress: boolean;
+  /**
+   * v0.6.5: true while runClaimAndPayout is between claim and the
+   * outbound LN send. Suppresses the recovery banner — the claim
+   * flow owns the redeemed balance until the sweep completes.
+   */
+  claimPayoutInProgress: boolean;
 }
 
 export interface UseEscrowActions {
@@ -425,6 +439,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // (e.g. federationName for error copy) without re-creating the
   // callback on every state change.
   const stateRef = useRef<UseEscrowState | null>(null);
+  // v0.6.5: synchronous mirrors of the in-progress flags. setState
+  // updates are async — without these refs, two near-simultaneous Fund
+  // taps could both pass the gate before React's next render. The ref
+  // is the authoritative read at entry; the setState call drives the UI.
+  const fundingInProgressRef = useRef(false);
+  const claimPayoutInProgressRef = useRef(false);
 
   const [state, setState] = useState<UseEscrowState>({
     connected: false,
@@ -434,6 +454,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     connectedRelays: 0,
     error: null,
     loading: false,
+    fundingInProgress: false,
+    claimPayoutInProgress: false,
     fedimint: {
       initialized: false,
       joined: false,
@@ -746,6 +768,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     fedimintRef.current = null;
     bridgeRef.current = null;
     signerRef.current = null;
+    fundingInProgressRef.current = false;
+    claimPayoutInProgressRef.current = false;
     clearSeedCache();
     setState({
       connected: false,
@@ -755,6 +779,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       connectedRelays: 0,
       error: null,
       loading: false,
+      fundingInProgress: false,
+      claimPayoutInProgress: false,
       fedimint: {
         initialized: false,
         joined: false,
@@ -1798,18 +1824,41 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       opts.onPhase({ kind: "lock-failed", error: err });
       return { kind: "lock-failed", error: err };
     }
-    const { runFundAndLock } = await import("../payments/fund-and-lock.js");
-    return runFundAndLock({
-      escrowId,
-      amountMsats: opts.amountMsats,
-      description: opts.description,
-      savedHandleId: opts.savedHandleId,
-      getBalance: () => fedimint.getBalance(),
-      createFundingInvoice: createFundingInvoice,
-      lockAndPublish: lockAndPublishAction,
-      onPhase: opts.onPhase,
-      signal: opts.signal,
-    });
+    // v0.6.5 funding-operation gate. The shared OPFS wallet's
+    // spendNotes call cannot safely overlap with a second runFundAndLock.
+    // Use a synchronous ref as the authoritative re-entry check at
+    // entry (setState propagation is async — without this, two near-
+    // simultaneous Fund taps could both pass the UI gate before React
+    // re-renders the disabled button). The setState call drives the
+    // UI; the ref stops the race.
+    if (fundingInProgressRef.current) {
+      const err = "Another funding operation is in progress. Complete it first.";
+      opts.onPhase({ kind: "lock-failed", error: err });
+      return { kind: "lock-failed", error: err };
+    }
+    fundingInProgressRef.current = true;
+    setState(prev => prev.fundingInProgress
+      ? prev
+      : { ...prev, fundingInProgress: true });
+    try {
+      const { runFundAndLock } = await import("../payments/fund-and-lock.js");
+      return await runFundAndLock({
+        escrowId,
+        amountMsats: opts.amountMsats,
+        description: opts.description,
+        savedHandleId: opts.savedHandleId,
+        getBalance: () => fedimint.getBalance(),
+        createFundingInvoice: createFundingInvoice,
+        lockAndPublish: lockAndPublishAction,
+        onPhase: opts.onPhase,
+        signal: opts.signal,
+      });
+    } finally {
+      fundingInProgressRef.current = false;
+      setState(prev => prev.fundingInProgress
+        ? { ...prev, fundingInProgress: false }
+        : prev);
+    }
   }, [createFundingInvoice, lockAndPublishAction]);
 
   // v0.3.0 Phase 3: atomic claim-and-payout orchestrator. Composes the
@@ -1835,41 +1884,57 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       args.onPhase({ kind: "claim-failed", error: err });
       return { kind: "claim-failed", error: err };
     }
-    const { runClaimAndPayout } = await import("../payments/claim-and-payout.js");
-    return runClaimAndPayout({
-      escrowId,
-      bolt11: args.bolt11,
-      expectedDeltaMsats: args.expectedDeltaMsats,
-      saveAfter: args.saveAfter,
-      addressUsed: args.addressUsed,
-      getBalance: () => fedimint.getBalance(),
-      // Production claim+payout uses the raw bridge claim, not
-      // claimAndRedeemAction, because claimAndRedeemAction emits the
-      // legacy success progress that auto-publishes COMPLETE. COMPLETE
-      // belongs after the balance-confirming watchdog below, not merely
-      // after redeemEcash returns.
-      claimAndRedeem: async (id: string) => {
-        try {
-          return await bridge.claimAndRedeem(id);
-        } catch (e: any) {
-          const msg = e?.message || String(e);
-          if (isStaleClaim(msg)) {
-            console.debug("[chama] Claim suppressed (stale):", msg);
-            return client.getState(id)!;
+    // v0.6.5: mirror the funding-operation gate for the claim sweep.
+    // Between claim-redeems and the outbound LN send, the OPFS balance
+    // is transiently > 0 with no active trade explaining it. Without
+    // this flag the recovery banner would race the very flow that's
+    // about to drain the balance. Ref-mirror matches the funding side.
+    claimPayoutInProgressRef.current = true;
+    setState(prev => prev.claimPayoutInProgress
+      ? prev
+      : { ...prev, claimPayoutInProgress: true });
+    try {
+      const { runClaimAndPayout } = await import("../payments/claim-and-payout.js");
+      return await runClaimAndPayout({
+        escrowId,
+        bolt11: args.bolt11,
+        expectedDeltaMsats: args.expectedDeltaMsats,
+        saveAfter: args.saveAfter,
+        addressUsed: args.addressUsed,
+        getBalance: () => fedimint.getBalance(),
+        // Production claim+payout uses the raw bridge claim, not
+        // claimAndRedeemAction, because claimAndRedeemAction emits the
+        // legacy success progress that auto-publishes COMPLETE. COMPLETE
+        // belongs after the balance-confirming watchdog below, not merely
+        // after redeemEcash returns.
+        claimAndRedeem: async (id: string) => {
+          try {
+            return await bridge.claimAndRedeem(id);
+          } catch (e: any) {
+            const msg = e?.message || String(e);
+            if (isStaleClaim(msg)) {
+              console.debug("[chama] Claim suppressed (stale):", msg);
+              return client.getState(id)!;
+            }
+            throw e;
           }
-          throw e;
-        }
-      },
-      completeClaim: async (id: string) => {
-        await client.complete(id);
-      },
-      payInvoice: async (bolt11: string) => {
-        await bridge.payInvoice(bolt11);
-        refreshBalanceRef.current?.().catch(() => {});
-      },
-      addOrTouchLightningHandle: addOrTouchPayoutDestination,
-      onPhase: args.onPhase,
-    });
+        },
+        completeClaim: async (id: string) => {
+          await client.complete(id);
+        },
+        payInvoice: async (bolt11: string) => {
+          await bridge.payInvoice(bolt11);
+          refreshBalanceRef.current?.().catch(() => {});
+        },
+        addOrTouchLightningHandle: addOrTouchPayoutDestination,
+        onPhase: args.onPhase,
+      });
+    } finally {
+      claimPayoutInProgressRef.current = false;
+      setState(prev => prev.claimPayoutInProgress
+        ? { ...prev, claimPayoutInProgress: false }
+        : prev);
+    }
   }, []);
 
   // ── Return ──────────────────────────────────────────────────────────────

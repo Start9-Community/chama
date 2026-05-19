@@ -2462,6 +2462,8 @@ import {
   displayCounterpartyName,
   canOfferSubscription,
   hasActiveBuyerSellerCommitment,
+  countActiveBuyerSellerCommitments,
+  isMidFunding,
   findActiveTrade,
   shouldShowRecoveryBanner,
   identifyStrandedEcashSource,
@@ -2471,6 +2473,7 @@ import {
   decideArbiterWarning,
   MAIN_SURFACE_RECOVERY_MIN_SATS,
 } from "../ui/decisions.js";
+import { pickArbiterFromPool } from "../arbiters/pool.js";
 // BP_FEDERATION_INVITE / BLF_FEDERATION_INVITE already imported above
 // from federation-config (which re-exports from federation-invites).
 
@@ -3244,12 +3247,15 @@ console.log("\n── canOfferSubscription ──");
   );
 }
 
-// ── 31d. hasActiveBuyerSellerCommitment + findActiveTrade (item 3) ──────
+// ── 31d. hasActiveBuyerSellerCommitment + findActiveTrade ───────────────
 //
-// The one-trade-at-a-time hard gate: any non-terminal escrow where
-// the user is buyer or seller blocks Create + Fund. Arbiter status
-// does NOT trigger the block (it triggers the soft/hard arbiter
-// warnings instead, per item 10).
+// History: these once backed the one-trade-at-a-time hard gate on
+// Create + Fund. v0.6.5 retired that gate and the functions are now
+// display helpers — they drive the ChamaBar "in escrow" pill and the
+// ActiveTradePill. The semantics they encode (non-terminal buyer/seller
+// commitments, arbiter status excluded) are still exactly the same;
+// only the consumer surfaces changed. Tests below verify the existing
+// contract still holds.
 console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
 {
   const me = "me_pubkey_aaaa";
@@ -3421,6 +3427,82 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     findActiveTrade({ escrows: [expiredLocked, older], userPubkey: me, nowSec })?.id === "older",
     "findActiveTrade skips expired LOCKED trades and returns the live trade",
   );
+
+  // v0.6.5: countActiveBuyerSellerCommitments — drives the plural-aware
+  // ActiveTradePill copy now that multiple concurrent trades are allowed.
+  assert(
+    countActiveBuyerSellerCommitments({ escrows: [], userPubkey: me }) === 0,
+    "Empty escrows → 0 active commitments",
+  );
+  assert(
+    countActiveBuyerSellerCommitments({ escrows: [listingOnly], userPubkey: me }) === 0,
+    "CREATE-only listing does not count toward active commitments",
+  );
+  assert(
+    countActiveBuyerSellerCommitments({ escrows: [asBuyer], userPubkey: me }) === 1,
+    "Single LOCKED trade counts once",
+  );
+  assert(
+    countActiveBuyerSellerCommitments({ escrows: [older, newer], userPubkey: me }) === 2,
+    "Two concurrent live trades count twice (v0.6.5 allows it)",
+  );
+  assert(
+    countActiveBuyerSellerCommitments({ escrows: [asArbiter, completed, cancelled], userPubkey: me }) === 0,
+    "Arbiter-only + terminal escrows don't count",
+  );
+}
+
+// ── 31d-2. isMidFunding (v0.6.5 funding-operation gate) ─────────────────
+//
+// The only gate that should block a second Fund tap. UI-layer concern;
+// the state machine doesn't care about concurrency. Exists because the
+// Fedimint WASM client shares one OPFS wallet and two concurrent
+// spendNotes calls would race.
+console.log("\n── isMidFunding ──");
+{
+  assert(
+    isMidFunding({ fundAndLockInProgress: false }) === false,
+    "Not mid-funding → gate open",
+  );
+  assert(
+    isMidFunding({ fundAndLockInProgress: true }) === true,
+    "Mid-funding → gate closed",
+  );
+}
+
+// ── 31d-3. pickArbiterFromPool (v0.6.5 round-robin assignment) ──────────
+//
+// Deterministic round-robin selection across the community arbiter
+// pool. Same escrow id → same arbiter (relay-replay idempotent).
+// Different escrow ids spread load across the pool.
+console.log("\n── pickArbiterFromPool ──");
+{
+  assert(
+    pickArbiterFromPool([], "any-id") === undefined,
+    "Empty pool → undefined",
+  );
+  assert(
+    pickArbiterFromPool(["solo"], "any-id") === "solo",
+    "Single-arbiter pool → that arbiter",
+  );
+
+  const pool = ["arb-A", "arb-B", "arb-C"];
+  const pick = pickArbiterFromPool(pool, "escrow-xyz");
+  assert(pick !== undefined && pool.includes(pick), "Pick is in the pool");
+  assert(
+    pickArbiterFromPool(pool, "escrow-xyz") === pick,
+    "Same escrow id → same arbiter on repeated calls (idempotent for relay replay)",
+  );
+
+  // Distribution: a handful of distinct ids should reach more than one
+  // bucket in a 3-arbiter pool. Charcode-sum doesn't guarantee perfect
+  // uniformity but is more than good enough for a tiny pool.
+  const seen = new Set<string>();
+  for (const id of ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]) {
+    const p = pickArbiterFromPool(pool, id);
+    if (p) seen.add(p);
+  }
+  assert(seen.size >= 2, "Round-robin spreads load across the pool, not always one slot");
 }
 
 // ── 31e. shouldShowRecoveryBanner + identifyStrandedEcashSource (item 2)─
@@ -3465,6 +3547,42 @@ console.log("\n── shouldShowRecoveryBanner + identifyStrandedEcashSource ─
       hasCurrentEscrow: true,
     }) === false,
     "Balance > 0 but active trade exists → no banner (active trade owns the funds)",
+  );
+  // v0.6.5: balance held briefly by the atomic fund-and-lock flow is
+  // expected-transient and must not race the recovery banner.
+  assert(
+    shouldShowRecoveryBanner({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasCurrentEscrow: false,
+      fundingInProgress: true,
+    }) === false,
+    "Mid-fund-and-lock holds the balance → no banner",
+  );
+  assert(
+    shouldShowRecoveryBanner({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasCurrentEscrow: false,
+      claimPayoutInProgress: true,
+    }) === false,
+    "Mid-claim-and-payout holds the balance → no banner",
+  );
+  assert(
+    shouldShowRecoveryBanner({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasCurrentEscrow: false,
+      fundingInProgress: false,
+      claimPayoutInProgress: false,
+    }) === true,
+    "Truly unexplained balance → banner fires (the orphan case)",
+  );
+  // v0.6.5: the preferred hasAnyActiveEscrow param name resolves
+  // identically to the legacy hasCurrentEscrow alias.
+  assert(
+    shouldShowRecoveryBanner({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasAnyActiveEscrow: true,
+    }) === false,
+    "hasAnyActiveEscrow (new name) suppresses the banner just like hasCurrentEscrow",
   );
 
   // identifyStrandedEcashSource: find the most recent CLAIM signed by user.
