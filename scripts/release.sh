@@ -93,6 +93,26 @@ if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
   exit 1
 fi
 
+# ── Clean-tree guard (v0.6.5 audit fix) ────────────────────────────────
+# Refuse to run if there are uncommitted or untracked changes. Without
+# this, the later `git add` step could accidentally sweep unrelated
+# WIP (stray logs, screenshots, scratch files, half-finished edits)
+# into the release commit. The downstream surgical-add covers the
+# happy path, but a clean-tree precondition is the load-bearing
+# guarantee — verified once, up front, so every later step can trust
+# it.
+if ! git diff-index --quiet HEAD --; then
+  echo "❌ Working tree has uncommitted changes. Commit or stash first."
+  git status --short
+  exit 1
+fi
+UNTRACKED=$(git ls-files --others --exclude-standard)
+if [ -n "$UNTRACKED" ]; then
+  echo "❌ Working tree has untracked files. Add to .gitignore, commit, or remove:"
+  echo "$UNTRACKED" | sed 's/^/   /'
+  exit 1
+fi
+
 # ── Sanity: package.json in sync with last tag ─────────────────────────
 CURRENT_PKG_VERSION=$(node -p "require('./package.json').version")
 LAST_TAG_VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "")
@@ -108,19 +128,6 @@ if [ -n "$LAST_TAG_VERSION" ] && [ "$CURRENT_PKG_VERSION" != "$LAST_TAG_VERSION"
   fi
 fi
 
-# ── Bump version (no git tag yet — we'll do it after commit) ──────────
-npm version "$BUMP_TYPE" --no-git-tag-version
-NEW_VERSION=$(node -p "require('./package.json').version")
-
-if git rev-parse -q --verify "refs/tags/v$NEW_VERSION" >/dev/null; then
-  echo "❌ Local tag v$NEW_VERSION already exists."
-  exit 1
-fi
-if git ls-remote --exit-code --tags origin "refs/tags/v$NEW_VERSION" >/dev/null 2>&1; then
-  echo "❌ Remote tag v$NEW_VERSION already exists on origin."
-  exit 1
-fi
-
 # ── node_modules drift check ──────────────────────────────────────────
 # Verifies installed deps match package-lock.json. v0.4.4 shipped a bundle
 # built against the wrong Fedimint version because node_modules drifted
@@ -134,25 +141,69 @@ if ! npm ls --depth=0 > /dev/null 2>&1; then
   exit 1
 fi
 
-# ── Pre-deploy gate (typecheck + tests) ────────────────────────────────
-# Refuses to proceed if `tsc --noEmit` or the escrow-engine tests fail.
-# Placed BEFORE commit so a failing gate never produces a public artifact.
+# ── Pre-deploy gate (typecheck + tests) — PRE-BUMP ─────────────────────
+# v0.6.5 audit fix: gates run BEFORE the version bump. Pre-this-patch
+# order was bump → gates → commit, which on gate failure left
+# package.json bumped without a commit (recoverable via the sanity
+# check above, but a manual revert was required and double-bumps were
+# easy on re-run). Running gates against the current pre-bump tree is
+# equivalent — `npm version` only changes the version string, not any
+# code or deps — and a failure now leaves the working tree exactly as
+# the user started. No revert needed.
 echo "🔎 Running predeploy gate (typecheck + tests)..."
 npm run predeploy
 
-# ── Build gate ─────────────────────────────────────────────────────────
-# Build before commit/tag/push so a broken bundle never becomes a public
-# release commit. The dist/ output is ignored; this checks the artifact.
+# ── Build gate — also PRE-BUMP ─────────────────────────────────────────
+# Same reasoning: keep the working tree untouched until every gate has
+# proven the code is shippable. dist/ is ignored anyway.
 echo "🔎 Running production build..."
 npm run build
 
+# ── Bump version (no git tag yet — we'll do it after commit) ──────────
+# Gates passed. Now mutate package.json + package-lock.json. From this
+# point until the commit lands, an error should roll back the bump so
+# the next run doesn't see drifted version state.
+npm version "$BUMP_TYPE" --no-git-tag-version
+NEW_VERSION=$(node -p "require('./package.json').version")
+BUMP_APPLIED=1
+COMMIT_DONE=0
+
+# Rollback trap: if anything between here and the commit fails, undo
+# the bump so the user's next attempt starts from a clean slate. Once
+# the commit lands, the trap becomes a no-op — the commit IS the
+# success state and we don't want to retroactively rewrite history if
+# the push or remote-verify fails.
+restore_pkg_on_error() {
+  local code=$?
+  if [ "$code" -ne 0 ] && [ "${BUMP_APPLIED:-0}" = "1" ] && [ "${COMMIT_DONE:-0}" = "0" ]; then
+    echo "⚠️  Rolling back package.json / package-lock.json (bump applied but commit not made)..."
+    git checkout -- package.json package-lock.json 2>/dev/null || true
+  fi
+  exit "$code"
+}
+trap restore_pkg_on_error EXIT
+
+if git rev-parse -q --verify "refs/tags/v$NEW_VERSION" >/dev/null; then
+  echo "❌ Local tag v$NEW_VERSION already exists."
+  exit 1
+fi
+if git ls-remote --exit-code --tags origin "refs/tags/v$NEW_VERSION" >/dev/null 2>&1; then
+  echo "❌ Remote tag v$NEW_VERSION already exists on origin."
+  exit 1
+fi
+
 # ── Commit ─────────────────────────────────────────────────────────────
-git add -A
+# Surgical add: only stage the files release.sh actually touched. The
+# pre-bump clean-tree guard guarantees nothing else is sitting around,
+# but using explicit paths instead of `git add -A` is defense in depth
+# (and reads clearly to anyone debugging a failed release).
+git add package.json package-lock.json
 if [ -n "$COMMIT_FILE" ]; then
   git commit -F "$COMMIT_FILE"
 else
   git commit -m "$COMMIT_MSG"
 fi
+COMMIT_DONE=1
 
 COMMIT_SHA=$(git rev-parse HEAD)
 git tag "v$NEW_VERSION"
