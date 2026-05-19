@@ -23,6 +23,13 @@
 
 // ── Types (compatible with @fedimint/core) ────────────────────────────────
 
+// v0.6.5: type-only import. The runtime adapter is loaded dynamically
+// at init time (see initClient below); the type carries no runtime
+// cost. Re-exported from this module so callers (useEscrow, the
+// orchestrator) don't have to reach into sdk-adapter directly.
+import type { LnReceiveStateKind } from "./sdk-adapter.js";
+export type { LnReceiveStateKind };
+
 /**
  * Fedimint wallet instance — mirrors @fedimint/core FedimintWallet API.
  * We define our own interface to decouple from the SDK version and
@@ -52,8 +59,17 @@ export interface IFedimintWallet {
   };
 
   lightning: {
-    /** Create a Lightning invoice to receive sats into the federation */
-    createInvoice(amountMsats: number, description: string): Promise<{ invoice: string; operationId: string }>;
+    /** Create a Lightning invoice to receive sats into the federation.
+     *  v0.6.5: `onReceiveState` is fired on every state transition of
+     *  the underlying SDK receive operation (created → funded →
+     *  awaiting_funds → claimed). The orchestrator uses this to
+     *  advance modal UI on `funded` without waiting for the 5s
+     *  balance poll to notice. */
+    createInvoice(
+      amountMsats: number,
+      description: string,
+      onReceiveState?: (kind: LnReceiveStateKind) => void,
+    ): Promise<{ invoice: string; operationId: string }>;
     /** Pay a Lightning invoice from federation balance */
     payInvoice(bolt11: string): Promise<{ operationId: string }>;
   };
@@ -661,9 +677,17 @@ export class FedimintClient {
    * Create a Lightning invoice to fund the wallet.
    * The user pays this invoice from any Lightning wallet.
    */
-  async createInvoice(amountMsats: number, description: string): Promise<string> {
+  async createInvoice(
+    amountMsats: number,
+    description: string,
+    onReceiveState?: (kind: LnReceiveStateKind) => void,
+  ): Promise<string> {
     const wallet = this.requireWallet();
-    const result = await wallet.lightning.createInvoice(amountMsats, description);
+    const result = await wallet.lightning.createInvoice(
+      amountMsats,
+      description,
+      onReceiveState,
+    );
     return result.invoice;
   }
 

@@ -201,6 +201,39 @@ function formatReceiveState(state: RealLnReceiveState): string {
   return Object.keys(state)[0] ?? "unknown";
 }
 
+/**
+ * v0.6.5: public-facing classification of the SDK's LN receive state.
+ * Exposed (re-exported via fedimint-client) so the orchestrator can
+ * pattern-match without needing the raw `RealLnReceiveState` union
+ * (which carries gateway-internal detail). The progression for a
+ * normal payment is:
+ *
+ *   created
+ *     → waiting_for_payment       (QR is up, no payment yet)
+ *     → funded                    (gateway received the HTLC)
+ *     → awaiting_funds            (federation mint protocol running)
+ *     → claimed                   (federation credited the wallet)
+ *
+ * The classifier is intentionally simple: hand the orchestrator a
+ * stable enum string and let it decide what UI to drive.
+ */
+export type LnReceiveStateKind =
+  | "created"
+  | "waiting_for_payment"
+  | "canceled"
+  | "funded"
+  | "awaiting_funds"
+  | "claimed";
+
+function classifyReceiveState(state: RealLnReceiveState): LnReceiveStateKind {
+  if (typeof state === "string") return state;
+  if ("canceled" in state) return "canceled";
+  if ("waiting_for_payment" in state) return "waiting_for_payment";
+  // Defensive default — any unknown object shape gets bucketed as
+  // claimed terminal so the orchestrator doesn't hang waiting.
+  return "claimed";
+}
+
 function formatPayState(state: RealLnPayState): string {
   if (typeof state === "string") return state;
   if ("waiting_for_refund" in state) {
@@ -781,7 +814,11 @@ export function adaptRealWallet(
     });
   };
 
-  const armReceiveWatch = (operationId: string, strict = true): void => {
+  const armReceiveWatch = (
+    operationId: string,
+    strict = true,
+    onState?: (kind: LnReceiveStateKind) => void,
+  ): void => {
     if (armedReceiveOperationIds.has(operationId)) return;
     armedReceiveOperationIds.add(operationId);
 
@@ -816,6 +853,17 @@ export function adaptRealWallet(
             `[chama] LN receive ${operationId}: ${formatReceiveState(state)}`,
             state,
           );
+          // v0.6.5: forward the classified state to an external
+          // listener (the orchestrator) so it can advance UI phases
+          // without waiting for the 5s balance poll. Defensive
+          // try/catch — a listener throwing should never destabilize
+          // the SDK subscription itself.
+          if (onState) {
+            try { onState(classifyReceiveState(state)); }
+            catch (e) {
+              console.debug("[chama] LN receive onState listener threw:", e);
+            }
+          }
           if (isReceiveTerminal(state)) stop();
         },
         (error) => {
@@ -909,7 +957,11 @@ export function adaptRealWallet(
     },
 
     lightning: {
-      async createInvoice(amountMsats: number, description: string) {
+      async createInvoice(
+        amountMsats: number,
+        description: string,
+        onReceiveState?: (kind: LnReceiveStateKind) => void,
+      ) {
         const gateway = await getTrustedLightningGateway("receive");
         const result = await real.lightning.createInvoice(
           amountMsats,
@@ -917,7 +969,9 @@ export function adaptRealWallet(
           undefined,
           gateway,
         );
-        armReceiveWatch(result.operation_id);
+        // v0.6.5: pass the listener through to the watch so the
+        // orchestrator can react to `funded` etc. in real time.
+        armReceiveWatch(result.operation_id, true, onReceiveState);
         return {
           invoice: result.invoice,
           operationId: result.operation_id,

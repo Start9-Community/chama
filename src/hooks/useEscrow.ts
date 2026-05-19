@@ -93,6 +93,7 @@ import {
   shouldReconcileFederation,
   deriveCreateFedTags,
 } from "../fedimint/index.js";
+import type { LnReceiveStateKind } from "../fedimint/index.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
@@ -334,8 +335,22 @@ export interface UseEscrowActions {
   /**
    * Create a Lightning invoice to fund the Fedimint wallet.
    * Returns the BOLT11 string for the user to pay from another wallet.
+   *
+   * v0.6.5: `onReceiveState` (optional) fires on every state
+   * transition of the underlying LN receive operation
+   * (`created` → `funded` → `awaiting_funds` → `claimed`). The
+   * atomic-funding orchestrator uses this to advance the modal UI
+   * the moment the gateway acknowledges the HTLC, instead of waiting
+   * for the 5s balance poll to notice. v0.6.4 production logs prove
+   * this state machine is the source of truth for "did the payment
+   * land?" — balance polling is the LOCK-readiness gate, the watch
+   * is the UX gate.
    */
-  createFundingInvoice: (amountMsats: number, description?: string) => Promise<string>;
+  createFundingInvoice: (
+    amountMsats: number,
+    description?: string,
+    onReceiveState?: (kind: LnReceiveStateKind) => void,
+  ) => Promise<string>;
   /**
    * v0.3.0 atomic funding: compose createFundingInvoice → balance-watcher
    * → lockAndPublish into one user-facing flow. The user pays a BOLT11
@@ -1782,7 +1797,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
   const createFundingInvoice = useCallback(async (
     amountMsats: number,
-    description: string = "Chama wallet top-up"
+    description: string = "Chama wallet top-up",
+    onReceiveState?: (kind: LnReceiveStateKind) => void,
   ) => {
     const fedimint = fedimintRef.current;
     if (!fedimint || !fedimint.isJoined()) {
@@ -1820,7 +1836,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       );
     }
 
-    return fedimint.createInvoice(amountMsats, description);
+    return fedimint.createInvoice(amountMsats, description, onReceiveState);
   }, [updateFedimint]);
 
   // v0.3.0 Phase 2: atomic fund-and-lock orchestrator. Composes the

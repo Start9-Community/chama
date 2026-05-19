@@ -261,11 +261,34 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
 
 // ── runFundAndLock ───────────────────────────────────────────────────────
 
+/** v0.6.5: receive-watch state, narrowed to a stable string union for
+ *  this orchestrator. The full SDK state union lives in sdk-adapter;
+ *  this is the public-facing shape callers (the orchestrator) work
+ *  with. Mirrors LnReceiveStateKind in fedimint/sdk-adapter but
+ *  redefined here to keep fund-and-lock.ts free of any Fedimint
+ *  imports — it stays a pure orchestrator, testable in isolation. */
+export type LnReceiveWatchKind =
+  | "created"
+  | "waiting_for_payment"
+  | "canceled"
+  | "funded"
+  | "awaiting_funds"
+  | "claimed";
+
 export interface RunFundAndLockDeps {
   /** Bound to fedimint.getBalance() in the hook. */
   getBalance: () => Promise<number>;
-  /** Bound to actions.createFundingInvoice in the hook. Returns BOLT11. */
-  createFundingInvoice: (amountMsats: number, description: string) => Promise<string>;
+  /** Bound to actions.createFundingInvoice in the hook. Returns BOLT11.
+   *  v0.6.5: optional `onReceiveState` listener — the SDK fires the
+   *  LN receive watch on every state transition (created → funded →
+   *  awaiting_funds → claimed). We use this to advance the modal to
+   *  mint-confirming the instant the gateway acks the HTLC, rather
+   *  than waiting up to 5s for the balance poll loop to notice. */
+  createFundingInvoice: (
+    amountMsats: number,
+    description: string,
+    onReceiveState?: (kind: LnReceiveWatchKind) => void,
+  ) => Promise<string>;
   /** Bound to actions.lockAndPublish in the hook. */
   lockAndPublish: (escrowId: string, opts: { savedHandleId?: string }) => Promise<unknown>;
 }
@@ -341,6 +364,21 @@ export async function runFundAndLock(
   const invoiceSlowWarnMs = opts.invoiceSlowWarnMs ?? DEFAULT_INVOICE_SLOW_WARN_MS;
   let slowWarnTimer: ReturnType<typeof setTimeout> | null = null;
   let hardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  // v0.6.5: receive-watch listener. Fires as the SDK observes the
+  // LN receive operation transition states. We emit mint-confirming
+  // the moment `funded` lands (gateway received the HTLC) so the
+  // modal stops sitting on the QR — pollForFunding would have
+  // noticed the same fact within 5s, but the watch is the lower-
+  // latency signal. Deduped so re-fires (awaiting_funds, claimed
+  // arriving after funded) don't spam onPhase.
+  let mintConfirmingEmittedByWatch = false;
+  const onReceiveState = (kind: LnReceiveWatchKind) => {
+    if (mintConfirmingEmittedByWatch) return;
+    if (kind === "funded" || kind === "awaiting_funds" || kind === "claimed") {
+      mintConfirmingEmittedByWatch = true;
+      emit({ kind: "mint-confirming" });
+    }
+  };
   let bolt11: string;
   try {
     const slowWarnPromise = new Promise<void>((resolve) => {
@@ -362,7 +400,7 @@ export async function runFundAndLock(
     });
 
     bolt11 = await Promise.race([
-      opts.createFundingInvoice(opts.amountMsats, opts.description),
+      opts.createFundingInvoice(opts.amountMsats, opts.description, onReceiveState),
       timeoutPromise,
     ]);
   } catch (e: any) {

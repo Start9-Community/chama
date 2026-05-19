@@ -5023,14 +5023,24 @@ console.log("\n── RUN FUND AND LOCK ──");
       lockAndPublish: 0 as number,
       getBalance: 0 as number,
     };
+    // v0.6.5: capture the most recent onReceiveState listener so tests
+    // can drive the receive-watch state machine manually. The real SDK
+    // fires this as the federation transitions through created →
+    // funded → claimed; tests reproduce that without a live wallet.
+    let lastReceiveListener: ((kind: import("../payments/fund-and-lock.js").LnReceiveWatchKind) => void) | null = null;
     return {
       calls,
       getBalance: async () => {
         calls.getBalance++;
         return opts.balances[Math.min(i++, opts.balances.length - 1)];
       },
-      createFundingInvoice: async (_msats: number, _desc: string) => {
+      createFundingInvoice: async (
+        _msats: number,
+        _desc: string,
+        onReceiveState?: (kind: import("../payments/fund-and-lock.js").LnReceiveWatchKind) => void,
+      ) => {
         calls.createInvoice++;
+        lastReceiveListener = onReceiveState ?? null;
         if (opts.invoiceResult instanceof Error) throw opts.invoiceResult;
         return opts.invoiceResult ?? "lnbc100n1pfakefundingok";
       },
@@ -5038,6 +5048,10 @@ console.log("\n── RUN FUND AND LOCK ──");
         calls.lockAndPublish++;
         if (opts.lockResult instanceof Error) throw opts.lockResult;
         return {} as any;
+      },
+      // Test helper: fire a receive-watch state as the SDK would.
+      fireReceiveState: (kind: import("../payments/fund-and-lock.js").LnReceiveWatchKind) => {
+        lastReceiveListener?.(kind);
       },
     };
   }
@@ -5302,6 +5316,130 @@ console.log("\n── RUN FUND AND LOCK ──");
       "Fast invoice → happy path still works");
     assert(!phases.some(p => p.kind === "creating-invoice-slow"),
       "No slow-warn phase when invoice resolves before slow-warn timer");
+  }
+
+  // ── v0.6.5: receive-watch `funded` → mint-confirming emitted early
+  // Production v0.6.4 logs prove the LN receive state machine
+  // (created → funded → awaiting_funds → claimed) is the lower-
+  // latency signal for "did the gateway see the payment?" — the 5s
+  // balance poll is a fallback. The orchestrator subscribes to
+  // receive-watch via createFundingInvoice's third arg and emits
+  // mint-confirming the moment `funded` fires, so the modal stops
+  // sitting on the QR.
+  {
+    // Three balance reads: baseline 0, two polls of 0, then 100k
+    // lands. The watch fires `funded` between poll #1 and poll #2
+    // — before the balance has moved — proving the watch-driven
+    // mint-confirming emit lands without a positive balance delta.
+    const wallet = makeMockWallet({ balances: [0, 0, 0, 100_000] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    let firedFunded = false;
+    const sleep = async (ms: number) => {
+      nowMs += ms;
+      if (!firedFunded && wallet.calls.getBalance >= 2) {
+        firedFunded = true;
+        wallet.fireReceiveState("funded");
+      }
+    };
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_receive_funded",
+      amountMsats: 100_000,
+      description: "receive-watch funded",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep,
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "locked",
+      "Receive-watch funded → still completes happy path");
+    const mintConfirmingIdx = phases.findIndex(p => p.kind === "mint-confirming");
+    const paymentConfirmedIdx = phases.findIndex(p => p.kind === "payment-confirmed");
+    assert(mintConfirmingIdx >= 0,
+      "mint-confirming emitted at least once (by receive-watch)");
+    assert(
+      mintConfirmingIdx < paymentConfirmedIdx || paymentConfirmedIdx === -1,
+      "mint-confirming precedes payment-confirmed (watch beats balance poll)",
+    );
+  }
+
+  // ── v0.6.5: receive-watch emits are deduped
+  // Real SDK fires `funded`, then `awaiting_funds`, then `claimed`
+  // in quick succession. We don't want to spam the modal with
+  // three consecutive mint-confirming flips — the orchestrator
+  // dedups so only the first transition emits.
+  {
+    const wallet = makeMockWallet({ balances: [0, 100_000] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    const sleep = async (ms: number) => {
+      nowMs += ms;
+      if (wallet.calls.createInvoice > 0 && wallet.calls.getBalance === 2) {
+        wallet.fireReceiveState("funded");
+        wallet.fireReceiveState("awaiting_funds");
+        wallet.fireReceiveState("claimed");
+      }
+    };
+    await runFundAndLock({
+      escrowId: "esc_test_receive_dedup",
+      amountMsats: 100_000,
+      description: "receive-watch dedup",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep,
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    // Count receive-watch-driven mint-confirming emissions. The
+    // balance-poll path may emit ONE more when the delta lands;
+    // the dedup is that the THREE consecutive watch states
+    // (funded/awaiting_funds/claimed) only produce ONE emit.
+    const mintEmits = phases.filter(p => p.kind === "mint-confirming").length;
+    assert(mintEmits <= 2,
+      "Receive-watch dedup: at most one watch-driven + one poll-driven mint-confirming");
+  }
+
+  // ── v0.6.5: created/waiting_for_payment don't trigger mint-confirming
+  // Only `funded` and later should advance the modal. The earlier
+  // states are the QR-display phase — flipping to mint-confirming
+  // there would be a lie ("payment detected" before payment exists).
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 0, 0] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    const sleep = async (ms: number) => {
+      nowMs += ms;
+      // Fire pre-funded states only. mint-confirming must NOT emit.
+      if (wallet.calls.createInvoice > 0 && wallet.calls.getBalance === 1) {
+        wallet.fireReceiveState("created");
+        wallet.fireReceiveState("waiting_for_payment");
+      }
+    };
+    await runFundAndLock({
+      escrowId: "esc_test_receive_pre_funded",
+      amountMsats: 100_000,
+      description: "receive-watch pre-funded",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep,
+      now: () => nowMs,
+      paymentDeadlineMs: 3_000, // short — let it expire
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(!phases.some(p => p.kind === "mint-confirming"),
+      "Pre-funded receive states (created / waiting_for_payment) do NOT emit mint-confirming");
   }
 
   // ── Aborted mid-flow: signal triggered while polling
