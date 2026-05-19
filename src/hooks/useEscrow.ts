@@ -395,6 +395,15 @@ export interface UseEscrowActions {
   switchFederation: (inviteCode: string, options?: { force?: boolean }) => Promise<void>;
   /** (Re-)start the Browse feed subscription for public listings. */
   watchPublicListings: (since?: number) => void;
+  /**
+   * v0.6.5: subscribe to live updates for a specific escrow. Idempotent —
+   * a label-keyed map de-duplicates per escrow id. Used by Browse to
+   * re-attach a sub for every visible listing on mount/reload, so JOIN
+   * events flow live even when the listing was hydrated in a prior
+   * session and the cold-start path skipped the implicit
+   * loadEscrow→watchEscrow chain.
+   */
+  watchEscrow: (escrowId: string) => void;
   /** PR 2: read the user's selected community slug (always returns
    *  a valid slug from the registry — defaults to us-blf / Global USD). */
   getCommunity: () => string;
@@ -2015,6 +2024,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     switchFederation,
     watchPublicListings: (since?: number) => {
       clientRef.current?.watchPublicListings(since);
+    },
+    watchEscrow: (escrowId: string) => {
+      clientRef.current?.watchEscrow(escrowId);
     },
     getCommunity: getUserCommunitySlug,
     setCommunity: setUserCommunitySlug,

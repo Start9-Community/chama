@@ -445,6 +445,30 @@ export default function App() {
   });
   const matchingListings = visibleListings.filter(listingMatchesRoute);
   const nonMatchingListings = visibleListings.filter(s => !listingMatchesRoute(s));
+
+  // v0.6.5: belt-and-suspenders live-update guarantee for Browse.
+  //
+  // loadEscrow already calls watchEscrow internally once hydration
+  // succeeds, but a few cold-path edges miss that wiring:
+  //   - On reload, prior-session listings sit in `escrows` already,
+  //     so the CREATE handler skips loadEscrow (state exists) and
+  //     the watchEscrow side-effect doesn't fire.
+  //   - Listings hydrated via My-trades replay (the user is a
+  //     participant) also bypass the Browse-discovery path.
+  //
+  // The user reported "if anyone joins, nobody knows unless they
+  // refresh" — this re-watch makes JOINs flow live regardless of
+  // how the listing first landed in state. watchEscrow is
+  // label-keyed inside the client, so duplicate calls are no-ops.
+  useEffect(() => {
+    for (const listing of visibleListings) {
+      actions.watchEscrow(listing.id);
+    }
+    // visibleListings is recomputed every render; depending on its
+    // length is a cheap-enough proxy for "did the visible set change"
+    // without forcing deep equality on the array.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleListings.length, visibleListings.map(l => l.id).join(",")]);
   // browseCommunity drives pill highlighting; it no longer filters
   // (the pill is identity-only post-v0.1.87). matchesBrowseCommunity
   // helper retired with the filter.

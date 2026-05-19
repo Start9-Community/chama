@@ -1,7 +1,8 @@
-import { type EscrowState } from "../../escrow-engine/types.js";
+import { type EscrowState, EscrowStatus, Role } from "../../escrow-engine/types.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { T, CAT_ICON, CAT_LABEL, TRINITY_RING_ORDER, fmtSats, refundRecipientFor } from "../theme.js";
 import { displayCounterpartyName } from "../decisions.js";
+import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import { Badge } from "./Badge.js";
 import { Dot } from "./Dot.js";
 
@@ -11,6 +12,15 @@ import { Dot } from "./Dot.js";
 // trade?" Adding a text line answers the question without requiring
 // a tap into TradeDetail. Truncated npub by default; kind:0 fetcher
 // (Me toggle) can plug in later via displayCounterpartyName.
+//
+// Arbiter handling mirrors TradeDetail's Trinity-Ring preview: when
+// the listing's community has a recruited arbiter pool and no JOIN
+// ACK has landed yet, surface the deterministic round-robin pick
+// (same pubkey LOCK will assign) as "Auto · prefix" — honest because
+// pickArbiterFromPool is the same function escrow-bridge.ts uses at
+// LOCK time. Without this, third-party browsers see "Empty arbiter"
+// on every public listing until LOCK lands, which understates how
+// complete the trade actually is.
 function shortName(pk: string | null | undefined): string | null {
   if (!pk) return null;
   return displayCounterpartyName({
@@ -19,22 +29,43 @@ function shortName(pk: string | null | undefined): string | null {
     kind0Name: null,
   });
 }
-function participantSummary(state: EscrowState, myRole: string | null): string | null {
+function participantSummary(
+  state: EscrowState,
+  myRole: string | null,
+  previewArbiterPk: string | null,
+): string | null {
   const buyer = state.participants.buyer;
   const seller = state.participants.seller;
+  const arbiter = state.participants.arbiter;
   const buyerName = myRole === "buyer" ? "You" : shortName(buyer);
   const sellerName = myRole === "seller" ? "You" : shortName(seller);
-  if (state.status === "CREATED") {
-    // Pre-LOCK: surface seller identity + buyer slot state. "Open to a
-    // buyer" reads better than "Empty" in a sentence; the dot row keeps
-    // the symbolic version for users who prefer that.
-    if (sellerName && buyerName) return `Posted by ${sellerName} · Buyer: ${buyerName}`;
-    if (sellerName) return `Posted by ${sellerName} · Open to a buyer`;
-    if (buyerName) return `Buyer: ${buyerName} · Open to a seller`;
-    return null;
+  // Arbiter copy:
+  //   real JOIN  → "Arbiter: xxxx" (or "You" if it's the viewer)
+  //   auto pool  → "Arbiter: Auto · xxxx" (preview from pool)
+  //   none       → null (omit from sentence; the dots still show Empty)
+  let arbiterPhrase: string | null = null;
+  if (arbiter) {
+    arbiterPhrase = myRole === "arbiter" ? "Arbiter: You" : `Arbiter: ${shortName(arbiter)}`;
+  } else if (previewArbiterPk) {
+    arbiterPhrase = `Arbiter: Auto · ${shortName(previewArbiterPk)}`;
   }
-  // LOCKED and beyond — both slots should be filled.
-  if (buyerName && sellerName) return `Buyer: ${buyerName} · Seller: ${sellerName}`;
+  if (state.status === "CREATED") {
+    // Pre-LOCK: surface seller identity + buyer slot state + arbiter.
+    // "Open to a buyer" reads better than "Empty" in a sentence; the
+    // dot row keeps the symbolic version for users who prefer that.
+    const parts: string[] = [];
+    if (sellerName) parts.push(`Posted by ${sellerName}`);
+    if (buyerName) parts.push(`Buyer: ${buyerName}`);
+    else if (sellerName) parts.push("Open to a buyer");
+    if (arbiterPhrase) parts.push(arbiterPhrase);
+    return parts.length ? parts.join(" · ") : null;
+  }
+  // LOCKED and beyond — both buyer/seller slots are filled; arbiter
+  // is too (LOCK won't land without one).
+  if (buyerName && sellerName) {
+    const base = `Buyer: ${buyerName} · Seller: ${sellerName}`;
+    return arbiterPhrase ? `${base} · ${arbiterPhrase}` : base;
+  }
   return null;
 }
 
@@ -54,6 +85,19 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
   const myRole = state.participants.buyer === pubkey ? "buyer"
     : state.participants.seller === pubkey ? "seller"
     : state.participants.arbiter === pubkey ? "arbiter" : null;
+
+  // v0.6.5: same auto-arbiter preview TradeDetail uses, hoisted into
+  // Browse cards so third-party scrolls see "2-of-3 already filled"
+  // rather than a stranded Empty arbiter slot. The preview ONLY
+  // applies before a real JOIN lands and only for communities that
+  // have a recruited arbiter pool — pickArbiterFromPool is the same
+  // deterministic function escrow-bridge.ts uses at LOCK time, so
+  // the previewed pubkey matches the eventual real assignment.
+  const previewArbiterPk = state.status === EscrowStatus.CREATED
+    && !state.participants[Role.ARBITER]
+    && state.communityArbiters.length > 0
+    ? (pickArbiterFromPool(state.communityArbiters, state.id) ?? null)
+    : null;
 
   const isAmber = variant === "non-matching";
   const cardBg = isAmber ? T.amberDim : T.card;
@@ -129,9 +173,11 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
 
       {/* v0.6.5: text participant summary above the dots. Answers
           "who joined?" without requiring a tap into detail. The
-          Trinity Ring below stays as the symbolic state-at-a-glance. */}
+          Trinity Ring below stays as the symbolic state-at-a-glance.
+          Arbiter slot shows "Auto · xxxx" when the community pool
+          pre-assigns (no real JOIN yet) — same pubkey LOCK will pick. */}
       {(() => {
-        const summary = participantSummary(state, myRole);
+        const summary = participantSummary(state, myRole, previewArbiterPk);
         return summary ? (
           <div style={{
             marginTop: 10,
@@ -149,18 +195,26 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
           [B, S, A] tuple — production smoke caught the drift. The
           §43 grep tripwire test now scans src/ui/ for any inline
           three-element Role literal and fails if it finds one
-          outside theme.ts. Forever-asset for brand coherence. */}
+          outside theme.ts. Forever-asset for brand coherence.
+          v0.6.5: arbiter slot renders the pool-derived preview as
+          solid + italic "Auto · xxxx" when no real arbiter JOIN
+          has landed and a community pool is configured. */}
       <div style={{ display: "flex", gap: 12, marginTop: 8, justifyContent: "center" }}>
-        {TRINITY_RING_ORDER.map(role => (
-          <Dot
-            key={role}
-            role={role}
-            pk={state.participants[role]}
-            isYou={myRole === role}
-            voted={!!state.votes[role]}
-            outcome={state.votes[role]}
-          />
-        ))}
+        {TRINITY_RING_ORDER.map(role => {
+          const realPk = state.participants[role];
+          const isAutoArbiter = role === Role.ARBITER && !realPk && !!previewArbiterPk;
+          return (
+            <Dot
+              key={role}
+              role={role}
+              pk={realPk ?? (isAutoArbiter ? previewArbiterPk : null)}
+              isYou={myRole === role}
+              voted={!!state.votes[role]}
+              outcome={state.votes[role]}
+              autoAssigned={isAutoArbiter}
+            />
+          );
+        })}
       </div>
 
       {/* Expiry info — what happens when time runs out */}
