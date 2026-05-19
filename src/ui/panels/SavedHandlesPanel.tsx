@@ -8,6 +8,7 @@ import {
   deleteSavedHandle,
   setHandleVisibility,
   maskHandle,
+  formatPhoneNumber,
 } from "../../payments/saved-handles.js";
 import {
   getRailByKey,
@@ -197,6 +198,15 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
           <input
             value={phoneValue}
             onChange={e => { setPhoneValue(e.target.value); setError(null); }}
+            onBlur={e => {
+              // v0.6.5: canonicalize "+CC XXX XXX XXX" the moment the
+              // input loses focus, so the user sees the normalized
+              // shape before tapping Save. Live-formatting on every
+              // keystroke fights the cursor on mobile; blur-time gives
+              // immediate feedback without that pain.
+              const formatted = formatPhoneNumber(e.target.value);
+              if (formatted !== e.target.value) setPhoneValue(formatted);
+            }}
             placeholder={phonePlaceholder}
             inputMode="tel"
             autoComplete="tel"

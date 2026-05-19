@@ -88,7 +88,15 @@ export const RAIL_REGISTRY: Rail[] = [
     placeholder: "+221 77 123 4567",
   },
 
-  // ── ke-kes (Kenya · KES) ───────────────────────────────────────────
+  // ── East Africa & broader M-Pesa / Airtel footprint ───────────────
+  // v0.6.5: broadened region tags. M-Pesa is Safaricom in Kenya but
+  // also Vodacom in Tanzania, DRC, Mozambique, Lesotho, and others —
+  // the brand and the UX are interchangeable from the user's
+  // perspective, so we treat them as one rail. Airtel Money operates
+  // across Kenya, Uganda, Tanzania, Rwanda, Zambia, Malawi, Niger,
+  // Chad, DRC, Madagascar, Gabon, Republic of Congo, and more.
+  // Region arrays list known community slugs (only ke-kes today, but
+  // future TZ/UG/RW/etc. communities will pick these up automatically).
   {
     key: "m-pesa",
     displayName: "M-Pesa",
@@ -102,6 +110,97 @@ export const RAIL_REGISTRY: Rail[] = [
     allowPublicHandle: false,
     region: ["ke-kes"],
     placeholder: "+254 733 123 456",
+  },
+  // MTN Mobile Money (MoMo) — the dominant network across West and
+  // Central Africa: Ghana, Côte d'Ivoire, Cameroon, Uganda, Rwanda,
+  // Zambia, Bénin, Liberia, Republic of Congo, Guinea, South Sudan.
+  // No region tag yet because none of those communities exist in the
+  // registry, but listed universally so users in countries it
+  // operates in can still tag their phones.
+  {
+    key: "mtn-momo",
+    displayName: "MTN Mobile Money",
+    allowPublicHandle: false,
+    placeholder: "+233 24 123 4567",
+  },
+  // Tigo Pesa — Tanzania (rebranded to "Mixx by Yas" 2023 but Tigo
+  // Pesa is still widely recognized), historically Senegal & Chad.
+  {
+    key: "tigo-pesa",
+    displayName: "Tigo Pesa",
+    allowPublicHandle: false,
+    placeholder: "+255 71 234 5678",
+  },
+  // Telebirr — Ethio Telecom's wallet, Ethiopia's dominant mobile
+  // money since 2021.
+  {
+    key: "telebirr",
+    displayName: "Telebirr",
+    allowPublicHandle: false,
+    placeholder: "+251 91 234 5678",
+  },
+
+  // ── South & Southeast Asia mobile money ───────────────────────────
+  // bKash — Bangladesh's dominant mobile financial service.
+  {
+    key: "bkash",
+    displayName: "bKash",
+    allowPublicHandle: false,
+    placeholder: "+880 1700 123456",
+  },
+  // GCash — Philippines, ~70M users. Globe Telecom's wallet.
+  {
+    key: "gcash",
+    displayName: "GCash",
+    allowPublicHandle: false,
+    placeholder: "+63 917 123 4567",
+  },
+  // Maya (formerly PayMaya) — Philippines, GCash's main competitor.
+  {
+    key: "maya",
+    displayName: "Maya (PayMaya)",
+    allowPublicHandle: false,
+    placeholder: "+63 917 123 4567",
+  },
+  // Easypaisa — Pakistan, Telenor Bank wallet.
+  {
+    key: "easypaisa",
+    displayName: "Easypaisa",
+    allowPublicHandle: false,
+    placeholder: "+92 300 1234567",
+  },
+  // JazzCash — Pakistan, Jazz Mobile Bank wallet.
+  {
+    key: "jazzcash",
+    displayName: "JazzCash",
+    allowPublicHandle: false,
+    placeholder: "+92 300 1234567",
+  },
+
+  // ── Latin America popular rails ──────────────────────────────────
+  // PIX — Brazil's instant-payment system. Keys are CPF, email,
+  // phone, or a random UUID; phone-keyed PIX is common. Public-by-
+  // design (the PIX key is meant to be shared).
+  {
+    key: "pix",
+    displayName: "PIX (Brazil)",
+    allowPublicHandle: true,
+    placeholder: "+55 11 91234 5678 or CPF / email",
+  },
+  // Mercado Pago — Argentina, Brazil, Mexico, Chile, Colombia, Peru,
+  // Uruguay. Phone-based wallet plus full bank app.
+  {
+    key: "mercado-pago",
+    displayName: "Mercado Pago",
+    allowPublicHandle: false,
+    placeholder: "+54 9 11 1234 5678",
+  },
+  // Nequi — Colombia, Bancolombia's digital wallet. Phone-keyed.
+  {
+    key: "nequi",
+    displayName: "Nequi",
+    allowPublicHandle: false,
+    placeholder: "+57 300 123 4567",
   },
 
   // ── sv-usd (El Salvador · USD) ─────────────────────────────────────
@@ -216,17 +315,33 @@ export function railAllowsPublicHandle(key: string | null | undefined): boolean 
  *  Rail interface to keep registry rows minimal; placeholder is a
  *  reliable proxy for now and easy to upgrade later. */
 export function phoneNetworksForCommunity(slug: string | null | undefined): Rail[] {
-  const community = railsForCommunity(slug).filter(r => {
-    if (r.key === "phone-number") return false;
-    // Phone-shaped placeholder ("+221 …", "+254 …") is the cheap proxy
-    // for "this rail rides on a phone number." Anything else (Revtag,
-    // $cashtag, Bank transfer) is excluded.
-    return r.placeholder ? r.placeholder.startsWith("+") : false;
-  });
-  if (community.length > 0) return community;
-  // Global fallback for users on a community without explicit phone
-  // rails — common mobile-money brands across Africa + global.
-  return RAIL_REGISTRY.filter(r =>
-    ["m-pesa", "airtel-money", "wave", "orange-money"].includes(r.key)
+  // v0.6.5: return region-relevant rails FIRST, then cross-region
+  // universally available rails. Never strand a user with an empty
+  // list — they may have a phone in a country whose community isn't
+  // in the registry yet (Ghana, Tanzania, Bangladesh, Philippines,
+  // Brazil, …), and they still need to tag their phone honestly.
+  //
+  // "Phone-shaped" proxy = placeholder starts with "+". Easy to keep
+  // in sync as the registry grows.
+  const isPhoneShaped = (r: Rail) =>
+    r.key !== "phone-number"
+    && (r.placeholder ? r.placeholder.startsWith("+") : false);
+
+  const allPhone = RAIL_REGISTRY.filter(isPhoneShaped);
+
+  const regionMatched = allPhone.filter(r =>
+    r.region && r.region.length > 0 && slug ? r.region!.includes(slug) : false
   );
+  const crossRegion = allPhone.filter(r => !r.region || r.region.length === 0);
+
+  if (regionMatched.length > 0) {
+    // Community user: their local rails first, popular cross-region
+    // options after, deduped by key.
+    const seen = new Set(regionMatched.map(r => r.key));
+    return [...regionMatched, ...crossRegion.filter(r => !seen.has(r.key))];
+  }
+  // No region match (community doesn't have phone rails configured,
+  // or unknown slug): show everything phone-shaped so a Bangladeshi
+  // user on Global · USD can still pick bKash.
+  return allPhone;
 }

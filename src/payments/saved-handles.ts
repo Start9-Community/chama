@@ -151,12 +151,18 @@ export function addSavedHandle(
   if (!trimmed) {
     throw new Error("Handle cannot be empty");
   }
+  // v0.6.5: phone numbers get canonicalized to "+CC XXX XXX XXX" on
+  // save. Other rails store the user's input verbatim — formatting a
+  // Revtag or email wouldn't help and could break a literal handle.
+  const normalized = rail === "phone-number"
+    ? formatPhoneNumber(trimmed)
+    : trimmed;
   const existing = readAll();
   const networks = opts?.networks?.filter(n => typeof n === "string" && n.length > 0);
   const entry: SavedHandle = {
     id: generateId(),
     rail,
-    handle: trimmed,
+    handle: normalized,
     visibility: "private",
     createdAt: Math.floor(Date.now() / 1000),
     ...(networks && networks.length > 0 ? { networks } : {}),
@@ -243,6 +249,105 @@ export function setHandleVisibility(
 }
 
 // ── Privacy decision + masking ────────────────────────────────────────────
+
+// ── Phone-number formatting ───────────────────────────────────────────────
+//
+// v0.6.5: normalize phone numbers to a consistent "+CC XXX XXX XXX" shape
+// so saved entries are unambiguous and visually scannable for the
+// counterparty receiving them at LOCK time. The user can type the
+// number any way they like — "+254712345678", "+254 712 345 678",
+// "0712345678", "254-712-345-678" — and the formatter reduces it to a
+// single canonical form before persistence.
+//
+// Country-code length is the only fuzzy part: most countries use a
+// 2- or 3-digit CC, but a handful (NANP=1, Russia/KZ=7) use 1 digit.
+// The function uses a small heuristic based on the first digit:
+//   "1" or "7" → 1-digit CC (NANP / Russia)
+//   "2…"      → 3-digit CC (most African countries)
+//   anything else → 2-digit CC
+// Domestic numbers (no leading "+") are left as digit groups of 3 with
+// no CC prefix — the user opted out of international formatting.
+//
+// The function is intentionally lenient: it never throws and always
+// returns SOMETHING the user can read. Garbage in (empty string, all
+// non-digits) yields a trimmed empty string.
+
+function detectCountryCodeLength(digits: string): number {
+  if (digits.length === 0) return 0;
+  // NANP (+1) and Russia/Kazakhstan (+7) are the well-known 1-digit CCs.
+  if (digits[0] === "1" || digits[0] === "7") return 1;
+  // Most African dial codes are 3 digits and start with "2":
+  // 211 (South Sudan), 212 (Morocco), 213 (Algeria), 216 (Tunisia),
+  // 218 (Libya), 220-229 (Gambia, Senegal, Mauritania, Mali, Guinea…),
+  // 230-239 (Mauritius, Liberia, Sierra Leone, Ghana…), 240-249
+  // (Equatorial Guinea, Gabon, Congo, DRC, Angola, Guinea-Bissau…),
+  // 250-259 (Rwanda, Ethiopia, Somalia, Djibouti, Kenya, Tanzania,
+  // Uganda…), 260-269 (Zambia, Madagascar, Zimbabwe, Namibia, Malawi,
+  // Lesotho, Botswana, Swaziland, Comoros…), 290-299 (Saint Helena,
+  // Eritrea, Aruba, Faroe, Greenland, Sudan, South Sudan).
+  if (digits[0] === "2" && digits.length >= 3) return 3;
+  // Default: 2-digit CC covers most of Europe, Asia, Oceania.
+  return Math.min(2, digits.length);
+}
+
+/** Group a string of digits into "XXX XXX XXX" chunks. Final chunk
+ *  absorbs any 4-digit trailer (so NANP "5551234567" → "555 123 4567",
+ *  not the ugly "555 123 456 7"). 1-digit trailers also merge into
+ *  the previous chunk; 2-digit trailers stay separate.
+ *
+ *  Examples:
+ *    "612345678"    (9)  → "612 345 678"
+ *    "5551234567"   (10) → "555 123 4567"
+ *    "12345678"     (8)  → "123 456 78"
+ *    "123"          (3)  → "123"
+ *    ""             (0)  → ""                                       */
+function groupPhoneDigits(rest: string): string {
+  if (rest.length === 0) return "";
+  const chunks: string[] = [];
+  let i = 0;
+  while (i < rest.length) {
+    const remaining = rest.length - i;
+    // 4-digit trailer absorbed into one chunk; covers NANP / Russia
+    // 10-digit forms cleanly.
+    if (remaining === 4) {
+      chunks.push(rest.slice(i, i + 4));
+      i += 4;
+    } else {
+      const take = Math.min(3, remaining);
+      chunks.push(rest.slice(i, i + take));
+      i += take;
+    }
+  }
+  return chunks.join(" ");
+}
+
+/** Normalize a user-typed phone number to "+CC XXX XXX XXX" form.
+ *  Lenient: never throws, returns the best-effort canonical form.
+ *  Examples:
+ *    "+254712345678"         → "+254 712 345 678"
+ *    "+254 712 345 678"      → "+254 712 345 678"  (idempotent)
+ *    "  +254-712.345 678 "   → "+254 712 345 678"
+ *    "+15551234567"          → "+1 555 123 4567"   (NANP)
+ *    "0712345678"            → "071 234 5678"      (domestic, no CC)
+ *    ""                      → ""
+ *    "+"                     → "+"                 (typing in progress) */
+export function formatPhoneNumber(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const hasPlus = trimmed.startsWith("+");
+  const digits = trimmed.replace(/\D/g, "");
+  if (!digits) return hasPlus ? "+" : "";
+
+  if (hasPlus) {
+    const ccLen = detectCountryCodeLength(digits);
+    const cc = digits.slice(0, ccLen);
+    const rest = digits.slice(ccLen);
+    const grouped = groupPhoneDigits(rest);
+    return grouped ? `+${cc} ${grouped}` : `+${cc}`;
+  }
+  // Domestic — same grouping rule, no CC prefix.
+  return groupPhoneDigits(digits);
+}
 
 /** Mask a handle for public display. Heuristics:
  *   - Very short handles (<= 4 chars): full mask "•••"

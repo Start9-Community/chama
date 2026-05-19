@@ -122,6 +122,7 @@ import {
   RAIL_REGISTRY,
   getRailByKey,
   railsForCommunity,
+  phoneNetworksForCommunity,
   railAllowsPublicHandle,
 } from "../payments/rail-registry.js";
 import {
@@ -1657,6 +1658,49 @@ console.log("\n── RAIL REGISTRY ──");
     "getRailByKey returns the right rail");
   assert(getRailByKey("xyz") === null, "Unknown key → null");
   assert(getRailByKey(null) === null, "Null key → null");
+
+  // v0.6.5: expanded Global South network roster + region-first
+  // ordering in phoneNetworksForCommunity.
+  assert(getRailByKey("mtn-momo")?.displayName === "MTN Mobile Money",
+    "MTN MoMo registered");
+  assert(getRailByKey("bkash")?.displayName === "bKash",
+    "bKash registered");
+  assert(getRailByKey("gcash")?.displayName === "GCash",
+    "GCash registered");
+  assert(getRailByKey("pix")?.displayName === "PIX (Brazil)",
+    "PIX registered");
+  assert(getRailByKey("nequi")?.displayName === "Nequi",
+    "Nequi registered");
+
+  // Region-first ordering: a Kenyan user sees M-Pesa + Airtel Money
+  // up top, then the cross-region rails (MTN MoMo, bKash, etc.).
+  const keNetworks = phoneNetworksForCommunity("ke-kes");
+  assert(keNetworks[0]?.key === "m-pesa",
+    "ke-kes sees M-Pesa first");
+  assert(keNetworks.some(r => r.key === "mtn-momo"),
+    "ke-kes also gets MTN MoMo in the cross-region tail");
+  assert(keNetworks.some(r => r.key === "bkash"),
+    "ke-kes also gets bKash in the cross-region tail");
+
+  // Senegal sees Wave / Orange / Wizall / Free Money first, then
+  // cross-region.
+  const snNetworks = phoneNetworksForCommunity("sn-cfa");
+  const snFirstKeys = snNetworks.slice(0, 4).map(r => r.key);
+  assert(snFirstKeys.includes("wave") && snFirstKeys.includes("orange-money"),
+    "sn-cfa sees its regional rails first");
+  assert(snNetworks.some(r => r.key === "mtn-momo"),
+    "sn-cfa also gets cross-region rails like MTN MoMo");
+
+  // No matching community (e.g. an unconfigured slug) → show
+  // everything phone-shaped, so a user from Bangladesh on Global ·
+  // USD can still tag their bKash number.
+  const fallback = phoneNetworksForCommunity("xx-future");
+  assert(fallback.some(r => r.key === "bkash"),
+    "Unmatched community still surfaces bKash");
+  assert(fallback.some(r => r.key === "wave"),
+    "Unmatched community still surfaces Wave");
+  assert(!fallback.some(r => r.key === "phone-number"),
+    "Phone-number meta rail itself is excluded from the network picker");
 }
 
 // ── 19. SAVED HANDLES — CRUD + visibility refusal ────────────────────────
@@ -1811,6 +1855,59 @@ console.log("\n── SAVED HANDLES — phone-network tagging (v0.6.5) ──");
   assert(
     cleared?.networks === undefined,
     "updateSavedHandle with [] clears the networks field",
+  );
+
+  // v0.6.5: phone numbers are canonicalized on save. The user can
+  // type any spacing; the stored value is "+CC XXX XXX XXX".
+  (globalThis as any).localStorage.clear();
+  const noSpaces = addSavedHandle("phone-number", "+254712345678");
+  assert(
+    noSpaces.handle === "+254 712 345 678",
+    "addSavedHandle formats a spaceless phone to '+CC XXX XXX XXX'",
+  );
+  const messy = addSavedHandle("phone-number", "  +254-712.345 678  ");
+  assert(
+    messy.handle === "+254 712 345 678",
+    "addSavedHandle normalizes mixed separators",
+  );
+  const idempotent = addSavedHandle("phone-number", "+254 712 345 678");
+  assert(
+    idempotent.handle === "+254 712 345 678",
+    "Formatting a canonical number is idempotent",
+  );
+  const nanp = addSavedHandle("phone-number", "+15551234567");
+  assert(
+    nanp.handle === "+1 555 123 4567",
+    "1-digit CC (NANP) detected — '+1 555 123 4567'",
+  );
+  const russia = addSavedHandle("phone-number", "+79161234567");
+  assert(
+    russia.handle === "+7 916 123 4567",
+    "1-digit CC for Russia detected",
+  );
+  const france = addSavedHandle("phone-number", "+33612345678");
+  assert(
+    france.handle === "+33 612 345 678",
+    "2-digit CC (France) detected",
+  );
+  const ghana = addSavedHandle("phone-number", "+233241234567");
+  assert(
+    ghana.handle === "+233 241 234 567",
+    "3-digit CC for Ghana (starts with 2) detected",
+  );
+  const domestic = addSavedHandle("phone-number", "0712345678");
+  assert(
+    domestic.handle.replace(/\s/g, "") === "0712345678"
+    && domestic.handle.includes(" "),
+    "Domestic-format number (no +) is grouped in 3s",
+  );
+
+  // Non-phone rails store the user's input verbatim — no formatter
+  // surprises for usernames, emails, account numbers.
+  const revtag = addSavedHandle("revtag", "@some_user.123");
+  assert(
+    revtag.handle === "@some_user.123",
+    "Non-phone rails preserve user input verbatim",
   );
 }
 
