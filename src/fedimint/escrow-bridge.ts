@@ -170,12 +170,19 @@ export class EscrowFedimintBridge {
     let handleId: string | undefined;
     let handle: string | undefined;
     let rail: string | undefined;
+    let handleNetworks: string[] | undefined;
     if (opts.savedHandleId) {
       const saved = getSavedHandle(opts.savedHandleId);
       if (saved) {
         handleId = saved.id;
         handle = saved.handle;
         rail = saved.rail;
+        // v0.6.5: networks (mobile-money tags on phone numbers) ride
+        // through the LOCK envelope so the three participants see them
+        // alongside the cleartext handle.
+        if (saved.networks && saved.networks.length > 0) {
+          handleNetworks = saved.networks;
+        }
       } else {
         // Stale ID — the saved handle was deleted between selection and
         // lock. Don't crash the lock; just emit without the handle and
@@ -197,6 +204,7 @@ export class EscrowFedimintBridge {
       handleId,
       handle,
       rail,
+      handleNetworks,
     });
   }
 

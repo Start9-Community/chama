@@ -332,6 +332,13 @@ export interface LockPayload {
   handleId?: string;
   handle?: string;
   rail?: string;
+  /** v0.6.5: optional mobile-money networks the locker accepts on this
+   *  handle (e.g. ["m-pesa", "airtel-money"] for a Kenyan phone number).
+   *  Carried inside the same NIP-44 envelope as handle/rail, never on
+   *  the wire as cleartext. Apply-time field — escrow-client populates
+   *  it from the envelope JSON before applyEvent. Only meaningful for
+   *  phone-number rails; other rails leave it undefined. */
+  handleNetworks?: string[];
   lockedAt: number;
 }
 
@@ -565,8 +572,18 @@ export interface EscrowState {
      *  raw-escrow) or a pre-PR-3 trade. The render layer applies
      *  handleDisplayForViewer() to gate cleartext display on viewer
      *  context — non-participants see masked output even when this
-     *  field is populated locally. */
-    handle: { id: string | null; value: string; rail: string | null } | null;
+     *  field is populated locally.
+     *  v0.6.5: `networks` carries the mobile-money networks the seller
+     *  tagged on a phone-number handle ("M-Pesa", "Wave", etc.). Empty
+     *  array means the seller didn't tag any; that's distinct from
+     *  null (no handle at all). Render layer shows them as chips
+     *  alongside the cleartext number during active trade. */
+    handle: {
+      id: string | null;
+      value: string;
+      rail: string | null;
+      networks: string[];
+    } | null;
   };
 
   /** Claim details */

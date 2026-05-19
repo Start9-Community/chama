@@ -592,9 +592,38 @@ export function TradeDetail({
           }}>
             {handleDisplayForViewer(state.lock.handle.value, !!myRole)}
           </div>
+          {/* v0.6.5: networks the seller accepts on this handle.
+              Phone numbers serve many mobile-money networks; without
+              this chip row the buyer has no honest way to know which
+              one to use. Only renders for participants (the cleartext
+              value itself is hidden from non-participants anyway, so
+              the network tags would be a privacy leak there). */}
+          {!!myRole && state.lock.handle.networks && state.lock.handle.networks.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{
+                fontSize: 9, color: T.muted, fontFamily: T.mono,
+                letterSpacing: 0.3, marginBottom: 5,
+              }}>
+                ACCEPTS
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {state.lock.handle.networks.map(networkKey => (
+                  <span key={networkKey} style={{
+                    padding: "4px 10px", borderRadius: 12,
+                    background: T.tealDim,
+                    border: `1px solid ${T.teal}66`,
+                    color: T.teal, fontFamily: T.mono,
+                    fontSize: 10, fontWeight: 700, letterSpacing: 0.2,
+                  }}>
+                    {getRailByKey(networkKey)?.displayName || networkKey}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{
             fontSize: 9, color: T.muted, fontFamily: T.mono,
-            marginTop: 6, lineHeight: 1.4,
+            marginTop: 8, lineHeight: 1.4,
           }}>
             {myRole
               ? "Revealed only to the three trade participants via the LOCK event."

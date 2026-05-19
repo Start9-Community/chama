@@ -1760,6 +1760,60 @@ console.log("\n── SAVED HANDLES (CRUD + visibility) ──");
   assert(listSavedHandles().length === 3, "Other entries unaffected by delete");
 }
 
+// ── 19b. SAVED HANDLES — v0.6.5 phone-network tagging ────────────────────
+console.log("\n── SAVED HANDLES — phone-network tagging (v0.6.5) ──");
+{
+  // Fresh storage for this block so count-based asserts above stay
+  // stable. v0.6.5 lets phone-number handles carry an array of mobile-
+  // money network rail keys (M-Pesa, Wave, Orange Money, etc.) so
+  // counterparties know which network to use during a trade.
+  (globalThis as any).localStorage.clear();
+
+  const phoneWithNetworks = addSavedHandle(
+    "phone-number",
+    "+254 712 345 678",
+    { networks: ["m-pesa", "airtel-money"] },
+  );
+  assert(
+    Array.isArray(phoneWithNetworks.networks)
+    && phoneWithNetworks.networks.length === 2
+    && phoneWithNetworks.networks.includes("m-pesa"),
+    "addSavedHandle persists the optional networks array",
+  );
+
+  const phoneNoNetworks = addSavedHandle("phone-number", "+1 555 123 4567");
+  assert(
+    phoneNoNetworks.networks === undefined,
+    "addSavedHandle omits networks when not provided",
+  );
+
+  const phoneEmptyNetworks = addSavedHandle(
+    "phone-number",
+    "+1 555 987 6543",
+    { networks: [] },
+  );
+  assert(
+    phoneEmptyNetworks.networks === undefined,
+    "addSavedHandle treats empty networks array as 'not provided'",
+  );
+
+  // updateSavedHandle can swap the network set.
+  const swapped = updateSavedHandle(phoneWithNetworks.id, {
+    networks: ["wave"],
+  });
+  assert(
+    swapped?.networks?.length === 1 && swapped.networks[0] === "wave",
+    "updateSavedHandle replaces the networks array",
+  );
+
+  // Empty networks via update drops the field entirely.
+  const cleared = updateSavedHandle(swapped!.id, { networks: [] });
+  assert(
+    cleared?.networks === undefined,
+    "updateSavedHandle with [] clears the networks field",
+  );
+}
+
 // ── 20. MASKING + handleDisplayForViewer ─────────────────────────────────
 console.log("\n── MASKING + viewer-aware display ──");
 {
@@ -1770,6 +1824,26 @@ console.log("\n── MASKING + viewer-aware display ──");
     "Phone handle keeps last 4 digits");
   assert(maskHandle("+221 77 123 4567").startsWith("+221"),
     "Phone handle keeps country prefix");
+
+  // v0.6.5 mask regression: a phone entered WITHOUT spaces must still
+  // be masked. Pre-v0.6.5 the heuristic was "split(' ').slice(0, 2)"
+  // which returned the entire number when there were no spaces,
+  // leaking everything next to a fake "•••".
+  {
+    const masked = maskHandle("+254712345678");
+    assert(masked.includes("•••"), "Spaceless phone gets a mask separator");
+    assert(masked.endsWith("5678"), "Spaceless phone keeps last 4");
+    assert(masked.startsWith("+254"), "Spaceless phone keeps country code");
+    assert(!masked.includes("712345"),
+      "Spaceless phone does NOT leak the middle digits (the v0.6.5 bug)");
+  }
+  // Domestic number (no + prefix) — still keep last 4, no CC leak.
+  {
+    const masked = maskHandle("0712345678");
+    assert(masked.endsWith("5678"), "Domestic number keeps last 4");
+    assert(!masked.includes("071234"),
+      "Domestic number doesn't leak the middle");
+  }
 
   // Email-shaped: mask local + domain
   const masked = maskHandle("alice@example.com");

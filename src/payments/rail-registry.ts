@@ -201,3 +201,32 @@ export function railsForCommunity(slug: string | null | undefined): Rail[] {
 export function railAllowsPublicHandle(key: string | null | undefined): boolean {
   return getRailByKey(key)?.allowPublicHandle === true;
 }
+
+/** v0.6.5: the set of phone-number-based mobile-money networks the
+ *  user can tag on their saved phone entry for a given community.
+ *  Surfaces the same regional rails Create lets sellers pick, minus
+ *  the synthetic "phone-number" rail itself. A user in Senegal sees
+ *  Wave / Orange Money / Wizall / Free Money; a user in Kenya sees
+ *  M-Pesa / Airtel Money; a global user sees a curated fallback. The
+ *  selection rides through the LOCK envelope so counterparties know
+ *  which network(s) to send fiat to.
+ *
+ *  Heuristic for "phone-based": region-scoped rails with the
+ *  +cc-formatted placeholder. We don't ship a strict type bit on the
+ *  Rail interface to keep registry rows minimal; placeholder is a
+ *  reliable proxy for now and easy to upgrade later. */
+export function phoneNetworksForCommunity(slug: string | null | undefined): Rail[] {
+  const community = railsForCommunity(slug).filter(r => {
+    if (r.key === "phone-number") return false;
+    // Phone-shaped placeholder ("+221 …", "+254 …") is the cheap proxy
+    // for "this rail rides on a phone number." Anything else (Revtag,
+    // $cashtag, Bank transfer) is excluded.
+    return r.placeholder ? r.placeholder.startsWith("+") : false;
+  });
+  if (community.length > 0) return community;
+  // Global fallback for users on a community without explicit phone
+  // rails — common mobile-money brands across Africa + global.
+  return RAIL_REGISTRY.filter(r =>
+    ["m-pesa", "airtel-money", "wave", "orange-money"].includes(r.key)
+  );
+}

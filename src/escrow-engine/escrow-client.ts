@@ -470,6 +470,9 @@ export class EscrowClient {
     handleId?: string;
     handle?: string;
     rail?: string;
+    /** v0.6.5: mobile-money networks the seller accepts on this handle
+     *  ("m-pesa", "wave", etc.). Bridge pulls from saved handle. */
+    handleNetworks?: string[];
   }): Promise<EscrowState> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
@@ -489,6 +492,12 @@ export class EscrowClient {
         handleId: params.handleId,
         handle: params.handle,
         rail: params.rail,
+        // v0.6.5: networks ride inside the same encrypted blob — never
+        // on the wire as cleartext. Only set when present; absent in
+        // pre-v0.6.5 trades and non-phone rails.
+        ...(params.handleNetworks && params.handleNetworks.length > 0
+          ? { networks: params.handleNetworks }
+          : {}),
       });
       handleEnvelope = await createEnvelope(
         handleData,
@@ -543,6 +552,9 @@ export class EscrowClient {
       handleId: params.handleId,
       handle: params.handle,
       rail: params.rail,
+      ...(params.handleNetworks && params.handleNetworks.length > 0
+        ? { handleNetworks: params.handleNetworks }
+        : {}),
     };
     const lockResult = this.applyLocally(escrowId, signed, localPayload);
 
@@ -1250,7 +1262,12 @@ export class EscrowClient {
     );
     if (cleartext === null) return parsed;
 
-    let handleData: { handleId?: string; handle?: string; rail?: string };
+    let handleData: {
+      handleId?: string;
+      handle?: string;
+      rail?: string;
+      networks?: string[];
+    };
     try {
       handleData = JSON.parse(cleartext);
     } catch {
@@ -1259,6 +1276,10 @@ export class EscrowClient {
     if (typeof handleData.handle !== "string" || handleData.handle.length === 0) {
       return parsed;
     }
+    // v0.6.5: networks is optional; tolerate absent/malformed shapes.
+    const networks = Array.isArray(handleData.networks)
+      ? handleData.networks.filter((n: unknown): n is string => typeof n === "string")
+      : undefined;
 
     return {
       ...parsed,
@@ -1267,6 +1288,7 @@ export class EscrowClient {
         handleId: handleData.handleId,
         handle: handleData.handle,
         rail: handleData.rail,
+        ...(networks && networks.length > 0 ? { handleNetworks: networks } : {}),
       },
     };
   }

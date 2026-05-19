@@ -4,6 +4,7 @@ import {
   type SavedHandle,
   listSavedHandles,
   addSavedHandle,
+  updateSavedHandle,
   deleteSavedHandle,
   setHandleVisibility,
   maskHandle,
@@ -12,6 +13,7 @@ import {
   getRailByKey,
   railsForCommunity,
   railAllowsPublicHandle,
+  phoneNetworksForCommunity,
 } from "../../payments/rail-registry.js";
 
 const PHONE_NUMBER_RAIL = "phone-number";
@@ -34,6 +36,11 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
   const [addRail, setAddRail] = useState<string>("");
   const [addValue, setAddValue] = useState<string>("");
   const [phoneValue, setPhoneValue] = useState<string>("");
+  // v0.6.5: which mobile-money networks the user accepts on the phone
+  // number being added. Stored locally with the handle and revealed
+  // alongside it during a trade so counterparties know which network
+  // to send fiat to.
+  const [phoneNetworks, setPhoneNetworks] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => {
@@ -44,6 +51,15 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
     .filter(r => r.key !== PHONE_NUMBER_RAIL);
   const phoneRail = getRailByKey(PHONE_NUMBER_RAIL);
   const phonePlaceholder = phoneRail?.placeholder || "+254 712 345 678";
+  const phoneNetworkOptions = phoneNetworksForCommunity(communitySlug);
+
+  const togglePhoneNetwork = (key: string) => {
+    setPhoneNetworks(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
 
   const handleAddPhone = () => {
     setError(null);
@@ -52,12 +68,23 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
       return;
     }
     try {
-      addSavedHandle(PHONE_NUMBER_RAIL, phoneValue.trim());
+      addSavedHandle(PHONE_NUMBER_RAIL, phoneValue.trim(), {
+        networks: [...phoneNetworks],
+      });
       setPhoneValue("");
+      setPhoneNetworks(new Set());
       refresh();
     } catch (e: any) {
       setError(e?.message || "Failed to save phone number");
     }
+  };
+
+  const handleToggleHandleNetwork = (h: SavedHandle, networkKey: string) => {
+    const current = new Set(h.networks ?? []);
+    if (current.has(networkKey)) current.delete(networkKey);
+    else current.add(networkKey);
+    updateSavedHandle(h.id, { networks: [...current] });
+    refresh();
   };
 
   const handleAdd = () => {
@@ -191,6 +218,43 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
             Save
           </button>
         </div>
+
+        {/* v0.6.5 network chips. Optional tags so a counterparty sees
+            "+254 ••• 5678 · M-Pesa" instead of just a number with no
+            hint of which mobile-money network to use. Selected
+            networks are stored on the SavedHandle and ride through
+            the LOCK envelope to the three participants. */}
+        {phoneNetworkOptions.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{
+              fontSize: 10, color: T.muted, fontFamily: T.mono,
+              letterSpacing: 0.4, marginBottom: 6,
+            }}>
+              Networks this number accepts (optional)
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {phoneNetworkOptions.map(rail => {
+                const selected = phoneNetworks.has(rail.key);
+                return (
+                  <button
+                    key={rail.key}
+                    onClick={() => togglePhoneNetwork(rail.key)}
+                    style={{
+                      padding: "5px 11px", borderRadius: 14,
+                      background: selected ? T.tealDim : T.surface,
+                      border: `1px solid ${selected ? T.teal + "66" : T.border}`,
+                      color: selected ? T.teal : T.muted,
+                      fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+                      cursor: "pointer", letterSpacing: 0.2,
+                    }}
+                  >
+                    {selected ? "✓ " : ""}{rail.displayName}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={{
@@ -268,6 +332,40 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                     {revealed ? "🙈 mask" : "👁 reveal"}
                   </span>
                 </div>
+                {/* v0.6.5: per-handle network chips for phone entries.
+                    Tap toggles inclusion. The current set is also what
+                    rides through the LOCK envelope. */}
+                {h.rail === PHONE_NUMBER_RAIL && phoneNetworkOptions.length > 0 && (
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{
+                      fontSize: 9, color: T.muted, fontFamily: T.mono,
+                      letterSpacing: 0.3, marginBottom: 5,
+                    }}>
+                      NETWORKS
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {phoneNetworkOptions.map(rail => {
+                        const selected = (h.networks ?? []).includes(rail.key);
+                        return (
+                          <button
+                            key={rail.key}
+                            onClick={() => handleToggleHandleNetwork(h, rail.key)}
+                            style={{
+                              padding: "4px 9px", borderRadius: 12,
+                              background: selected ? T.tealDim : T.surface,
+                              border: `1px solid ${selected ? T.teal + "66" : T.border}`,
+                              color: selected ? T.teal : T.muted,
+                              fontFamily: T.mono, fontSize: 9, fontWeight: 700,
+                              cursor: "pointer", letterSpacing: 0.2,
+                            }}
+                          >
+                            {selected ? "✓ " : ""}{rail.displayName}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 <button
                   onClick={() => handleDelete(h.id)}
                   style={{

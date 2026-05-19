@@ -429,6 +429,10 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
       id: p.handleId ?? null,
       value: p.handle,
       rail: p.rail ?? null,
+      // v0.6.5: networks carried in the encrypted envelope. Empty
+      // array means "seller didn't tag any" — render layer hides the
+      // chip row; non-empty means show them alongside the cleartext.
+      networks: Array.isArray(p.handleNetworks) ? p.handleNetworks : [],
     };
   }
 

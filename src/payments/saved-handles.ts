@@ -56,6 +56,15 @@ export interface SavedHandle {
   /** Legacy optional field from the era where Lightning destinations
    *  were stored here. Kept so old rows validate long enough to migrate. */
   lastUsedAt?: number;
+  /** v0.6.5: rail keys the user accepts on THIS handle. Only meaningful
+   *  for phone-number entries — one number often works on multiple
+   *  mobile-money networks (Safaricom SIM → M-Pesa; Senegalese number →
+   *  Wave AND Orange Money; etc.). Counterparties need to know which
+   *  network to send to during a trade. Each entry is a rail key from
+   *  rail-registry.ts (e.g. "m-pesa", "wave", "orange-money"). Empty/
+   *  undefined for non-phone rails. Flows through the LOCK envelope so
+   *  it's visible to all three participants at active-trade time. */
+  networks?: string[];
 }
 
 // ── Storage I/O ───────────────────────────────────────────────────────────
@@ -103,7 +112,10 @@ function isSavedHandle(x: any): x is SavedHandle {
     typeof x.rail === "string" &&
     typeof x.handle === "string" &&
     (x.visibility === "private" || x.visibility === "public") &&
-    typeof x.createdAt === "number"
+    typeof x.createdAt === "number" &&
+    // networks is optional; if present must be an array of strings.
+    (x.networks === undefined
+      || (Array.isArray(x.networks) && x.networks.every((n: unknown) => typeof n === "string")))
   );
 }
 
@@ -130,18 +142,24 @@ export function getSavedHandlesByRail(rail: string): SavedHandle[] {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
-export function addSavedHandle(rail: string, handle: string): SavedHandle {
+export function addSavedHandle(
+  rail: string,
+  handle: string,
+  opts?: { networks?: string[] },
+): SavedHandle {
   const trimmed = handle.trim();
   if (!trimmed) {
     throw new Error("Handle cannot be empty");
   }
   const existing = readAll();
+  const networks = opts?.networks?.filter(n => typeof n === "string" && n.length > 0);
   const entry: SavedHandle = {
     id: generateId(),
     rail,
     handle: trimmed,
     visibility: "private",
     createdAt: Math.floor(Date.now() / 1000),
+    ...(networks && networks.length > 0 ? { networks } : {}),
   };
   writeAll([entry, ...existing]);
   return entry;
@@ -156,16 +174,27 @@ export function deleteSavedHandle(id: string): void {
  *  guard. */
 export function updateSavedHandle(
   id: string,
-  patch: { rail?: string; handle?: string },
+  patch: { rail?: string; handle?: string; networks?: string[] },
 ): SavedHandle | null {
   const handles = readAll();
   const idx = handles.findIndex(h => h.id === id);
   if (idx === -1) return null;
+  // Drop the networks field entirely when the patch sets it to an
+  // empty array — keeps the stored object minimal for non-phone rails.
+  const nextNetworks = patch.networks
+    ?.filter(n => typeof n === "string" && n.length > 0);
   const next: SavedHandle = {
     ...handles[idx],
     ...(patch.rail   !== undefined ? { rail:   patch.rail   } : {}),
     ...(patch.handle !== undefined ? { handle: patch.handle.trim() } : {}),
+    ...(patch.networks !== undefined
+      ? (nextNetworks && nextNetworks.length > 0
+          ? { networks: nextNetworks }
+          : { networks: undefined })
+      : {}),
   };
+  // Strip undefined networks so the stored JSON stays clean.
+  if (next.networks === undefined) delete next.networks;
   handles[idx] = next;
   writeAll(handles);
   return next;
@@ -217,17 +246,27 @@ export function setHandleVisibility(
 
 /** Mask a handle for public display. Heuristics:
  *   - Very short handles (<= 4 chars): full mask "•••"
- *   - Phone-shaped (starts with +): keep country/area prefix + last 4
+ *   - Phone-shaped (starts with + or digit): keep "+CC" and last 4
+ *     digits, mask the middle. The previous heuristic
+ *     ("split on space, keep first two chunks") leaked the whole number
+ *     when the user entered without spaces — split(" ") returned a
+ *     one-element array and "first two" was the entire input. v0.6.5
+ *     fix: strip non-digits first so formatting doesn't matter, then
+ *     reconstruct from a canonical anchor (country code + last 4).
  *   - Email-shaped (contains @): mask local + first chars of domain
  *   - Otherwise: keep first 2 + last 2, mask middle */
 export function maskHandle(handle: string): string {
   if (!handle) return "";
   if (handle.length <= 4) return "•••";
   if (handle.startsWith("+") || /^\+?\d/.test(handle)) {
-    // Phone-ish: keep prefix to the first space (country code chunk) + last 4
-    const prefix = handle.split(" ").slice(0, 2).join(" ");
-    const last4 = handle.replace(/\s/g, "").slice(-4);
-    return `${prefix}•••${last4}`;
+    const digits = handle.replace(/\D/g, "");
+    if (digits.length <= 4) return `•••${digits}`;
+    // Country code: leading 1-3 digits after the "+", if any. Without
+    // a "+" the input might be a domestic number — show just the last 4.
+    const ccMatch = handle.match(/^\+(\d{1,3})/);
+    const cc = ccMatch ? `+${ccMatch[1]}` : "";
+    const last4 = digits.slice(-4);
+    return cc ? `${cc} ••• ${last4}` : `••• ${last4}`;
   }
   if (handle.includes("@")) {
     const [local, domain = ""] = handle.split("@");
