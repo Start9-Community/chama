@@ -456,6 +456,39 @@ export function countActiveBuyerSellerCommitments(inputs: {
 }
 
 /**
+ * v0.6.5: total msats across all live buyer/seller commitments the
+ * user is in. Drives the ActiveTradePill's amount headline.
+ *
+ * Distinct from `activeCommittedMsats` (which sums only LOCKED +
+ * APPROVED — money *actually* in escrow). This sums every live
+ * trade's amountMsats regardless of stage (CREATED + LOCKED +
+ * APPROVED + CLAIMED), because the pill says "3 active trades · X
+ * sats" — the implied reading is total trade value, not just sats
+ * currently locked. Two surfaces, two truthful readings:
+ *   ActiveTradePill   → "what's the gravitational weight of my live
+ *                        trade activity right now?"     (this helper)
+ *   ChamaBar in-trade → "how many sats are actually locked in
+ *                        escrow?"                       (activeCommittedMsats)
+ */
+export function sumActiveBuyerSellerTradeMsats(inputs: {
+  escrows: Iterable<EscrowState>;
+  userPubkey: string;
+  nowSec?: number;
+}): number {
+  const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
+  let sum = 0;
+  for (const e of inputs.escrows) {
+    const isBuyerOrSeller =
+      e.participants.buyer === inputs.userPubkey
+      || e.participants.seller === inputs.userPubkey;
+    if (!isBuyerOrSeller) continue;
+    if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
+    sum += e.amountMsats;
+  }
+  return sum;
+}
+
+/**
  * v0.6.5 funding-operation gate. True while runFundAndLock is mid-flight
  * (between creating-invoice and the locked/lock-failed/expired/aborted
  * terminal phases). The only condition that should disable a second

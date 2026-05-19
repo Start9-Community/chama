@@ -2463,6 +2463,7 @@ import {
   canOfferSubscription,
   hasActiveBuyerSellerCommitment,
   countActiveBuyerSellerCommitments,
+  sumActiveBuyerSellerTradeMsats,
   isMidFunding,
   findActiveTrade,
   shouldShowRecoveryBanner,
@@ -3454,6 +3455,27 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
   assert(
     countActiveBuyerSellerCommitments({ escrows: [asArbiter, completed, cancelled], userPubkey: me }) === 0,
     "Arbiter-only + terminal escrows don't count",
+  );
+
+  // v0.6.5: sumActiveBuyerSellerTradeMsats — the honest total behind
+  // the ActiveTradePill headline. Sums amountMsats across every live
+  // trade (CREATED + LOCKED + APPROVED + CLAIMED), distinct from
+  // activeCommittedMsats which only counts LOCKED+APPROVED.
+  assert(
+    sumActiveBuyerSellerTradeMsats({ escrows: [], userPubkey: me }) === 0,
+    "Empty escrows → 0 msats",
+  );
+  assert(
+    sumActiveBuyerSellerTradeMsats({ escrows: [asBuyer], userPubkey: me }) === 1_000_000,
+    "Single LOCKED trade contributes its full amountMsats",
+  );
+  assert(
+    sumActiveBuyerSellerTradeMsats({ escrows: [listingOnly, asBuyer], userPubkey: me }) === 2_000_000,
+    "CREATE-only listing + LOCKED trade sum together (1M + 1M)",
+  );
+  assert(
+    sumActiveBuyerSellerTradeMsats({ escrows: [asArbiter, completed, cancelled, expired], userPubkey: me }) === 0,
+    "Arbiter-only + terminal + expired escrows don't contribute",
   );
 }
 

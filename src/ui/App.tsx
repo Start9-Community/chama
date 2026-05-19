@@ -19,6 +19,7 @@ import {
   shouldShowRecoveryBanner,
   hasActiveBuyerSellerCommitment,
   countActiveBuyerSellerCommitments,
+  sumActiveBuyerSellerTradeMsats,
   activeCommittedMsats,
   decideChamaBarLabel,
   findActiveTrade,
@@ -369,6 +370,14 @@ export default function App() {
     : false;
   const activeCommitmentCount = pubkey
     ? countActiveBuyerSellerCommitments({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
+    : 0;
+  // v0.6.5: total amountMsats across every live buyer/seller trade.
+  // Drives the ActiveTradePill headline "N active trades · X sats"
+  // honestly — the implied total reading. Distinct from
+  // activeCommittedMsats below (LOCKED+APPROVED only, "actually in
+  // escrow" — ChamaBar's reading).
+  const activeTradeMsats = pubkey
+    ? sumActiveBuyerSellerTradeMsats({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : 0;
   // v0.4.2 hotfix round 3: msats locked in active escrows where the
   // user is buyer/seller. Drives the ChamaBar "X sats in escrow" pill
@@ -1108,7 +1117,7 @@ export default function App() {
             <ActiveTradePill
               trade={activeTrade}
               activeTradeCount={activeCommitmentCount}
-              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
+              activeTradeMsats={activeTradeMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1144,7 +1153,7 @@ export default function App() {
             <ActiveTradePill
               trade={activeTrade}
               activeTradeCount={activeCommitmentCount}
-              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
+              activeTradeMsats={activeTradeMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1168,7 +1177,7 @@ export default function App() {
             <ActiveTradePill
               trade={activeTrade}
               activeTradeCount={activeCommitmentCount}
-              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
+              activeTradeMsats={activeTradeMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1183,7 +1192,7 @@ export default function App() {
             <ActiveTradePill
               trade={activeTrade}
               activeTradeCount={activeCommitmentCount}
-              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
+              activeTradeMsats={activeTradeMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1197,7 +1206,7 @@ export default function App() {
             <ActiveTradePill
               trade={activeTrade}
               activeTradeCount={activeCommitmentCount}
-              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
+              activeTradeMsats={activeTradeMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
@@ -1239,7 +1248,7 @@ export default function App() {
             <ActiveTradePill
               trade={activeTrade}
               activeTradeCount={activeCommitmentCount}
-              activeTradeMsats={committedMsats > 0 ? committedMsats : activeTrade.amountMsats}
+              activeTradeMsats={activeTradeMsats}
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
