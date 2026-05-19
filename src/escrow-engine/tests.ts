@@ -3304,13 +3304,18 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     participants: { buyer: null, seller: me, arbiter: arb },
     eventChain: [{ kind: EscrowEventKind.CREATE } as any],
   });
+  // v0.6.5 semantics flip: the user's own unmatched listing IS a live
+  // commitment from their perspective ("I have a 2k listing open"), so
+  // it counts toward the ChamaBar pill and active-trade surfaces. The
+  // pre-v0.6.5 exclusion existed only to keep the Create gate from
+  // self-blocking; that gate is gone, so the exclusion is gone.
   assert(
-    hasActiveBuyerSellerCommitment({ escrows: [listingOnly], userPubkey: me }) === false,
-    "CREATE-only public listing does not count as an active trade",
+    hasActiveBuyerSellerCommitment({ escrows: [listingOnly], userPubkey: me }) === true,
+    "v0.6.5: CREATE-only public listing now counts as a live commitment",
   );
   assert(
-    findActiveTrade({ escrows: [listingOnly], userPubkey: me }) === null,
-    "findActiveTrade ignores CREATE-only public listing ghosts",
+    findActiveTrade({ escrows: [listingOnly], userPubkey: me })?.id === "listing-only",
+    "findActiveTrade now surfaces CREATE-only listings the user posted",
   );
 
   const joinedCreated = escrow({
@@ -3435,8 +3440,8 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     "Empty escrows → 0 active commitments",
   );
   assert(
-    countActiveBuyerSellerCommitments({ escrows: [listingOnly], userPubkey: me }) === 0,
-    "CREATE-only listing does not count toward active commitments",
+    countActiveBuyerSellerCommitments({ escrows: [listingOnly], userPubkey: me }) === 1,
+    "v0.6.5: CREATE-only listing now counts toward active commitments",
   );
   assert(
     countActiveBuyerSellerCommitments({ escrows: [asBuyer], userPubkey: me }) === 1,

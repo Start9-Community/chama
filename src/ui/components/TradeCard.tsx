@@ -1,8 +1,42 @@
 import { type EscrowState } from "../../escrow-engine/types.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { T, CAT_ICON, CAT_LABEL, TRINITY_RING_ORDER, fmtSats, refundRecipientFor } from "../theme.js";
+import { displayCounterpartyName } from "../decisions.js";
 import { Badge } from "./Badge.js";
 import { Dot } from "./Dot.js";
+
+// v0.6.5: short, scannable participant summary above the Trinity Ring.
+// The dots already encode this info but are visually de-emphasized;
+// users were missing them at a glance and asking "who joined this
+// trade?" Adding a text line answers the question without requiring
+// a tap into TradeDetail. Truncated npub by default; kind:0 fetcher
+// (Me toggle) can plug in later via displayCounterpartyName.
+function shortName(pk: string | null | undefined): string | null {
+  if (!pk) return null;
+  return displayCounterpartyName({
+    npub: pk,
+    fetchKind0Enabled: false,
+    kind0Name: null,
+  });
+}
+function participantSummary(state: EscrowState, myRole: string | null): string | null {
+  const buyer = state.participants.buyer;
+  const seller = state.participants.seller;
+  const buyerName = myRole === "buyer" ? "You" : shortName(buyer);
+  const sellerName = myRole === "seller" ? "You" : shortName(seller);
+  if (state.status === "CREATED") {
+    // Pre-LOCK: surface seller identity + buyer slot state. "Open to a
+    // buyer" reads better than "Empty" in a sentence; the dot row keeps
+    // the symbolic version for users who prefer that.
+    if (sellerName && buyerName) return `Posted by ${sellerName} · Buyer: ${buyerName}`;
+    if (sellerName) return `Posted by ${sellerName} · Open to a buyer`;
+    if (buyerName) return `Buyer: ${buyerName} · Open to a seller`;
+    return null;
+  }
+  // LOCKED and beyond — both slots should be filled.
+  if (buyerName && sellerName) return `Buyer: ${buyerName} · Seller: ${sellerName}`;
+  return null;
+}
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
 // chama_browse_amber_tint_sorted. Quiet, not alarmist — it's a
@@ -93,6 +127,22 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
         <Badge status={state.status} />
       </div>
 
+      {/* v0.6.5: text participant summary above the dots. Answers
+          "who joined?" without requiring a tap into detail. The
+          Trinity Ring below stays as the symbolic state-at-a-glance. */}
+      {(() => {
+        const summary = participantSummary(state, myRole);
+        return summary ? (
+          <div style={{
+            marginTop: 10,
+            fontSize: 11, color: T.muted, fontFamily: T.mono,
+            textAlign: "center", letterSpacing: 0.2,
+          }}>
+            {summary}
+          </div>
+        ) : null;
+      })()}
+
       {/* v0.3.1 Phase 2: participant order sourced from
           TRINITY_RING_ORDER (theme.ts). Phase 6 introduced the
           constant for TradeDetail but TradeCard still had the inline
@@ -100,7 +150,7 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
           §43 grep tripwire test now scans src/ui/ for any inline
           three-element Role literal and fails if it finds one
           outside theme.ts. Forever-asset for brand coherence. */}
-      <div style={{ display: "flex", gap: 12, marginTop: 12, justifyContent: "center" }}>
+      <div style={{ display: "flex", gap: 12, marginTop: 8, justifyContent: "center" }}>
         {TRINITY_RING_ORDER.map(role => (
           <Dot
             key={role}

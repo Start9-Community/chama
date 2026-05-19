@@ -398,12 +398,14 @@ function isPastEscrowDeadline(e: EscrowState, nowSec: number): boolean {
 
 function isLiveBuyerSellerCommitment(e: EscrowState, nowSec: number): boolean {
   if (TERMINAL_STATES.has(e.status)) return false;
-  if (
-    e.status === EscrowStatus.CREATED &&
-    !e.eventChain?.some(event => event.kind !== EscrowEventKind.CREATE)
-  ) {
-    return false;
-  }
+  // v0.6.5 update: prior versions excluded CREATE-only public listings
+  // (no JOIN ACK yet) so a seller could keep listing without the old
+  // one-trade-at-a-time gate blocking them. With that gate retired,
+  // the exclusion now mismatches the user's mental model — their own
+  // unmatched listing IS a live commitment ("I have a 2k listing
+  // open"). Me · History counts it; the ChamaBar pill and active-trade
+  // pill must match. The only filter that survives is the deadline
+  // sweep so cleanup-pending trades don't strand the pill counter.
   if (
     (e.status === EscrowStatus.CREATED || e.status === EscrowStatus.LOCKED)
     && isPastEscrowDeadline(e, nowSec)
