@@ -65,6 +65,18 @@ candidate list with the older roadmap.
 - [ ] **APK rebuild + Zapstore listing.** Rebuild and list after the core
       product surface is stable enough to invite non-developer testers.
 
+- [ ] **Pre-warm Fund flow on TradeDetail mount.** First-fire on a fundable
+      CREATED listing has the AtomicFundingModal sitting on its
+      CreatingInvoice spinner for a noticeable beat while the Fedimint WASM
+      client and federation cold-start. v0.6.5 hid the worst symptom (the
+      "Locking…" button label bleed-through, now mitigated by a heavier
+      backdrop and an honest "Funding…" label), but the underlying delay
+      is still there. Issue a dry-run `getBalance()` (or equivalent
+      idempotent warm-up call) right when the seller lands on their own
+      CREATED listing so the WASM worker, federation handshake, and
+      health probe are ready before they tap Fund. Smoke-session source:
+      2026-05-19 cold-start glitch report.
+
 ---
 
 ## Scratched Off
