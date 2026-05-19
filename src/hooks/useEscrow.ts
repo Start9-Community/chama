@@ -452,7 +452,18 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // updates are async — without these refs, two near-simultaneous Fund
   // taps could both pass the gate before React's next render. The ref
   // is the authoritative read at entry; the setState call drives the UI.
-  const fundingInProgressRef = useRef(false);
+  //
+  // v0.6.5 follow-up: fundingInProgressRef holds the AbortSignal of
+  // the live run (or null when idle), not just a boolean. React
+  // StrictMode double-mounts effects in dev: first mount starts run#1
+  // and aborts it, then second mount synchronously starts run#2.
+  // Between those two, run#1's finally hasn't fired (the awaited
+  // promise sits in the microtask queue past the abort), so a
+  // boolean ref still reads "in progress" and the second mount
+  // gets a false-positive lock-failed. By checking signal.aborted
+  // on the held ref, we can let run#2 proceed when run#1 is already
+  // dead, while still blocking a real concurrent user Fund tap.
+  const fundingInProgressRef = useRef<AbortSignal | null>(null);
   const claimPayoutInProgressRef = useRef(false);
 
   const [state, setState] = useState<UseEscrowState>({
@@ -777,7 +788,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     fedimintRef.current = null;
     bridgeRef.current = null;
     signerRef.current = null;
-    fundingInProgressRef.current = false;
+    fundingInProgressRef.current = null;
     claimPayoutInProgressRef.current = false;
     clearSeedCache();
     setState({
@@ -1835,17 +1846,33 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
     // v0.6.5 funding-operation gate. The shared OPFS wallet's
     // spendNotes call cannot safely overlap with a second runFundAndLock.
-    // Use a synchronous ref as the authoritative re-entry check at
-    // entry (setState propagation is async — without this, two near-
-    // simultaneous Fund taps could both pass the UI gate before React
-    // re-renders the disabled button). The setState call drives the
-    // UI; the ref stops the race.
-    if (fundingInProgressRef.current) {
+    // The ref is the authoritative synchronous read at entry (setState
+    // propagation is async — without this, two near-simultaneous Fund
+    // taps could both pass the UI gate before React re-renders the
+    // disabled button). The setState call drives the UI; the ref
+    // stops the race.
+    //
+    // v0.6.5 follow-up: the ref now holds the AbortSignal of the
+    // live run (or null when idle). A non-null + non-aborted ref
+    // means a real concurrent call is in flight — reject. A non-null
+    // + aborted ref means the previous run was cancelled (the most
+    // common cause being React StrictMode's intentional double-mount
+    // in dev: first effect mounts run#1, cleanup aborts it, second
+    // effect synchronously starts run#2 BEFORE run#1's finally fires
+    // and clears the ref). In that case the previous run is dead;
+    // let the new run through.
+    const inflight = fundingInProgressRef.current;
+    if (inflight && !inflight.aborted) {
       const err = "Another funding operation is in progress. Complete it first.";
       opts.onPhase({ kind: "lock-failed", error: err });
       return { kind: "lock-failed", error: err };
     }
-    fundingInProgressRef.current = true;
+    // Capture the signal we'll write to the ref so the finally can
+    // compare by identity. If the caller didn't supply one, we mint
+    // an internal AbortController so we still have a stable identity
+    // to match against.
+    const ownSignal = opts.signal ?? new AbortController().signal;
+    fundingInProgressRef.current = ownSignal;
     setState(prev => prev.fundingInProgress
       ? prev
       : { ...prev, fundingInProgress: true });
@@ -1863,7 +1890,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         signal: opts.signal,
       });
     } finally {
-      fundingInProgressRef.current = false;
+      // Only clear the ref if THIS run still owns it. In the StrictMode
+      // double-mount case, run#1's finally fires AFTER run#2 has
+      // already replaced the ref with its own signal — clearing
+      // unconditionally would strand run#2 in a state where the UI
+      // thinks it's idle while a real fund flow is in progress.
+      if (fundingInProgressRef.current === ownSignal) {
+        fundingInProgressRef.current = null;
+      }
       setState(prev => prev.fundingInProgress
         ? { ...prev, fundingInProgress: false }
         : prev);
