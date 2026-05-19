@@ -102,6 +102,16 @@ export function AtomicFundingModal({
         savedHandleId,
         signal: ctrl.signal,
         onPhase: (p) => {
+          // v0.6.5: drop emits from an aborted run. React StrictMode
+          // double-mounts effects in dev — first mount → cleanup
+          // (ctrl.abort) → second mount → new run. Without this
+          // guard, the FIRST run's late `aborted` emit (and any
+          // other phase events it produces post-abort) leaks into
+          // the modal's setPhase and silently flips state to
+          // `aborted`, which has no render branch — modal goes
+          // black. The fix scopes phase events to the live run
+          // strictly via the closed-over ctrl.signal.
+          if (ctrl.signal.aborted) return;
           if (p.kind === "invoice-created") {
             lastBolt11 = p.bolt11;
             lastExpiresAt = p.expiresAt;
@@ -311,6 +321,31 @@ export function AtomicFundingModal({
             error={phase.error}
             onCancel={() => onClose(phase)}
           />
+        )}
+
+        {/* v0.6.5: explicit no-op for the `aborted` phase. Pre-this-fix
+            phase=aborted had no render branch, so any stray aborted
+            event from a torn-down StrictMode first-mount left the modal
+            stuck with header + empty body. The closure-scoped emit
+            guard above is the real fix; this branch is defense in
+            depth so a future emit path can't black-hole the modal
+            silently. Renders an explicit "Cancelled" surface so the
+            state is at least visible and the user knows to tap × to
+            close — though in practice the parent onClose dismissal
+            should mean we never paint this. */}
+        {phase.kind === "aborted" && (
+          <div style={{
+            padding: "24px 16px", textAlign: "center",
+            background: T.surface, border: `1px solid ${T.border}`,
+            borderRadius: T.r,
+          }}>
+            <div style={{
+              fontSize: 12, color: T.muted, fontFamily: T.mono,
+              letterSpacing: 1,
+            }}>
+              CANCELLED
+            </div>
+          </div>
         )}
       </div>
     </div>
