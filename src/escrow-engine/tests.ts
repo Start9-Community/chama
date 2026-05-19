@@ -5465,6 +5465,91 @@ console.log("\n── RUN FUND AND LOCK ──");
       "funded receive state still advances the modal to mint-confirming");
   }
 
+  // ── v0.6.5 follow-up: receive-watch `funded` starts the mint watchdog
+  // even when wallet balance never moves. Before this, the modal could show
+  // "Payment detected · crediting" forever-ish because pollForFunding only
+  // started mint-timeout after a positive balance delta.
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 0, 0, 0, 0, 0] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    let firedFunded = false;
+    const sleep = async (ms: number) => {
+      nowMs += ms;
+      if (!firedFunded && wallet.calls.getBalance >= 1) {
+        firedFunded = true;
+        wallet.fireReceiveState("funded");
+      }
+    };
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_receive_funded_no_credit",
+      amountMsats: 100_000,
+      description: "receive-watch funded but no wallet credit",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep,
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 3_000,
+      mintSlowWarnMs: 1_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "mint-timeout",
+      "Receive-watch funded with no wallet credit → mint-timeout, not invoice expiry");
+    assert(phases.some(p => p.kind === "mint-confirming-slow"),
+      "Funded-without-credit path emits the slow mint warning");
+    assert(wallet.calls.lockAndPublish === 0,
+      "LOCK is not dispatched without wallet credit");
+  }
+
+  // ── v0.6.5 follow-up: post-funded canceled:rejected that never credits
+  // becomes an explicit lock-failed error after the mint watchdog, not a
+  // misleading Try-LOCK path. If balance credits before the watchdog, the
+  // previous test above still proves we lock successfully.
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 0, 0, 0, 0, 0] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    let firedCancel = false;
+    const sleep = async (ms: number) => {
+      nowMs += ms;
+      if (!firedCancel && wallet.calls.getBalance >= 1) {
+        firedCancel = true;
+        wallet.fireReceiveState("funded");
+        wallet.fireReceiveState({ canceled: { reason: "rejected" } });
+      }
+    };
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_receive_rejected_after_funded_no_credit",
+      amountMsats: 100_000,
+      description: "receive-watch rejected after funded without credit",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep,
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 3_000,
+      mintSlowWarnMs: 1_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "lock-failed",
+      "Post-funded canceled:rejected with no wallet credit → explicit lock-failed");
+    if (terminal.kind === "lock-failed") {
+      assert(/canceled:rejected/.test(terminal.error),
+        "Post-funded rejection error preserves the receive cancel reason");
+      assert(/no ecash credit arrived/i.test(terminal.error),
+        "Post-funded rejection error explains that wallet credit never arrived");
+    }
+    assert(phases.some(p => p.kind === "mint-confirming-slow"),
+      "Post-funded rejection path still surfaces the slow mint warning before failing");
+    assert(wallet.calls.lockAndPublish === 0,
+      "LOCK is not dispatched for rejected receive without wallet credit");
+  }
+
   // ── v0.6.5: pre-funded receive-watch `canceled:rejected` → lock-failed
   // If the gateway/federation cancels before any funded signal, no HTLC has
   // been accepted from Chama's perspective. This is safe to surface early.

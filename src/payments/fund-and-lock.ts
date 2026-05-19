@@ -20,13 +20,14 @@
 // `creating-invoice`     transient — bridge call to mint BOLT11
 // `invoice-created`      transient — fires once, hands BOLT11 to the UI
 // `awaiting-payment`     polling — balance unchanged from baseline
-// `mint-confirming`      polling — balance moved partial; waiting for
-//                        federation to credit the rest
+// `mint-confirming`      polling — receive-watch saw gateway funding or
+//                        balance moved partial; waiting for federation
+//                        to credit the wallet
 // `payment-confirmed`    transient — full threshold met; LOCK next
 // `locking`              transient — calling lockAndPublish
 // `locked`               TERMINAL — LOCK published, modal closes
 // `expired`              TERMINAL — 15-min payment deadline elapsed
-// `mint-timeout`         TERMINAL — partial credit got stuck for 60s
+// `mint-timeout`         TERMINAL — gateway/partial credit got stuck
 // `aborted`              TERMINAL — caller cancelled via AbortSignal
 // `lock-failed`          TERMINAL — invoice creation or LOCK threw
 //
@@ -171,6 +172,12 @@ export interface PollFundingOpts {
   pollIntervalMs?: number;
   /** Defaults to DEFAULT_THRESHOLD_PCT (0.9). */
   thresholdPct?: number;
+  /** v0.6.5 follow-up: low-latency receive-watch hint. True once the
+   *  gateway reports `funded`/`awaiting_funds`/`claimed`, even before
+   *  wallet balance changes. This starts the mint-confirming watchdog
+   *  from the gateway's evidence of payment instead of waiting for a
+   *  partial balance delta that may never arrive on rejected receives. */
+  mintDetected?: () => boolean;
   /** Test seam: inject a fast/synchronous sleep. */
   sleep?: (ms: number) => Promise<void>;
   /** Test seam: inject a synthetic clock. */
@@ -224,7 +231,12 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
     }
 
     // First evidence of inbound funds → flip to mint-confirming.
-    if (delta > 0 && !inMintPhase) {
+    // Balance deltas are strongest, but the SDK receive watcher can
+    // report `funded` before balance credit is observable. Treat that
+    // as mint-confirming too so the watchdog starts even if the mint
+    // later rejects without ever moving wallet balance.
+    const mintDetected = delta > 0 || Boolean(opts.mintDetected?.());
+    if (mintDetected && !inMintPhase) {
       inMintPhase = true;
       mintStartedAt = now();
       opts.onPhase({ kind: "mint-confirming" });
@@ -380,6 +392,7 @@ export async function runFundAndLock(
   // balance gate decides whether we can LOCK.
   let mintConfirmingEmittedByWatch = false;
   let watchOverride: FundAndLockTerminal | null = null;
+  let postFundedCancelReason: string | null = null;
   const watchAbort = new AbortController();
   const onReceiveState = (kind: LnReceiveWatchKind) => {
     if (typeof kind === "object" && "canceled" in kind) {
@@ -392,6 +405,7 @@ export async function runFundAndLock(
         // continue polling balance instead of treating the receive stream's
         // cancel as authoritative. Some browser/Fedimint receive paths emit
         // canceled:rejected before balance credit is observable.
+        postFundedCancelReason = postFundedCancelReason ?? reason;
         return;
       }
       if (reason === "expired") {
@@ -478,6 +492,7 @@ export async function runFundAndLock(
     mintConfirmTimeoutMs: opts.mintConfirmTimeoutMs,
     mintSlowWarnMs: opts.mintSlowWarnMs,
     pollIntervalMs: opts.pollIntervalMs,
+    mintDetected: () => mintConfirmingEmittedByWatch,
     sleep: opts.sleep,
     now: opts.now,
   });
@@ -486,6 +501,17 @@ export async function runFundAndLock(
   // Post-funded cancel reports are intentionally ignored above so balance
   // polling can preserve the known-working v0.6.4 behavior.
   if (watchOverride) return watchOverride;
+
+  if (polled.kind === "mint-timeout" && postFundedCancelReason) {
+    const err =
+      `Payment reached the gateway, but the federation later reported ` +
+      `canceled:${postFundedCancelReason} and no ecash credit arrived. ` +
+      "Do not pay another invoice for this trade yet. Your sending wallet " +
+      "may refund automatically; if sats later appear in Chama, use the " +
+      "recovery prompt or try the lock again from the trade.";
+    emit({ kind: "lock-failed", error: err });
+    return { kind: "lock-failed", error: err };
+  }
 
   if (polled.kind !== "payment-confirmed") {
     return polled;
