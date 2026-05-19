@@ -11,7 +11,8 @@
 // disambiguator, hiddenFromPicker. The brief's pre-seed list is curated
 // to federations Jetty has operational relationships with or proven
 // testing history — every other federation is left to its community
-// leader to claim permissionlessly via addCustomCommunity().
+// leader to claim permissionlessly via addCustomCommunity(). The curated
+// picker can hide old slugs while keeping them resolvable on the wire.
 //
 // federationInvite is non-null for every pre-seeded entry in v0.1.85.
 // The legacy `null` semantics (fall through to a default) survive only
@@ -35,7 +36,7 @@ export interface Community {
   /** Three-letter currency code (ISO 4217) — the load-bearing axis. */
   currency: string;
   /** ISO 3166-1 alpha-2 country codes the community spans. May be empty
-   *  for genuinely scope-less communities (global-usd). */
+   *  for genuinely scope-less communities (Global · USD). */
   countries: string[];
   /** ISO 639-1 language codes spoken by the community. Listings and chat
    *  happen in any of these — Chama does not enforce one. */
@@ -93,16 +94,16 @@ const IROH_LIMITATION_NOTE =
 export const COMMUNITY_REGISTRY: Community[] = [
   {
     slug: "us-blf",
-    displayName: "US · Bitcoin Life · USD",
+    displayName: "Global · USD",
     currency: "USD",
-    countries: ["US"],
-    languages: ["en"],
+    countries: [],
+    languages: ["en", "es", "fr"],
     federationInvite: BLF_FEDERATION_INVITE,
-    flagEmoji: "🇺🇸",
-    country: "US",
+    flagEmoji: "🌍",
+    country: null,
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
-    disambiguator: "Bitcoin Life",
+    disambiguator: null,
     hiddenFromPicker: false,
   },
   {
@@ -111,7 +112,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     currency: "XOF",
     countries: ["SN"],
     languages: ["fr", "wo"],
-    federationInvite: BP_FEDERATION_INVITE,
+    federationInvite: BLF_FEDERATION_INVITE,
     flagEmoji: "🇸🇳",
     country: "SN",
     browserReliable: true,
@@ -131,7 +132,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: null,
-    hiddenFromPicker: false,
+    hiddenFromPicker: true,
   },
   {
     slug: "ke-kes",
@@ -184,9 +185,9 @@ export function getCommunityBySlug(slug: string | null | undefined): Community |
   return getCustomCommunityBySlug(slug);
 }
 
-/** Default community when the user hasn't picked one yet. global-usd
- *  exists precisely so first-launch users always have a sensible
- *  fallback that won't geofence them out of any listing. */
+/** Default community when the user hasn't picked one yet. The stable
+ *  us-blf slug now presents as Global · USD while ChamaBar exposes the
+ *  backing federation name for users who want that detail. */
 export const DEFAULT_COMMUNITY_SLUG = "us-blf";
 
 /** Pre-seeded entries that should appear in the picker (excludes

@@ -51,8 +51,8 @@ export function useFederationCommands(deps: FederationCommandsDeps): FederationC
     // Capture previous state BEFORE any mutation so we can revert on
     // switch failure. We track the RAW community (null for first-timers)
     // separately from the resolution-flavored fallback — without that
-    // distinction, the revert path would write "global-usd" to
-    // localStorage for a first-timer whose first switch failed,
+    // distinction, the revert path would write the default Global USD
+    // route to localStorage for a first-timer whose first switch failed,
     // permanently parking them on a community they never picked
     // (Bug A regression seen in v0.1.85 smoke testing).
     const previousInvite = getActiveInvite();

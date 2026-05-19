@@ -16,7 +16,7 @@ import { DEFAULT_COMMUNITY_SLUG, getCommunityBySlug } from "./registry.js";
 export const COMMUNITY_STORAGE_KEY = "chama_community";
 
 /** Read the user's selected community slug. Falls back to the default
- *  (global-usd) when nothing is stored or storage is unreachable. An
+ *  (us-blf, shown as Global · USD) when nothing is stored or storage is unreachable. An
  *  unknown slug (stale entry from an older registry version) also
  *  falls back to default rather than silently flowing into new listings. */
 export function getUserCommunitySlug(): string {

@@ -90,6 +90,7 @@ import {
   getActiveInvite,
   setActiveInvite,
   clearActiveInvite,
+  shouldReconcileFederation,
   deriveCreateFedTags,
 } from "../fedimint/index.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
@@ -381,7 +382,7 @@ export interface UseEscrowActions {
   /** (Re-)start the Browse feed subscription for public listings. */
   watchPublicListings: (since?: number) => void;
   /** PR 2: read the user's selected community slug (always returns
-   *  a valid slug from the registry — defaults to global-usd). */
+   *  a valid slug from the registry — defaults to us-blf / Global USD). */
   getCommunity: () => string;
   /** PR 2: persist the user's community choice. Pass empty string to
    *  clear and revert to default. Does NOT auto re-init the wallet —
@@ -1312,10 +1313,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // This is the load-bearing safety. Without it, a refresh + wrong
       // fed pick destroys notes purely and simply (reproduced twice
       // during v0.1.81 testing).
-      const driftDetected =
-        previousActiveInvite !== null
-        && previousActiveInvite !== desiredInvite
-        && fedimint.isJoined();
+      const driftDetected = shouldReconcileFederation({
+        previousActiveInvite,
+        desiredInvite,
+        walletIsJoined: fedimint.isJoined(),
+        walletFederationId: fedimint.getFederationId(),
+      });
 
       if (driftDetected) {
         let opfsBalanceMsats = 0;
@@ -1358,7 +1361,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
             balanceMsats?: number;
             previousActiveInvite?: string;
             desiredInvite?: string;
-          }).previousActiveInvite = previousActiveInvite!;
+          }).previousActiveInvite = previousActiveInvite ?? "";
           (refuseErr as Error & {
             code?: string;
             balanceMsats?: number;
@@ -1372,7 +1375,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         console.warn(
           "[chama] reconcile: wiping OPFS to switch federations",
           {
-            previous: previousActiveInvite!.slice(0, 24) + "…",
+            previous: previousActiveInvite
+              ? previousActiveInvite.slice(0, 24) + "…"
+              : "(untracked OPFS)",
             desired: desiredInvite.slice(0, 24) + "…",
             balanceMsats: opfsBalanceMsats,
             forced: force,

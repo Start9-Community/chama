@@ -12,9 +12,9 @@ import { LoadTradeInput } from "../components/LoadTradeInput.js";
 // the per-community filter — pills are identity-only now.
 //
 // v0.2.0 item 4: two-section layout per chama_browse_amber_tint_sorted.
-// Matching listings (on the user's active fed) render first as normal
+// Matching listings (on the user's active route) render first as normal
 // cards; non-matching listings render below an "N LISTINGS ON OTHER
-// FEDERATIONS" divider with amber tint. Tapping a non-matching listing
+// ROUTES" divider with amber tint. Tapping a non-matching listing
 // triggers the listing-tap dispatch in App.tsx (silent re-init when
 // balance==0; destroy-confirm modal when balance>0).
 export function BrowseView({
@@ -254,7 +254,7 @@ export function BrowseView({
                   letterSpacing: 1.2, textTransform: "uppercase",
                   whiteSpace: "nowrap" as const,
                 }}>
-                  {nonMatchingListings.length} listing{nonMatchingListings.length !== 1 ? "s" : ""} on other federations
+                  {nonMatchingListings.length} listing{nonMatchingListings.length !== 1 ? "s" : ""} on other routes
                 </div>
                 <div style={{ flex: 1, height: 1, background: T.border }} />
               </div>

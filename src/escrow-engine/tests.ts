@@ -99,6 +99,9 @@ import {
 import {
   resolveFederationForCommunity,
   setCustomFederationInvite,
+  shouldReconcileFederation,
+  BP_FEDERATION_ID,
+  BLF_FEDERATION_ID,
   BP_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
@@ -161,7 +164,11 @@ import {
   decideDispatch,
 } from "../ui/components/destination-picker-logic.js";
 import { DEFAULT_RELAYS } from "./default-relays.js";
-import { normalizeTrustedArbiterInput } from "../arbiters/pool.js";
+import {
+  BLF_OFFICIAL_ARBITERS,
+  getTrustedArbiterPool,
+  normalizeTrustedArbiterInput,
+} from "../arbiters/pool.js";
 
 // v0.3.0 Phase 2 — atomic fund-and-lock orchestrator
 import {
@@ -1054,7 +1061,9 @@ console.log("\n── EXPIRY ──");
 console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 {
   // v0.1.85: registry pre-seed expanded to 5 entries — sn-cfa, global-usd,
-  // ke-kes (now Afribit-backed), us-blf (new), sv-usd (sunset, hiddenFromPicker).
+  // ke-kes (now Afribit-backed), us-blf, sv-usd (sunset, hiddenFromPicker).
+  // v0.7.0: the visible USD default keeps the stable us-blf slug but
+  // presents as Global · USD; legacy global-usd is hidden with BP.
   // Permissionless additions live in localStorage and are not counted here.
   assert(COMMUNITY_REGISTRY.length === 5, "Registry has the 5 v0.1.85 pre-seeds");
   assert(getCommunityBySlug("sn-cfa")?.currency === "XOF", "sn-cfa is XOF");
@@ -1062,12 +1071,30 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug("sv-usd")?.currency === "USD", "sv-usd is USD");
   assert(getCommunityBySlug("global-usd")?.currency === "USD", "global-usd is USD");
   assert(getCommunityBySlug("us-blf")?.currency === "USD", "us-blf is USD");
+  assert(getCommunityBySlug("us-blf")?.displayName === "Global · USD",
+    "us-blf presents as Global · USD");
+  assert(getCommunityBySlug("us-blf")?.flagEmoji === "🌍",
+    "Global · USD uses the Africa-facing globe emoji");
   assert(DEFAULT_COMMUNITY_SLUG === "us-blf", "Default community is us-blf (BLF, v0.5.0)");
   assert(DEFAULT_RELAYS.length >= 5, "Default relay pool has at least 5 stable relays");
+  (globalThis as any).localStorage.clear();
   assert(
     normalizeTrustedArbiterInput(` ${ARBITER_PK},${ARBITER_PK.toUpperCase()} invalid ${ARBITER2_PK} `).length === 2,
     "Trusted arbiter input normalizes, dedupes, and ignores invalid entries"
   );
+  assert(BLF_OFFICIAL_ARBITERS.length === 2,
+    "BLF official arbiter pool has two baked arbiters");
+  assert(getTrustedArbiterPool({ community: "us-blf" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "Global USD/BLF listings carry the official BLF arbiters");
+  assert(getTrustedArbiterPool({ community: "sn-cfa" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "Senegal CFA is BLF-backed and carries the official BLF arbiters");
+  assert(getTrustedArbiterPool({
+    community: "us-blf",
+    excludePubkeys: [BLF_OFFICIAL_ARBITERS[0]!],
+  }).join(",") === BLF_OFFICIAL_ARBITERS[1]!,
+    "Official arbiter pool respects participant exclusion");
+  assert(getTrustedArbiterPool({ community: "ke-kes" }).length === 0,
+    "Afribit has no baked BLF official arbiters");
 
   // Lookup with valid + missing slug
   assert(getCommunityBySlug("sn-cfa") !== null, "Valid slug returns community");
@@ -1075,10 +1102,9 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug(null) === null, "Null slug returns null");
   assert(getCommunityBySlug(undefined) === null, "Undefined slug returns null");
 
-  // v0.1.85: every pre-seed now pins federationInvite explicitly. BP for
-  // browser-friendly defaults (sn-cfa, global-usd), Afribit for ke-kes,
-  // BLF for the explicit us-blf entry. sv-usd carries a null invite as
-  // a sunset marker (hidden from picker; resolves on-the-wire to BP).
+  // v0.1.85: every visible pre-seed now pins federationInvite explicitly.
+  // v0.7.0: us-blf and sn-cfa route through BLF; Afribit stays separate.
+  // Hidden legacy slugs remain resolvable for old listings.
   const allPinned = COMMUNITY_REGISTRY
     .filter(c => !c.hiddenFromPicker)
     .every(c => typeof c.federationInvite === "string" && c.federationInvite.startsWith("fed1"));
@@ -1088,6 +1114,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "sv-usd is hidden from picker (sunset entry)");
   assert(getCommunityBySlug("sv-usd")?.federationInvite === null,
     "sv-usd carries null invite (resolves to BP fallback on-the-wire)");
+  assert(getCommunityBySlug("global-usd")?.hiddenFromPicker === true,
+    "legacy global-usd/BP is hidden from picker");
 
   // Schema additions: every entry must carry the new fields
   for (const c of COMMUNITY_REGISTRY) {
@@ -1118,13 +1146,15 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
-  assert(picker.length === 4, "Picker shows 4 visible entries (sv-usd hidden)");
+  assert(picker.length === 3, "Picker shows 3 visible entries (BP global-usd and sv-usd hidden)");
   assert(picker[0]?.slug === DEFAULT_COMMUNITY_SLUG,
-    "Picker starts with the default BLF community (active pill visible first)");
+    "Picker starts with Global USD on BLF (active pill visible first)");
   assert(!picker.some(c => c.slug === "sv-usd"),
     "Picker excludes sv-usd");
+  assert(!picker.some(c => c.slug === "global-usd"),
+    "Picker excludes legacy BP global-usd");
   assert(picker.some(c => c.slug === "us-blf"),
-    "Picker includes us-blf");
+    "Picker includes us-blf as the Global USD route");
 
   // Storage roundtrip — defaults to us-blf when nothing set (v0.5.0)
   (globalThis as any).localStorage.clear();
@@ -1257,9 +1287,9 @@ console.log("\n── PERMISSIONLESS COMMUNITY ADDITION ──");
 
 // ── 15. BP / BLF RESOLVER ────────────────────────────────────────────────
 // v0.1.85: the universal browser-friendly fallback is BP, not BLF. Every
-// pre-seeded community now has an explicit federationInvite. BLF is
-// reachable only via the us-blf entry, sandbox-mode picker, or a pasted
-// custom invite — never as an ambient fallback.
+// visible pre-seeded community now has an explicit federationInvite.
+// v0.7.0: BLF backs the public Global USD route plus Senegal CFA; BP's
+// old global-usd slug stays hidden for legacy listings.
 console.log("\n── BP / BLF RESOLVER ──");
 {
   // No custom invite, no community: BP fallback
@@ -1276,8 +1306,8 @@ console.log("\n── BP / BLF RESOLVER ──");
   const snCfaInvite = getCommunityBySlug("sn-cfa")!.federationInvite!;
   assert(resolveFederationForCommunity("sn-cfa") === snCfaInvite,
     "sn-cfa → registry-pinned invite");
-  assert(snCfaInvite === BP_FEDERATION_INVITE,
-    "sn-cfa pins BP (browser-friendly fallback)");
+  assert(snCfaInvite === BLF_FEDERATION_INVITE,
+    "sn-cfa pins BLF");
 
   const keKesInvite = getCommunityBySlug("ke-kes")!.federationInvite!;
   assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
@@ -1287,15 +1317,15 @@ console.log("\n── BP / BLF RESOLVER ──");
 
   const globalUsdInvite = getCommunityBySlug("global-usd")!.federationInvite!;
   assert(resolveFederationForCommunity("global-usd") === globalUsdInvite,
-    "global-usd → registry-pinned BP invite");
+    "hidden global-usd → registry-pinned BP invite for legacy listings");
   assert(globalUsdInvite === BP_FEDERATION_INVITE,
-    "global-usd pins BP");
+    "hidden global-usd still pins BP");
 
   const usBlfInvite = getCommunityBySlug("us-blf")!.federationInvite!;
   assert(resolveFederationForCommunity("us-blf") === usBlfInvite,
     "us-blf → registry-pinned invite");
   assert(usBlfInvite === BLF_FEDERATION_INVITE,
-    "us-blf pins BLF (the only opt-in path to BLF as a community)");
+    "us-blf pins BLF for the public Global USD route");
 
   // Custom invite override beats community resolution
   const fakeCustomInvite = "fed1qcustom_user_pasted_invite_for_resolver_test";
@@ -1309,6 +1339,88 @@ console.log("\n── BP / BLF RESOLVER ──");
   setCustomFederationInvite("");
   assert(resolveFederationForCommunity(null) === BP_FEDERATION_INVITE,
     "After clearing custom invite, falls back to BP again");
+}
+
+// ── 15b. FEDERATION DRIFT DETECTION ──────────────────────────────────────
+//
+// Regression for the "fresh login looks like BLF, listings tag BP" bug.
+// Sign-out/reload does not wipe OPFS, so a next init can find a wallet already
+// joined to whatever route OPFS held while `chama_active_invite` is missing.
+// That has to reconcile before joinFederation can pin a UI lie.
+console.log("\n── FEDERATION DRIFT DETECTION ──");
+{
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: null,
+      desiredInvite: BLF_FEDERATION_INVITE,
+      walletIsJoined: false,
+      walletFederationId: BP_FEDERATION_ID,
+    }) === false,
+    "walletIsJoined=false → never reconcile (fresh OPFS, nothing bound)",
+  );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: BP_FEDERATION_INVITE,
+      desiredInvite: BLF_FEDERATION_INVITE,
+      walletIsJoined: false,
+      walletFederationId: BP_FEDERATION_ID,
+    }) === false,
+    "walletIsJoined=false → no reconcile even if localStorage records a different invite",
+  );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: BLF_FEDERATION_INVITE,
+      desiredInvite: BLF_FEDERATION_INVITE,
+      walletIsJoined: true,
+      walletFederationId: BLF_FEDERATION_ID,
+    }) === false,
+    "Tracked match (previousActiveInvite === desiredInvite) → no reconcile",
+  );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: BP_FEDERATION_INVITE,
+      desiredInvite: BLF_FEDERATION_INVITE,
+      walletIsJoined: true,
+      walletFederationId: BP_FEDERATION_ID,
+    }) === true,
+    "Tracked drift (previousActiveInvite !== desiredInvite) → reconcile",
+  );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: null,
+      desiredInvite: BLF_FEDERATION_INVITE,
+      walletIsJoined: true,
+      walletFederationId: null,
+    }) === true,
+    "Untracked OPFS (previousActiveInvite=null, wallet already joined) → reconcile",
+  );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: null,
+      desiredInvite: BP_FEDERATION_INVITE,
+      walletIsJoined: true,
+      walletFederationId: null,
+    }) === true,
+    "Untracked OPFS reconciles regardless of desired invite",
+  );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: BLF_FEDERATION_INVITE,
+      desiredInvite: BLF_FEDERATION_INVITE,
+      walletIsJoined: true,
+      walletFederationId: BP_FEDERATION_ID,
+    }) === true,
+    "Tracked invite can still reconcile when known desired invite disagrees with actual wallet fed id",
+  );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: null,
+      desiredInvite: BLF_FEDERATION_INVITE,
+      walletIsJoined: true,
+      walletFederationId: BLF_FEDERATION_ID,
+    }) === false,
+    "Untracked OPFS does not reconcile when known desired invite already matches actual wallet fed id",
+  );
 }
 
 // ── 16. FULFILLMENT NORMALIZATION ────────────────────────────────────────
@@ -2354,6 +2466,8 @@ import {
   shouldShowRecoveryBanner,
   identifyStrandedEcashSource,
   decideListingTapEffect,
+  listingMatchesActiveRoute,
+  resolveCreateMintUrl,
   decideArbiterWarning,
   MAIN_SURFACE_RECOVERY_MIN_SATS,
 } from "../ui/decisions.js";
@@ -2382,15 +2496,15 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
   assert(firstTime.kind === "switch-silent",
     "First-time user tap → switch-silent (one-tap join, no picker step)");
   if (firstTime.kind === "switch-silent") {
-    assert(firstTime.targetInvite === BP_FEDERATION_INVITE,
-      "First-time tap on sn-cfa targets BP (its pinned invite)");
+    assert(firstTime.targetInvite === BLF_FEDERATION_INVITE,
+      "First-time tap on sn-cfa targets BLF (its pinned invite)");
     assert(firstTime.displayName === "Senegal · CFA",
       "First-time tap carries the community displayName");
   }
 
   // Returning user already on the community's federation → identity-only.
   const sameFed = decideCommunityTapEffect({
-    slug: "sn-cfa", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 0,
+    slug: "sn-cfa", currentInvite: BLF_FEDERATION_INVITE, balanceMsats: 0,
   });
   assert(sameFed.kind === "identity-only",
     "Tap a community whose pinned invite matches current → identity-only");
@@ -2404,7 +2518,7 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
   if (switchSilent.kind === "switch-silent") {
     assert(switchSilent.targetInvite === BLF_FEDERATION_INVITE,
       "Switch-silent targets the community's pinned invite (us-blf → BLF)");
-    assert(switchSilent.displayName === "US · Bitcoin Life · USD",
+    assert(switchSilent.displayName === "Global · USD",
       "Switch-silent carries the community's displayName");
   }
 
@@ -2508,8 +2622,8 @@ console.log("\n── AUTO-INIT TARGET ──");
   if (claimedOrRecovered.kind === "use-home") {
     assert(claimedOrRecovered.slug === "sn-cfa",
       "use-home carries the home community slug");
-    assert(claimedOrRecovered.invite === BP_FEDERATION_INVITE,
-      "use-home invite is the home community's pinned invite (sn-cfa → BP)");
+    assert(claimedOrRecovered.invite === BLF_FEDERATION_INVITE,
+      "use-home invite is the home community's pinned invite (sn-cfa → BLF)");
   }
 
   // 3) Returning user, no active trade → sticky-community.
@@ -2529,7 +2643,7 @@ console.log("\n── AUTO-INIT TARGET ──");
 
   // 4) Returning user already on home's fed → still use-home (idempotent).
   const alreadyHome = decideAutoInitTarget({
-    activeInvite: BP_FEDERATION_INVITE,
+    activeInvite: BLF_FEDERATION_INVITE,
     homeCommunity: "sn-cfa",
     hasCurrentEscrow: false,
     balanceMsats: 0,
@@ -2551,7 +2665,7 @@ console.log("\n── AUTO-INIT TARGET ──");
     "Balance>0 without currentEscrow → use-home (data-layer guard handles conflict)");
 
   // 6) Truly first-time user — v0.2.0 item 6: no home AND no active →
-  //    use-default (BLF + us-blf, v0.5.0; was BP + global-usd in v0.2.0).
+  //    use-default (BLF + Global USD/us-blf, v0.7.0; was BP + global-usd in v0.2.0).
   //    Pre-v0.2.0 this fell to "skip"
   //    and stranded users in "No Chama" limbo per Pillar 2.1's
   //    "every user has a home" doctrine.
@@ -3151,7 +3265,7 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     category: "p2p-trade",
     fulfillment: "service",
     community: "sn-cfa",
-    mintUrl: BP_FEDERATION_INVITE,
+    mintUrl: BLF_FEDERATION_INVITE,
     participants: { buyer: null, seller: null, arbiter: null },
     initiator: { pubkey: me, role: Role.SELLER },
     communityArbiters: [],
@@ -3366,7 +3480,7 @@ console.log("\n── shouldShowRecoveryBanner + identifyStrandedEcashSource ─
     category: "p2p-trade",
     fulfillment: "service",
     community: "sn-cfa",
-    mintUrl: BP_FEDERATION_INVITE,
+    mintUrl: BLF_FEDERATION_INVITE,
     participants: { buyer: me, seller: other, arbiter: arb },
     initiator: { pubkey: me, role: Role.BUYER },
     communityArbiters: [],
@@ -3458,8 +3572,8 @@ console.log("\n── decideListingTapEffect ──");
 {
   // Matching fed → State A render, no client work.
   const matching = decideListingTapEffect({
-    listing: { mintUrl: BP_FEDERATION_INVITE, community: "sn-cfa" },
-    currentInvite: BP_FEDERATION_INVITE,
+    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "sn-cfa" },
+    currentInvite: BLF_FEDERATION_INVITE,
     balanceMsats: 0,
   });
   assert(matching.kind === "matching",
@@ -3476,7 +3590,7 @@ console.log("\n── decideListingTapEffect ──");
   if (switchSilent.kind === "switch-silent") {
     assert(switchSilent.targetInvite === BLF_FEDERATION_INVITE,
       "Target invite matches the listing's fed");
-    assert(switchSilent.displayName === "US · Bitcoin Life · USD",
+    assert(switchSilent.displayName === "Global · USD",
       "Display name carries community name for narration");
   }
 
@@ -3508,7 +3622,7 @@ console.log("\n── decideListingTapEffect ──");
   // dispatches initFedimint vs switchFederation based on whether a
   // client is loaded).
   const noClient = decideListingTapEffect({
-    listing: { mintUrl: BP_FEDERATION_INVITE, community: "sn-cfa" },
+    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "sn-cfa" },
     currentInvite: null,
     balanceMsats: 0,
   });
@@ -3528,6 +3642,36 @@ console.log("\n── decideListingTapEffect ──");
     assert(fallback.targetInvite === BLF_FEDERATION_INVITE,
       "Community-derived fallback resolves to us-blf's pinned invite");
   }
+
+  const bpFedId = "11".repeat(32);
+  const blfFedId = "22".repeat(32);
+  assert(
+    listingMatchesActiveRoute({
+      listingMintUrl: BLF_FEDERATION_INVITE,
+      listingFedId: bpFedId,
+      activeInvite: BLF_FEDERATION_INVITE,
+      activeFedId: blfFedId,
+    }) === false,
+    "Browse matching uses CREATE fed id over stale mintUrl when fed id is present",
+  );
+  assert(
+    listingMatchesActiveRoute({
+      listingMintUrl: BLF_FEDERATION_INVITE,
+      listingFedId: bpFedId,
+      activeInvite: BLF_FEDERATION_INVITE,
+      activeFedId: bpFedId,
+    }) === true,
+    "Browse matching accepts a listing when CREATE fed id matches active fed id",
+  );
+  assert(
+    listingMatchesActiveRoute({
+      listingMintUrl: BLF_FEDERATION_INVITE,
+      listingFedId: null,
+      activeInvite: BLF_FEDERATION_INVITE,
+      activeFedId: blfFedId,
+    }) === true,
+    "Legacy listing without fed id falls back to mintUrl matching",
+  );
 }
 
 // ── 31g. decideArbiterWarning (item 10) ─────────────────────────────────
@@ -3548,7 +3692,7 @@ console.log("\n── decideArbiterWarning ──");
     category: "p2p-trade",
     fulfillment: "service",
     community: "sn-cfa",
-    mintUrl: BP_FEDERATION_INVITE,
+    mintUrl: BLF_FEDERATION_INVITE,
     participants: { buyer, seller, arbiter: me },
     initiator: { pubkey: seller, role: Role.SELLER },
     communityArbiters: [],
@@ -3655,19 +3799,28 @@ console.log("\n── decideArbiterWarning ──");
   );
 }
 
-// ── 32. CreateForm derives mintUrl from community (no manual fed input) ─
+// ── 32. CreateForm derives mintUrl from active route ────────────────────
 //
 // v0.1.85 cleanup: the federation invite input field was removed from
-// CreateForm. Listings now derive mintUrl from the user's current
-// community via resolveFederationForCommunity. This test pins the
-// behavior so a future regression that re-adds a manual fed picker
-// gets caught.
+// CreateForm. Listings now derive mintUrl from the joined route first,
+// then fall back to the user's current community when no route is loaded.
+// This keeps Browse color/sorting aligned with the CREATE fed tag.
 console.log("\n── CreateForm-derived mintUrl ──");
 {
   (globalThis as any).localStorage.clear();
-  // sn-cfa pins BP — listings in sn-cfa go to BP.
-  assert(resolveFederationForCommunity("sn-cfa") === BP_FEDERATION_INVITE,
-    "sn-cfa listing → BP invite (community-derived mintUrl)");
+  assert(resolveCreateMintUrl({
+    activeInvite: BP_FEDERATION_INVITE,
+    community: "us-blf",
+  }) === BP_FEDERATION_INVITE,
+    "Active route wins over home community when creating a listing");
+  assert(resolveCreateMintUrl({
+    activeInvite: null,
+    community: "us-blf",
+  }) === BLF_FEDERATION_INVITE,
+    "No active route falls back to community-derived mintUrl");
+  // sn-cfa pins BLF for now — listings in sn-cfa go to BLF.
+  assert(resolveFederationForCommunity("sn-cfa") === BLF_FEDERATION_INVITE,
+    "sn-cfa listing → BLF invite (community-derived mintUrl)");
   // us-blf pins BLF — listings in us-blf go to BLF.
   assert(resolveFederationForCommunity("us-blf") === BLF_FEDERATION_INVITE,
     "us-blf listing → BLF invite");

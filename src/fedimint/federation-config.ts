@@ -22,15 +22,19 @@
 import {
   BP_FEDERATION_NAME,
   BP_FEDERATION_INVITE,
+  BP_FEDERATION_ID,
   BLF_FEDERATION_NAME,
   BLF_FEDERATION_INVITE,
+  BLF_FEDERATION_ID,
 } from "./federation-invites.js";
 
 export {
   BP_FEDERATION_NAME,
   BP_FEDERATION_INVITE,
+  BP_FEDERATION_ID,
   BLF_FEDERATION_NAME,
   BLF_FEDERATION_INVITE,
+  BLF_FEDERATION_ID,
 };
 
 /**
@@ -135,6 +139,55 @@ export function clearActiveInvite(): void {
       localStorage.removeItem(ACTIVE_INVITE_STORAGE_KEY);
     }
   } catch { /* no-op */ }
+}
+
+function normalizeFederationId(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && /^[0-9a-f]{64}$/.test(normalized) ? normalized : null;
+}
+
+export function expectedFederationIdForInvite(invite: string | null | undefined): string | null {
+  const trimmed = invite?.trim();
+  if (trimmed === BP_FEDERATION_INVITE) return BP_FEDERATION_ID;
+  if (trimmed === BLF_FEDERATION_INVITE) return BLF_FEDERATION_ID;
+  return null;
+}
+
+// ── Cold-start drift detection (pure) ───────────────────────────────────
+//
+// Pure helper for initFedimint's reconcile gate. Returns true when the
+// OPFS-resident wallet may be bound to a route that doesn't match the invite
+// we want to use, in which case the caller must wipe + rejoin subject to the
+// fund-loss balance guard.
+//
+// Two flavors of drift:
+//   1. Tracked drift: previousActiveInvite is recorded and disagrees with
+//      desiredInvite.
+//   2. Untracked OPFS: previousActiveInvite is null, but the wallet is already
+//      joined from a previous session. Sign-out/reload does not wipe OPFS.
+//      Without this branch, joinFederation can record the requested invite
+//      while the wallet stays bound to whatever route the OPFS already held,
+//      producing CREATE events whose `mintUrl` and `fed` facts disagree.
+//
+// We can't peek an invite's fed-id without joining, so the untracked case is
+// conservative for unknown routes. For curated routes, compare the desired
+// invite's known federation ID to the wallet's actual federation ID before
+// trusting localStorage. The caller's balance guard prevents silent bearer-cash
+// loss.
+export function shouldReconcileFederation(inputs: {
+  previousActiveInvite: string | null;
+  desiredInvite: string;
+  walletIsJoined: boolean;
+  walletFederationId?: string | null;
+}): boolean {
+  if (!inputs.walletIsJoined) return false;
+  const expectedFedId = expectedFederationIdForInvite(inputs.desiredInvite);
+  const walletFedId = normalizeFederationId(inputs.walletFederationId);
+  if (expectedFedId && walletFedId) {
+    return expectedFedId !== walletFedId;
+  }
+  if (inputs.previousActiveInvite === null) return true;
+  return inputs.previousActiveInvite !== inputs.desiredInvite;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -242,12 +295,14 @@ export interface FederationPreset {
 export const CURATED_PRESETS: FederationPreset[] = [
   {
     name: BP_FEDERATION_NAME,
+    federationId: BP_FEDERATION_ID,
     inviteCode: BP_FEDERATION_INVITE,
     description: "Browser-friendly default. Safe starting point.",
     source: "curated",
   },
   {
     name: BLF_FEDERATION_NAME,
+    federationId: BLF_FEDERATION_ID,
     inviteCode: BLF_FEDERATION_INVITE,
     description: "Best on the mobile app — limited browser support today.",
     source: "curated",

@@ -51,7 +51,7 @@ export function SwitchFederationPanel({
   const requestCustomSwitch = () => {
     if (!customValid) return;
     setConfirming({
-      name: `External route (${customTrimmed.slice(4, 12)}…)`,
+      name: "External route",
       invite: customTrimmed,
     });
   };

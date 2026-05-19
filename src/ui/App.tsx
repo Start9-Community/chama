@@ -22,6 +22,7 @@ import {
   decideChamaBarLabel,
   findActiveTrade,
   identifyStrandedEcashSource,
+  listingMatchesActiveRoute,
 } from "./decisions.js";
 import { Toast } from "./components/Toast.js";
 import { BottomNav, BOTTOM_NAV_HEIGHT, type Tab } from "./components/BottomNav.js";
@@ -400,22 +401,24 @@ export default function App() {
   // is gone (along with the "All" pill in v0.1.87) — pills are
   // identity-only now; Browse shows everything fed-routed.
   //
-  // Match predicate: listing's mintUrl === user's active fed invite.
-  // Pre-PR-A listings without mintUrl fall through to non-matching
-  // (the listing-tap dispatch handles them via community-derived
-  // fallback — see decideListingTapEffect).
+  // Match predicate: prefer the CREATE event's `fed` id when present,
+  // falling back to mintUrl for legacy listings. The fed id is the
+  // load-bearing money-route fact; mintUrl can be stale if a power user
+  // switched routes without changing their home community.
   const myActiveInvite = fedimint.joined ? getActiveInvite() : null;
   const visibleListings = visibleTrades.filter(s =>
     !isParticipant(s)
     && s.status === EscrowStatus.CREATED
     && matchesBrowseCategory(s)
   );
-  const matchingListings = visibleListings.filter(s =>
-    !!myActiveInvite && s.mintUrl === myActiveInvite
-  );
-  const nonMatchingListings = visibleListings.filter(s =>
-    !myActiveInvite || s.mintUrl !== myActiveInvite
-  );
+  const listingMatchesRoute = (s: EscrowState) => listingMatchesActiveRoute({
+    listingMintUrl: s.mintUrl,
+    listingFedId: (s.eventChain[0]?.payload as { fed?: string } | undefined)?.fed ?? null,
+    activeInvite: myActiveInvite,
+    activeFedId: fedimint.federationId,
+  });
+  const matchingListings = visibleListings.filter(listingMatchesRoute);
+  const nonMatchingListings = visibleListings.filter(s => !listingMatchesRoute(s));
   // browseCommunity drives pill highlighting; it no longer filters
   // (the pill is identity-only post-v0.1.87). matchesBrowseCommunity
   // helper retired with the filter.
@@ -1083,6 +1086,7 @@ export default function App() {
               onGoToArbiterTrade={(escrowId) => openEscrow(escrowId)}
               canOfferSubscription={userCanSubscribe}
               userPubkey={pubkey ?? null}
+              activeInvite={getActiveInvite()}
             />
           )}
         </div>

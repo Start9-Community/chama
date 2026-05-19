@@ -2,14 +2,19 @@
 //
 // v1 keeps arbiter assignment simple: community listings carry a pool of
 // eligible arbiters, and LOCK auto-assigns from that pool without requiring
-// the arbiter to publish a JOIN first. Operators can bake the pool at build
-// time with VITE_CHAMA_TRUSTED_ARBITERS or set chama_trusted_arbiters in
-// localStorage while testing.
+// the arbiter to publish a JOIN first. BLF has a baked official pool;
+// operators can add more arbiters at build time with
+// VITE_CHAMA_TRUSTED_ARBITERS or set chama_trusted_arbiters in localStorage
+// while testing.
 
 import { nip19 } from "nostr-tools";
 
 export const TRUSTED_ARBITERS_STORAGE_KEY = "chama_trusted_arbiters";
 export const TRUSTED_ARBITERS_ENV_KEY = "VITE_CHAMA_TRUSTED_ARBITERS";
+export const BLF_OFFICIAL_ARBITER_NPUBS = [
+  "npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6",
+  "npub1z75k4fqjmyvfcv5e57tampeqatnfsrt6mt78dmz4ps9nezskjncqqtvwsz",
+];
 
 export interface TrustedArbiterPoolOptions {
   community?: string | null;
@@ -40,6 +45,10 @@ function splitConfiguredPubkeys(raw: string | undefined | null): string[] {
     .map(normalizePubkey)
     .filter((pk): pk is string => pk !== null);
 }
+
+export const BLF_OFFICIAL_ARBITERS = unique(
+  splitConfiguredPubkeys(BLF_OFFICIAL_ARBITER_NPUBS.join(","))
+);
 
 function communityEnvKey(community: string | null | undefined): string | null {
   if (!community) return null;
@@ -75,6 +84,12 @@ function readLocalPool(community?: string | null): string[] {
   }
 }
 
+function readOfficialPool(community?: string | null): string[] {
+  const slug = community?.trim();
+  if (slug === "us-blf" || slug === "sn-cfa") return BLF_OFFICIAL_ARBITERS;
+  return [];
+}
+
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
@@ -86,7 +101,11 @@ export function getTrustedArbiterPool(options: TrustedArbiterPoolOptions = {}): 
       .filter((pk): pk is string => !!pk)
   );
 
-  return unique([...readLocalPool(options.community), ...readEnvPool(options.community)])
+  return unique([
+    ...readOfficialPool(options.community),
+    ...readLocalPool(options.community),
+    ...readEnvPool(options.community),
+  ])
     .filter((pk) => !excluded.has(pk));
 }
 

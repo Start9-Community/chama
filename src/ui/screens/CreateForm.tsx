@@ -38,9 +38,8 @@ import { useState, useEffect } from "react";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
 import { getUserCommunitySlug } from "../../communities/storage.js";
-import { resolveFederationForCommunity } from "../../fedimint/federation-config.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
-import { type ArbiterWarning, displayCounterpartyName } from "../decisions.js";
+import { type ArbiterWarning, displayCounterpartyName, resolveCreateMintUrl } from "../decisions.js";
 import { T, inputStyle } from "../theme.js";
 
 type Step = 1 | 2 | 3;
@@ -137,7 +136,7 @@ const EMPTY_FORM_STATE: FormState = {
 export function CreateForm({
   onCreate, onClose,
   arbiterWarning, onGoToArbiterTrade,
-  canOfferSubscription, userPubkey,
+  canOfferSubscription, userPubkey, activeInvite,
 }: {
   onCreate: (params: any) => void;
   onClose: () => void;
@@ -145,6 +144,7 @@ export function CreateForm({
   onGoToArbiterTrade: (escrowId: string) => void;
   canOfferSubscription: boolean;
   userPubkey: string | null;
+  activeInvite: string | null;
 }) {
   const [step, setStep] = useState<Step>(1);
   const [vertical, setVertical] = useState<Vertical>("p2p-trade");
@@ -182,7 +182,7 @@ export function CreateForm({
     setSubmitting(true);
     try {
       const amountMsats = parseInt(form.sats) * 1000;
-      const mintUrl = resolveFederationForCommunity(community);
+      const mintUrl = resolveCreateMintUrl({ activeInvite, community });
       const communityArbiters = getTrustedArbiterPool({
         community,
         excludePubkeys: [userPubkey],
@@ -830,11 +830,10 @@ function Step3({
             FIRST LISTING? HEADS UP
           </div>
           <div style={{ fontSize: 12, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
-            This listing will run on{" "}
-            <strong>{homeCommunity?.displayName ?? "your community"}</strong>'s
-            backing federation. Buyers on other federations will be auto-
-            switched when they tap your listing — they don't move money via
-            Lightning to switch, just spin up a fresh Chama on the right fed.
+            This listing will run on your current Chama route. Buyers on a
+            different route will be switched when they tap your listing — they
+            don't move money via Lightning to switch, just spin up a fresh
+            Chama on the right route.
           </div>
         </div>
       )}

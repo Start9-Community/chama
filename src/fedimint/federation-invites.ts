@@ -19,6 +19,9 @@ export const BP_FEDERATION_NAME = "Bitcoin Principles";
 export const BP_FEDERATION_INVITE =
   "fed11qgqzxgthwden5te0v9cxjtnzd96xxmmfdckhqunfde3kjurvv4ejucm0d5hsqqfqkggx3jz0tvfv5n7lj0e7gs7nh47z06ry95x4963wfh8xlka7a80su3952t";
 
+export const BP_FEDERATION_ID =
+  "ff286a6e8a80074bc59e324699f352c3b15cf21f39e76e3be2bb3844ac48087c";
+
 /**
  * Bitcoin Life Federation — an explicit federation option, NOT the
  * universal fallback. Iroh-only transport: now reliable from browsers
@@ -30,3 +33,6 @@ export const BLF_FEDERATION_NAME = "Bitcoin Life Federation";
 
 export const BLF_FEDERATION_INVITE =
   "fed11qgqyj3mfwfhksw309ajrwvmxvenxgvpkvyursenxxvur2c3sv4jkxdfcxf3kgdmyvs6nzcehvc6xzctzxumrxdmr89jnwdtpv5enqwtpxqmrsvfh89skxv34qqqjpzytwrkr28r8mjas4ej467utd7excr7fapj7ukgc4ugacm6nu2u73k7ram";
+
+export const BLF_FEDERATION_ID =
+  "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";

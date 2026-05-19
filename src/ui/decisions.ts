@@ -157,7 +157,7 @@ export function decideCommunityTapEffect(inputs: CommunityTapInputs): CommunityT
 //      No home AND no active invite means a truly fresh npub (first
 //      sign-in). Pre-v0.2.0 this fell to "skip" and the user landed
 //      in "No Chama" limbo, which violates Pillar 2.1. v0.2.0 assigns
-//      BP + global-usd silently so the user lands on Browse with a
+//      BLF + Global USD silently so the user lands on Browse with a
 //      working federation; they can switch communities anytime via
 //      the pills, after which sticky-community takes over.
 //
@@ -214,7 +214,7 @@ export function decideAutoInitTarget(inputs: AutoInitInputs): AutoInitTarget {
     return { kind: "use-home", invite: homeInvite, slug: inputs.homeCommunity };
   }
 
-  // First-time-npub: no home AND no active. Assign BP + global-usd
+  // First-time-npub: no home AND no active. Assign BLF + Global USD
   // silently. The defaultCommunity slug becomes the user's home (the
   // shell calls actions.setCommunity with it), so subsequent reloads
   // land them in branch 2 (use-home) — first-time-default fires
@@ -691,6 +691,39 @@ function resolveListingInvite(listing: { mintUrl: string; community: string | nu
     if (c?.federationInvite) return c.federationInvite;
   }
   return BP_FEDERATION_INVITE;
+}
+
+export interface ListingRouteMatchInputs {
+  listingMintUrl: string;
+  listingFedId?: string | null;
+  activeInvite: string | null;
+  activeFedId?: string | null;
+}
+
+function normalizeFedId(value: string | null | undefined): string | null {
+  const trimmed = value?.trim().toLowerCase();
+  return trimmed && /^[0-9a-f]{64}$/.test(trimmed) ? trimmed : null;
+}
+
+export function listingMatchesActiveRoute(inputs: ListingRouteMatchInputs): boolean {
+  const listingFedId = normalizeFedId(inputs.listingFedId);
+  const activeFedId = normalizeFedId(inputs.activeFedId);
+
+  if (listingFedId) {
+    return !!activeFedId && listingFedId === activeFedId;
+  }
+
+  return !!inputs.activeInvite && inputs.listingMintUrl === inputs.activeInvite;
+}
+
+export function resolveCreateMintUrl(inputs: {
+  activeInvite: string | null;
+  community: string | null;
+}): string {
+  if (inputs.activeInvite?.startsWith("fed1")) {
+    return inputs.activeInvite;
+  }
+  return resolveListingInvite({ mintUrl: "", community: inputs.community });
 }
 
 export function decideListingTapEffect(inputs: ListingTapInputs): ListingTapEffect {
