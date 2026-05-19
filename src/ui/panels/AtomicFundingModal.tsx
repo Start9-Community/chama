@@ -223,7 +223,13 @@ export function AtomicFundingModal({
 
   return (
     <div onClick={handleCancel} style={{
-      position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+      // v0.6.5: 0xee alpha (≈93%) instead of 0xcc (80%). On first-fire
+      // the modal can sit on the CreatingInvoice spinner for a few
+      // seconds while the WASM client and federation warm up; with
+      // the looser backdrop the TradeDetail page behind it (including
+      // the Fund button's transient "Funding…" label) was visually
+      // bleeding through and reading like a glitch.
+      position: "fixed", inset: 0, background: "#000e", zIndex: 9998,
       display: "flex", alignItems: "center", justifyContent: "center",
       padding: 16, animation: "fadeIn 0.2s ease",
     }}>

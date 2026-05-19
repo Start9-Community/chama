@@ -539,7 +539,7 @@ export function TradeDetail({
               letterSpacing: 0.5, transition: "all 0.2s",
             }}
           >
-            {locking ? "Locking..." : fundingInProgress ? lockLabel + " unavailable" : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
+            {locking ? "Funding…" : fundingInProgress ? lockLabel + " unavailable" : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
           </button>
           {fundingInProgress && (
             <div style={{
