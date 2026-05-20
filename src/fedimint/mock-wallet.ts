@@ -20,7 +20,7 @@
 //
 // Cryptographic guarantees: none. Do not use in production.
 
-import type { IFedimintWallet } from "./fedimint-client.js";
+import type { IFedimintWallet, LnReceiveStateKind } from "./fedimint-client.js";
 
 const MOCK_FEDERATION_ID = "mock_fed_" + "0".repeat(56);
 const MOCK_INVITE = "fed1mock" + "0".repeat(80);
@@ -117,13 +117,21 @@ export function createMockWallet(): IFedimintWallet {
     },
 
     lightning: {
-      async createInvoice(amountMsats: number, description: string) {
+      async createInvoice(
+        amountMsats: number,
+        description: string,
+        onReceiveState?: (kind: LnReceiveStateKind) => void,
+      ) {
         // Fake bolt11 — user can pretend-pay it and we'll credit the balance
         // after a short delay to simulate settlement.
         const opId = `mock_op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        onReceiveState?.("created");
+        onReceiveState?.("waiting_for_payment");
         setTimeout(() => {
+          onReceiveState?.("funded");
           balanceMsats += amountMsats;
           notifyBalance();
+          onReceiveState?.("claimed");
         }, 2_000);
         return {
           invoice: `lnbcmock${amountMsats}n1p${description.replace(/\W/g, "").slice(0, 10)}${opId}`,

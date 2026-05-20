@@ -18,11 +18,16 @@
 // ── Phase model ────────────────────────────────────────────────────────
 //
 // `creating-invoice`     transient — bridge call to mint BOLT11
+// `receive-watch-ready`  transient — receive stream emitted its first
+//                        non-terminal state; QR is safe to show
 // `invoice-created`      transient — fires once, hands BOLT11 to the UI
 // `awaiting-payment`     polling — balance unchanged from baseline
 // `mint-confirming`      polling — receive-watch saw gateway funding or
 //                        balance moved partial; waiting for federation
 //                        to credit the wallet
+// `receive-rejected`     in-flight hint — gateway saw the payment, then
+//                        receive-watch reported canceled:rejected; keep
+//                        checking briefly for late ecash credit
 // `payment-confirmed`    transient — full threshold met; LOCK next
 // `locking`              transient — calling lockAndPublish
 // `locked`               TERMINAL — LOCK published, modal closes
@@ -68,7 +73,9 @@ export type FundingPhase =
 export type FundAndLockPhase =
   | { kind: "creating-invoice" }
   | { kind: "creating-invoice-slow" }
+  | { kind: "receive-watch-ready" }
   | { kind: "invoice-created"; bolt11: string; expiresAt: number }
+  | { kind: "receive-rejected"; reason: string }
   | FundingPhase
   | { kind: "locking" }
   | { kind: "locked" }
@@ -115,6 +122,15 @@ export const DEFAULT_MINT_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
  *  user, instead of a silent terminal that ate good trades. */
 export const DEFAULT_MINT_SLOW_WARN_MS = 60 * 1000;
 
+/** v0.7.1: short grace after a post-funded receive cancellation.
+ *  Production v0.7.0 showed `funded → canceled:rejected` with no
+ *  subsequent ecash credit. We still preserve the known race where
+ *  balance can credit shortly after a rejected watch state, but after
+ *  this window the app should stop showing the generic slow-mint
+ *  surface and tell the user to check the sending wallet / recovery
+ *  banner instead of waiting the full mint watchdog. */
+export const DEFAULT_POST_FUNDED_CANCEL_GRACE_MS = 30 * 1000;
+
 /** Same cadence as startClaimWatchdog (5s ticks). Keeps the wallet's
  *  Fedimint state consistent across watchdogs. */
 export const DEFAULT_POLL_INTERVAL_MS = 5_000;
@@ -138,6 +154,13 @@ export const DEFAULT_INVOICE_TIMEOUT_MS = 45_000;
  *  "creating-invoice-slow" surface so the user sees we're still
  *  trying. The poll loop keeps going until the hard cap above. */
 export const DEFAULT_INVOICE_SLOW_WARN_MS = 10_000;
+
+/** v0.7.1: after create_bolt11_invoice returns, require the
+ * subscribe_ln_receive stream to produce an initial state before we
+ * expose the QR. This cannot prove paid settlement, but it does prove
+ * the browser client is watching the operation it is asking the user
+ * to fund. */
+export const DEFAULT_RECEIVE_WATCH_READY_TIMEOUT_MS = 5_000;
 
 const defaultSleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -178,6 +201,12 @@ export interface PollFundingOpts {
    *  from the gateway's evidence of payment instead of waiting for a
    *  partial balance delta that may never arrive on rejected receives. */
   mintDetected?: () => boolean;
+  /** v0.7.1: reason from a post-funded receive cancellation, if any.
+   *  This does not immediately outrank balance polling; it only starts
+   *  a short grace window so late wallet credit can still lock. */
+  postFundedCancelReason?: () => string | null;
+  /** Defaults to DEFAULT_POST_FUNDED_CANCEL_GRACE_MS. */
+  postFundedCancelGraceMs?: number;
   /** Test seam: inject a fast/synchronous sleep. */
   sleep?: (ms: number) => Promise<void>;
   /** Test seam: inject a synthetic clock. */
@@ -193,12 +222,15 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
   const paymentDeadlineMs = opts.paymentDeadlineMs ?? DEFAULT_PAYMENT_DEADLINE_MS;
   const mintConfirmTimeoutMs = opts.mintConfirmTimeoutMs ?? DEFAULT_MINT_CONFIRM_TIMEOUT_MS;
   const mintSlowWarnMs = opts.mintSlowWarnMs ?? DEFAULT_MINT_SLOW_WARN_MS;
+  const postFundedCancelGraceMs =
+    opts.postFundedCancelGraceMs ?? DEFAULT_POST_FUNDED_CANCEL_GRACE_MS;
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const thresholdPct = opts.thresholdPct ?? DEFAULT_THRESHOLD_PCT;
   const requiredDelta = Math.floor(opts.expectedMsats * thresholdPct);
 
   const start = now();
   let mintStartedAt: number | null = null;
+  let postFundedCancelStartedAt: number | null = null;
   let inMintPhase = false;
   let slowWarnFired = false;
 
@@ -242,6 +274,10 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
       opts.onPhase({ kind: "mint-confirming" });
     }
 
+    if (inMintPhase && opts.postFundedCancelReason?.()) {
+      postFundedCancelStartedAt ??= now();
+    }
+
     // Timeout checks — evaluated AFTER the threshold check so a
     // last-tick payment that lands exactly at the deadline still
     // succeeds.
@@ -253,11 +289,26 @@ export async function pollForFunding(opts: PollFundingOpts): Promise<FundingTerm
     }
     if (inMintPhase) {
       const mintElapsed = now() - (mintStartedAt ?? start);
+      const postFundedCancelElapsed = postFundedCancelStartedAt === null
+        ? null
+        : now() - postFundedCancelStartedAt;
       // Soft warn — one-time UI flip so the user knows the federation
       // is slow but we're still waiting. Not a terminal.
-      if (!slowWarnFired && mintElapsed >= mintSlowWarnMs) {
+      if (
+        postFundedCancelElapsed === null &&
+        !slowWarnFired &&
+        mintElapsed >= mintSlowWarnMs
+      ) {
         slowWarnFired = true;
         opts.onPhase({ kind: "mint-confirming-slow" });
+      }
+      if (
+        postFundedCancelElapsed !== null &&
+        postFundedCancelElapsed >= postFundedCancelGraceMs
+      ) {
+        const result: FundingTerminal = { kind: "mint-timeout" };
+        opts.onPhase(result);
+        return result;
       }
       // Hard cap — terminal.
       if (mintElapsed >= mintConfirmTimeoutMs) {
@@ -324,9 +375,11 @@ export interface RunFundAndLockOpts extends RunFundAndLockDeps {
   mintConfirmTimeoutMs?: number;
   mintSlowWarnMs?: number;
   pollIntervalMs?: number;
+  postFundedCancelGraceMs?: number;
   /** v0.6.5: createFundingInvoice tunables. */
   invoiceTimeoutMs?: number;
   invoiceSlowWarnMs?: number;
+  receiveWatchReadyTimeoutMs?: number;
   /** Test seams. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -374,8 +427,26 @@ export async function runFundAndLock(
   // 45s fails fast with a recoverable lock-failed error.
   const invoiceTimeoutMs = opts.invoiceTimeoutMs ?? DEFAULT_INVOICE_TIMEOUT_MS;
   const invoiceSlowWarnMs = opts.invoiceSlowWarnMs ?? DEFAULT_INVOICE_SLOW_WARN_MS;
+  const receiveWatchReadyTimeoutMs =
+    opts.receiveWatchReadyTimeoutMs ?? DEFAULT_RECEIVE_WATCH_READY_TIMEOUT_MS;
   let slowWarnTimer: ReturnType<typeof setTimeout> | null = null;
   let hardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  let receiveWatchReadyTimer: ReturnType<typeof setTimeout> | null = null;
+  let receiveWatchReady = false;
+  let resolveReceiveWatchReady: (() => void) | null = null;
+  let rejectReceiveWatchReady: ((error: Error) => void) | null = null;
+  const receiveWatchReadyPromise = new Promise<void>((resolve, reject) => {
+    resolveReceiveWatchReady = resolve;
+    rejectReceiveWatchReady = reject;
+  });
+  const finishReceiveWatchReady = (error?: Error) => {
+    if (receiveWatchReady) return;
+    receiveWatchReady = true;
+    if (receiveWatchReadyTimer) clearTimeout(receiveWatchReadyTimer);
+    receiveWatchReadyTimer = null;
+    if (error) rejectReceiveWatchReady?.(error);
+    else resolveReceiveWatchReady?.();
+  };
   // v0.6.5: receive-watch listener. Fires as the SDK observes the
   // LN receive operation transition states. We emit mint-confirming
   // the moment `funded` lands (gateway received the HTLC) so the
@@ -388,8 +459,8 @@ export async function runFundAndLock(
   // let the balance poll remain the source of truth, and BLF payments could
   // still succeed even when the receive watch later reported
   // canceled:rejected. So: before the gateway reports `funded`, a cancel is
-  // terminal. After `funded`, keep polling for actual balance credit; only the
-  // balance gate decides whether we can LOCK.
+  // terminal. After `funded`, keep polling for actual balance credit during
+  // a short grace window; the balance gate still decides whether we can LOCK.
   let mintConfirmingEmittedByWatch = false;
   let watchOverride: FundAndLockTerminal | null = null;
   let postFundedCancelReason: string | null = null;
@@ -401,16 +472,20 @@ export async function runFundAndLock(
       if (watchOverride) return;
       const reason = kind.canceled.reason;
       if (mintConfirmingEmittedByWatch) {
-        // The gateway already saw the HTLC. Keep the v0.6.4 behavior:
-        // continue polling balance instead of treating the receive stream's
-        // cancel as authoritative. Some browser/Fedimint receive paths emit
-        // canceled:rejected before balance credit is observable.
-        postFundedCancelReason = postFundedCancelReason ?? reason;
+        // The gateway already saw the HTLC. Preserve the v0.6.4 race
+        // protection by continuing to poll balance for a short grace
+        // window, but surface the rejection immediately so the modal
+        // stops implying "slow mint" is the only thing happening.
+        if (!postFundedCancelReason) {
+          postFundedCancelReason = reason;
+          emit({ kind: "receive-rejected", reason });
+        }
         return;
       }
       if (reason === "expired") {
         watchOverride = { kind: "expired" };
         emit({ kind: "expired" });
+        finishReceiveWatchReady(new Error("Lightning invoice expired"));
       } else {
         const msg =
           `Federation didn't accept the payment (reason: ${reason}). ` +
@@ -419,6 +494,7 @@ export async function runFundAndLock(
           "switch communities before trying again.";
         watchOverride = { kind: "lock-failed", error: msg };
         emit({ kind: "lock-failed", error: msg });
+        finishReceiveWatchReady(new Error(msg));
       }
       // Force pollForFunding to bail on its next tick. We can't
       // touch opts.signal (caller owns it); the local watchAbort is
@@ -426,6 +502,7 @@ export async function runFundAndLock(
       watchAbort.abort();
       return;
     }
+    finishReceiveWatchReady();
     if (mintConfirmingEmittedByWatch) return;
     if (kind === "funded" || kind === "awaiting_funds" || kind === "claimed") {
       mintConfirmingEmittedByWatch = true;
@@ -451,11 +528,22 @@ export async function runFundAndLock(
         ));
       }, invoiceTimeoutMs);
     });
-
     bolt11 = await Promise.race([
       opts.createFundingInvoice(opts.amountMsats, opts.description, onReceiveState),
       timeoutPromise,
     ]);
+    if (watchOverride) return watchOverride;
+    if (!receiveWatchReady) {
+      receiveWatchReadyTimer = setTimeout(() => {
+        finishReceiveWatchReady(new Error(
+          "Couldn't verify the Lightning receive watcher for this invoice. " +
+          "Chama did not show the QR because it may not be able to detect " +
+          "or recover the payment.",
+        ));
+      }, receiveWatchReadyTimeoutMs);
+    }
+    await receiveWatchReadyPromise;
+    emit({ kind: "receive-watch-ready" });
   } catch (e: any) {
     const err = e?.message || "Couldn't create funding invoice";
     emit({ kind: "lock-failed", error: err });
@@ -463,6 +551,7 @@ export async function runFundAndLock(
   } finally {
     if (slowWarnTimer) clearTimeout(slowWarnTimer);
     if (hardTimeoutTimer) clearTimeout(hardTimeoutTimer);
+    if (receiveWatchReadyTimer) clearTimeout(receiveWatchReadyTimer);
   }
   const expiresAt = (opts.now ?? defaultNow)() +
     (opts.paymentDeadlineMs ?? DEFAULT_PAYMENT_DEADLINE_MS);
@@ -493,22 +582,24 @@ export async function runFundAndLock(
     mintSlowWarnMs: opts.mintSlowWarnMs,
     pollIntervalMs: opts.pollIntervalMs,
     mintDetected: () => mintConfirmingEmittedByWatch,
+    postFundedCancelReason: () => postFundedCancelReason,
+    postFundedCancelGraceMs: opts.postFundedCancelGraceMs,
     sleep: opts.sleep,
     now: opts.now,
   });
 
   // Receive watch override takes precedence for pre-funded terminal states.
-  // Post-funded cancel reports are intentionally ignored above so balance
-  // polling can preserve the known-working v0.6.4 behavior.
+  // Post-funded cancel reports preserve the known-working balance race, but
+  // only for a short grace window before becoming an explicit lock-failed.
   if (watchOverride) return watchOverride;
 
   if (polled.kind === "mint-timeout" && postFundedCancelReason) {
     const err =
-      `Payment reached the gateway, but the federation later reported ` +
-      `canceled:${postFundedCancelReason} and no ecash credit arrived. ` +
-      "Do not pay another invoice for this trade yet. Your sending wallet " +
-      "may refund automatically; if sats later appear in Chama, use the " +
-      "recovery prompt or try the lock again from the trade.";
+      `Payment reached the Lightning gateway, but the federation rejected ` +
+      `the mint before Chama received ecash (canceled:${postFundedCancelReason}). ` +
+      "Do not pay another invoice for this trade yet. Check the sending " +
+      "wallet for a failed or refunded payment. If sats later appear in " +
+      "Chama, use the recovery prompt before trying again.";
     emit({ kind: "lock-failed", error: err });
     return { kind: "lock-failed", error: err };
   }

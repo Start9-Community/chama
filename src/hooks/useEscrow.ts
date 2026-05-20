@@ -5,6 +5,8 @@
 // ── localStorage helpers for escrow ID persistence ────────────────────────
 const LEGACY_STORAGE_KEY = "chama_escrow_ids";
 const MAX_SAVED_ESCROW_IDS = 50;
+const FEDIMINT_WALLET_NOT_READY =
+  "Chama wallet disconnected. Tap Reconnect and try again.";
 
 function escrowStorageKey(pubkey?: string | null): string {
   return pubkey ? `${LEGACY_STORAGE_KEY}:${pubkey}` : LEGACY_STORAGE_KEY;
@@ -99,6 +101,10 @@ import { getCommunityBySlug, type Community } from "../communities/registry.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
+import {
+  MIN_REAL_ATOMIC_FUNDING_MSATS,
+  minimumAtomicFundingMessage,
+} from "../payments/funding-limits.js";
 
 function isExpiredUnfundedEscrow(escrowState: EscrowState, nowSec = Math.floor(Date.now() / 1000)): boolean {
   return (
@@ -852,7 +858,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     return () => {
       mountedRef.current = false;
       clientRef.current?.disconnect();
-      fedimintRef.current?.cleanup().catch(() => {});
+      const fedimint = fedimintRef.current;
+      fedimint?.cleanup().catch(() => {});
+      if (fedimintRef.current === fedimint) fedimintRef.current = null;
+      if (bridgeRef.current) bridgeRef.current = null;
     };
   }, []);
 
@@ -1272,6 +1281,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // recreating their callbacks.
   refreshBalanceRef.current = refreshBalance;
 
+  const markFedimintWalletNotReady = useCallback((message = FEDIMINT_WALLET_NOT_READY) => {
+    const at = Date.now();
+    healthRef.current = { ok: false, at };
+    updateFedimint({
+      initialized: false,
+      joined: false,
+      busy: false,
+      error: message,
+      lastHealthOk: false,
+      lastHealthAt: at,
+      bootProbeState: "failed",
+    });
+  }, [updateFedimint]);
+
   const initFedimint = useCallback(async (
     inviteCode?: string,
     options?: { force?: boolean },
@@ -1347,6 +1370,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // otherwise create + init a fresh one against whatever the OPFS
       // currently holds.
       let fedimint = fedimintRef.current;
+      if (fedimint && !fedimint.isInitialized()) {
+        fedimintRef.current = null;
+        bridgeRef.current = null;
+        fedimint = null;
+      }
       if (!fedimint) {
         fedimint = buildClient();
         await fedimint.init({ mnemonic, storageScope, simNpub });
@@ -1815,8 +1843,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     onReceiveState?: (kind: LnReceiveStateKind) => void,
   ) => {
     const fedimint = fedimintRef.current;
-    if (!fedimint || !fedimint.isJoined()) {
-      throw new Error("Join a federation before creating an invoice");
+    if (!fedimint || !fedimint.isInitialized() || !fedimint.isJoined()) {
+      markFedimintWalletNotReady();
+      throw new Error(FEDIMINT_WALLET_NOT_READY);
     }
 
     // Health gate: refuse if the most recent probe failed and is still
@@ -1851,7 +1880,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
 
     return fedimint.createInvoice(amountMsats, description, onReceiveState);
-  }, [updateFedimint]);
+  }, [markFedimintWalletNotReady, updateFedimint]);
 
   // v0.3.0 Phase 2: atomic fund-and-lock orchestrator. Composes the
   // existing createFundingInvoice + lockAndPublishAction into a single
@@ -1869,8 +1898,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     },
   ): Promise<import("../payments/fund-and-lock.js").FundAndLockTerminal> => {
     const fedimint = fedimintRef.current;
-    if (!fedimint) {
-      const err = "Wallet not initialized";
+    if (!fedimint || !fedimint.isInitialized() || !fedimint.isJoined()) {
+      markFedimintWalletNotReady();
+      const err = FEDIMINT_WALLET_NOT_READY;
+      opts.onPhase({ kind: "lock-failed", error: err });
+      return { kind: "lock-failed", error: err };
+    }
+    if (
+      !isSimModeOn() &&
+      !isTestnetMode() &&
+      opts.amountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
+    ) {
+      const err =
+        `${minimumAtomicFundingMessage()} Tiny invoices can be accepted by ` +
+        "a Lightning gateway and still reject before ecash mints.";
       opts.onPhase({ kind: "lock-failed", error: err });
       return { kind: "lock-failed", error: err };
     }
@@ -1932,7 +1973,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         ? { ...prev, fundingInProgress: false }
         : prev);
     }
-  }, [createFundingInvoice, lockAndPublishAction]);
+  }, [createFundingInvoice, lockAndPublishAction, markFedimintWalletNotReady]);
 
   // v0.3.0 Phase 3: atomic claim-and-payout orchestrator. Composes the
   // existing claimAndRedeemAction with a balance watchdog and outbound
@@ -2059,8 +2100,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // buttons un-disable across the rest of the UI — single source
       // of truth.
       const fedimint = fedimintRef.current;
-      if (!fedimint) {
-        return { ok: false as const, error: "Wallet not initialized" };
+      if (!fedimint || !fedimint.isInitialized() || !fedimint.isJoined()) {
+        markFedimintWalletNotReady();
+        return { ok: false as const, error: FEDIMINT_WALLET_NOT_READY };
       }
       try {
         await fedimint.probeReachable();
@@ -2073,6 +2115,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         });
         return { ok: true as const };
       } catch (e: any) {
+        const message = e?.message || "Federation unreachable";
+        if (/FedimintClient not initialized/i.test(message)) {
+          markFedimintWalletNotReady();
+          return { ok: false as const, error: FEDIMINT_WALLET_NOT_READY };
+        }
         const at = Date.now();
         healthRef.current = { ok: false, at };
         updateFedimint({
@@ -2080,7 +2127,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           lastHealthAt: at,
           bootProbeState: "failed",
         });
-        return { ok: false as const, error: e?.message || "Federation unreachable" };
+        return { ok: false as const, error: message };
       }
     },
     refreshBalance,

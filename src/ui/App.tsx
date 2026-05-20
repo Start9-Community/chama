@@ -5,7 +5,7 @@ import { Preferences } from "@capacitor/preferences";
 import { useEscrow } from "../hooks/useEscrow.js";
 import { type EscrowState, EscrowStatus, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
-import { getActiveInvite } from "../fedimint/index.js";
+import { getActiveInvite, isTestnetMode } from "../fedimint/index.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
 
@@ -50,6 +50,10 @@ import { AtomicFundingModal } from "./panels/AtomicFundingModal.js";
 import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
 import { addOrTouchPayoutDestination, listPayoutDestinations } from "../payments/payout-destinations.js";
+import {
+  MIN_REAL_ATOMIC_FUNDING_MSATS,
+  minimumAtomicFundingMessage,
+} from "../payments/funding-limits.js";
 import { SavedHandlesPanel } from "./panels/SavedHandlesPanel.js";
 import { PayoutDestinationsPanel } from "./panels/PayoutDestinationsPanel.js";
 import { SimModePill, SimEntryModal, SIM_PILL_HEIGHT } from "../sim/SimModeBanner.js";
@@ -396,13 +400,12 @@ export default function App() {
   const midFunding = isMidFunding({ fundingInProgress });
 
   // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND nothing
-  // else explains the balance — no active trade, no mid-funding flow,
-  // no mid-claim sweep. The expected-transient cases (balance held
-  // briefly by the atomic fund or claim flows) suppress the banner
-  // so it doesn't race the flow that's about to drain.
+  // else explains the balance — no locked/approved commitment, no
+  // mid-funding flow, no mid-claim sweep. CREATED listings do not explain
+  // local ecash because no money has moved yet.
   const showRecoveryBanner = shouldShowRecoveryBanner({
     balanceMsats: fedimint.balanceMsats ?? 0,
-    hasAnyActiveEscrow: hasActiveCommitment,
+    hasAnyActiveEscrow: committedMsats > 0,
     fundingInProgress: midFunding,
     claimPayoutInProgress,
   });
@@ -1090,6 +1093,27 @@ export default function App() {
                 return;
               }
               if (!selected) return;
+              if (
+                !simOn &&
+                !isTestnetMode() &&
+                selected.amountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
+              ) {
+                setToast({
+                  message:
+                    `${minimumAtomicFundingMessage()} Tiny invoices can be ` +
+                    "accepted by a Lightning gateway and still reject before ecash mints.",
+                  type: "error",
+                });
+                return;
+              }
+              const probe = await actions.probeFederation();
+              if (!probe.ok) {
+                setToast({
+                  message: probe.error || "Chama wallet disconnected. Tap Reconnect and try again.",
+                  type: "error",
+                });
+                return;
+              }
               // v0.3.0 Phase 2: open AtomicFundingModal instead of
               // dispatching lockAndPublish directly. The modal handles
               // BOLT11 → mint → LOCK in one user-perceived motion.

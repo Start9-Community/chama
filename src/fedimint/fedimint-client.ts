@@ -324,9 +324,18 @@ export class FedimintClient {
       this.balanceUnsubscribe = null;
     }
     if (this.wallet) {
-      await this.wallet.cleanup();
+      const wallet = this.wallet;
       this.wallet = null;
+      try {
+        await wallet.cleanup();
+      } finally {
+        this._federationId = null;
+        this._joinedInvite = null;
+      }
+      return;
     }
+    this._federationId = null;
+    this._joinedInvite = null;
   }
 
   private requireWallet(): IFedimintWallet {
@@ -543,9 +552,18 @@ export class FedimintClient {
     return this._federationId;
   }
 
+  /** Check if the wallet object exists in this JS client. */
+  isInitialized(): boolean {
+    return this.wallet !== null;
+  }
+
   /** Check if the wallet is connected to a federation */
   isJoined(): boolean {
-    return this.wallet?.isOpen() ?? false;
+    try {
+      return this.wallet?.isOpen() ?? false;
+    } catch {
+      return false;
+    }
   }
 
   /** Get the federation invite code (for sharing) */

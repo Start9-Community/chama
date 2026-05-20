@@ -561,8 +561,8 @@ export function activeCommittedMsats(inputs: {
 //                   unreachable · Reconnect →"; tappable). Wins over
 //                   all other states because reachability is the
 //                   floor for any other meaningful state.
-//   - in-trade    : balance > 0 AND user is buyer/seller in an active
-//                   trade ("Active funds in escrow: N sats")
+//   - in-trade    : user has a LOCKED/APPROVED buyer/seller commitment
+//                   ("Active funds in escrow: N sats")
 //   - stranded    : material balance AND no active commitment (failure-mode;
 //                   tappable → opens RecoveryPayoutModal directly)
 //   - ready       : balance == 0 OR only tiny post-payout dust
@@ -614,15 +614,12 @@ export function decideChamaBarLabel(opts: {
   const activeTradeCount = Math.max(1, opts.activeTradeCount ?? 1);
   // Floor to whole sats — the bar always speaks in sats, never msats.
   const sats = Math.floor(opts.balanceMsats / 1000);
-  if (sats > 0) {
-    if (opts.hasActiveBuyerSellerCommitment) return { kind: "in-trade", sats, activeTradeCount };
-    if (sats >= MAIN_SURFACE_RECOVERY_MIN_SATS) return { kind: "stranded", sats };
-  }
-  // Balance is 0. If there's an active LOCKED/APPROVED commitment,
-  // surface its amount as the in-trade pill — the escrow ledger is
-  // the source of truth here, not the (correctly-zero) wallet.
+  // If there's an active LOCKED/APPROVED commitment, surface that ledger
+  // amount as the in-trade pill. CREATED listings are intentionally not
+  // enough to explain a wallet balance: no money has moved yet.
   const committedSats = Math.floor((opts.activeCommittedMsats ?? 0) / 1000);
   if (committedSats > 0) return { kind: "in-trade", sats: committedSats, activeTradeCount };
+  if (sats > 0 && sats >= MAIN_SURFACE_RECOVERY_MIN_SATS) return { kind: "stranded", sats };
   return { kind: "ready" };
 }
 
@@ -665,11 +662,11 @@ export function findActiveTrade(inputs: {
 
 export function shouldShowRecoveryBanner(inputs: {
   balanceMsats: number;
-  /** v0.6.5 preferred name: true when ANY non-terminal escrow exists
-   *  that could explain a non-zero balance (buyer, seller, or arbiter
-   *  participation — though arbiter-only commitments rarely produce
-   *  local OPFS balance). The pre-v0.6.5 alias `hasCurrentEscrow` is
-   *  still honored for callers that haven't migrated. */
+  /** v0.6.5 preferred name. Callers should pass true only for an actual
+   *  LOCKED/APPROVED commitment that can explain local OPFS balance.
+   *  CREATED listings do not count because no money has moved yet. The
+   *  pre-v0.6.5 alias `hasCurrentEscrow` is still honored for callers
+   *  that haven't migrated. */
   hasAnyActiveEscrow?: boolean;
   /** Deprecated alias for `hasAnyActiveEscrow`. Kept so older callers
    *  (and tests) continue to work without touching every site. */

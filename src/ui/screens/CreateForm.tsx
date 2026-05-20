@@ -34,7 +34,7 @@
 //     honesty info card (one-time-per-account, dismissed on first
 //     publish). Save-draft button + Publish button.
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type WheelEvent } from "react";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
 import { getUserCommunitySlug } from "../../communities/storage.js";
@@ -42,6 +42,9 @@ import { defaultCurrencyForCommunity } from "../../communities/currency.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
 import { type ArbiterWarning, displayCounterpartyName, resolveCreateMintUrl } from "../decisions.js";
 import { T, inputStyle } from "../theme.js";
+import { MIN_REAL_ATOMIC_FUNDING_SATS } from "../../payments/funding-limits.js";
+import { isTestnetMode } from "../../fedimint/index.js";
+import { isSimModeOn } from "../../sim/simMode.js";
 
 type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
@@ -123,6 +126,10 @@ function markFirstPublished(pubkey: string | null): void {
   } catch { /* no-op */ }
 }
 
+function blurNumberInputOnWheel(e: WheelEvent<HTMLInputElement>) {
+  e.currentTarget.blur();
+}
+
 export function emptyCreateFormState(currency = "USD"): FormState {
   return {
     desc: "",
@@ -183,9 +190,18 @@ export function CreateForm({
 
   const handlePublish = async () => {
     if (!form.desc || !form.sats) return;
+    const baseSats = parseInt(form.sats || "0", 10) || 0;
+    const totalSats = form.isSubscription
+      ? (parseInt(form.periods || "0", 10) || 0) * baseSats
+      : baseSats;
+    if (
+      !isSimModeOn() &&
+      !isTestnetMode() &&
+      totalSats < MIN_REAL_ATOMIC_FUNDING_SATS
+    ) return;
     setSubmitting(true);
     try {
-      const amountMsats = parseInt(form.sats) * 1000;
+      const amountMsats = baseSats * 1000;
       const mintUrl = resolveCreateMintUrl({ activeInvite, community });
       const communityArbiters = getTrustedArbiterPool({
         community,
@@ -656,7 +672,17 @@ function Step2({
   onBack: () => void;
   onNext: () => void;
 }) {
-  const ready = form.desc.trim().length > 0 && form.sats.trim().length > 0;
+  const totalSats = (parseInt(form.sats || "0", 10) || 0) *
+    (form.isSubscription ? (parseInt(form.periods || "0", 10) || 0) : 1);
+  const amountTooSmall =
+    !isSimModeOn() &&
+    !isTestnetMode() &&
+    totalSats > 0 &&
+    totalSats < MIN_REAL_ATOMIC_FUNDING_SATS;
+  const ready =
+    form.desc.trim().length > 0 &&
+    form.sats.trim().length > 0 &&
+    !amountTooSmall;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
 
@@ -684,7 +710,14 @@ function Step2({
       <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>AMOUNT (SATS)</div>
-          <input type="number" value={form.sats} onChange={e => set("sats", e.target.value)} placeholder="100000" style={inputStyle} />
+          <input
+            type="number"
+            value={form.sats}
+            onChange={e => set("sats", e.target.value)}
+            onWheel={blurNumberInputOnWheel}
+            placeholder="100000"
+            style={inputStyle}
+          />
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FIAT</div>
@@ -697,6 +730,16 @@ function Step2({
           </div>
         </div>
       </div>
+      {amountTooSmall && (
+        <div style={{
+          marginTop: -8, marginBottom: 16, padding: "8px 10px",
+          borderRadius: T.rs, background: T.amberDim,
+          border: `1px solid ${T.amber}44`,
+          color: T.amber, fontFamily: T.mono, fontSize: 10, lineHeight: 1.45,
+        }}>
+          Minimum real Lightning escrow is {MIN_REAL_ATOMIC_FUNDING_SATS.toLocaleString()} sats.
+        </div>
+      )}
 
       {/* Subscription toggle — invisible unless graduated (item 7).
           v0.2.0 universally false (no rating events yet). */}
@@ -811,7 +854,17 @@ function Step3({
   onSaveDraft: () => void;
 }) {
   const v = VERTICALS.find(vert => vert.id === vertical)!;
-  const ready = form.desc.trim().length > 0 && form.sats.trim().length > 0;
+  const totalSats = (parseInt(form.sats || "0", 10) || 0) *
+    (form.isSubscription ? (parseInt(form.periods || "0", 10) || 0) : 1);
+  const amountTooSmall =
+    !isSimModeOn() &&
+    !isTestnetMode() &&
+    totalSats > 0 &&
+    totalSats < MIN_REAL_ATOMIC_FUNDING_SATS;
+  const ready =
+    form.desc.trim().length > 0 &&
+    form.sats.trim().length > 0 &&
+    !amountTooSmall;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
 
@@ -928,6 +981,14 @@ function Step3({
           {submitting ? "Publishing…" : "Publish to community"}
         </button>
       </div>
+      {amountTooSmall && (
+        <div style={{
+          textAlign: "center", marginTop: 6, fontSize: 10,
+          color: T.amber, fontFamily: T.mono, lineHeight: 1.45,
+        }}>
+          Minimum real Lightning escrow is {MIN_REAL_ATOMIC_FUNDING_SATS.toLocaleString()} sats.
+        </div>
+      )}
       <div style={{ textAlign: "center", marginTop: 6, fontSize: 10, color: T.muted, fontFamily: T.mono }}>
         kind:38100 CREATE · NIP-44 encrypted · multi-relay
       </div>

@@ -611,6 +611,20 @@ type LowLevelRpcClient = {
 // DEFAULT_META_KEY = MetaKey(0). Fields like `vetted_gateways` live inside
 // that JSON value; they are not themselves meta-module keys.
 const META_DEFAULT_KEY = 0;
+const FEDIMINT_SDK_DIAGNOSTICS = {
+  "@fedimint/core": "0.1.3",
+  "@fedimint/transport-web": "0.1.2",
+  "@fedimint/fedimint-client-wasm-bundler": "0.1.1",
+};
+
+type GatewayTrustProbeSummary = {
+  purpose: "receive" | "pay";
+  configContainsMetaModule: boolean;
+  metaModuleRefs: string[];
+  metaRpcFailures: string[];
+  metaVettedGatewayIds: string[];
+  curatedFallbackAllowed: boolean;
+};
 
 function summarizeMetaProbeResult(value: unknown): string {
   if (value === null) return "null";
@@ -696,6 +710,7 @@ function getLowLevelRpc(real: RealFedimintWallet): {
 async function getMetaModuleConsensus(
   real: RealFedimintWallet,
   moduleRefs: Set<string>,
+  failures?: string[],
 ): Promise<unknown[]> {
   const lowLevel = getLowLevelRpc(real);
   if (!lowLevel) return [];
@@ -723,8 +738,10 @@ async function getMetaModuleConsensus(
           values.push(result);
         }
       } catch (e) {
+        const message = summarizeError(e);
+        failures?.push(`module=${moduleRef} key=${String(payload)}: ${message}`);
         console.info(
-          `[chama] meta.get_consensus_value failed module=${moduleRef} key=${String(payload)}(default): ${summarizeError(e)}`,
+          `[chama] meta.get_consensus_value failed module=${moduleRef} key=${String(payload)}(default): ${message}`,
         );
       }
     }
@@ -755,10 +772,11 @@ async function addCuratedGatewayTrust(
 async function getMetaVettedGatewayIds(
   real: RealFedimintWallet,
   purpose: "receive" | "pay",
-): Promise<Set<string>> {
+): Promise<{ ids: Set<string>; probe: GatewayTrustProbeSummary }> {
   const trusted = new Set<string>();
   let configContainsMetaModule = false;
   const metaModuleRefs = new Set<string>();
+  const metaRpcFailures: string[] = [];
 
   if (typeof real.federation.getConfig === "function") {
     try {
@@ -775,23 +793,17 @@ async function getMetaVettedGatewayIds(
   }
 
   if (configContainsMetaModule) {
-    const consensusValues = await getMetaModuleConsensus(real, metaModuleRefs);
+    const consensusValues = await getMetaModuleConsensus(real, metaModuleRefs, metaRpcFailures);
     for (const value of consensusValues) collectVettedGatewayIds(value, trusted);
   }
 
-  if (
-    trusted.size === 0 &&
-    (purpose === "pay" || (purpose === "receive" && configContainsMetaModule))
-  ) {
-    if (purpose === "receive") {
-      console.warn(
-        "[chama] LN receive using curated gateway fallback because this browser SDK exposes the federation meta module in config but cannot call it",
-      );
-    }
+  if (trusted.size === 0 && purpose === "pay") {
     await addCuratedGatewayTrust(real, trusted, purpose);
   } else if (trusted.size === 0 && purpose === "receive") {
     console.warn(
-      "[chama] LN receive skipped curated gateway fallback; receive invoices require wallet-verifiable gateway trust",
+      configContainsMetaModule
+        ? "[chama] LN receive skipped curated gateway fallback because this browser SDK could not verify federation meta; receive invoices require wallet-verifiable gateway trust"
+        : "[chama] LN receive skipped curated gateway fallback; receive invoices require wallet-verifiable gateway trust",
     );
   }
 
@@ -802,7 +814,48 @@ async function getMetaVettedGatewayIds(
   } else {
     console.info(`[chama] LN ${purpose} found no meta-vetted gateway IDs`);
   }
-  return trusted;
+  return {
+    ids: trusted,
+    probe: {
+      purpose,
+      configContainsMetaModule,
+      metaModuleRefs: [...metaModuleRefs],
+      metaRpcFailures,
+      metaVettedGatewayIds: [...trusted],
+      curatedFallbackAllowed: purpose === "pay",
+    },
+  };
+}
+
+async function buildGatewayTrustDiagnostics(args: {
+  real: RealFedimintWallet;
+  purpose: "receive" | "pay";
+  gateways: RealLightningGateway[];
+  probe: GatewayTrustProbeSummary;
+}): Promise<Record<string, unknown>> {
+  let federationId: string | null = null;
+  try {
+    federationId = normalizeFederationId(await args.real.federation.getFederationId());
+  } catch {}
+  return {
+    issue: args.purpose === "receive"
+      ? "no_wallet_verifiable_lightning_receive_gateway"
+      : "no_trusted_lightning_pay_gateway",
+    federationId,
+    sdkPackages: FEDIMINT_SDK_DIAGNOSTICS,
+    jsSdkModuleKinds: ["", "ln", "mint", "wallet"],
+    gateways: args.gateways.map((gateway) => ({
+      gatewayId: gateway.info?.gateway_id ?? null,
+      alias: gateway.info?.lightning_alias ?? null,
+      api: gateway.info?.api ?? null,
+      vetted: gateway.vetted,
+      supportsPrivatePayments: gateway.info?.supports_private_payments ?? null,
+    })),
+    metaProbe: args.probe,
+    interpretation: args.purpose === "receive"
+      ? "The federation advertises gateways, but the browser wallet could not prove any receive gateway is trusted. Showing a QR here can take Lightning payment and then reject before ecash mints."
+      : "The federation advertises gateways, but the browser wallet could not prove any pay gateway is trusted.",
+  };
 }
 
 export function adaptRealWallet(
@@ -853,7 +906,8 @@ export function adaptRealWallet(
       }
 
       const selectableGateways = gateways.filter((candidate) => candidate.info);
-      const metaVettedGatewayIds = await getMetaVettedGatewayIds(real, purpose);
+      const metaTrust = await getMetaVettedGatewayIds(real, purpose);
+      const metaVettedGatewayIds = metaTrust.ids;
       const vettedGateway = selectableGateways.find((candidate) =>
         candidate.vetted === true && candidate.info
       );
@@ -864,13 +918,24 @@ export function adaptRealWallet(
       const trustedGateway = vettedGateway ?? metaVettedGateway;
       if (!trustedGateway?.info) {
         if (selectableGateways.length > 0) {
-          throw new Error(
+          const diagnostic = await buildGatewayTrustDiagnostics({
+            real,
+            purpose,
+            gateways: selectableGateways,
+            probe: metaTrust.probe,
+          });
+          const message =
             purpose === "receive"
               ? "No wallet-verifiable Lightning receive gateway is available for this federation. " +
                 "Refusing to show a QR code that may take payment and reject before ecash mints."
               : "No trusted Lightning pay gateway is available for this federation. " +
-                "Your claimed sats are still in your Chama wallet; payout can be retried.",
+                "Your claimed sats are still in your Chama wallet; payout can be retried.";
+          const error = new Error(
+            `${message}\n\nChama diagnostics:\n${JSON.stringify(diagnostic, null, 2)}`,
           );
+          (error as Error & { chamaDiagnostics?: Record<string, unknown> }).chamaDiagnostics =
+            diagnostic;
+          throw error;
         }
         console.warn(`[chama] LN ${purpose} gateway selection found no gateways`);
         return undefined;

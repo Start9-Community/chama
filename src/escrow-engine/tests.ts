@@ -5289,6 +5289,7 @@ console.log("\n── RUN FUND AND LOCK ──");
     balances: number[];
     invoiceResult?: string | Error;
     lockResult?: "ok" | Error;
+    suppressInitialReceiveState?: boolean;
   }) {
     let i = 0;
     const calls = {
@@ -5315,6 +5316,7 @@ console.log("\n── RUN FUND AND LOCK ──");
         calls.createInvoice++;
         lastReceiveListener = onReceiveState ?? null;
         if (opts.invoiceResult instanceof Error) throw opts.invoiceResult;
+        if (!opts.suppressInitialReceiveState) onReceiveState?.("created");
         return opts.invoiceResult ?? "lnbc100n1pfakefundingok";
       },
       lockAndPublish: async (_id: string, _o: { savedHandleId?: string }) => {
@@ -5562,6 +5564,44 @@ console.log("\n── RUN FUND AND LOCK ──");
       "LOCK never dispatched when invoice timed out");
   }
 
+  // ── v0.7.1: invoice receive-watch preflight
+  // A BOLT11 alone is not enough; before the QR is shown, the receive
+  // stream must prove it can see the operation. This is a no-money SDK
+  // probe: it cannot prove paid settlement, but it prevents asking the
+  // user to fund an invoice Chama cannot watch.
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 0, 0],
+      suppressInitialReceiveState: true,
+    });
+    const phases: FundAndLockPhase[] = [];
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_receive_watch_not_ready",
+      amountMsats: 100_000,
+      description: "receive watch preflight",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      invoiceTimeoutMs: 5_000,
+      invoiceSlowWarnMs: 50,
+      receiveWatchReadyTimeoutMs: 1,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "lock-failed",
+      "Missing initial receive-watch state → terminal lock-failed");
+    if (terminal.kind === "lock-failed") {
+      assert(/receive watcher/i.test(terminal.error),
+        "Preflight error explains the receive watcher was not verified");
+    }
+    assert(!phases.some(p => p.kind === "invoice-created"),
+      "No invoice-created phase emitted before receive-watch preflight");
+    assert(wallet.calls.lockAndPublish === 0,
+      "LOCK never dispatched when receive-watch preflight failed");
+  }
+
   // ── v0.6.5: fast invoice → no slow-warn phase
   // A warm federation responds in <slow-warn ms, so the user never sees
   // the "federation is slow" surface.
@@ -5762,10 +5802,10 @@ console.log("\n── RUN FUND AND LOCK ──");
       "LOCK is not dispatched without wallet credit");
   }
 
-  // ── v0.6.5 follow-up: post-funded canceled:rejected that never credits
-  // becomes an explicit lock-failed error after the mint watchdog, not a
-  // misleading Try-LOCK path. If balance credits before the watchdog, the
-  // previous test above still proves we lock successfully.
+  // ── v0.7.1: post-funded canceled:rejected that never credits becomes
+  // an explicit lock-failed error after a short rejection grace, not the
+  // generic slow-mint / Try-LOCK path. If balance credits before the grace,
+  // the previous test above still proves we lock successfully.
   {
     const wallet = makeMockWallet({ balances: [0, 0, 0, 0, 0, 0, 0] });
     const phases: FundAndLockPhase[] = [];
@@ -5790,8 +5830,9 @@ console.log("\n── RUN FUND AND LOCK ──");
       sleep,
       now: () => nowMs,
       paymentDeadlineMs: 60_000,
-      mintConfirmTimeoutMs: 3_000,
+      mintConfirmTimeoutMs: 300_000,
       mintSlowWarnMs: 1_000,
+      postFundedCancelGraceMs: 2_000,
       pollIntervalMs: 1_000,
     });
     assert(terminal.kind === "lock-failed",
@@ -5799,11 +5840,15 @@ console.log("\n── RUN FUND AND LOCK ──");
     if (terminal.kind === "lock-failed") {
       assert(/canceled:rejected/.test(terminal.error),
         "Post-funded rejection error preserves the receive cancel reason");
-      assert(/no ecash credit arrived/i.test(terminal.error),
+      assert(/before Chama received ecash/i.test(terminal.error),
         "Post-funded rejection error explains that wallet credit never arrived");
     }
-    assert(phases.some(p => p.kind === "mint-confirming-slow"),
-      "Post-funded rejection path still surfaces the slow mint warning before failing");
+    assert(phases.some(p => p.kind === "receive-rejected"),
+      "Post-funded rejection path surfaces the receive-rejected warning");
+    assert(!phases.some(p => p.kind === "mint-confirming-slow"),
+      "Post-funded rejection path does not keep showing generic slow-mint copy");
+    assert(nowMs < 10_000,
+      "Post-funded rejection fails on the short grace, not the full mint watchdog");
     assert(wallet.calls.lockAndPublish === 0,
       "LOCK is not dispatched for rejected receive without wallet credit");
   }
@@ -6686,12 +6731,10 @@ console.log("\n── LIGHTNING PAYOUT FEE RESERVE ──");
 
 // ── 42. CHAMA BAR LABEL DECISION (v0.3.0 Phase 5) ────────────────────────
 //
-// decideChamaBarLabel maps (balance, hasActiveBuyerSellerCommitment) to
-// one of three top-bar states. Per Phase 5 reminder #3: arbiter-only
-// commitments are NOT treated as active — the predicate is the same
-// hasActiveBuyerSellerCommitment used by Create-blocking (locked in
-// v0.2.0 Q3). The bar's caller computes the predicate; this helper is
-// pure shape conversion + sat conversion + tie-breaking.
+// decideChamaBarLabel maps wallet balance + actual committed escrow value
+// to one of three top-bar states. Per Phase 5 reminder #3: arbiter-only
+// commitments are NOT treated as active. CREATED listings also do not
+// explain wallet balance; no money has moved yet.
 console.log("\n── CHAMA BAR LABEL ──");
 {
   // Zero balance → ready, regardless of commitment state
@@ -6711,18 +6754,28 @@ console.log("\n── CHAMA BAR LABEL ──");
       "Zero balance + active commitment → ready (no sats to label)");
   }
 
-  // Positive balance + active commitment → in-trade with sats
+  // Small positive balance + active CREATED-only listing → ready. The listing
+  // can explain the ActiveTradePill, but it cannot explain wallet ecash.
   {
     const r = decideChamaBarLabel({
-      balanceMsats: 50_000,
+      balanceMsats: 68_000,
       hasActiveBuyerSellerCommitment: true,
+      activeCommittedMsats: 0,
     });
-    assert(r.kind === "in-trade",
-      "Balance + active commitment → in-trade");
-    if (r.kind === "in-trade") {
-      assert(r.sats === 50,
-        "in-trade carries sats (msats / 1000)");
-    }
+    assert(r.kind === "ready",
+      "68 sats + created-only active listing → ready, not phantom in-escrow");
+  }
+
+  // Material positive balance + active CREATED-only listing → stranded.
+  // An open listing must not suppress recovery for real wallet balance.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasActiveBuyerSellerCommitment: true,
+      activeCommittedMsats: 0,
+    });
+    assert(r.kind === "stranded",
+      "Material balance + created-only active listing → stranded");
   }
 
   // Small positive balance + NO active commitment → ready. This is
@@ -6856,10 +6909,11 @@ console.log("\n── CHAMA BAR LABEL ──");
     const r4 = decideChamaBarLabel({
       balanceMsats: 100_000,
       hasActiveBuyerSellerCommitment: true,
+      activeCommittedMsats: 0,
       bootProbeState: "ok",
     });
-    assert(r4.kind === "in-trade",
-      "bootProbeState=ok preserves existing 'in-trade' kind");
+    assert(r4.kind === "ready",
+      "bootProbeState=ok preserves created-only active listing as ready");
   }
 
   // pending → passes through to existing three-state decision
@@ -6944,17 +6998,17 @@ console.log("\n── CHAMA BAR LABEL ──");
       "Post-CLAIM terminal: balance=0 + no commitment → ready (no phantom in-escrow)");
   }
 
-  // Balance > 0 still wins over activeCommittedMsats — if the wallet
-  // has actual cash AND there's an active trade, the pill prefers the
-  // wallet's authoritative number. Both paths land on in-trade.
+  // activeCommittedMsats wins over wallet balance for the in-escrow pill.
+  // The escrow ledger is the source of truth for what has actually been
+  // locked; any unrelated wallet balance is handled by recovery logic.
   {
     const r = decideChamaBarLabel({
       balanceMsats: 30_000_000,
       hasActiveBuyerSellerCommitment: true,
       activeCommittedMsats: 50_000_000,
     });
-    assert(r.kind === "in-trade" && (r as any).sats === 30_000,
-      "balance > 0 takes precedence: wallet shows 30k, ignore committed=50k");
+    assert(r.kind === "in-trade" && (r as any).sats === 50_000,
+      "activeCommittedMsats takes precedence: show locked 50k, not wallet 30k");
   }
 
   // bootProbeState=failed still overrides committed amount — Reconnect
@@ -8463,9 +8517,7 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
 
   // Receive invoices are different from outbound payout: if the wallet cannot
   // verify gateway trust itself, a QR can take payment and then reject before
-  // ecash mints. BLF's curated fallback is therefore NOT allowed on receive
-  // unless the federation config advertises the meta module and the browser
-  // SDK simply cannot call that module.
+  // ecash mints. BLF's curated fallback is therefore NOT allowed on receive.
   {
     const blfFederationId =
       "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
@@ -8523,9 +8575,9 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
   }
 
   // BLF's current browser SDK advertises a meta module in get_config, but the
-  // WASM client can answer "module not found" for client-rpc(meta). In that
-  // specific case, use the tiny federation-scoped curated fallback so the
-  // known Fedi gateway remains selectable without trusting Henwen.
+  // WASM client can answer "module not found" for client-rpc(meta). That is
+  // still not enough for receive: Chama must not show a QR unless wallet code
+  // can verify gateway trust itself.
   {
     const blfFederationId =
       "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
@@ -8575,10 +8627,17 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       },
     ]);
     const wallet = adaptRealWallet(h.real as any);
-    await wallet.lightning.createInvoice(100_000, "fund");
+    let threw = false;
+    try {
+      await wallet.lightning.createInvoice(100_000, "fund");
+    } catch (e) {
+      threw = /No wallet-verifiable Lightning receive gateway/.test((e as Error).message);
+    }
 
-    assert(h.calls.createInvoiceGatewayId === blfTrustedGatewayId,
-      "Adapter uses BLF's exact curated gateway for receive when meta exists but this SDK cannot call it");
+    assert(threw,
+      "Adapter refuses BLF receive when meta exists but this SDK cannot call it");
+    assert(h.calls.createInvoice === 0,
+      "Adapter does not create a receive QR from config-meta-only curated trust");
     await wallet.cleanup();
   }
 

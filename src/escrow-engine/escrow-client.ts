@@ -958,13 +958,10 @@ export class EscrowClient {
     if (!result.ok) {
       console.error(`[escrow] loadEscrow ${escrowId}: replay FAILED — ${result.error.code}: ${result.error.message}`);
       this.callbacks.onValidationError?.(escrowId, result.error.message, result.error.eventId);
-      // Remove from saved list so we don't keep retrying a permanently broken chain
-      try {
-        const saved = JSON.parse(localStorage.getItem("chama_escrow_ids") || "[]");
-        const filtered = saved.filter((id: string) => id !== escrowId);
-        localStorage.setItem("chama_escrow_ids", JSON.stringify(filtered));
-        console.info(`[escrow] Removed broken escrow ${escrowId} from saved list`);
-      } catch {}
+      // Money-path safety: a replay failure can be caused by partial relay
+      // history, late events, or an invalid remote event. Keep the local
+      // pointer so later rehydration or recovery surfaces can still find it.
+      console.warn(`[escrow] Kept failed escrow ${escrowId} in saved list for later recovery/rehydration`);
       return null;
     }
     console.debug(`[escrow] loadEscrow ${escrowId}: replay OK — state is ${result.state.status}`);

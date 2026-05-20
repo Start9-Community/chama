@@ -60,6 +60,7 @@ type ModalPhase =
   | { kind: "awaiting-payment"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming-slow"; bolt11: string; expiresAt: number }
+  | { kind: "receive-rejected"; reason: string }
   | { kind: "payment-confirmed" }
   | { kind: "locking" }
   | { kind: "locked" }
@@ -134,6 +135,9 @@ export function AtomicFundingModal({
             setPhase({ kind: "creating-invoice-slow" });
             return;
           }
+          if (p.kind === "receive-watch-ready") {
+            return;
+          }
           if (p.kind === "awaiting-payment") {
             // pollForFunding emits this on entry; we need the BOLT11
             // already resolved from the prior "invoice-created" phase.
@@ -167,6 +171,10 @@ export function AtomicFundingModal({
                 expiresAt: lastExpiresAt,
               });
             }
+            return;
+          }
+          if (p.kind === "receive-rejected") {
+            setPhase({ kind: "receive-rejected", reason: p.reason });
             return;
           }
           // payment-confirmed / locking / locked / expired / mint-timeout
@@ -291,6 +299,14 @@ export function AtomicFundingModal({
         {phase.kind === "mint-confirming-slow" && (
           <MintConfirmingSlowState
             amountSats={amountSats}
+            onCancel={handleCancel}
+          />
+        )}
+
+        {phase.kind === "receive-rejected" && (
+          <ReceiveRejectedState
+            amountSats={amountSats}
+            reason={phase.reason}
             onCancel={handleCancel}
           />
         )}
@@ -527,7 +543,7 @@ function MintConfirmingSlowState({
         <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, marginBottom: 6 }}>
           +{amountSats.toLocaleString()} sats inbound
         </div>
-        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, wordBreak: "break-word" }}>
           Your payment was received. The federation's mint protocol can
           take a few minutes to finish crediting on slow days. We'll
           keep waiting and LOCK as soon as the credit lands.
@@ -557,6 +573,58 @@ function MintConfirmingSlowState({
         }}
       >
         Cancel & recover later
+      </button>
+    </div>
+  );
+}
+
+function ReceiveRejectedState({
+  amountSats, reason, onCancel,
+}: { amountSats: number; reason: string; onCancel: () => void }) {
+  return (
+    <div>
+      <div style={{
+        padding: "20px 16px", textAlign: "center",
+        background: T.redDim, border: `1px solid ${T.red}66`, borderRadius: T.r,
+        marginBottom: 12,
+      }}>
+        <div style={{ fontSize: 28, marginBottom: 8 }}>✕</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: T.red, fontFamily: T.sans, marginBottom: 4 }}>
+          Federation rejected the payment
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, marginBottom: 6 }}>
+          {amountSats.toLocaleString()} sats not credited
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, wordBreak: "break-word" }}>
+          Gateway status is canceled:{reason}. Chama is checking briefly
+          for late wallet credit. If no recovery banner appears, check
+          the sending wallet for a failed or refunded payment.
+        </div>
+      </div>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        gap: 8, marginBottom: 12, padding: "6px 12px",
+        borderRadius: T.rs, background: T.redDim,
+        border: `1px solid ${T.red}44`,
+      }}>
+        <div style={{
+          width: 8, height: 8, borderRadius: "50%",
+          background: T.red, animation: "pulse 1.4s ease-in-out infinite",
+        }} />
+        <span style={{ fontSize: 10, fontFamily: T.mono, color: T.red, letterSpacing: 0.5 }}>
+          Checking Chama balance before stopping…
+        </span>
+      </div>
+      <button
+        onClick={onCancel}
+        style={{
+          width: "100%", padding: "10px 16px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+          cursor: "pointer",
+        }}
+      >
+        Close and check later
       </button>
     </div>
   );
@@ -717,6 +785,7 @@ function LockFailedState({
 }: { error: string; onCancel: () => void }) {
   const isWalletVerifiableGatewayError =
     /wallet-verifiable Lightning receive gateway/i.test(error);
+  const diagnostics = extractChamaDiagnostics(error);
   const title = isWalletVerifiableGatewayError
     ? "Funding unavailable here"
     : "Couldn't lock the trade";
@@ -739,6 +808,19 @@ function LockFailedState({
           {detail}
         </div>
       </div>
+      {diagnostics && (
+        <button
+          onClick={() => navigator.clipboard?.writeText(diagnostics).catch(() => {})}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.redDim, border: `1px solid ${T.red}44`,
+            color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+            cursor: "pointer", marginBottom: 8,
+          }}
+        >
+          Copy Fedimint diagnostics
+        </button>
+      )}
       <button
         onClick={onCancel}
         style={{
@@ -752,4 +834,11 @@ function LockFailedState({
       </button>
     </div>
   );
+}
+
+function extractChamaDiagnostics(error: string): string | null {
+  const marker = "Chama diagnostics:";
+  const index = error.indexOf(marker);
+  if (index === -1) return null;
+  return error.slice(index + marker.length).trim() || null;
 }

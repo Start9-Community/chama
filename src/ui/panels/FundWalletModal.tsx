@@ -1,8 +1,12 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, lazy, Suspense, type WheelEvent } from "react";
 import { T, inputStyle } from "../theme.js";
 import { isSimModeOn } from "../../sim/simMode.js";
 
 const QRCode = lazy(() => import("../QRCode.js"));
+
+function blurNumberInputOnWheel(e: WheelEvent<HTMLInputElement>) {
+  e.currentTarget.blur();
+}
 
 export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpendNotes, balanceMsats }: {
   onClose: () => void;
@@ -143,7 +147,13 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
         {/* RECEIVE */}
         {tab === "receive" && !invoice && (<>
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>AMOUNT (SATS)</div>
-          <input type="number" value={amountSats} onChange={(e) => setAmountSats(e.target.value)} style={{ ...inputStyle, marginBottom: 12 }} />
+          <input
+            type="number"
+            value={amountSats}
+            onChange={(e) => setAmountSats(e.target.value)}
+            onWheel={blurNumberInputOnWheel}
+            style={{ ...inputStyle, marginBottom: 12 }}
+          />
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>DESCRIPTION</div>
           <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} style={{ ...inputStyle, marginBottom: 16 }} />
           <button disabled={busy} onClick={handleGenerate} style={{
@@ -251,7 +261,13 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
 
           {sendType === "ecash" && (<>
             <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>AMOUNT (SATS)</div>
-            <input type="number" value={amountSats} onChange={(e) => setAmountSats(e.target.value)} style={{ ...inputStyle, marginBottom: 12 }} />
+            <input
+              type="number"
+              value={amountSats}
+              onChange={(e) => setAmountSats(e.target.value)}
+              onWheel={blurNumberInputOnWheel}
+              style={{ ...inputStyle, marginBottom: 12 }}
+            />
             <div style={{ display: "flex", gap: 8 }}>
               <button disabled={busy} onClick={handleSpendAmount} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`, color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{busy ? "Creating..." : "Create ecash"}</button>
               <button disabled={busy} onClick={handleSpendAll} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{`Send ALL (${Math.floor(balanceMsats / 1000)} sats)`}</button>
