@@ -1029,3 +1029,8 @@ drain it.
   speed and user judgment, not in interface gates.
 
 **Status:** Active. Shipped v0.6.5.
+
+---
+
+## 2026-05-20 - DECISION (locked): "P2P" renamed to "Exchange" across all user-facing surfaces. 
+P2P renamed to Exchange, Bill Pay renamed to Community Bill Pay across all user-facing surfaces. Internal category enum values (p2p-trade, bill-pay) unchanged. Pill abbreviation: ⚡ EXCHANGE and 🧾 COM. BILL PAY. Full name in Create wizard, Trade Detail, and educational contexts. The "Community" prefix is structural — it anchors the mutual-aid framing where someone helps someone else pay their bill, not a self-service fintech feature. Per Pillar 2.7, the name itself educates.

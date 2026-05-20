@@ -319,6 +319,15 @@ Chama is not "another P2P escrow app." The pieces that make it singular:
 
 7. **Recurring payments solve a real Lightning gap.** No LN wallet currently offers reliable user-to-user recurring payments because it requires exactly the trust model Chama builds. Recurring payments to a stranger over LN is too risky. Recurring payments to a npub with 200+ positive ratings on Chama is reasonable. Chama's reputation layer makes recurring payments safe in a way that pure-LN cannot be.
 
+8. **Naming principle:** 
+
+Table:
+ConceptUser-facingInternalSats-for-fiat swapExchangep2p-trade (enum unchanged)Pay someone else's billCommunity Bill Paybill-pay (enum unchanged)
+
+User-facing labels describe the action the user is performing, not the architecture enabling it. "Exchange" describes swapping value. "Community Bill Pay" describes helping a neighbor. The internal enum values (p2p-trade, bill-pay) remain unchanged — the rename is a UI-only surface per the same pattern as the wallet→Chama rename in v0.1.85. Code identifiers are stable; user-facing language evolves with understanding.
+
 ---
 
 *Last updated: May 5, 2026. Current state: v0.1.85 in pre-push smoke testing — community-pill identity, browser-honesty banner, seed-cache fix, picker → Sandbox-only, CreateForm cleanup landed during this session. Pillar 2.1 amended with the "every user has a home" doctrine. Next major milestone: v0.2.0 federation-follows-listing convergence.*
+
+---
