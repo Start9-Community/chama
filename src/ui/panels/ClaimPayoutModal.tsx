@@ -30,6 +30,12 @@ import { T } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import {
+  createChapsmartPayoutInvoice,
+  getChapsmartPayoutProfile,
+  isChapsmartPayoutEligible,
+  saveChapsmartPayoutProfile,
+} from "../../payments/chapsmart-payout.js";
+import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
 } from "../../payments/lightning-fees.js";
@@ -50,6 +56,12 @@ export interface ClaimPayoutModalProps {
    *  list. Caller fetches via listPayoutDestinations(); the modal does
    *  not re-fetch. */
   savedDestinations: PayoutDestination[];
+  /** User's selected country/community Chama. Enables local payout rails
+   *  such as Chapsmart when the user lives in Tanzania. */
+  homeCommunity?: string | null;
+  /** Active trade fiat currency. Lets TZS trades expose Chapsmart even
+   *  when an older user has no home-community selection yet. */
+  fiatCurrency?: string | null;
   /** Bound to actions.claimAndPayout from useEscrow. */
   claimAndPayout: (
     escrowId: string,
@@ -90,6 +102,8 @@ export function ClaimPayoutModal({
   escrowId,
   payoutMsats,
   savedDestinations,
+  homeCommunity,
+  fiatCurrency,
   claimAndPayout,
   probeFederation,
   onClose,
@@ -104,6 +118,7 @@ export function ClaimPayoutModal({
   // Try-again so the retry uses the exact same destination/save
   // semantics as the original attempt.
   const lastDispatchRef = useRef<DispatchArgs | null>(null);
+  const chapsmartEligible = isChapsmartPayoutEligible({ homeCommunity, fiatCurrency });
 
   // Common dispatch helper — used by both the picker's first resolve
   // and the bridge-threw retry path. Updates stage transitions and
@@ -122,6 +137,17 @@ export function ClaimPayoutModal({
       // Auto-close on success after a brief celebratory beat.
       setTimeout(() => onClose(terminal), 1500);
     }
+  };
+
+  const resolveDestination = (bolt11: string, opts: { saveAfter: boolean; addressUsed?: string }) => {
+    lastDispatchRef.current = {
+      bolt11,
+      saveAfter: opts.saveAfter,
+      addressUsed: opts.addressUsed,
+    };
+    // Fire-and-forget — dispatchClaim manages its own stage
+    // transitions and terminal handling.
+    void dispatchClaim(lastDispatchRef.current);
   };
 
   // v0.3.1 Phase 1: claim-bridge-threw retry handler. Two-step per
@@ -165,16 +191,14 @@ export function ClaimPayoutModal({
             ? `Send ${payoutSats.toLocaleString()} sats to your Lightning wallet. About ${reserveSats.toLocaleString()} sats stays available for Lightning fees.`
             : `Send ${payoutSats.toLocaleString()} sats to your Lightning wallet`
         }
-        onResolve={(bolt11, opts) => {
-          lastDispatchRef.current = {
-            bolt11,
-            saveAfter: opts.saveAfter,
-            addressUsed: opts.addressUsed,
-          };
-          // Fire-and-forget — dispatchClaim manages its own stage
-          // transitions and terminal handling.
-          void dispatchClaim(lastDispatchRef.current);
-        }}
+        topSlot={chapsmartEligible ? (
+          <ChapsmartPayoutOption
+            escrowId={escrowId}
+            amountSats={payoutSats}
+            onResolve={(bolt11) => resolveDestination(bolt11, { saveAfter: false })}
+          />
+        ) : undefined}
+        onResolve={resolveDestination}
         onCancel={() => onClose(undefined)}
       />
     );
@@ -231,6 +255,121 @@ export function ClaimPayoutModal({
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function ChapsmartPayoutOption({
+  escrowId,
+  amountSats,
+  onResolve,
+}: {
+  escrowId: string;
+  amountSats: number;
+  onResolve: (bolt11: string) => void;
+}) {
+  const profile = getChapsmartPayoutProfile();
+  const [phoneNumber, setPhoneNumber] = useState(profile?.phoneNumber ?? "");
+  const [recipientName, setRecipientName] = useState(profile?.recipientName ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleChapsmart = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const saved = saveChapsmartPayoutProfile({ phoneNumber, recipientName });
+      const invoice = await createChapsmartPayoutInvoice({
+        phoneNumber: saved.phoneNumber,
+        recipientName: saved.recipientName,
+        amountSatsMax: amountSats,
+        escrowId,
+      });
+      onResolve(invoice.bolt11);
+    } catch (e: any) {
+      setErr(e?.message || "Chapsmart payout is not ready yet");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      padding: 12, borderRadius: T.r,
+      background: T.tealDim, border: `1px solid ${T.teal}44`,
+    }}>
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        gap: 10, marginBottom: 10,
+      }}>
+        <div style={{ textAlign: "left" }}>
+          <div style={{
+            fontSize: 11, color: T.teal, fontFamily: T.mono,
+            fontWeight: 900, letterSpacing: 0.4,
+          }}>
+            M-PESA VIA CHAPSMART
+          </div>
+          <div style={{
+            fontSize: 10, color: T.muted, fontFamily: T.sans,
+            marginTop: 2,
+          }}>
+            Send up to {amountSats.toLocaleString()} sats as TZS
+          </div>
+        </div>
+        <span style={{ fontSize: 22, lineHeight: 1 }}>🇹🇿</span>
+      </div>
+      <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
+        <input
+          value={phoneNumber}
+          onChange={(e) => { setPhoneNumber(e.target.value); setErr(null); }}
+          placeholder="+255 71 234 5678"
+          type="tel"
+          disabled={busy}
+          style={{
+            width: "100%", padding: "10px 12px", boxSizing: "border-box",
+            background: T.bg, border: `1px solid ${T.border}`,
+            borderRadius: T.rs, color: T.text,
+            fontFamily: T.sans, fontSize: 13, outline: "none",
+          }}
+        />
+        <input
+          value={recipientName}
+          onChange={(e) => { setRecipientName(e.target.value); setErr(null); }}
+          placeholder="Recipient full name"
+          type="text"
+          disabled={busy}
+          style={{
+            width: "100%", padding: "10px 12px", boxSizing: "border-box",
+            background: T.bg, border: `1px solid ${T.border}`,
+            borderRadius: T.rs, color: T.text,
+            fontFamily: T.sans, fontSize: 13, outline: "none",
+          }}
+        />
+      </div>
+      {err && (
+        <div style={{
+          marginBottom: 8, padding: "8px 10px",
+          background: T.redDim, border: `1px solid ${T.red}33`,
+          borderRadius: T.rs, color: T.red,
+          fontSize: 10, fontFamily: T.mono,
+        }}>
+          {err}
+        </div>
+      )}
+      <button
+        onClick={handleChapsmart}
+        disabled={busy || !phoneNumber.trim() || !recipientName.trim()}
+        style={{
+          width: "100%", padding: "11px 12px", borderRadius: T.rs,
+          background: busy || !phoneNumber.trim() || !recipientName.trim() ? T.surface : T.teal,
+          border: `1px solid ${busy || !phoneNumber.trim() || !recipientName.trim() ? T.border : T.teal}`,
+          color: busy || !phoneNumber.trim() || !recipientName.trim() ? T.muted : T.bg,
+          fontFamily: T.mono, fontSize: 11, fontWeight: 900,
+          cursor: busy || !phoneNumber.trim() || !recipientName.trim() ? "default" : "pointer",
+        }}
+      >
+        {busy ? "Getting Chapsmart invoice..." : "Send to M-Pesa"}
+      </button>
     </div>
   );
 }

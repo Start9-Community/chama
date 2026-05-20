@@ -65,17 +65,17 @@ candidate list with the older roadmap.
 - [ ] **APK rebuild + Zapstore listing.** Rebuild and list after the core
       product surface is stable enough to invite non-developer testers.
 
-- [ ] **v0.6.6 onboarding + NWC.** Next product push: make first-run feel
+- [x] **v0.7.0 onboarding + NWC foundation.** Next product push: make first-run feel
       intentional instead of discovered by wandering. Guide a new user
       through Nostr signer connection, community choice, the built-in
       Fedimint wallet, payment handles, payout destinations, and the basic
       escrow lifecycle without turning the app into a marketing page.
 
-      Add NWC as an optional power-user adapter for fund/claim flows while
-      keeping Chama's browser Fedimint wallet as the default path. The user
-      should understand which wallet is holding sats, which wallet is only a
-      remote signer/payment source, and when Chama has or has not requested
-      money. No silent wallet switching.
+      v0.7.0 shipped the first-impression shell, country-first Chama
+      picker, friendlier key ceremony, East/West/Central Africa coverage,
+      Tanzania/TZS defaults, Chapsmart payout scaffolding, phone formatting,
+      and safer vote-turn UI. NWC remains a power-user follow-up after the
+      Chapsmart contract is confirmed.
 
       Source: 2026-05-19 release planning after v0.6.5.
 
@@ -91,11 +91,12 @@ candidate list with the older roadmap.
       health probe are ready before they tap Fund. Smoke-session source:
       2026-05-19 cold-start glitch report.
 
-- [ ] **Turn-gated vote buttons by category (v0.6.6).** Today both
-      buyer and seller see RELEASE + REFUND simultaneously after LOCK;
-      a seller can accidentally tap "I received the fiat" before the
-      buyer has actually sent it. Gate the UI so exactly one user has
-      their action surfaced at a time, with the order set by category:
+- [x] **Turn-gated vote buttons by category (v0.7.0).** Buyer/seller
+      vote buttons are now UI-gated by category via
+      `decideVotePrompt(state, pubkey)`: exactly one happy-path actor
+      is prompted before the first vote, then the counterparty unlocks.
+      Protocol remains unchanged — the state machine still accepts
+      buyer/seller votes in any order.
 
       - **P2P trade**: buyer-first (buyer sends fiat → votes RELEASE
         first → seller's RELEASE button unlocks). Buyer is the actor
@@ -119,16 +120,8 @@ candidate list with the older roadmap.
       triggers. Image upload for chat is a separate prerequisite —
       see sub-item below.
 
-      Protocol stays unchanged: the state machine still accepts
-      votes in any order. Gating is UI-only, in a new
-      `decideVotePrompt(state, pubkey)` helper alongside
-      decideArbiterWarning in `src/ui/decisions.ts`. Hard timeout +
-      arbiter still resolve stuck trades — this is purely about
-      preventing accidental wrong-direction votes during the
-      happy path.
-
-      Minor-version candidate after onboarding/NWC. Source: 2026-05-19
-      design session.
+      Source: 2026-05-19 design session; implemented during v0.7.0
+      prep.
 
 - [ ] **Chat image upload + viewer (prerequisite for dispute polish).**
       Buyer and seller need to be able to share receipts, screenshots,
@@ -246,7 +239,7 @@ codebase. Keep these here briefly so the consolidation has memory.
 - [ ] **EcashProvider interface.** Abstract the bearer-cash backend once a
       second provider is concrete enough to shape the interface.
 
-- [ ] **NWC advanced wallet automation.** After the v0.6.6 NWC foundation,
+- [ ] **NWC advanced wallet automation.** After the v0.7.0 NWC foundation,
       evaluate deeper NWC flows beyond basic fund/claim: recurring payments,
       saved permissions, policy limits, and richer wallet capability checks.
 

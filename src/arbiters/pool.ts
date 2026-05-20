@@ -8,6 +8,8 @@
 // while testing.
 
 import { nip19 } from "nostr-tools";
+import { getCommunityBySlug } from "../communities/registry.js";
+import { BLF_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
 
 export const TRUSTED_ARBITERS_STORAGE_KEY = "chama_trusted_arbiters";
 export const TRUSTED_ARBITERS_ENV_KEY = "VITE_CHAMA_TRUSTED_ARBITERS";
@@ -86,7 +88,10 @@ function readLocalPool(community?: string | null): string[] {
 
 function readOfficialPool(community?: string | null): string[] {
   const slug = community?.trim();
-  if (slug === "us-blf" || slug === "sn-cfa") return BLF_OFFICIAL_ARBITERS;
+  if (!slug) return [];
+  if (getCommunityBySlug(slug)?.federationInvite === BLF_FEDERATION_INVITE) {
+    return BLF_OFFICIAL_ARBITERS;
+  }
   return [];
 }
 

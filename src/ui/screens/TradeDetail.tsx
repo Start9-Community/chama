@@ -5,7 +5,7 @@ import {
   Outcome,
   EscrowStatus,
 } from "../../escrow-engine/types.js";
-import { canVote, getWinner } from "../../escrow-engine/state-machine.js";
+import { getWinner } from "../../escrow-engine/state-machine.js";
 import { getVoteLabel } from "../../labels/vote-labels.js";
 import {
   listSavedHandles,
@@ -17,7 +17,7 @@ import {
   T, STATUS, ROLE_COLOR, CAT_LABEL, TRINITY_RING_ORDER,
   fmtSats, refundRecipientFor, inputStyle,
 } from "../theme.js";
-import { decideTradeDetailFraming } from "../decisions.js";
+import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import {
   hasStateBExplained,
@@ -97,7 +97,7 @@ export function TradeDetail({
     && state.communityArbiters.length > 0
     ? (pickArbiterFromPool(state.communityArbiters, state.id) ?? null)
     : null;
-  const voteCheck = myRole ? canVote(state, pubkey) : { canVote: false };
+  const votePrompt = decideVotePrompt(state, pubkey);
   const winner = getWinner(state);
   const iAmWinner = winner?.pubkey === pubkey;
 
@@ -589,7 +589,7 @@ export function TradeDetail({
             padding: "10px 12px", background: T.surface,
             borderRadius: T.rs, border: `1px solid ${T.border}`,
             wordBreak: "break-all" as const,
-          }}>
+          }} title={myRole ? state.lock.handle.value : undefined}>
             {handleDisplayForViewer(state.lock.handle.value, !!myRole)}
           </div>
           {/* v0.6.5: networks the seller accepts on this handle.
@@ -680,9 +680,22 @@ export function TradeDetail({
           actually receives the sats on each vote, removing the
           ambiguity that otherwise sits in the highest-stakes UI
           interaction in the product. */}
-      {voteCheck.canVote && myRole && (() => {
+      {votePrompt.kind === "waiting" && (
+        <div style={{
+          padding: "12px 14px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11,
+          lineHeight: 1.5, textAlign: "center", marginBottom: 16,
+        }}>
+          {votePrompt.message}
+        </div>
+      )}
+
+      {votePrompt.kind === "buttons" && myRole && (() => {
         const isArbiter = myRole === Role.ARBITER;
         const isMarketplace = state.category === "marketplace";
+        const showRelease = votePrompt.outcomes.includes(Outcome.RELEASE);
+        const showRefund = votePrompt.outcomes.includes(Outcome.REFUND);
         // Who wins on RELEASE / REFUND
         const releaseWinner = isMarketplace ? "seller" : "buyer";
         const refundWinner = isMarketplace ? "buyer" : "seller";
@@ -706,7 +719,7 @@ export function TradeDetail({
 
         return (
           <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-            {!state.subscription && (
+            {showRelease && (
               <button disabled={voting} onClick={() => handleVote(Outcome.RELEASE)} style={{
                 flex: 1, padding: "16px", borderRadius: T.rs,
                 background: voting ? T.surface : releaseBg,
@@ -718,20 +731,22 @@ export function TradeDetail({
                 {isArbiter ? "Side with " + releaseWinner : "✓ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.RELEASE)}
               </button>
             )}
-            <button disabled={voting} onClick={() => handleVote(Outcome.REFUND)} style={{
-              flex: 1, padding: "16px", borderRadius: T.rs,
-              background: voting ? T.surface : refundBg,
-              border: `1px solid ${refundBorder}`,
-              color: refundText,
-              fontFamily: T.mono, fontSize: 14, fontWeight: 700,
-              cursor: voting ? "default" : "pointer", transition: "all 0.2s",
-            }}>
-              {state.subscription
-                ? "🛑 Cancel & Refund Remaining"
-                : isArbiter
-                  ? "Side with " + refundWinner
-                  : "↩ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.REFUND)}
-            </button>
+            {showRefund && (
+              <button disabled={voting} onClick={() => handleVote(Outcome.REFUND)} style={{
+                flex: 1, padding: "16px", borderRadius: T.rs,
+                background: voting ? T.surface : refundBg,
+                border: `1px solid ${refundBorder}`,
+                color: refundText,
+                fontFamily: T.mono, fontSize: 14, fontWeight: 700,
+                cursor: voting ? "default" : "pointer", transition: "all 0.2s",
+              }}>
+                {state.subscription
+                  ? "🛑 Cancel & Refund Remaining"
+                  : isArbiter
+                    ? "Side with " + refundWinner
+                    : "↩ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.REFUND)}
+              </button>
+            )}
           </div>
         );
       })()}

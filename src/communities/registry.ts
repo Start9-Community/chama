@@ -84,13 +84,111 @@ export interface Community {
 const IROH_LIMITATION_NOTE =
   "Browser Fedimint reliable via canary iroh bump.";
 
-/** v0.1.85 pre-seed list. Curated to federations Jetty operates or
- *  has proven testing history with; permissionless additions go via
- *  `addCustomCommunity()` to localStorage. Other countries listed in
- *  the brief (Bitsacco Kenya, Galoy US, regional aggregators) get
- *  added when their community leaders claim them.
+export const EAST_AFRICA_COUNTRY_CODES = [
+  "BI", "KM", "DJ", "ER", "ET", "KE", "MG", "MW", "MU",
+  "MZ", "RW", "SC", "SO", "SS", "TZ", "UG", "ZM", "ZW",
+] as const;
+
+export const WEST_AFRICA_COUNTRY_CODES = [
+  "BJ", "BF", "CV", "CI", "GM", "GH", "GN", "GW",
+  "LR", "ML", "MR", "NE", "NG", "SN", "SL", "TG",
+] as const;
+
+export const CENTRAL_AFRICA_COUNTRY_CODES = [
+  "AO", "CM", "CF", "TD", "CG", "CD", "GQ", "GA", "ST",
+] as const;
+
+interface CountryChamaSeed {
+  country: string;
+  name: string;
+  currency: string;
+  languages: string[];
+  slug?: string;
+  displayName?: string;
+}
+
+function flagEmojiForCountry(country: string): string {
+  const codePoints = country.toUpperCase().split("")
+    .map(char => 127397 + char.charCodeAt(0));
+  return String.fromCodePoint(...codePoints);
+}
+
+function blfCountryChama(seed: CountryChamaSeed): Community {
+  const currency = seed.currency.toUpperCase();
+  return {
+    slug: seed.slug ?? `${seed.country.toLowerCase()}-${currency.toLowerCase()}`,
+    displayName: seed.displayName ?? `${seed.name} · ${currency}`,
+    currency,
+    countries: [seed.country],
+    languages: seed.languages,
+    federationInvite: BLF_FEDERATION_INVITE,
+    flagEmoji: flagEmojiForCountry(seed.country),
+    country: seed.country,
+    browserReliable: true,
+    notes: IROH_LIMITATION_NOTE,
+    disambiguator: null,
+    hiddenFromPicker: false,
+  };
+}
+
+const EAST_AFRICA_COUNTRY_CHAMAS: Community[] = [
+  blfCountryChama({ country: "BI", name: "Burundi", currency: "BIF", languages: ["rn", "fr", "en"] }),
+  blfCountryChama({ country: "KM", name: "Comoros", currency: "KMF", languages: ["ar", "fr"] }),
+  blfCountryChama({ country: "DJ", name: "Djibouti", currency: "DJF", languages: ["fr", "ar"] }),
+  blfCountryChama({ country: "ER", name: "Eritrea", currency: "ERN", languages: ["ti", "ar", "en"] }),
+  blfCountryChama({ country: "ET", name: "Ethiopia", currency: "ETB", languages: ["am", "en"] }),
+  blfCountryChama({ country: "MG", name: "Madagascar", currency: "MGA", languages: ["mg", "fr"] }),
+  blfCountryChama({ country: "MW", name: "Malawi", currency: "MWK", languages: ["en", "ny"] }),
+  blfCountryChama({ country: "MU", name: "Mauritius", currency: "MUR", languages: ["en", "fr"] }),
+  blfCountryChama({ country: "MZ", name: "Mozambique", currency: "MZN", languages: ["pt"] }),
+  blfCountryChama({ country: "RW", name: "Rwanda", currency: "RWF", languages: ["rw", "en", "fr"] }),
+  blfCountryChama({ country: "SC", name: "Seychelles", currency: "SCR", languages: ["en", "fr"] }),
+  blfCountryChama({ country: "SO", name: "Somalia", currency: "SOS", languages: ["so", "ar"] }),
+  blfCountryChama({ country: "SS", name: "South Sudan", currency: "SSP", languages: ["en"] }),
+  blfCountryChama({ country: "UG", name: "Uganda", currency: "UGX", languages: ["en", "sw"] }),
+  blfCountryChama({ country: "ZM", name: "Zambia", currency: "ZMW", languages: ["en"] }),
+  blfCountryChama({ country: "ZW", name: "Zimbabwe", currency: "ZWG", languages: ["en", "sn", "nd"] }),
+];
+
+const WEST_AFRICA_COUNTRY_CHAMAS: Community[] = [
+  blfCountryChama({ country: "BJ", name: "Benin", currency: "XOF", languages: ["fr"] }),
+  blfCountryChama({ country: "BF", name: "Burkina Faso", currency: "XOF", languages: ["fr"] }),
+  blfCountryChama({ country: "CV", name: "Cabo Verde", currency: "CVE", languages: ["pt"] }),
+  blfCountryChama({ country: "CI", name: "Côte d'Ivoire", currency: "XOF", languages: ["fr"] }),
+  blfCountryChama({ country: "GM", name: "Gambia", currency: "GMD", languages: ["en"] }),
+  blfCountryChama({ country: "GH", name: "Ghana", currency: "GHS", languages: ["en"] }),
+  blfCountryChama({ country: "GN", name: "Guinea", currency: "GNF", languages: ["fr"] }),
+  blfCountryChama({ country: "GW", name: "Guinea-Bissau", currency: "XOF", languages: ["pt"] }),
+  blfCountryChama({ country: "LR", name: "Liberia", currency: "LRD", languages: ["en"] }),
+  blfCountryChama({ country: "ML", name: "Mali", currency: "XOF", languages: ["fr"] }),
+  blfCountryChama({ country: "MR", name: "Mauritania", currency: "MRU", languages: ["ar", "fr"] }),
+  blfCountryChama({ country: "NE", name: "Niger", currency: "XOF", languages: ["fr"] }),
+  blfCountryChama({ country: "NG", name: "Nigeria", currency: "NGN", languages: ["en"] }),
+  blfCountryChama({ country: "SL", name: "Sierra Leone", currency: "SLE", languages: ["en"] }),
+  blfCountryChama({ country: "TG", name: "Togo", currency: "XOF", languages: ["fr"] }),
+];
+
+const CENTRAL_AFRICA_COUNTRY_CHAMAS: Community[] = [
+  blfCountryChama({ country: "AO", name: "Angola", currency: "AOA", languages: ["pt"] }),
+  blfCountryChama({ country: "CM", name: "Cameroon", currency: "XAF", languages: ["fr", "en"] }),
+  blfCountryChama({ country: "CF", name: "Central African Republic", currency: "XAF", languages: ["fr", "sg"] }),
+  blfCountryChama({ country: "TD", name: "Chad", currency: "XAF", languages: ["fr", "ar"] }),
+  blfCountryChama({ country: "CG", name: "Republic of the Congo", currency: "XAF", languages: ["fr"] }),
+  blfCountryChama({ country: "CD", name: "DR Congo", currency: "CDF", languages: ["fr", "ln", "sw"] }),
+  blfCountryChama({ country: "GQ", name: "Equatorial Guinea", currency: "XAF", languages: ["es", "fr", "pt"] }),
+  blfCountryChama({ country: "GA", name: "Gabon", currency: "XAF", languages: ["fr"] }),
+  blfCountryChama({ country: "ST", name: "Sao Tome and Principe", currency: "STN", languages: ["pt"] }),
+];
+
+/** v0.1.85 pre-seed list, expanded in v0.7.0 to make country-first
+ *  onboarding feel welcoming across East, West, and Central Africa.
+ *  Most country
+ *  shells are backed by BLF until a country-specific federation is
+ *  claimed; permissionless additions still go via `addCustomCommunity()`
+ *  to localStorage.
  *
- *  PRE-SEED ORDER MATTERS: this is the order they render in the picker. */
+ *  PRE-SEED ORDER MATTERS for default-first storage and legacy lookup;
+ *  the onboarding picker sorts countries alphabetically inside filters. */
 export const COMMUNITY_REGISTRY: Community[] = [
   {
     slug: "us-blf",
@@ -120,6 +218,8 @@ export const COMMUNITY_REGISTRY: Community[] = [
     disambiguator: null,
     hiddenFromPicker: false,
   },
+  ...WEST_AFRICA_COUNTRY_CHAMAS,
+  ...CENTRAL_AFRICA_COUNTRY_CHAMAS,
   {
     slug: "global-usd",
     displayName: "Global · USD",
@@ -148,6 +248,23 @@ export const COMMUNITY_REGISTRY: Community[] = [
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "Afribit",
+    hiddenFromPicker: false,
+  },
+  ...EAST_AFRICA_COUNTRY_CHAMAS,
+  {
+    slug: "tz-tzs",
+    displayName: "Tanzania · TZS",
+    currency: "TZS",
+    countries: ["TZ"],
+    languages: ["sw", "en"],
+    // Tanzania is user-facing identity first; until a Tanzania-specific
+    // federation is claimed, use the same proven BLF backing route.
+    federationInvite: BLF_FEDERATION_INVITE,
+    flagEmoji: "🇹🇿",
+    country: "TZ",
+    browserReliable: true,
+    notes: IROH_LIMITATION_NOTE,
+    disambiguator: null,
     hiddenFromPicker: false,
   },
   // Sunset entry — kept alive so old listings carrying community: "sv-usd"

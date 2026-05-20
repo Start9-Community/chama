@@ -26,7 +26,7 @@
 // The picker handles its own LNURL resolution + error rendering; the
 // consumer only sees the BOLT11 + dispatch metadata.
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { T, inputStyle } from "../theme.js";
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import {
@@ -64,6 +64,9 @@ export interface DestinationPickerProps {
   onResolve: (bolt11: string, opts: DestinationPickerResolveOpts) => void;
   /** Fired when the user dismisses the modal without committing. */
   onCancel: () => void;
+  /** Optional first-tier destination supplied by a caller-specific
+   *  adapter, such as Chapsmart for Tanzania TZS payouts. */
+  topSlot?: ReactNode;
 }
 
 export function DestinationPicker({
@@ -73,6 +76,7 @@ export function DestinationPicker({
   subtitle,
   onResolve,
   onCancel,
+  topSlot,
 }: DestinationPickerProps) {
   const [typed, setTyped] = useState("");
   const [bolt11, setBolt11] = useState("");
@@ -161,6 +165,12 @@ export function DestinationPicker({
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 16 }}>
           {subtitle ?? `Send ${amountSats.toLocaleString()} sats to your Lightning wallet`}
         </div>
+
+        {topSlot && (
+          <div style={{ marginBottom: 16 }}>
+            {topSlot}
+          </div>
+        )}
 
         {/* Tier 1: saved rows */}
         {decoratedRows.length > 0 && (

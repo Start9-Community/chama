@@ -21,6 +21,7 @@ import {
   EscrowStatus,
   EscrowEventKind,
   Role,
+  Outcome,
   TERMINAL_STATES,
 } from "../escrow-engine/types.js";
 
@@ -927,6 +928,108 @@ export function decideTradeDetailFraming(inputs: DetailFramingInputs): DetailFra
     homeCommunityName: homeCom?.displayName ?? "your community",
     homeFlagEmoji: homeCom?.flagEmoji ?? "🌐",
   };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Vote prompt turn-gate (v0.7.0)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Protocol stays permissive: the state machine still accepts buyer/seller
+// votes in either order. This helper is the UI safety layer that prevents
+// the happy-path counterparty from seeing high-stakes vote buttons before
+// their turn.
+//
+// Category order:
+//   - p2p-trade / bill-pay / lending: buyer first
+//   - marketplace: seller first
+//
+// Once either buyer or seller votes, the other participant gets their
+// buttons. Arbiter remains observer-only until buyer and seller both vote
+// and disagree.
+
+export type VotePrompt =
+  | { kind: "none"; reason: string }
+  | { kind: "waiting"; waitingOn: Role | "dispute"; message: string }
+  | { kind: "buttons"; role: Role; outcomes: Outcome[] };
+
+function participantRoleForPubkey(state: EscrowState, pubkey: string): Role | null {
+  if (state.participants[Role.BUYER] === pubkey) return Role.BUYER;
+  if (state.participants[Role.SELLER] === pubkey) return Role.SELLER;
+  if (state.participants[Role.ARBITER] === pubkey) return Role.ARBITER;
+  return null;
+}
+
+function firstHappyPathVoter(state: EscrowState): Role {
+  return state.category === "marketplace" ? Role.SELLER : Role.BUYER;
+}
+
+function waitingForFirstVoteCopy(state: EscrowState, role: Role): string {
+  if (role === Role.SELLER) {
+    if (state.category !== "marketplace") return "Waiting on seller to confirm";
+    if (state.fulfillment === "digital") return "Waiting on seller to deliver the file";
+    if (state.fulfillment === "service") return "Waiting on seller to deliver the service";
+    return "Waiting on seller to ship";
+  }
+  if (state.category === "bill-pay") return "Waiting on buyer to confirm the bill was paid";
+  if (state.category === "lending") return "Waiting on buyer to confirm the loan arrived";
+  return "Waiting on buyer to confirm payment sent";
+}
+
+export function decideVotePrompt(state: EscrowState, pubkey: string): VotePrompt {
+  if (state.status !== EscrowStatus.LOCKED && state.status !== EscrowStatus.EXPIRED) {
+    return { kind: "none", reason: "not-votable-state" };
+  }
+
+  const role = participantRoleForPubkey(state, pubkey);
+  if (!role) return { kind: "none", reason: "not-participant" };
+  if (state.votes[role] !== undefined) return { kind: "none", reason: "already-voted" };
+
+  // Expiry healing votes should only drive REFUND. Ordering is deliberately
+  // skipped here, matching the state-machine's healing path.
+  if (state.status === EscrowStatus.EXPIRED) {
+    return { kind: "buttons", role, outcomes: [Outcome.REFUND] };
+  }
+
+  const buyerVote = state.votes[Role.BUYER];
+  const sellerVote = state.votes[Role.SELLER];
+  const buyerSellerBothVoted = buyerVote !== undefined && sellerVote !== undefined;
+  const standardOutcomes = state.subscription
+    ? [Outcome.REFUND]
+    : [Outcome.RELEASE, Outcome.REFUND];
+
+  if (role === Role.ARBITER) {
+    if (!buyerSellerBothVoted) {
+      return {
+        kind: "waiting",
+        waitingOn: "dispute",
+        message: "Waiting for buyer and seller; arbiter only acts on a dispute",
+      };
+    }
+    if (buyerVote === sellerVote) {
+      return {
+        kind: "waiting",
+        waitingOn: "dispute",
+        message: "Buyer and seller agree; no arbiter action needed",
+      };
+    }
+    return { kind: "buttons", role, outcomes: standardOutcomes };
+  }
+
+  if (buyerSellerBothVoted) return { kind: "none", reason: "buyer-seller-voted" };
+
+  const noBuyerSellerVotes = buyerVote === undefined && sellerVote === undefined;
+  if (noBuyerSellerVotes) {
+    const firstRole = firstHappyPathVoter(state);
+    if (role !== firstRole) {
+      return {
+        kind: "waiting",
+        waitingOn: firstRole,
+        message: waitingForFirstVoteCopy(state, firstRole),
+      };
+    }
+  }
+
+  return { kind: "buttons", role, outcomes: standardOutcomes };
 }
 
 // ──────────────────────────────────────────────────────────────────────────

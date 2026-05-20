@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { type EscrowState } from "../../escrow-engine/types.js";
-import { getPickerCommunities, getCommunityBySlug } from "../../communities/registry.js";
+import { getPickerCommunities, getCommunityBySlug, type Community } from "../../communities/registry.js";
 import { T, BROWSE_CATS, inputStyle } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
@@ -38,7 +38,10 @@ export function BrowseView({
   onOpenEscrow: (id: string) => void;
   onLoadById: (id: string) => void | Promise<void>;
 }) {
-  const pickerCommunities = getPickerCommunities();
+  const pickerCommunities = useMemo(
+    () => [...getPickerCommunities()].sort(compareBrowseCommunities),
+    [],
+  );
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [customInviteInput, setCustomInviteInput] = useState("");
 
@@ -126,8 +129,11 @@ export function BrowseView({
           (PHILOSOPHY.md §2.1) — there is no community-less state.
           Tapping a pill is an identity choice; v0.2.0 adds the amber
           two-section layout that surfaces non-matching listings without
-          needing an "all" filter. On-the-wire listings on hidden slugs
-          (e.g. sv-usd) still resolve via getCommunityBySlug elsewhere. */}
+          needing an "all" filter. v0.7.0 sorts this long rail
+          alphabetically so country-first users can land where they
+          expect while we wait on the globe picker. On-the-wire listings
+          on hidden slugs (e.g. sv-usd) still resolve via getCommunityBySlug
+          elsewhere. */}
       <div style={{
         display: "flex", gap: 6, marginBottom: 12,
         overflowX: "auto",
@@ -287,4 +293,22 @@ export function BrowseView({
       </div>
     </div>
   );
+}
+
+function compareBrowseCommunities(a: Community, b: Community): number {
+  const byLabel = browseCommunitySortLabel(a).localeCompare(
+    browseCommunitySortLabel(b),
+    undefined,
+    { sensitivity: "base" },
+  );
+  if (byLabel !== 0) return byLabel;
+  const byCurrency = a.currency.localeCompare(b.currency, undefined, { sensitivity: "base" });
+  if (byCurrency !== 0) return byCurrency;
+  return a.slug.localeCompare(b.slug, undefined, { sensitivity: "base" });
+}
+
+function browseCommunitySortLabel(community: Community): string {
+  return community.displayName
+    .replace(/\s·\s[A-Z]{3}$/, "")
+    .replace(/\s·\s/g, " ");
 }

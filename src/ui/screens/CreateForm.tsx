@@ -38,6 +38,7 @@ import { useState, useEffect } from "react";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
 import { getUserCommunitySlug } from "../../communities/storage.js";
+import { defaultCurrencyForCommunity } from "../../communities/currency.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
 import { type ArbiterWarning, displayCounterpartyName, resolveCreateMintUrl } from "../decisions.js";
 import { T, inputStyle } from "../theme.js";
@@ -122,16 +123,18 @@ function markFirstPublished(pubkey: string | null): void {
   } catch { /* no-op */ }
 }
 
-const EMPTY_FORM_STATE: FormState = {
-  desc: "",
-  sats: "",
-  fiat: "",
-  cur: "USD",
-  fulfillment: "physical",
-  isSubscription: false,
-  periods: "3",
-  intervalDays: "30",
-};
+export function emptyCreateFormState(currency = "USD"): FormState {
+  return {
+    desc: "",
+    sats: "",
+    fiat: "",
+    cur: currency,
+    fulfillment: "physical",
+    isSubscription: false,
+    periods: "3",
+    intervalDays: "30",
+  };
+}
 
 export function CreateForm({
   onCreate, onClose,
@@ -146,14 +149,6 @@ export function CreateForm({
   userPubkey: string | null;
   activeInvite: string | null;
 }) {
-  const [step, setStep] = useState<Step>(1);
-  const [vertical, setVertical] = useState<Vertical>("p2p-trade");
-  const [form, setForm] = useState<FormState>(EMPTY_FORM_STATE);
-  const [submitting, setSubmitting] = useState(false);
-  const [arbiterDismissed, setArbiterDismissed] = useState(false);
-  const [drafts, setDrafts] = useState<SavedDraft[]>(() => readAllDrafts());
-  const [showAllDrafts, setShowAllDrafts] = useState(false);
-
   // Resolve community context for the listing. Read once at mount;
   // listing publishes into seller's current community (Pillar 2.3).
   const community = (() => {
@@ -161,6 +156,15 @@ export function CreateForm({
     return getCommunityBySlug(slug) ? slug : DEFAULT_COMMUNITY_SLUG;
   })();
   const homeCommunity = getCommunityBySlug(community);
+  const [step, setStep] = useState<Step>(1);
+  const [vertical, setVertical] = useState<Vertical>("p2p-trade");
+  const [form, setForm] = useState<FormState>(() =>
+    emptyCreateFormState(defaultCurrencyForCommunity(community)),
+  );
+  const [submitting, setSubmitting] = useState(false);
+  const [arbiterDismissed, setArbiterDismissed] = useState(false);
+  const [drafts, setDrafts] = useState<SavedDraft[]>(() => readAllDrafts());
+  const [showAllDrafts, setShowAllDrafts] = useState(false);
 
   // Auto-save draft on field change (silent, debounced via the form
   // state's natural batching). Cleared on successful publish.

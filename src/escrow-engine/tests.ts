@@ -82,7 +82,10 @@ import { RelayManager } from "./relay-manager.js";
 // PR 2 imports
 import {
   COMMUNITY_REGISTRY,
+  CENTRAL_AFRICA_COUNTRY_CODES,
   DEFAULT_COMMUNITY_SLUG,
+  EAST_AFRICA_COUNTRY_CODES,
+  WEST_AFRICA_COUNTRY_CODES,
   getCommunityBySlug,
   getPickerCommunities,
   getCustomCommunities,
@@ -96,6 +99,12 @@ import {
   setUserCommunitySlug,
   COMMUNITY_STORAGE_KEY,
 } from "../communities/storage.js";
+import { defaultCurrencyForCommunity } from "../communities/currency.js";
+import {
+  buildCommunityRequestMessage,
+  getCommunityRequestRecipients,
+  sendCommunityRequestToGlobalArbiters,
+} from "../communities/community-request.js";
 import {
   resolveFederationForCommunity,
   getActiveInvite,
@@ -137,6 +146,9 @@ import {
   updateSavedHandle,
   setHandleVisibility,
   maskHandle,
+  formatPhoneNumber,
+  formatPhoneNumberForDisplay,
+  getPhoneNumberDisplayParts,
   publicHandleDisplay,
   handleDisplayForViewer,
   LIGHTNING_RAIL,
@@ -150,6 +162,14 @@ import {
   migrateLegacyLightningHandles,
   type PayoutDestination,
 } from "../payments/payout-destinations.js";
+import {
+  CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY,
+  createChapsmartPayoutInvoice,
+  getChapsmartPayoutProfile,
+  isChapsmartPayoutEligible,
+  saveChapsmartPayoutProfile,
+  toChapsmartTanzaniaPhone,
+} from "../payments/chapsmart-payout.js";
 
 // v0.3.0 Phase 1 — LNURL + DestinationPicker logic
 import {
@@ -206,6 +226,7 @@ import {
 // v0.3.0 Phase 5 — ChamaBar label decision
 import {
   decideChamaBarLabel,
+  decideVotePrompt,
 } from "../ui/decisions.js";
 import {
   isFediWebViewSignInEnvironment,
@@ -214,7 +235,9 @@ import {
 } from "../ui/sign-in-environment.js";
 import {
   adaptNIP46BunkerSigner,
+  createNip46PairingSecret,
 } from "./nip46-signer.js";
+import { validateRecoveryKeyInput } from "./nsec-signer.js";
 
 // v0.3.0 Phase 6 — Trinity Ring participant order (theme.ts)
 // v0.3.1 Phase 2 — extends §43 with a grep tripwire over src/ui/
@@ -236,7 +259,7 @@ import {
   envelopeHasRecipient,
 } from "./envelope.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
-import { generateSecretKey, getPublicKey, nip44 } from "nostr-tools";
+import { generateSecretKey, getPublicKey, nip19, nip44 } from "nostr-tools";
 
 /** Build a minimal NIP-44 encrypt/decrypt pair for a given private key,
  *  using nostr-tools v2 NIP-44. The "encrypt as me to recipient" function
@@ -1064,14 +1087,32 @@ console.log("\n── EXPIRY ──");
 // ── 14. COMMUNITY REGISTRY + STORAGE ─────────────────────────────────────
 console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 {
-  // v0.1.85: registry pre-seed expanded to 5 entries — sn-cfa, global-usd,
-  // ke-kes (now Afribit-backed), us-blf, sv-usd (sunset, hiddenFromPicker).
+  // v0.7.0: registry includes Tanzania/TZS plus every East/West/Central Africa
+  // country Chama shell. Country-first identity is user-facing; the
+  // backing federation stays hidden until a claimed local route exists.
   // v0.7.0: the visible USD default keeps the stable us-blf slug but
   // presents as Global · USD; legacy global-usd is hidden with BP.
   // Permissionless additions live in localStorage and are not counted here.
-  assert(COMMUNITY_REGISTRY.length === 5, "Registry has the 5 v0.1.85 pre-seeds");
+  assert(COMMUNITY_REGISTRY.length === 46,
+    "Registry has 46 pre-seeds: Global, East/West/Central Africa, plus hidden legacy entries");
   assert(getCommunityBySlug("sn-cfa")?.currency === "XOF", "sn-cfa is XOF");
   assert(getCommunityBySlug("ke-kes")?.currency === "KES", "ke-kes is KES");
+  assert(getCommunityBySlug("tz-tzs")?.currency === "TZS", "tz-tzs is TZS");
+  assert(getCommunityBySlug("tz-tzs")?.country === "TZ", "tz-tzs country is Tanzania");
+  assert(getCommunityBySlug("gh-ghs")?.currency === "GHS", "gh-ghs is GHS");
+  assert(getCommunityBySlug("ng-ngn")?.currency === "NGN", "ng-ngn is NGN");
+  assert(getCommunityBySlug("ao-aoa")?.currency === "AOA", "ao-aoa is AOA");
+  assert(getCommunityBySlug("cm-xaf")?.currency === "XAF", "cm-xaf is XAF");
+  assert(getCommunityBySlug("cm-xaf")?.country === "CM", "cm-xaf country is Cameroon");
+  assert(getCommunityBySlug("cf-xaf")?.currency === "XAF", "cf-xaf is XAF");
+  assert(getCommunityBySlug("td-xaf")?.currency === "XAF", "td-xaf is XAF");
+  assert(getCommunityBySlug("cg-xaf")?.currency === "XAF", "cg-xaf is XAF");
+  assert(getCommunityBySlug("cd-cdf")?.currency === "CDF", "cd-cdf is CDF");
+  assert(getCommunityBySlug("gq-xaf")?.currency === "XAF", "gq-xaf is XAF");
+  assert(getCommunityBySlug("ga-xaf")?.currency === "XAF", "ga-xaf is XAF");
+  assert(getCommunityBySlug("st-stn")?.currency === "STN", "st-stn is STN");
+  assert(getCommunityBySlug("ug-ugx")?.currency === "UGX", "ug-ugx is UGX");
+  assert(getCommunityBySlug("zw-zwg")?.currency === "ZWG", "zw-zwg uses Zimbabwe Gold");
   assert(getCommunityBySlug("sv-usd")?.currency === "USD", "sv-usd is USD");
   assert(getCommunityBySlug("global-usd")?.currency === "USD", "global-usd is USD");
   assert(getCommunityBySlug("us-blf")?.currency === "USD", "us-blf is USD");
@@ -1092,6 +1133,14 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Global USD/BLF listings carry the official BLF arbiters");
   assert(getTrustedArbiterPool({ community: "sn-cfa" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
     "Senegal CFA is BLF-backed and carries the official BLF arbiters");
+  assert(getTrustedArbiterPool({ community: "tz-tzs" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "Tanzania TZS is BLF-backed for now and carries the official BLF arbiters");
+  assert(getTrustedArbiterPool({ community: "gh-ghs" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "New BLF-backed country shells carry the official BLF arbiters");
+  assert(getTrustedArbiterPool({ community: "cm-xaf" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "Cameroon XAF is BLF-backed for now and carries the official BLF arbiters");
+  assert(getTrustedArbiterPool({ community: "cd-cdf" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "DR Congo CDF is BLF-backed for now and carries the official BLF arbiters");
   assert(getTrustedArbiterPool({
     community: "us-blf",
     excludePubkeys: [BLF_OFFICIAL_ARBITERS[0]!],
@@ -1150,7 +1199,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
-  assert(picker.length === 3, "Picker shows 3 visible entries (BP global-usd and sv-usd hidden)");
+  assert(picker.length === 44,
+    "Picker shows Global plus every East/West/Central Africa country Chama");
   assert(picker[0]?.slug === DEFAULT_COMMUNITY_SLUG,
     "Picker starts with Global USD on BLF (active pill visible first)");
   assert(!picker.some(c => c.slug === "sv-usd"),
@@ -1159,6 +1209,21 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Picker excludes legacy BP global-usd");
   assert(picker.some(c => c.slug === "us-blf"),
     "Picker includes us-blf as the Global USD route");
+  assert(picker.some(c => c.slug === "tz-tzs"),
+    "Picker includes Tanzania TZS for first-run country selection");
+  assert(picker.some(c => c.slug === "cm-xaf"),
+    "Picker includes Cameroon XAF for first-run country selection");
+  assert(picker.some(c => c.slug === "ao-aoa"),
+    "Picker includes Angola AOA for first-run country selection");
+  assert(picker.some(c => c.slug === "cd-cdf"),
+    "Picker includes DR Congo CDF for first-run country selection");
+  const pickerCountries = new Set(picker.flatMap(c => c.countries));
+  assert(EAST_AFRICA_COUNTRY_CODES.every(code => pickerCountries.has(code)),
+    "Picker includes every East Africa country code");
+  assert(WEST_AFRICA_COUNTRY_CODES.every(code => pickerCountries.has(code)),
+    "Picker includes every West Africa country code");
+  assert(CENTRAL_AFRICA_COUNTRY_CODES.every(code => pickerCountries.has(code)),
+    "Picker includes every Central Africa country code currently supported");
 
   // Storage roundtrip — defaults to us-blf when nothing set (v0.5.0)
   (globalThis as any).localStorage.clear();
@@ -1179,6 +1244,68 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getUserCommunitySlug() === "ke-kes", "Pre-clear: ke-kes set");
   setUserCommunitySlug("");
   assert(getUserCommunitySlug() === "us-blf", "Empty string clears, falls to default");
+
+  assert(defaultCurrencyForCommunity("tz-tzs") === "TZS",
+    "defaultCurrencyForCommunity follows Tanzania/TZS home Chama");
+  assert(defaultCurrencyForCommunity("cm-xaf") === "XAF",
+    "defaultCurrencyForCommunity follows Cameroon/XAF home Chama");
+  assert(defaultCurrencyForCommunity("cd-cdf") === "CDF",
+    "defaultCurrencyForCommunity follows DR Congo/CDF home Chama");
+  assert(defaultCurrencyForCommunity("ghost-fed") === "USD",
+    "defaultCurrencyForCommunity falls back to USD on stale slug");
+
+  assert(getCommunityRequestRecipients().join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "Country request DMs target the Global/BLF official arbiters");
+  const requestMessage = buildCommunityRequestMessage({
+    requestedChama: "Cameroon",
+    note: "Douala / XAF",
+  }, BUYER_PK);
+  assert(requestMessage.includes("Cameroon") && requestMessage.includes("Douala / XAF"),
+    "Country request message carries requested country and note");
+  assert(requestMessage.includes(BUYER_PK),
+    "Country request message carries sender pubkey for arbiter follow-up");
+
+  const publishedRequests: NostrEvent[] = [];
+  const requestRelay = {
+    connect() {},
+    disconnect() {},
+    getConnectedCount() { return 1; },
+    async publish(event: NostrEvent) {
+      publishedRequests.push(event);
+      return { accepted: 1, rejected: 0, errors: [] };
+    },
+  } as unknown as RelayManager;
+  const requestSigner: Signer = {
+    async getPublicKey() { return BUYER_PK; },
+    async signEvent(event: UnsignedEvent) {
+      return {
+        ...event,
+        id: `country_request_${publishedRequests.length}`,
+        pubkey: BUYER_PK,
+        sig: "sig",
+      } as NostrEvent;
+    },
+    async nip44Encrypt(plaintext: string, recipientPubkey: string) {
+      return `encrypted:${recipientPubkey}:${plaintext}`;
+    },
+    async nip44Decrypt(ciphertext: string) {
+      return ciphertext;
+    },
+  };
+  const requestResult = await sendCommunityRequestToGlobalArbiters({
+    requestedChama: "Cameroon",
+    note: "Needs XAF route",
+  }, {
+    signer: requestSigner,
+    relayManager: requestRelay,
+    now: () => 123,
+  });
+  assert(requestResult.sent === BLF_OFFICIAL_ARBITERS.length,
+    "Country request sender publishes one encrypted DM per global arbiter");
+  assert(publishedRequests.every(e => e.kind === 4 && e.created_at === 123),
+    "Country request DMs publish as kind 4 events with deterministic test time");
+  assert(publishedRequests.every(e => e.tags.some(t => t[0] === "chama" && t[1] === "community-request")),
+    "Country request DMs carry a Chama request tag");
 }
 
 // ── 14b. PERMISSIONLESS COMMUNITY ADDITION (v0.1.85) ─────────────────────
@@ -1597,6 +1724,109 @@ console.log("\n── VOTE LABEL DICTIONARY ──");
     "Using defaultFulfillmentFor('marketplace') yields the physical labels");
 }
 
+// ── 17b. VOTE PROMPT TURN-GATE (v0.7.0) ─────────────────────────────────
+console.log("\n── VOTE PROMPT TURN-GATE ──");
+{
+  const { state: lockedP2P } = buildToLocked();
+
+  let prompt = decideVotePrompt(lockedP2P, BUYER_PK);
+  assert(
+    prompt.kind === "buttons"
+    && prompt.outcomes.includes(Outcome.RELEASE)
+    && prompt.outcomes.includes(Outcome.REFUND),
+    "P2P starts buyer-first with both buyer vote outcomes available",
+  );
+
+  prompt = decideVotePrompt(lockedP2P, SELLER_PK);
+  assert(
+    prompt.kind === "waiting"
+    && prompt.waitingOn === Role.BUYER
+    && /buyer/i.test(prompt.message),
+    "P2P seller waits until buyer confirms payment sent",
+  );
+
+  const buyerVoted = {
+    ...lockedP2P,
+    votes: { [Role.BUYER]: Outcome.RELEASE },
+  } as EscrowState;
+  prompt = decideVotePrompt(buyerVoted, SELLER_PK);
+  assert(
+    prompt.kind === "buttons"
+    && prompt.outcomes.includes(Outcome.RELEASE)
+    && prompt.outcomes.includes(Outcome.REFUND),
+    "After buyer votes, P2P seller buttons unlock",
+  );
+  prompt = decideVotePrompt(buyerVoted, BUYER_PK);
+  assert(prompt.kind === "none", "Buyer does not see buttons after already voting");
+
+  const marketplace = {
+    ...lockedP2P,
+    category: "marketplace",
+    fulfillment: "physical",
+    votes: {},
+  } as EscrowState;
+  prompt = decideVotePrompt(marketplace, SELLER_PK);
+  assert(prompt.kind === "buttons", "Marketplace starts seller-first");
+  prompt = decideVotePrompt(marketplace, BUYER_PK);
+  assert(
+    prompt.kind === "waiting"
+    && prompt.waitingOn === Role.SELLER
+    && /ship/i.test(prompt.message),
+    "Marketplace buyer waits for seller to ship first",
+  );
+
+  const sellerVoted = {
+    ...marketplace,
+    votes: { [Role.SELLER]: Outcome.RELEASE },
+  } as EscrowState;
+  prompt = decideVotePrompt(sellerVoted, BUYER_PK);
+  assert(prompt.kind === "buttons", "After seller votes, marketplace buyer buttons unlock");
+
+  prompt = decideVotePrompt(lockedP2P, ARBITER_PK);
+  assert(
+    prompt.kind === "waiting"
+    && prompt.waitingOn === "dispute",
+    "Arbiter sees no buttons before buyer and seller both vote",
+  );
+
+  const disagree = {
+    ...lockedP2P,
+    votes: {
+      [Role.BUYER]: Outcome.RELEASE,
+      [Role.SELLER]: Outcome.REFUND,
+    },
+  } as EscrowState;
+  prompt = decideVotePrompt(disagree, ARBITER_PK);
+  assert(prompt.kind === "buttons", "Arbiter buttons unlock only after disagreement");
+
+  const agree = {
+    ...lockedP2P,
+    votes: {
+      [Role.BUYER]: Outcome.RELEASE,
+      [Role.SELLER]: Outcome.RELEASE,
+    },
+  } as EscrowState;
+  prompt = decideVotePrompt(agree, ARBITER_PK);
+  assert(
+    prompt.kind === "waiting"
+    && /agree/i.test(prompt.message),
+    "Arbiter still has no buttons when buyer and seller agree",
+  );
+
+  const expired = {
+    ...lockedP2P,
+    status: EscrowStatus.EXPIRED,
+    votes: {},
+  } as EscrowState;
+  prompt = decideVotePrompt(expired, SELLER_PK);
+  assert(
+    prompt.kind === "buttons"
+    && prompt.outcomes.length === 1
+    && prompt.outcomes[0] === Outcome.REFUND,
+    "Expired healing UI exposes only REFUND",
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // PR 3 — saved payment handles + handle reveal in LOCK
 // ══════════════════════════════════════════════════════════════════════════
@@ -1666,6 +1896,13 @@ console.log("\n── RAIL REGISTRY ──");
     "ke-kes community shows universal Phone number rail");
   assert(!kenya.some(r => r.key === "wave"),
     "ke-kes community does NOT show Wave (Senegal-only)");
+  const tanzania = railsForCommunity("tz-tzs");
+  assert(tanzania.some(r => r.key === "m-pesa"),
+    "tz-tzs community shows M-Pesa");
+  assert(tanzania.some(r => r.key === "tigo-pesa"),
+    "tz-tzs community shows Tigo Pesa");
+  assert(tanzania.some(r => r.key === "airtel-money"),
+    "tz-tzs community shows Airtel Money");
 
   // Lookup
   assert(getRailByKey("phone-number")?.displayName === "Phone number",
@@ -1697,6 +1934,12 @@ console.log("\n── RAIL REGISTRY ──");
     "ke-kes also gets MTN MoMo in the cross-region tail");
   assert(keNetworks.some(r => r.key === "bkash"),
     "ke-kes also gets bKash in the cross-region tail");
+
+  const tzNetworks = phoneNetworksForCommunity("tz-tzs");
+  assert(tzNetworks[0]?.key === "m-pesa",
+    "tz-tzs sees M-Pesa first");
+  assert(tzNetworks.some(r => r.key === "tigo-pesa"),
+    "tz-tzs includes Tigo Pesa in regional phone networks");
 
   // Senegal sees Wave / Orange / Wizall / Free Money first, then
   // cross-region.
@@ -1873,49 +2116,61 @@ console.log("\n── SAVED HANDLES — phone-network tagging (v0.6.5) ──");
     "updateSavedHandle with [] clears the networks field",
   );
 
-  // v0.6.5: phone numbers are canonicalized on save. The user can
-  // type any spacing; the stored value is "+CC XXX XXX XXX".
+  // v0.7.0: phone numbers are canonicalized on save. The user can
+  // type any spacing; the stored value is "+CC XXX-XXX-XXXX".
   (globalThis as any).localStorage.clear();
   const noSpaces = addSavedHandle("phone-number", "+254712345678");
   assert(
-    noSpaces.handle === "+254 712 345 678",
-    "addSavedHandle formats a spaceless phone to '+CC XXX XXX XXX'",
+    noSpaces.handle === "+254 712-345-678",
+    "addSavedHandle formats a spaceless phone to '+CC XXX-XXX-XXXX'",
   );
   const messy = addSavedHandle("phone-number", "  +254-712.345 678  ");
   assert(
-    messy.handle === "+254 712 345 678",
+    messy.handle === "+254 712-345-678",
     "addSavedHandle normalizes mixed separators",
   );
-  const idempotent = addSavedHandle("phone-number", "+254 712 345 678");
+  const idempotent = addSavedHandle("phone-number", "+254 712-345-678");
   assert(
-    idempotent.handle === "+254 712 345 678",
+    idempotent.handle === "+254 712-345-678",
     "Formatting a canonical number is idempotent",
   );
   const nanp = addSavedHandle("phone-number", "+15551234567");
   assert(
-    nanp.handle === "+1 555 123 4567",
-    "1-digit CC (NANP) detected — '+1 555 123 4567'",
+    nanp.handle === "+1 555-123-4567",
+    "1-digit CC (NANP) detected — '+1 555-123-4567'",
   );
   const russia = addSavedHandle("phone-number", "+79161234567");
   assert(
-    russia.handle === "+7 916 123 4567",
+    russia.handle === "+7 916-123-4567",
     "1-digit CC for Russia detected",
   );
   const france = addSavedHandle("phone-number", "+33612345678");
   assert(
-    france.handle === "+33 612 345 678",
+    france.handle === "+33 6-12-34-56-78",
     "2-digit CC (France) detected",
   );
   const ghana = addSavedHandle("phone-number", "+233241234567");
   assert(
-    ghana.handle === "+233 241 234 567",
+    ghana.handle === "+233 24-123-4567",
     "3-digit CC for Ghana (starts with 2) detected",
   );
   const domestic = addSavedHandle("phone-number", "0712345678");
   assert(
-    domestic.handle.replace(/\s/g, "") === "0712345678"
-    && domestic.handle.includes(" "),
-    "Domestic-format number (no +) is grouped in 3s",
+    domestic.handle.replace(/-/g, "") === "0712345678"
+    && domestic.handle.includes("-"),
+    "Domestic-format number (no +) is dashed",
+  );
+  assert(formatPhoneNumber("+2") === "+2",
+    "Partial +2 country code stays visible while typing");
+  const kenyaParts = getPhoneNumberDisplayParts("+254712345678");
+  assert(
+    kenyaParts.flagEmoji === "🇰🇪"
+    && kenyaParts.inputValue === "712-345-678",
+    "Phone display parts expose country flag plus national input value",
+  );
+  assert(
+    formatPhoneNumberForDisplay("+254712345678") === "🇰🇪 712-345-678",
+    "Phone display replaces +254 with the Kenya flag",
   );
 
   // Non-phone rails store the user's input verbatim — no formatter
@@ -1930,13 +2185,13 @@ console.log("\n── SAVED HANDLES — phone-network tagging (v0.6.5) ──");
 // ── 20. MASKING + handleDisplayForViewer ─────────────────────────────────
 console.log("\n── MASKING + viewer-aware display ──");
 {
-  // Phone-shaped: keep prefix + last 4
+  // Phone-shaped: keep flag/prefix + last 4
   assert(maskHandle("+221 77 123 4567").includes("•••"),
     "Phone handle gets masked");
   assert(maskHandle("+221 77 123 4567").endsWith("4567"),
     "Phone handle keeps last 4 digits");
-  assert(maskHandle("+221 77 123 4567").startsWith("+221"),
-    "Phone handle keeps country prefix");
+  assert(maskHandle("+221 77 123 4567").startsWith("🇸🇳"),
+    "Phone handle uses country flag when known");
 
   // v0.6.5 mask regression: a phone entered WITHOUT spaces must still
   // be masked. Pre-v0.6.5 the heuristic was "split(' ').slice(0, 2)"
@@ -1946,7 +2201,7 @@ console.log("\n── MASKING + viewer-aware display ──");
     const masked = maskHandle("+254712345678");
     assert(masked.includes("•••"), "Spaceless phone gets a mask separator");
     assert(masked.endsWith("5678"), "Spaceless phone keeps last 4");
-    assert(masked.startsWith("+254"), "Spaceless phone keeps country code");
+    assert(masked.startsWith("🇰🇪"), "Spaceless phone uses country flag");
     assert(!masked.includes("712345"),
       "Spaceless phone does NOT leak the middle digits (the v0.6.5 bug)");
   }
@@ -1969,8 +2224,10 @@ console.log("\n── MASKING + viewer-aware display ──");
     "Generic handle gets masked");
 
   // handleDisplayForViewer — viewer-context decides everything
-  assert(handleDisplayForViewer("+221 77 555 1234", true) === "+221 77 555 1234",
-    "Participant viewer sees cleartext");
+  assert(handleDisplayForViewer("+221 77 555 1234", true) === "🇸🇳 77-555-1234",
+    "Participant viewer sees flag-led phone display");
+  assert(handleDisplayForViewer("123456789", true) === "123456789",
+    "Participant viewer keeps non-plus numeric handles verbatim");
   assert(handleDisplayForViewer("+221 77 555 1234", false).includes("•••"),
     "Non-participant viewer sees masked output");
   // Critical invariant: non-participants see masked REGARDLESS of how
@@ -2054,8 +2311,8 @@ console.log("\n── LOCK HANDLE PROPAGATION (atomic-funding flow) ──");
   // sees masked output regardless of what's in state.lock.handle.value.
   if (r.ok && r.state.lock.handle) {
     const cleartext = r.state.lock.handle.value;
-    assert(handleDisplayForViewer(cleartext, true) === cleartext,
-      "Participant view: full cleartext from LOCK");
+    assert(handleDisplayForViewer(cleartext, true) === "🇸🇳 77-555-1234",
+      "Participant view: flag-led display from LOCK cleartext");
     assert(handleDisplayForViewer(cleartext, false).includes("•••"),
       "Non-participant view: masked even though cleartext sits in state");
   }
@@ -6871,6 +7128,30 @@ console.log("\n── SIGN-IN OPTION ENVIRONMENT GATE ──");
   assert(!shouldOfferNIP46Signer(capacitorNative),
     "NIP-46 signer app is hidden in native Capacitor builds");
 
+  const fixedSecret = createNip46PairingSecret((bytes) => {
+    bytes.fill(0xab);
+    return bytes;
+  });
+  assert(fixedSecret === "abababababababababababababababab",
+    "NIP-46 pairing secret is generated from crypto bytes");
+
+  const validHex = await validateRecoveryKeyInput("11".repeat(32));
+  assert(validHex.ok && validHex.kind === "hex" && validHex.normalized === "11".repeat(32),
+    "Recovery key validation accepts exactly 32-byte hex");
+
+  const generatedNsec = nip19.nsecEncode(generateSecretKey());
+  const validNsec = await validateRecoveryKeyInput(generatedNsec);
+  assert(validNsec.ok && validNsec.kind === "nsec" && validNsec.secretKey.length === 32,
+    "Recovery key validation accepts valid nsec1 keys");
+
+  const shortHex = await validateRecoveryKeyInput("11".repeat(31));
+  assert(!shortHex.ok && /64-character hex/i.test(shortHex.error),
+    "Recovery key validation rejects short hex with a friendly error");
+
+  const invalidNsec = await validateRecoveryKeyInput("nsec1notavalidkey");
+  assert(!invalidNsec.ok && /valid nsec/i.test(invalidNsec.error),
+    "Recovery key validation rejects malformed nsec with a friendly error");
+
   const nip46Calls: string[] = [];
   const adapted = adaptNIP46BunkerSigner({
     async getPublicKey() { return BUYER_PK; },
@@ -7377,6 +7658,91 @@ console.log("\n── PAYMENT HANDLES / PAYOUT DESTINATIONS — split ──");
     "Deleting a payment handle leaves payout destinations unchanged");
 
   (globalThis as any).localStorage.clear();
+}
+
+console.log("\n── CHAPSMART PAYOUT PROFILE + ADAPTER ──");
+{
+  (globalThis as any).localStorage.clear();
+  assert(getChapsmartPayoutProfile() === null,
+    "Fresh Chapsmart payout profile starts empty");
+
+  const profile = saveChapsmartPayoutProfile({
+    phoneNumber: "+255 71 234 5678",
+    recipientName: "Asha Mushi",
+  });
+  assert(profile.phoneNumber === "+255 71 234 5678",
+    "Chapsmart profile stores phone number locally");
+  assert(getChapsmartPayoutProfile()?.recipientName === "Asha Mushi",
+    "Chapsmart profile round-trips recipient name");
+  assert(
+    (globalThis as any).localStorage.getItem(CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY)?.includes("Asha Mushi"),
+    "Chapsmart profile persists under its private storage key",
+  );
+
+  assert(toChapsmartTanzaniaPhone("+255 71 234 5678") === "0712345678",
+    "Chapsmart phone normalizes +255 to domestic 07 format");
+  assert(toChapsmartTanzaniaPhone("0712345678") === "0712345678",
+    "Chapsmart phone accepts domestic 07 format");
+  assert(toChapsmartTanzaniaPhone("682345678") === "0682345678",
+    "Chapsmart phone adds leading zero to 9-digit TZ mobile");
+  let badPhone = false;
+  try { toChapsmartTanzaniaPhone("+254 712 345 678"); } catch { badPhone = true; }
+  assert(badPhone, "Chapsmart phone rejects non-Tanzania numbers");
+
+  assert(isChapsmartPayoutEligible({ homeCommunity: "tz-tzs" }),
+    "Chapsmart eligible from Tanzania home Chama");
+  assert(isChapsmartPayoutEligible({ fiatCurrency: "TZS" }),
+    "Chapsmart eligible from active TZS trade context");
+  assert(!isChapsmartPayoutEligible({ homeCommunity: "ke-kes", fiatCurrency: "KES" }),
+    "Chapsmart hidden for non-Tanzania/non-TZS context");
+
+  const okFetch = async (_url: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    assert(body.phoneNumber === "0712345678",
+      "Chapsmart adapter sends domestic TZ phone to endpoint");
+    assert(body.amountSatsMax === 12_345,
+      "Chapsmart adapter sends sats budget");
+    return new Response(JSON.stringify({
+      success: true,
+      invoiceId: "cs_inv_1",
+      bolt11: "lnbc123n1pchapsmart",
+      amountSats: 12_000,
+      amountTZS: 25_000,
+      feeSats: 345,
+      expiresAt: 123456,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const invoice = await createChapsmartPayoutInvoice({
+    phoneNumber: "+255 71 234 5678",
+    recipientName: "Asha Mushi",
+    amountSatsMax: 12_345,
+    escrowId: "escrow_cs",
+  }, {
+    endpoint: "https://example.test/chapsmart",
+    fetchImpl: okFetch as typeof fetch,
+  });
+  assert(invoice.amountSats === 12_000 && invoice.amountTZS === 25_000,
+    "Chapsmart adapter returns validated sats/TZS invoice");
+
+  const overBudgetFetch = async () => new Response(JSON.stringify({
+    success: true,
+    invoiceId: "cs_inv_2",
+    bolt11: "lnbc999n1pchapsmart",
+    amountSats: 99_999,
+    amountTZS: 1_000,
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  let overBudget = false;
+  try {
+    await createChapsmartPayoutInvoice({
+      phoneNumber: "+255 71 234 5678",
+      recipientName: "Asha Mushi",
+      amountSatsMax: 10_000,
+    }, {
+      endpoint: "https://example.test/chapsmart",
+      fetchImpl: overBudgetFetch as typeof fetch,
+    });
+  } catch { overBudget = true; }
+  assert(overBudget, "Chapsmart adapter rejects invoices above sats budget");
 }
 
 // ── SIM WALLET — balance subscription end-to-end ─────────────────────────

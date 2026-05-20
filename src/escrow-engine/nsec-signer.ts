@@ -8,6 +8,65 @@
 import type { Signer, UnsignedEvent } from "./escrow-client.js";
 import type { NostrEvent } from "./types.js";
 
+export type RecoveryKeyKind = "nsec" | "hex";
+
+export type RecoveryKeyValidation =
+  | { ok: true; kind: RecoveryKeyKind; secretKey: Uint8Array; normalized: string }
+  | { ok: false; error: string };
+
+const HEX_SECRET_RE = /^[0-9a-fA-F]{64}$/;
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export async function validateRecoveryKeyInput(input: string): Promise<RecoveryKeyValidation> {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return { ok: false, error: "Enter your Chama recovery key." };
+  }
+
+  const { nip19 } = await import("nostr-tools");
+
+  if (trimmed.startsWith("nsec1")) {
+    try {
+      const decoded = nip19.decode(trimmed);
+      if (decoded.type !== "nsec" || !(decoded.data instanceof Uint8Array) || decoded.data.length !== 32) {
+        return { ok: false, error: "That recovery key is not a valid nsec." };
+      }
+      return {
+        ok: true,
+        kind: "nsec",
+        secretKey: decoded.data,
+        normalized: trimmed,
+      };
+    } catch {
+      return { ok: false, error: "That recovery key is not a valid nsec." };
+    }
+  }
+
+  if (!HEX_SECRET_RE.test(trimmed)) {
+    return {
+      ok: false,
+      error: "Paste an nsec recovery key or a 64-character hex private key.",
+    };
+  }
+
+  const secretKey = new Uint8Array(32);
+  for (let i = 0; i < 64; i += 2) {
+    secretKey[i / 2] = parseInt(trimmed.substring(i, i + 2), 16);
+  }
+
+  return {
+    ok: true,
+    kind: "hex",
+    secretKey,
+    normalized: bytesToHex(secretKey),
+  };
+}
+
 export class NsecSigner implements Signer {
   private secretKey: Uint8Array;
   private _pubkey: string | null = null;
@@ -24,23 +83,14 @@ export class NsecSigner implements Signer {
   private async init(): Promise<void> {
     if (this._initialized) return;
 
-    const { nip19 } = await import("nostr-tools");
     const { getPublicKey } = await import("nostr-tools/pure");
 
-    let hex: string;
-    if (this._nsecOrHex.startsWith("nsec1")) {
-      const decoded = nip19.decode(this._nsecOrHex);
-      if (decoded.type !== "nsec") throw new Error("Invalid nsec");
-      hex = Array.from(decoded.data as Uint8Array).map(b => b.toString(16).padStart(2, "0")).join("");
-    } else {
-      hex = this._nsecOrHex;
+    const validated = await validateRecoveryKeyInput(this._nsecOrHex);
+    if (!validated.ok) {
+      throw new Error(validated.error);
     }
 
-    this.secretKey = new Uint8Array(32);
-    for (let i = 0; i < 64; i += 2) {
-      this.secretKey[i / 2] = parseInt(hex.substring(i, i + 2), 16);
-    }
-
+    this.secretKey = validated.secretKey;
     this._pubkey = getPublicKey(this.secretKey);
     this._initialized = true;
   }

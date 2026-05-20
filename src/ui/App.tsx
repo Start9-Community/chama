@@ -194,6 +194,7 @@ export default function App() {
   const [pendingClaim, setPendingClaim] = useState<{
     escrowId: string;
     payoutMsats: number;
+    fiatCurrency?: string | null;
     resolve: () => void;
   } | null>(null);
   // v0.3.0 Phase 4: RecoveryPayoutModal mount state. Single mount used
@@ -870,6 +871,8 @@ export default function App() {
           escrowId={pendingClaim.escrowId}
           payoutMsats={pendingClaim.payoutMsats}
           savedDestinations={listPayoutDestinations()}
+          homeCommunity={getUserCommunitySlugRaw()}
+          fiatCurrency={pendingClaim.fiatCurrency}
           claimAndPayout={actions.claimAndPayout}
           probeFederation={actions.probeFederation}
           onClose={(terminal) => {
@@ -1044,6 +1047,7 @@ export default function App() {
                 setPendingClaim({
                   escrowId: selectedId!,
                   payoutMsats,
+                  fiatCurrency: selected.fiatCurrency,
                   resolve,
                 });
               });

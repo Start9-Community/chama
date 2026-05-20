@@ -151,7 +151,7 @@ export function addSavedHandle(
   if (!trimmed) {
     throw new Error("Handle cannot be empty");
   }
-  // v0.6.5: phone numbers get canonicalized to "+CC XXX XXX XXX" on
+  // v0.7.0: phone numbers get canonicalized to "+CC XXX-XXX-XXXX" on
   // save. Other rails store the user's input verbatim — formatting a
   // Revtag or email wouldn't help and could break a literal handle.
   const normalized = rail === "phone-number"
@@ -252,12 +252,14 @@ export function setHandleVisibility(
 
 // ── Phone-number formatting ───────────────────────────────────────────────
 //
-// v0.6.5: normalize phone numbers to a consistent "+CC XXX XXX XXX" shape
+// v0.7.0: normalize phone numbers to a consistent "+CC XXX-XXX-XXXX" shape
 // so saved entries are unambiguous and visually scannable for the
 // counterparty receiving them at LOCK time. The user can type the
-// number any way they like — "+254712345678", "+254 712 345 678",
+// number any way they like — "+254712345678", "+254 712-345-678",
 // "0712345678", "254-712-345-678" — and the formatter reduces it to a
-// single canonical form before persistence.
+// single canonical form before persistence. Display helpers can then
+// replace the visible "+CC" with a country flag while preserving the
+// dial code in storage.
 //
 // Country-code length is the only fuzzy part: most countries use a
 // 2- or 3-digit CC, but a handful (NANP=1, Russia/KZ=7) use 1 digit.
@@ -265,12 +267,89 @@ export function setHandleVisibility(
 //   "1" or "7" → 1-digit CC (NANP / Russia)
 //   "2…"      → 3-digit CC (most African countries)
 //   anything else → 2-digit CC
-// Domestic numbers (no leading "+") are left as digit groups of 3 with
+// Domestic numbers (no leading "+") are left as dashed digit groups with
 // no CC prefix — the user opted out of international formatting.
 //
 // The function is intentionally lenient: it never throws and always
 // returns SOMETHING the user can read. Garbage in (empty string, all
 // non-digits) yields a trimmed empty string.
+
+const PHONE_CC_TO_ISO: Record<string, string> = {
+  "1": "US",
+  "7": "RU",
+  "20": "EG",
+  "27": "ZA",
+  "30": "GR",
+  "31": "NL",
+  "32": "BE",
+  "33": "FR",
+  "34": "ES",
+  "39": "IT",
+  "44": "GB",
+  "49": "DE",
+  "54": "AR",
+  "55": "BR",
+  "57": "CO",
+  "61": "AU",
+  "63": "PH",
+  "81": "JP",
+  "82": "KR",
+  "86": "CN",
+  "91": "IN",
+  "92": "PK",
+  "212": "MA",
+  "213": "DZ",
+  "216": "TN",
+  "218": "LY",
+  "221": "SN",
+  "223": "ML",
+  "225": "CI",
+  "226": "BF",
+  "229": "BJ",
+  "233": "GH",
+  "234": "NG",
+  "237": "CM",
+  "243": "CD",
+  "250": "RW",
+  "251": "ET",
+  "254": "KE",
+  "255": "TZ",
+  "256": "UG",
+  "260": "ZM",
+  "263": "ZW",
+  "265": "MW",
+  "503": "SV",
+  "880": "BD",
+};
+
+const PHONE_NATIONAL_GROUPS: Record<string, number[]> = {
+  "1": [3, 3, 4],
+  "7": [3, 3, 4],
+  "33": [1, 2, 2, 2, 2],
+  "54": [1, 2, 4, 4],
+  "55": [2, 5, 4],
+  "57": [3, 3, 4],
+  "63": [3, 3, 4],
+  "92": [3, 7],
+  "221": [2, 3, 4],
+  "233": [2, 3, 4],
+  "251": [2, 3, 4],
+  "254": [3, 3, 3],
+  "255": [2, 3, 4],
+  "880": [4, 6],
+};
+
+function isoToFlagEmoji(iso: string): string {
+  const codePoints = iso.toUpperCase().split("")
+    .map(char => 127397 + char.charCodeAt(0));
+  return String.fromCodePoint(...codePoints);
+}
+
+function phoneFlagForCountryCode(countryCode: string | null): string | null {
+  if (!countryCode) return null;
+  const iso = PHONE_CC_TO_ISO[countryCode];
+  return iso ? isoToFlagEmoji(iso) : null;
+}
 
 function detectCountryCodeLength(digits: string): number {
   if (digits.length === 0) return 0;
@@ -285,24 +364,34 @@ function detectCountryCodeLength(digits: string): number {
   // Uganda…), 260-269 (Zambia, Madagascar, Zimbabwe, Namibia, Malawi,
   // Lesotho, Botswana, Swaziland, Comoros…), 290-299 (Saint Helena,
   // Eritrea, Aruba, Faroe, Greenland, Sudan, South Sudan).
-  if (digits[0] === "2" && digits.length >= 3) return 3;
+  if (digits[0] === "2") return digits.length >= 3 ? 3 : 0;
   // Default: 2-digit CC covers most of Europe, Asia, Oceania.
-  return Math.min(2, digits.length);
+  return digits.length >= 2 ? 2 : 0;
 }
 
-/** Group a string of digits into "XXX XXX XXX" chunks. Final chunk
- *  absorbs any 4-digit trailer (so NANP "5551234567" → "555 123 4567",
- *  not the ugly "555 123 456 7"). 1-digit trailers also merge into
+/** Group a string of digits into "XXX-XXX-XXXX" chunks. Final chunk
+ *  absorbs any 4-digit trailer (so NANP "5551234567" → "555-123-4567",
+ *  not the ugly "555-123-456-7"). 1-digit trailers also merge into
  *  the previous chunk; 2-digit trailers stay separate.
  *
  *  Examples:
- *    "612345678"    (9)  → "612 345 678"
- *    "5551234567"   (10) → "555 123 4567"
- *    "12345678"     (8)  → "123 456 78"
+ *    "612345678"    (9)  → "612-345-678"
+ *    "5551234567"   (10) → "555-123-4567"
+ *    "12345678"     (8)  → "123-456-78"
  *    "123"          (3)  → "123"
  *    ""             (0)  → ""                                       */
-function groupPhoneDigits(rest: string): string {
+function groupPhoneDigits(rest: string, countryCode?: string): string {
   if (rest.length === 0) return "";
+  const pattern = countryCode ? PHONE_NATIONAL_GROUPS[countryCode] : undefined;
+  if (pattern && pattern.reduce((sum, n) => sum + n, 0) === rest.length) {
+    let offset = 0;
+    return pattern.map(size => {
+      const chunk = rest.slice(offset, offset + size);
+      offset += size;
+      return chunk;
+    }).join("-");
+  }
+
   const chunks: string[] = [];
   let i = 0;
   while (i < rest.length) {
@@ -318,17 +407,17 @@ function groupPhoneDigits(rest: string): string {
       i += take;
     }
   }
-  return chunks.join(" ");
+  return chunks.join("-");
 }
 
-/** Normalize a user-typed phone number to "+CC XXX XXX XXX" form.
+/** Normalize a user-typed phone number to "+CC XXX-XXX-XXXX" form.
  *  Lenient: never throws, returns the best-effort canonical form.
  *  Examples:
- *    "+254712345678"         → "+254 712 345 678"
- *    "+254 712 345 678"      → "+254 712 345 678"  (idempotent)
- *    "  +254-712.345 678 "   → "+254 712 345 678"
- *    "+15551234567"          → "+1 555 123 4567"   (NANP)
- *    "0712345678"            → "071 234 5678"      (domestic, no CC)
+ *    "+254712345678"         → "+254 712-345-678"
+ *    "+254 712-345-678"      → "+254 712-345-678"  (idempotent)
+ *    "  +254-712.345 678 "   → "+254 712-345-678"
+ *    "+15551234567"          → "+1 555-123-4567"   (NANP)
+ *    "0712345678"            → "071-234-5678"      (domestic, no CC)
  *    ""                      → ""
  *    "+"                     → "+"                 (typing in progress) */
 export function formatPhoneNumber(value: string): string {
@@ -340,19 +429,74 @@ export function formatPhoneNumber(value: string): string {
 
   if (hasPlus) {
     const ccLen = detectCountryCodeLength(digits);
+    if (ccLen === 0) return `+${digits}`;
     const cc = digits.slice(0, ccLen);
     const rest = digits.slice(ccLen);
-    const grouped = groupPhoneDigits(rest);
+    const grouped = groupPhoneDigits(rest, cc);
     return grouped ? `+${cc} ${grouped}` : `+${cc}`;
   }
   // Domestic — same grouping rule, no CC prefix.
   return groupPhoneDigits(digits);
 }
 
+export interface PhoneNumberDisplayParts {
+  normalized: string;
+  countryCode: string | null;
+  flagEmoji: string | null;
+  nationalDigits: string;
+  nationalFormatted: string;
+  /** Flag-led display for saved/revealed phone handles. */
+  display: string;
+  /** Value to show inside the tel input when the flag prefix is visible. */
+  inputValue: string;
+}
+
+export function getPhoneNumberDisplayParts(value: string): PhoneNumberDisplayParts {
+  const normalized = formatPhoneNumber(value);
+  const trimmed = value.trim();
+  const hasPlus = trimmed.startsWith("+");
+  const digits = trimmed.replace(/\D/g, "");
+  const ccLen = hasPlus ? detectCountryCodeLength(digits) : 0;
+
+  if (!hasPlus || ccLen === 0) {
+    return {
+      normalized,
+      countryCode: null,
+      flagEmoji: null,
+      nationalDigits: digits,
+      nationalFormatted: normalized,
+      display: normalized,
+      inputValue: normalized,
+    };
+  }
+
+  const countryCode = digits.slice(0, ccLen);
+  const nationalDigits = digits.slice(ccLen);
+  const nationalFormatted = groupPhoneDigits(nationalDigits, countryCode);
+  const flagEmoji = phoneFlagForCountryCode(countryCode);
+  const flagDisplay = flagEmoji
+    ? (nationalFormatted ? `${flagEmoji} ${nationalFormatted}` : flagEmoji)
+    : normalized;
+
+  return {
+    normalized,
+    countryCode,
+    flagEmoji,
+    nationalDigits,
+    nationalFormatted,
+    display: flagDisplay,
+    inputValue: flagEmoji ? nationalFormatted : normalized,
+  };
+}
+
+export function formatPhoneNumberForDisplay(value: string): string {
+  return getPhoneNumberDisplayParts(value).display;
+}
+
 /** Mask a handle for public display. Heuristics:
  *   - Very short handles (<= 4 chars): full mask "•••"
- *   - Phone-shaped (starts with + or digit): keep "+CC" and last 4
- *     digits, mask the middle. The previous heuristic
+ *   - Phone-shaped (starts with + or digit): keep the country flag
+ *     when known, otherwise "+CC", plus last 4 digits. The previous heuristic
  *     ("split on space, keep first two chunks") leaked the whole number
  *     when the user entered without spaces — split(" ") returned a
  *     one-element array and "first two" was the entire input. v0.6.5
@@ -366,12 +510,10 @@ export function maskHandle(handle: string): string {
   if (handle.startsWith("+") || /^\+?\d/.test(handle)) {
     const digits = handle.replace(/\D/g, "");
     if (digits.length <= 4) return `•••${digits}`;
-    // Country code: leading 1-3 digits after the "+", if any. Without
-    // a "+" the input might be a domestic number — show just the last 4.
-    const ccMatch = handle.match(/^\+(\d{1,3})/);
-    const cc = ccMatch ? `+${ccMatch[1]}` : "";
+    const parts = getPhoneNumberDisplayParts(handle);
     const last4 = digits.slice(-4);
-    return cc ? `${cc} ••• ${last4}` : `••• ${last4}`;
+    if (parts.flagEmoji) return `${parts.flagEmoji} ••• ${last4}`;
+    return parts.countryCode ? `+${parts.countryCode} ••• ${last4}` : `••• ${last4}`;
   }
   if (handle.includes("@")) {
     const [local, domain = ""] = handle.split("@");
@@ -413,6 +555,10 @@ export function handleDisplayForViewer(
   handle: string,
   viewerIsParticipant: boolean,
 ): string {
-  if (viewerIsParticipant) return handle;
+  if (viewerIsParticipant) {
+    return handle.startsWith("+")
+      ? formatPhoneNumberForDisplay(handle)
+      : handle;
+  }
   return maskHandle(handle);
 }

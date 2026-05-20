@@ -101,15 +101,15 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "m-pesa",
     displayName: "M-Pesa",
     allowPublicHandle: false,
-    region: ["ke-kes"],
-    placeholder: "+254 712 345 678",
+    region: ["ke-kes", "tz-tzs"],
+    placeholder: "+255 71 234 5678",
   },
   {
     key: "airtel-money",
     displayName: "Airtel Money",
     allowPublicHandle: false,
-    region: ["ke-kes"],
-    placeholder: "+254 733 123 456",
+    region: ["ke-kes", "tz-tzs"],
+    placeholder: "+255 68 123 4567",
   },
   // MTN Mobile Money (MoMo) — the dominant network across West and
   // Central Africa: Ghana, Côte d'Ivoire, Cameroon, Uganda, Rwanda,
@@ -129,6 +129,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "tigo-pesa",
     displayName: "Tigo Pesa",
     allowPublicHandle: false,
+    region: ["tz-tzs"],
     placeholder: "+255 71 234 5678",
   },
   // Telebirr — Ethio Telecom's wallet, Ethiopia's dominant mobile

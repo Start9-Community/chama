@@ -27,6 +27,20 @@ const NIP46_RELAYS = [
 
 const NIP46_CONNECT_TIMEOUT_MS = 90_000;
 
+export function createNip46PairingSecret(
+  randomBytes?: (bytes: Uint8Array) => Uint8Array,
+): string {
+  const fill = randomBytes ?? globalThis.crypto?.getRandomValues?.bind(globalThis.crypto);
+  if (!fill) {
+    throw new Error("Secure randomness is unavailable");
+  }
+  const bytes = new Uint8Array(16);
+  fill(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export interface NIP46ConnectResult {
   signer: Signer;
   pubkey: string;
@@ -87,8 +101,8 @@ export async function createNostrConnectSession(): Promise<{
 
   const clientPubkey = getPublicKey(localSecretKey);
 
-  // Generate a random secret for this connection
-  const secret = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  // Generate a cryptographically random pairing secret for this connection.
+  const secret = createNip46PairingSecret();
 
   // Create the nostrconnect:// URI
   const uri = createNostrConnectURI({

@@ -9,6 +9,8 @@ import {
   setHandleVisibility,
   maskHandle,
   formatPhoneNumber,
+  formatPhoneNumberForDisplay,
+  getPhoneNumberDisplayParts,
 } from "../../payments/saved-handles.js";
 import {
   getRailByKey,
@@ -50,9 +52,36 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
 
   const availableRails = railsForCommunity(communitySlug)
     .filter(r => r.key !== PHONE_NUMBER_RAIL);
-  const phoneRail = getRailByKey(PHONE_NUMBER_RAIL);
-  const phonePlaceholder = phoneRail?.placeholder || "+254 712 345 678";
   const phoneNetworkOptions = phoneNetworksForCommunity(communitySlug);
+  const phoneRail = getRailByKey(PHONE_NUMBER_RAIL);
+  const phonePlaceholder = phoneNetworkOptions.find(r =>
+    r.region?.includes(communitySlug) && r.placeholder?.startsWith("+")
+  )?.placeholder
+    || phoneRail?.placeholder
+    || "+254 712-345-678";
+  const phoneParts = getPhoneNumberDisplayParts(phoneValue);
+  const phonePlaceholderParts = getPhoneNumberDisplayParts(phonePlaceholder);
+  const phonePrefix = phoneValue && phoneParts.flagEmoji ? phoneParts.flagEmoji : "+";
+  const phoneInputValue = phoneValue
+    ? (phoneParts.flagEmoji ? phoneParts.inputValue : phoneParts.normalized)
+    : "";
+  const phoneInputPlaceholder = !phoneValue && phonePlaceholderParts.countryCode
+    ? `${phonePlaceholderParts.countryCode} ${phonePlaceholderParts.inputValue}`
+    : phonePlaceholderParts.inputValue || phonePlaceholderParts.normalized;
+
+  const handlePhoneInputChange = (rawInput: string) => {
+    setError(null);
+    if (!rawInput.trim()) {
+      setPhoneValue("");
+      return;
+    }
+    const trimmed = rawInput.trim();
+    const prefixCountryCode = phoneParts.countryCode ?? phonePlaceholderParts.countryCode;
+    const nextRaw = prefixCountryCode && !trimmed.startsWith("+")
+      ? `+${prefixCountryCode}${trimmed}`
+      : trimmed;
+    setPhoneValue(formatPhoneNumber(nextRaw));
+  };
 
   const togglePhoneNetwork = (key: string) => {
     setPhoneNetworks(prev => {
@@ -195,23 +224,32 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
           coordination, and most mobile payments. It is never public.
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <input
-            value={phoneValue}
-            onChange={e => { setPhoneValue(e.target.value); setError(null); }}
-            onBlur={e => {
-              // v0.6.5: canonicalize "+CC XXX XXX XXX" the moment the
-              // input loses focus, so the user sees the normalized
-              // shape before tapping Save. Live-formatting on every
-              // keystroke fights the cursor on mobile; blur-time gives
-              // immediate feedback without that pain.
-              const formatted = formatPhoneNumber(e.target.value);
-              if (formatted !== e.target.value) setPhoneValue(formatted);
-            }}
-            placeholder={phonePlaceholder}
-            inputMode="tel"
-            autoComplete="tel"
-            style={{ ...inputStyle, marginBottom: 0, flex: "1 1 220px", minWidth: 0 }}
-          />
+          <div style={{
+            display: "flex", alignItems: "center", flex: "1 1 220px", minWidth: 0,
+            background: T.surface, border: `1px solid ${T.border}`,
+            borderRadius: T.rs, overflow: "hidden",
+          }}>
+            <span style={{
+              width: 44, textAlign: "center", flexShrink: 0,
+              fontSize: 20, lineHeight: "20px",
+              borderRight: `1px solid ${T.border}`,
+            }}>
+              {phonePrefix}
+            </span>
+            <input
+              value={phoneInputValue}
+              onChange={e => handlePhoneInputChange(e.target.value)}
+              onBlur={() => setPhoneValue(v => formatPhoneNumber(v))}
+              placeholder={phoneInputPlaceholder}
+              inputMode="tel"
+              autoComplete="tel"
+              style={{
+                ...inputStyle,
+                marginBottom: 0, border: "none", borderRadius: 0,
+                background: "transparent", flex: 1, minWidth: 0,
+              }}
+            />
+          </div>
           <button
             onClick={handleAddPhone}
             disabled={!phoneValue.trim()}
@@ -290,7 +328,9 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
             const railName = rail?.displayName || h.rail;
             const allowsPublic = railAllowsPublicHandle(h.rail);
             const revealed = revealedIds.has(h.id);
-            const display = revealed ? h.handle : maskHandle(h.handle);
+            const display = revealed
+              ? (h.rail === PHONE_NUMBER_RAIL ? formatPhoneNumberForDisplay(h.handle) : h.handle)
+              : maskHandle(h.handle);
             return (
               <div key={h.id} style={{
                 background: T.card, border: `1px solid ${T.border}`,
