@@ -640,11 +640,38 @@ function summarizeMetaProbeResult(value: unknown): string {
 function summarizeError(value: unknown): string {
   if (value instanceof Error) return value.message;
   if (typeof value === "string") return value;
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { message?: unknown }).message === "string"
+  ) {
+    return (value as { message: string }).message;
+  }
   try {
     return JSON.stringify(value).slice(0, 240);
   } catch {
     return String(value);
   }
+}
+
+function isFederationTransactionTooLarge(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("generated transaction") &&
+    normalized.includes("rejected by the federation") &&
+    normalized.includes("too large");
+}
+
+function normalizePaySubmitError(value: unknown): Error {
+  const message = summarizeError(value) || "Lightning payment failed";
+  if (isFederationTransactionTooLarge(message)) {
+    const error = new Error(
+      "Federation rejected this payout transaction as too large before Lightning submit. " +
+      "Your sats are still in your Chama; retry recovery in a moment.",
+    );
+    (error as Error & { rawMessage?: string }).rawMessage = message;
+    return error;
+  }
+  return value instanceof Error ? value : new Error(message);
 }
 
 function getLowLevelRpc(real: RealFedimintWallet): {
@@ -1124,11 +1151,12 @@ export function adaptRealWallet(
         try {
           result = await real.lightning.payInvoice(bolt11, gateway);
         } catch (e: any) {
+          const error = normalizePaySubmitError(e);
           console.warn(
-            `[chama] LN pay submit failed via ${gateway?.gateway_id ?? "default gateway"}: ${e?.message || e}`,
+            `[chama] LN pay submit failed via ${gateway?.gateway_id ?? "default gateway"}: ${error.message}`,
             e,
           );
-          throw e;
+          throw error;
         }
         console.info(
           `[chama] LN pay submit-out gateway=${gateway?.gateway_id ?? "default"} durationMs=${Date.now() - startedAt} result=${summarizePaySubmitResult(result)}`,
@@ -1257,7 +1285,9 @@ if (typeof import.meta !== "undefined" && (import.meta as any).hot) {
  * Destructive to *local* state only. The Nostr-backed mnemonic lives on
  * relays and will be reinstalled on the next init().
  */
-export async function resetLocalFedimintWallet(): Promise<void> {
+export async function resetLocalFedimintWallet(
+  opts: { storageScope?: string | null } = {},
+): Promise<void> {
   // v0.4.2 sim mode: sim wallets live in localStorage, not OPFS. Calling
   // navigator.storage.getDirectory() in sim mode is both unnecessary and
   // can throw "Security error" in restricted browser contexts (the
@@ -1304,7 +1334,11 @@ export async function resetLocalFedimintWallet(): Promise<void> {
   // Best-effort delete of the currently-configured file AND the legacy
   // default name. Failures on a locked file are non-fatal because we're
   // about to rotate anyway.
-  const namesToDelete = new Set<string>([getStoredFilename(), FEDIMINT_OPFS_FILE]);
+  const activeName = getStoredFilename(opts.storageScope);
+  const namesToDelete = new Set<string>([activeName]);
+  if (!opts.storageScope || activeName === FEDIMINT_OPFS_FILE) {
+    namesToDelete.add(FEDIMINT_OPFS_FILE);
+  }
   for (const name of namesToDelete) {
     try {
       // @ts-ignore — options arg lacks TS lib coverage on some releases
@@ -1321,7 +1355,7 @@ export async function resetLocalFedimintWallet(): Promise<void> {
   // 3. Rotate to a fresh filename. Even if the old file couldn't be
   //    deleted, the next init() will use a brand-new name and skip
   //    whatever stale handle was orphaned.
-  const newName = rotateFilename();
+  const newName = rotateFilename(opts.storageScope);
   console.info(`[chama] Next init will use OPFS file: ${newName}`);
 }
 

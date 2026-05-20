@@ -1461,7 +1461,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         bridgeRef.current = null;
         healthRef.current = { ok: null, at: null };
         try {
-          await resetLocalFedimintWallet();
+          await resetLocalFedimintWallet({ storageScope });
         } catch (e) {
           console.warn("[chama] reconcile wipe threw (non-fatal):", e);
         }
@@ -1471,7 +1471,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         // below lands on the desired fed cleanly (no v0.1.69 case-c
         // throw, no case-b silent no-op).
         fedimint = buildClient();
-        await fedimint.init({ mnemonic, simNpub });
+        await fedimint.init({ mnemonic, storageScope, simNpub });
         fedimintRef.current = fedimint;
       }
 
@@ -1659,7 +1659,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       throw err;
     }
 
-    // Tear down the in-memory wallet first so the IndexedDB delete isn't
+    // Tear down the in-memory wallet first so the OPFS delete isn't
     // blocked by the WASM worker holding the database open.
     try {
       await fedimintRef.current?.cleanup();
@@ -1672,7 +1672,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     healthRef.current = { ok: null, at: null };
     clearActiveInvite();
 
-    await resetLocalFedimintWallet();
+    const activePubkey = await signerRef.current?.getPublicKey().catch(() => null) ?? null;
+    await resetLocalFedimintWallet({ storageScope: activePubkey });
 
     updateFedimint({
       initialized: false,
@@ -1758,7 +1759,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       clearActiveInvite();
 
       // Step 2 — wipe OPFS file + rotate filename so init() opens a fresh DB
-      await resetLocalFedimintWallet();
+      const activePubkey = await signerRef.current?.getPublicKey().catch(() => null) ?? null;
+      await resetLocalFedimintWallet({ storageScope: activePubkey });
 
       // Step 3 — persist the new invite as the custom override so future
       // reloads stay on this fed (mirrors the picker's non-default-preset

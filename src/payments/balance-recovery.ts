@@ -43,6 +43,20 @@ export interface RunRecoveryPayoutOpts {
   onPhase: (phase: RecoveryPayoutPhase) => void;
 }
 
+function errorMessage(e: unknown, fallback: string): string {
+  if (e instanceof Error && e.message) return e.message;
+  if (typeof e === "string" && e) return e;
+  if (
+    e &&
+    typeof e === "object" &&
+    typeof (e as { message?: unknown }).message === "string" &&
+    (e as { message: string }).message
+  ) {
+    return (e as { message: string }).message;
+  }
+  return fallback;
+}
+
 /** Pay BOLT11 → optionally save handle → done. Resolves with terminal,
  *  never rejects. payout-failed leaves the orphan in the user's wallet
  *  for a subsequent retry; the recovery banner gate keeps firing until
@@ -56,7 +70,7 @@ export async function runRecoveryPayout(
   try {
     await opts.payInvoice(opts.bolt11);
   } catch (e: any) {
-    const error = e?.message || "Lightning payment failed";
+    const error = errorMessage(e, "Lightning payment failed");
     emit({ kind: "payout-failed", error });
     return { kind: "payout-failed", error };
   }

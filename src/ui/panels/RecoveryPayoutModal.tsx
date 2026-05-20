@@ -20,6 +20,7 @@ import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
+  retrySmallerLightningPayoutSats,
 } from "../../payments/lightning-fees.js";
 import type {
   RecoveryPayoutPhase,
@@ -60,8 +61,14 @@ export function RecoveryPayoutModal({
   addOrTouchPayoutDestination,
   onClose,
 }: RecoveryPayoutModalProps) {
-  const payoutSats = maxLightningPayoutSats(balanceMsats);
-  const reserveSats = lightningPayoutReserveSats(balanceMsats);
+  const maxPayoutSats = maxLightningPayoutSats(balanceMsats);
+  const [manualPayoutSats, setManualPayoutSats] = useState<number | null>(null);
+  const payoutSats = manualPayoutSats === null
+    ? maxPayoutSats
+    : Math.max(0, Math.min(manualPayoutSats, maxPayoutSats));
+  const reserveSats = manualPayoutSats === null
+    ? lightningPayoutReserveSats(balanceMsats)
+    : Math.max(0, Math.ceil((Math.max(0, balanceMsats) - payoutSats * 1000) / 1000));
   const feeReserveNote = reserveSats > 0
     ? `About ${reserveSats.toLocaleString()} sats stays available for Lightning fees.`
     : "";
@@ -144,7 +151,18 @@ export function RecoveryPayoutModal({
         {stage.kind === "running" && <RunningPanel />}
 
         {stage.kind === "terminal" && (
-          <TerminalPanel terminal={stage.terminal} onClose={() => onClose(stage.terminal)} />
+          <TerminalPanel
+            terminal={stage.terminal}
+            onRetry={() => setStage({ kind: "picking" })}
+            onRetrySmaller={() => {
+              const smaller = retrySmallerLightningPayoutSats(payoutSats);
+              if (smaller <= 0) return;
+              setManualPayoutSats(smaller);
+              setStage({ kind: "picking" });
+            }}
+            retrySmallerSats={retrySmallerLightningPayoutSats(payoutSats)}
+            onClose={() => onClose(stage.terminal)}
+          />
         )}
       </div>
     </div>
@@ -170,8 +188,14 @@ function RunningPanel() {
 }
 
 function TerminalPanel({
-  terminal, onClose,
-}: { terminal: RecoveryPayoutTerminal; onClose: () => void }) {
+  terminal, onRetry, onRetrySmaller, retrySmallerSats, onClose,
+}: {
+  terminal: RecoveryPayoutTerminal;
+  onRetry: () => void;
+  onRetrySmaller: () => void;
+  retrySmallerSats: number;
+  onClose: () => void;
+}) {
   if (terminal.kind === "done") {
     return (
       <div style={{
@@ -191,6 +215,10 @@ function TerminalPanel({
   }
 
   // payout-failed
+  const canRetrySmaller =
+    retrySmallerSats > 0 &&
+    /too large|payout transaction as too large|generated transaction/i.test(terminal.error);
+
   return (
     <div>
       <div style={{
@@ -206,9 +234,33 @@ function TerminalPanel({
           fontSize: 10, color: T.muted, fontFamily: T.mono,
           whiteSpace: "pre-wrap", wordBreak: "break-word",
         }}>
-          {terminal.error}{"\n\n"}Your sats are still in your Chama. Try again from the recovery banner.
+          {terminal.error}{"\n\n"}Your sats are still in your Chama. Try again with a fresh invoice.
         </div>
       </div>
+      <button
+        onClick={onRetry}
+        style={{
+          width: "100%", padding: "12px 16px", borderRadius: T.rs,
+          background: T.accent, border: `1px solid ${T.accent}`,
+          color: "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+          cursor: "pointer", marginBottom: 8,
+        }}
+      >
+        Try again
+      </button>
+      {canRetrySmaller && (
+        <button
+          onClick={onRetrySmaller}
+          style={{
+            width: "100%", padding: "12px 16px", borderRadius: T.rs,
+            background: T.amberDim, border: `1px solid ${T.amber}66`,
+            color: T.amber, fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+            cursor: "pointer", marginBottom: 8,
+          }}
+        >
+          Try {retrySmallerSats.toLocaleString()} sats
+        </button>
+      )}
       <button
         onClick={onClose}
         style={{

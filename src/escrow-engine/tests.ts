@@ -200,6 +200,7 @@ import {
   estimateLightningSendFeeMsats,
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
+  retrySmallerLightningPayoutSats,
 } from "../payments/lightning-fees.js";
 
 // v0.3.0 Phase 5 — ChamaBar label decision
@@ -5864,7 +5865,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
   function makeMockWallet(opts: {
     balances: number[];
     claimResult?: "ok" | Error;
-    payInvoiceResult?: "ok" | Error;
+    payInvoiceResult?: "ok" | Error | string;
   }) {
     let i = 0;
     const calls = {
@@ -5890,6 +5891,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       payInvoice: async (_b: string) => {
         calls.payInvoice++;
         if (opts.payInvoiceResult instanceof Error) throw opts.payInvoiceResult;
+        if (typeof opts.payInvoiceResult === "string") throw opts.payInvoiceResult;
       },
       completeClaim: async (_id: string) => {
         calls.completeClaim++;
@@ -6089,6 +6091,38 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "Handle NOT saved when payout failed (orphan = recovery banner's job)");
   }
 
+  // WASM errors can cross the JS boundary as plain strings. Preserve the
+  // useful Fedimint reason instead of collapsing to "Lightning payment failed".
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 100_000, 100_000],
+      payInvoiceResult: "The generated transaction would be rejected by the federation for being too large.",
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_claim_string_pay_error",
+      bolt11: "lnbc100n1pstringpayerr",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      completeClaim: wallet.completeClaim,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "payout-failed",
+      "string payInvoice throw → terminal=payout-failed");
+    if (terminal.kind === "payout-failed") {
+      assert(/transaction would be rejected/.test(terminal.error),
+        "payout-failed preserves plain-string Fedimint error detail");
+    }
+  }
+
   // ── Auto-save toggle OFF: success but no save call ──────────────────
   {
     const wallet = makeMockWallet({ balances: [0, 100_000, 100_000] });
@@ -6211,7 +6245,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
 // cosmetic-failure-swallowed semantics as Phase 3.
 console.log("\n── RUN RECOVERY PAYOUT ──");
 {
-  function makeMockWallet(opts: { payInvoiceResult?: "ok" | Error }) {
+  function makeMockWallet(opts: { payInvoiceResult?: "ok" | Error | string }) {
     const calls = { payInvoice: 0, saveHandle: 0 };
     const handlesSaved: string[] = [];
     return {
@@ -6220,6 +6254,7 @@ console.log("\n── RUN RECOVERY PAYOUT ──");
       payInvoice: async (_b: string) => {
         calls.payInvoice++;
         if (opts.payInvoiceResult instanceof Error) throw opts.payInvoiceResult;
+        if (typeof opts.payInvoiceResult === "string") throw opts.payInvoiceResult;
       },
       addOrTouchLightningHandle: (address: string) => {
         calls.saveHandle++;
@@ -6276,6 +6311,29 @@ console.log("\n── RUN RECOVERY PAYOUT ──");
     }
     assert(wallet.calls.saveHandle === 0,
       "Handle NOT saved on payout-failed (orphan stays orphaned, recover later)");
+  }
+
+  // Preserve string-shaped Fedimint/WASM errors in recovery as well.
+  {
+    const wallet = makeMockWallet({
+      payInvoiceResult: "The generated transaction would be rejected by the federation for being too large.",
+    });
+    const terminal = await runRecoveryPayout({
+      bolt11: "lnbc100n1precover_string_fail",
+      saveAfter: true,
+      addressUsed: "bob@phoenix.app",
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+    });
+    assert(terminal.kind === "payout-failed",
+      "string recovery payInvoice throw → terminal=payout-failed");
+    if (terminal.kind === "payout-failed") {
+      assert(/transaction would be rejected/.test(terminal.error),
+        "recovery payout preserves plain-string Fedimint error detail");
+    }
+    assert(wallet.calls.saveHandle === 0,
+      "Handle NOT saved after string-shaped recovery payout failure");
   }
 
   // ── saveAfter=false: success, but handle NOT saved ──────────────────
@@ -6363,6 +6421,10 @@ console.log("\n── LIGHTNING PAYOUT FEE RESERVE ──");
     "50 sat balance shows an about-3-sat Lightning fee reserve");
   assert(maxLightningPayoutSats(2_500) === 0,
     "Tiny balances below outbound fee floor are not offered as LN payouts");
+  assert(retrySmallerLightningPayoutSats(992) === 496,
+    "Too-large recovery retry halves the payout amount to reduce note inputs");
+  assert(retrySmallerLightningPayoutSats(1) === 0,
+    "Too-large retry stops when there is no smaller whole-sat payout");
 }
 
 // ── 42. CHAMA BAR LABEL DECISION (v0.3.0 Phase 5) ────────────────────────
@@ -7687,6 +7749,32 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       "Adapter refuses outbound LN pay when SDK omits the payment operation ID");
     assert(h.calls.subscribeLnPay === 0,
       "Adapter does not subscribe without a payment operation ID");
+  }
+
+  // Some Fedimint WASM errors cross the boundary as string-ish values. The
+  // submit-time "transaction too large" failure happens before an operation
+  // id exists, so normalize it into a user-facing Error with retry framing.
+  {
+    const h = makeRealWallet();
+    (h.real.lightning as any).payInvoice = async (_bolt11: string, gatewayInfo?: { gateway_id?: string }) => {
+      h.calls.payInvoice++;
+      h.calls.payInvoiceGatewayId = gatewayInfo?.gateway_id ?? "";
+      throw "The generated transaction would be rejected by the federation for being too large.";
+    };
+    const wallet = adaptRealWallet(h.real as any);
+    let threw = false;
+    try {
+      await wallet.lightning.payInvoice("lnbc100n1payout");
+    } catch (e) {
+      threw = /Federation rejected this payout transaction as too large/.test((e as Error).message) &&
+        /retry recovery/.test((e as Error).message);
+    }
+    assert(threw,
+      "Adapter normalizes transaction-too-large submit errors for payout recovery");
+    assert(h.calls.payInvoice === 1,
+      "real.lightning.payInvoice was attempted before transaction-too-large surfaced");
+    assert(h.calls.subscribeLnPay === 0,
+      "Adapter does not subscribe when submit failed before an operation ID");
   }
 
   // The browser SDK should always expose subscribeLnPay, but if that contract

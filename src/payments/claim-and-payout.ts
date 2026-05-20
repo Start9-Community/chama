@@ -131,6 +131,20 @@ function moneyLog(checkpoint: string, fields: Record<string, unknown>): void {
   console.info(parts.join(" "));
 }
 
+function errorMessage(e: unknown, fallback: string): string {
+  if (e instanceof Error && e.message) return e.message;
+  if (typeof e === "string" && e) return e;
+  if (
+    e &&
+    typeof e === "object" &&
+    typeof (e as { message?: unknown }).message === "string" &&
+    (e as { message: string }).message
+  ) {
+    return (e as { message: string }).message;
+  }
+  return fallback;
+}
+
 // ── waitForBalanceGrowth ─────────────────────────────────────────────────
 
 export interface WaitForBalanceGrowthOpts {
@@ -267,7 +281,7 @@ export async function runClaimAndPayout(
   try {
     baseline = await opts.getBalance();
   } catch (e: any) {
-    const error = e?.message || "Couldn't read wallet balance";
+    const error = errorMessage(e, "Couldn't read wallet balance");
     emit({ kind: "claim-failed", error });
     return { kind: "claim-failed", error };
   }
@@ -288,7 +302,7 @@ export async function runClaimAndPayout(
   try {
     await opts.claimAndRedeem(opts.escrowId);
   } catch (e: any) {
-    const error = e?.message || "Claim failed";
+    const error = errorMessage(e, "Claim failed");
     // v0.3.1 Phase 1: typed bridge errors get their own retry-able
     // terminal. Discrimination is on e.code (the bridge tags
     // FED_PROBE_FAILED + FED_MISMATCH at throw sites in
@@ -375,7 +389,7 @@ export async function runClaimAndPayout(
     });
     await opts.payInvoice(opts.bolt11);
   } catch (e: any) {
-    const error = e?.message || "Lightning payment failed";
+    const error = errorMessage(e, "Lightning payment failed");
     moneyLog("CLAIM-PAY-OUT", {
       escrowId: opts.escrowId,
       result: "error",

@@ -43,3 +43,9 @@ export function lightningPayoutReserveSats(balanceMsats: number): number {
   const payoutSats = maxLightningPayoutSats(balanceMsats);
   return Math.max(0, Math.ceil((Math.max(0, balanceMsats) - payoutSats * 1000) / 1000));
 }
+
+export function retrySmallerLightningPayoutSats(currentPayoutSats: number): number {
+  const current = Math.max(0, Math.floor(currentPayoutSats));
+  if (current <= 1) return 0;
+  return Math.max(1, Math.floor(current / 2));
+}

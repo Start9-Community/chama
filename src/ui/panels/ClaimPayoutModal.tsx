@@ -329,7 +329,7 @@ function TerminalPanel({
   } else {
     // payout-failed
     title = "Payout couldn't be sent";
-    subtitle = `${terminal.error}\n\nYour sats are safe in your Chama. Use the Recovery banner on Browse to retry.`;
+    subtitle = `${terminal.error}\n\nYour sats are safe in your Chama. Close this and use the Recovery banner to retry the payout only.`;
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⏳";
@@ -387,7 +387,7 @@ function TerminalPanel({
           cursor: retryProbing ? "not-allowed" : "pointer",
         }}
       >
-        Close
+        {terminal.kind === "payout-failed" ? "Show recovery" : "Close"}
       </button>
     </div>
   );
