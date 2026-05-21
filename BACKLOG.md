@@ -36,12 +36,18 @@ candidate list with the older roadmap.
       targets still need the full migration before recording durable
       walkthroughs.
 
-- [ ] **Per-npub localStorage for user-scoped state.** `chama_active_invite`,
+- [x] **Per-npub localStorage for user-scoped state.** `chama_active_invite`,
       `chama_community`, saved handles, payout destinations, and similar
       identity-scoped state should not bleed between npubs on shared
       browsers. Refactor toward `chama_<key>_<pubkey>` storage, with
-      migration from legacy global keys. Some scoped sentinels have landed,
-      but the main identity-bound stores are still global.
+      migration from legacy global keys.
+
+      Landed after v0.7.0: active invite, custom invite, home Chama,
+      saved handles, payout destinations, ChapSmart payout profile,
+      pending redemption stash, and Create drafts now read/write through
+      the active pubkey scope. First-run onboarding can still write before
+      a signer is known; the first connected pubkey claims that legacy
+      value and removes the global key so the next user does not inherit it.
 
 - [x] **Soften v0.1.74 seed-safety error red-on-refresh.** A transient
       relay zero-event response can still read like a critical funds alert.
@@ -79,17 +85,17 @@ candidate list with the older roadmap.
 
       Source: 2026-05-19 release planning after v0.6.5.
 
-- [ ] **Pre-warm Fund flow on TradeDetail mount.** First-fire on a fundable
+- [x] **Pre-warm Fund flow on TradeDetail mount.** First-fire on a fundable
       CREATED listing has the AtomicFundingModal sitting on its
       CreatingInvoice spinner for a noticeable beat while the Fedimint WASM
       client and federation cold-start. v0.6.5 hid the worst symptom (the
       "Locking…" button label bleed-through, now mitigated by a heavier
       backdrop and an honest "Funding…" label), but the underlying delay
-      is still there. Issue a dry-run `getBalance()` (or equivalent
-      idempotent warm-up call) right when the seller lands on their own
-      CREATED listing so the WASM worker, federation handshake, and
-      health probe are ready before they tap Fund. Smoke-session source:
-      2026-05-19 cold-start glitch report.
+      needed warming. TradeDetail now quietly calls the same idempotent
+      federation probe path when the expected locker opens a CREATED
+      listing, so the WASM worker, federation handshake, and health probe
+      are warmed before Fund. Smoke-session source: 2026-05-19 cold-start
+      glitch report.
 
 - [x] **Turn-gated vote buttons by category (v0.7.0).** Buyer/seller
       vote buttons are now UI-gated by category via
@@ -123,16 +129,18 @@ candidate list with the older roadmap.
       Source: 2026-05-19 design session; implemented during v0.7.0
       prep.
 
-- [ ] **Chat image upload + viewer (prerequisite for dispute polish).**
+- [x] **Chat image upload + viewer (prerequisite for dispute polish).**
       Buyer and seller need to be able to share receipts, screenshots,
       and proof-of-payment images in trade chat. Arbiter needs to view
-      them during dispute resolution. Today chat is text-only.
-      Wire image upload (Blossom or NIP-94 file metadata), inline
-      thumbnail rendering, and tap-to-expand. Encryption follows the
-      existing CHAT NIP-44 path so non-participants can't read
-      receipts. Specifically required by the turn-gated vote flow
-      above — without images, "chat clears the doubt" is half-
-      true.
+      them during dispute resolution.
+
+      First pass landed after v0.7.0: chat bodies now travel inside a
+      buyer/seller/arbiter encrypted envelope, receipt images are
+      compressed client-side before send, thumbnails render inline, and
+      tap-to-expand opens a private viewer. The current transport keeps
+      the compressed image inline in the encrypted CHAT body; Blossom or
+      NIP-94-backed blobs remain the scale-up path if relay event-size
+      pressure shows up.
 
 - [ ] **Notifications grand finale.** Treat notifications as a major final
       polish layer, not a tiny toast sweep. Users need to know when a trade
@@ -208,11 +216,11 @@ codebase. Keep these here briefly so the consolidation has memory.
       self-hostable LNURL-pay resolver backed by the user's own Chama
       instance, with explicit opt-in and uptime/privacy copy.
 
-- [ ] **Manual arbiter selection.** Surface arbiter stats and let sellers
-      choose from a graduated pool with backup assignment so a missing
-      arbiter cannot deadlock a trade. v0.6.5 round-robin pool selection
-      is the automatic default; manual override remains the graduated-
-      seller affordance.
+- [ ] **Arbiter public dashboard.** Surface per-arbiter stats on their
+profile: trades assigned, disputes handled, outcome breakdown,
+inactivity periods, and any community revocations. Reputation is the
+real collateral; make it legible. Read-only v1 surface; no UI work
+until election events exist.
 
 - [ ] **Recurring payments unlock.** Reveal subscription listings only for
       graduated sellers once aggregate ratings are populated.
@@ -243,14 +251,36 @@ codebase. Keep these here briefly so the consolidation has memory.
       evaluate deeper NWC flows beyond basic fund/claim: recurring payments,
       saved permissions, policy limits, and richer wallet capability checks.
 
-- [ ] **Arbiter healing powers.** Bounded stale-trade repair without
-      consensus, especially for lending repayment timelines.
+- [ ] Community arbiter election via kind:38104. Each community elects
+its own arbiter pool through availability events. Replaces the v1
+hardcoded BLF_OFFICIAL_ARBITERS bootstrap. Same random-assignment
+layer underneath — only the pool source changes. Wire after v1 ships
+and real Nairobi usage shows who the natural arbiters are.
 
-- [ ] **Open arbiter pool with kind:38104 availability events.** Community
-      elected, self-published availability, reputation-aware.
+- [ ] Arbiter key separation enforcement at community tenure level.
+v1 enforces uniqueness per-trade (DUPLICATE_PARTICIPANT). v2
+target: an npub elected as arbiter for a community is blocked from
+opening buyer/seller trades in that same community while holding
+arbiter status. Requires arbiter-status tracking per community slug.
+Civilian key + arbiter key must stay separate; the protocol should
+enforce what the design already requires.
 
-- [ ] **Arbiter incentive economics.** Decide fee model after real usage
-      shows what arbiters actually do and where the work is.
+- [ ] Arbiter incentive economics. Dispute-triggered flat fee, not a
+percentage of trade value on every assignment. Exact amounts are
+a post-v1 empirical question — let Nairobi usage show what arbiters
+actually do before pricing it. Structure is locked: duty pays, not
+power. "Arbiter was needed" flag goes on the public trade receipt.
+
+- [ ] Arbiter healing powers. Bounded stale-trade repair without
+full consensus, especially for Lending repayment timelines that
+have no server-side timer. Design after v1 usage reveals the
+actual failure modes.
+
+- [ ] Arbiter opt-in and availability signals. Elected arbiters can
+publish kind:38104 events marking themselves unavailable for
+certain trade types, amounts, or time windows. Combined with
+election events, creates a real community political economy where
+arbiters compete on service record, not just name recognition.
 
 - [ ] **Self-reveal gesture for testimonials.** Let users opt into
       publishing individual ratings as testimonials.

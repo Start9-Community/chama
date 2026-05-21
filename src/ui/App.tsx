@@ -1133,6 +1133,9 @@ export default function App() {
                 });
               });
             }}
+            onPrewarmFunding={() => {
+              void actions.prewarmFunding();
+            }}
             onOpenSettings={() => setView("saved-handles")}
           />
         </div>

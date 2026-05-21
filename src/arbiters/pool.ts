@@ -129,13 +129,23 @@ export function normalizeTrustedArbiterInput(raw: string): string[] {
  * dozen). A cryptographic hash would be overkill — distribution is
  * close enough to uniform for fair load-spreading across the pool.
  */
-export function pickArbiterFromPool(pool: string[], escrowId: string): string | undefined {
-  if (pool.length === 0) return undefined;
-  if (pool.length === 1) return pool[0];
+export function pickArbiterFromPool(
+  pool: string[],
+  escrowId: string,
+  excludePubkeys: Array<string | null | undefined> = [],
+): string | undefined {
+  const excluded = new Set(
+    excludePubkeys
+      .map((pk) => pk?.toLowerCase())
+      .filter((pk): pk is string => !!pk)
+  );
+  const candidates = pool.filter((pk) => !excluded.has(pk.toLowerCase()));
+  if (candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0];
   let hash = 0;
   for (let i = 0; i < escrowId.length; i++) {
     hash = (hash + escrowId.charCodeAt(i)) | 0;
   }
-  const idx = Math.abs(hash) % pool.length;
-  return pool[idx];
+  const idx = Math.abs(hash) % candidates.length;
+  return candidates[idx];
 }

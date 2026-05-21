@@ -248,9 +248,15 @@ function handleJoin(state: EscrowState, event: ParsedEscrowEvent<JoinPayload>): 
     return err("ROLE_TAKEN", `Role ${p.role} is already filled`, event.raw.id);
   }
 
-  // Pubkey is registered in a different role — reject
-  if (getRole(state, event.pubkey) !== null) {
-    return err("ALREADY_JOINED", "Pubkey is already a participant in another role", event.raw.id);
+  // Same npub cannot sit on both sides of a trade. This is distinct from
+  // ROLE_TAKEN: the requested slot may be empty, but the signer already
+  // owns another role in the same escrow.
+  const existingRole = getRole(state, event.pubkey);
+  if (existingRole !== null) {
+    return err("ALREADY_JOINED",
+      `Pubkey is already the ${existingRole}; cannot join as ${p.role}`,
+      event.raw.id
+    );
   }
 
   // Arbiter must be in the community pool (when one exists)

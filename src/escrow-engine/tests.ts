@@ -107,6 +107,7 @@ import {
 } from "../communities/community-request.js";
 import {
   resolveFederationForCommunity,
+  getFederationInvite,
   getActiveInvite,
   setActiveInvite,
   setCustomFederationInvite,
@@ -117,6 +118,11 @@ import {
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
 import { adaptRealWallet } from "../fedimint/sdk-adapter.js";
+import {
+  clearAllPendingRedemptions,
+  listPendingRedemptions,
+  stashPendingRedemption,
+} from "../fedimint/pending-redemptions.js";
 import {
   queryUntilFound,
   SEED_RECOVERY_RETRY_DELAYS_MS,
@@ -222,6 +228,7 @@ import {
   maxLightningPayoutSats,
   retrySmallerLightningPayoutSats,
 } from "../payments/lightning-fees.js";
+import { EscrowFedimintBridge } from "../fedimint/escrow-bridge.js";
 
 // v0.3.0 Phase 5 — ChamaBar label decision
 import {
@@ -238,6 +245,11 @@ import {
   createNip46PairingSecret,
 } from "./nip46-signer.js";
 import { validateRecoveryKeyInput } from "./nsec-signer.js";
+import {
+  getLocalStorageUserScope,
+  scopedStorageKey,
+  setLocalStorageUserScope,
+} from "../storage/user-scope.js";
 
 // v0.3.0 Phase 6 — Trinity Ring participant order (theme.ts)
 // v0.3.1 Phase 2 — extends §43 with a grep tripwire over src/ui/
@@ -559,6 +571,17 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
   assertErr(applyEvent(state, join1dup), "ALREADY_JOINED", "Same pubkey re-JOIN is benign duplicate");
 }
 
+// Same pubkey cannot become both buyer and seller
+{
+  const create = createEvent();
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const selfJoin = joinEvent(Role.BUYER, SELLER_PK, create.raw.id);
+    assertErr(applyEvent(r1.state, selfJoin), "ALREADY_JOINED",
+      "Seller cannot join their own listing as buyer");
+  }
+}
+
 // Can't JOIN as initiator's role
 {
   const create = createEvent();
@@ -592,6 +615,36 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
     const anyArbiter = joinEvent(Role.ARBITER, "99".repeat(32), create.raw.id);
     assertOk(applyEvent(r1.state, anyArbiter),
       "Empty pool means any arbiter pubkey can JOIN");
+  }
+}
+
+// Client preflight refuses self-join before publishing to relays
+{
+  const create = createEvent();
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    let publishedJoin: NostrEvent | null = null;
+    const selfJoinClient = new EscrowClient({
+      async getPublicKey() { return SELLER_PK; },
+      async signEvent(event: UnsignedEvent) {
+        return { ...event, id: "self_join_signed", pubkey: SELLER_PK, sig: "sig" } as NostrEvent;
+      },
+      async nip44Encrypt(plaintext: string) { return plaintext; },
+      async nip44Decrypt(ciphertext: string) { return ciphertext; },
+    }, { relays: [] });
+    (selfJoinClient as any).states.set(ESCROW_ID, r1.state);
+    (selfJoinClient as any).relayManager.publish = async (event: NostrEvent) => {
+      publishedJoin = event;
+      return { accepted: 1, rejected: 0, errors: [] };
+    };
+    let refused = false;
+    try {
+      await selfJoinClient.joinEscrow(ESCROW_ID, Role.BUYER);
+    } catch (e: any) {
+      refused = e?.code === "ALREADY_PARTICIPANT";
+    }
+    assert(refused, "Client refuses seller self-join as buyer");
+    assert(publishedJoin === null, "Client self-join refusal publishes no JOIN event");
   }
 }
 
@@ -894,6 +947,77 @@ console.log("\n── CHAT ──");
     assert(r.state.chatMessages.length === 1, "Chat stored in chatMessages");
     assert(r.state.eventChain.length === 2, "Chat NOT in eventChain (state chain)");
   }
+
+  const imageChat = makeParsedEvent<ChatPayload>(EscrowEventKind.CHAT, BUYER_PK, {
+    type: "escrow:chat",
+    message: "Receipt attached",
+    attachments: [{
+      id: "img_receipt_1",
+      kind: "image",
+      mimeType: "image/jpeg",
+      dataUrl: "data:image/jpeg;base64,ZmFrZQ==",
+      name: "receipt.jpg",
+      width: 800,
+      height: 600,
+      sizeBytes: 4,
+    }],
+    senderRole: Role.BUYER,
+    sentAt: NOW,
+  });
+  const withImage = applyEvent(state, imageChat);
+  if (assertOk(withImage, "Chat accepts encrypted-image attachment payloads")) {
+    const payload = withImage.state.chatMessages[0].payload;
+    assert(payload.attachments?.[0]?.id === "img_receipt_1",
+      "Chat image attachment survives state-machine apply");
+  }
+
+  let publishedChat: NostrEvent | null = null;
+  const chatClient = new EscrowClient({
+    async getPublicKey() { return BUYER_PK; },
+    async signEvent(event: UnsignedEvent) {
+      return { ...event, id: "chat_signed_1", pubkey: BUYER_PK, sig: "sig" } as NostrEvent;
+    },
+    async nip44Encrypt(_plaintext: string, recipientPubkey: string) {
+      return `cipher-for:${recipientPubkey}`;
+    },
+    async nip44Decrypt(ciphertext: string) {
+      return ciphertext;
+    },
+  }, { relays: [] });
+  (chatClient as any).states.set(state.id, state);
+  (chatClient as any).relayManager.publish = async (event: NostrEvent) => {
+    publishedChat = event;
+    return { accepted: 1, rejected: 0, errors: [] };
+  };
+  await chatClient.sendChat(state.id, {
+    message: "receipt paid",
+    attachments: [{
+      id: "img_receipt_2",
+      kind: "image",
+      mimeType: "image/jpeg",
+      dataUrl: "data:image/jpeg;base64,cGFpZA==",
+      name: "paid.jpg",
+      width: 600,
+      height: 400,
+      sizeBytes: 4,
+    }],
+  });
+  const capturedChat = publishedChat as unknown as NostrEvent | null;
+  if (!capturedChat) {
+    throw new Error("sendChat did not publish a Nostr chat event");
+  }
+  assert(true, "sendChat publishes a Nostr chat event");
+  const publishedPayload = JSON.parse(capturedChat.content) as ChatPayload;
+  assert(publishedPayload.message === "",
+    "New chat wire payload leaves plaintext message empty");
+  assert(!!publishedPayload.bodyEnvelope?.encryptedFor[BUYER_PK],
+    "New chat wire payload encrypts body to buyer");
+  assert(!!publishedPayload.bodyEnvelope?.encryptedFor[SELLER_PK],
+    "New chat wire payload encrypts body to seller");
+  assert(!capturedChat.content.includes("receipt paid"),
+    "New chat wire payload does not leak message cleartext");
+  assert(chatClient.getState(state.id)?.chatMessages[0]?.payload.attachments?.[0]?.id === "img_receipt_2",
+    "Local sendChat apply shows encrypted receipt image immediately");
 
   // Non-participant can't chat
   const badChat = makeParsedEvent<ChatPayload>(EscrowEventKind.CHAT, "ff".repeat(32), {
@@ -3555,6 +3679,85 @@ console.log("\n── getUserCommunitySlugRaw ──");
   (globalThis as any).localStorage.clear();
 }
 
+// ── 31a. PER-NPUB LOCALSTORAGE SCOPING ──────────────────────────────────
+console.log("\n── per-npub localStorage scoping ──");
+{
+  (globalThis as any).localStorage.clear();
+  setLocalStorageUserScope(null);
+  assert(getLocalStorageUserScope() === null,
+    "Storage starts unscoped before a signer is known");
+
+  // First-run onboarding writes before connect; the first connected npub
+  // claims that legacy value into its scoped key and removes the global.
+  setUserCommunitySlug("tz-tzs");
+  assert((globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY) === "tz-tzs",
+    "Pre-connect community choice writes the legacy onboarding key");
+  setLocalStorageUserScope("alice");
+  assert(getUserCommunitySlugRaw() === "tz-tzs",
+    "Connected user reads the pre-connect community choice");
+  assert((globalThis as any).localStorage.getItem(scopedStorageKey(COMMUNITY_STORAGE_KEY)) === "tz-tzs",
+    "Pre-connect community choice migrates to the active npub scope");
+  assert((globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY) === null,
+    "Legacy community key is claimed so another npub does not inherit it");
+
+  setLocalStorageUserScope("bob");
+  assert(getUserCommunitySlugRaw() === null,
+    "Second npub does not inherit first npub's home Chama");
+  setUserCommunitySlug("ke-kes");
+  assert(getUserCommunitySlugRaw() === "ke-kes",
+    "Second npub can persist an independent home Chama");
+  setLocalStorageUserScope("alice");
+  assert(getUserCommunitySlugRaw() === "tz-tzs",
+    "Switching back restores the first npub's home Chama");
+
+  setCustomFederationInvite("fed1qalicecustom");
+  setActiveInvite("fed1qaliceactive");
+  const aliceHandle = addSavedHandle("phone-number", "+255 740 034 110");
+  const alicePayout = addOrTouchPayoutDestination("alice@getchama.app");
+  const aliceChap = saveChapsmartPayoutProfile({
+    phoneNumber: "+255 740 034 110",
+    recipientName: "Asha Mushi",
+  });
+  stashPendingRedemption({
+    escrowId: "alice_claim",
+    oobNotes: "oob_alice",
+    notesHash: "hash_alice",
+    amountMsats: 12_000,
+  });
+
+  setLocalStorageUserScope("bob");
+  assert(getFederationInvite() !== "fed1qalicecustom",
+    "Custom federation invite is scoped per npub");
+  assert(getActiveInvite() === null,
+    "Active joined invite is scoped per npub");
+  assert(listSavedHandles().every(h => h.id !== aliceHandle.id),
+    "Saved payment handles are scoped per npub");
+  assert(listPayoutDestinations().every(d => d.id !== alicePayout.id),
+    "Payout destinations are scoped per npub");
+  assert(getChapsmartPayoutProfile() === null,
+    "Chapsmart payout profile is scoped per npub");
+  assert(listPendingRedemptions().length === 0,
+    "Pending redemption stash is scoped per npub");
+
+  setLocalStorageUserScope("alice");
+  assert(getFederationInvite() === "fed1qalicecustom",
+    "First npub keeps its custom federation invite");
+  assert(getActiveInvite() === "fed1qaliceactive",
+    "First npub keeps its active joined invite");
+  assert(getSavedHandle(aliceHandle.id)?.handle === aliceHandle.handle,
+    "First npub keeps its saved handle");
+  assert(listPayoutDestinations()[0]?.id === alicePayout.id,
+    "First npub keeps its payout destination");
+  assert(getChapsmartPayoutProfile()?.recipientName === aliceChap.recipientName,
+    "First npub keeps its Chapsmart profile");
+  assert(listPendingRedemptions()[0]?.escrowId === "alice_claim",
+    "First npub keeps its pending redemption stash");
+
+  clearAllPendingRedemptions();
+  setLocalStorageUserScope(null);
+  (globalThis as any).localStorage.clear();
+}
+
 // ── 31b. SEED RECOVERY RETRY (v0.1.85 Bug G fix) ────────────────────────
 //
 // queryUntilFound is the retry helper getOrCreateSeed wraps around the
@@ -3974,6 +4177,50 @@ console.log("\n── pickArbiterFromPool ──");
     if (p) seen.add(p);
   }
   assert(seen.size >= 2, "Round-robin spreads load across the pool, not always one slot");
+  assert(
+    pickArbiterFromPool(["buyer", "arb-B"], "any-id", ["buyer"]) === "arb-B",
+    "Arbiter pick excludes existing participants",
+  );
+  assert(
+    pickArbiterFromPool(["buyer"], "any-id", ["buyer"]) === undefined,
+    "Arbiter pick returns empty when every pool member is already a participant",
+  );
+
+  const create = createEvent({ communityArbiters: [BUYER_PK] });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const buyerJoin = joinEvent(Role.BUYER, BUYER_PK, create.raw.id);
+    const r2 = applyEvent(r1.state, buyerJoin);
+    if (r2.ok) {
+      let createEscrowLockCalled = false;
+      const bridge = new EscrowFedimintBridge(
+        {
+          getState: () => r2.state,
+          lockEscrow: async () => {
+            throw new Error("lockEscrow should not be called");
+          },
+        } as any,
+        {
+          createEscrowLock: async () => {
+            createEscrowLockCalled = true;
+            throw new Error("Fedimint spend should not be called");
+          },
+        } as any,
+        {} as any,
+      );
+      let refusedBeforeSpend = false;
+      try {
+        await bridge.lockAndPublish(ESCROW_ID);
+      } catch (e: any) {
+        refusedBeforeSpend = /no arbiter available/i.test(e?.message || "")
+          && /no eligible backup/i.test(e?.message || "");
+      }
+      assert(refusedBeforeSpend,
+        "Bridge refuses LOCK when the only pool arbiter is already the buyer");
+      assert(!createEscrowLockCalled,
+        "Bridge refuses duplicate-arbiter LOCK before spending Fedimint ecash");
+    }
+  }
 }
 
 // ── 31e. shouldShowRecoveryBanner + identifyStrandedEcashSource (item 2)─

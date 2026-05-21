@@ -98,16 +98,50 @@ Capabilities that the underlying environment unlocks (e.g. a self-hosted Lightni
 
 ### 2.6 Reputation as the backbone primitive
 
-Every trade produces rating events. Public aggregate counts and percentages are visible on every npub's profile. Individual comments are NIP-44 encrypted to the recipient, who can later self-publish them as testimonials in v2. The rating events are Nostr-native (custom kind in the 30000-39999 range), portable across clients, and chain-replayable.
+Every trade produces rating events. Public aggregate counts and percentages are visible on every npub's profile. Individual comments are NIP-44 encrypted to the recipient, who can later self-publish them as testimonials in v2. The rating events are Nostr-native (custom kind in the 30000–39999 range), portable across clients, and chain-replayable.
+This dataset is the substrate for graduated authority across the entire platform. It's not decoration. It's structural. Two ladders run on it:
 
-This dataset is **the substrate for graduated authority across the entire platform.** It's not decoration. It's structural. Two ladders run on it:
-
-- **Arbiter graduation:** auto-assigned (v1) → manual-pickable (v1.5) → community-elected with terms (v2)
-- **Merchant graduation:** regular seller → recurring-payment-eligible → (future tiers)
+Arbiter graduation: auto-assigned (v1) → manual-pickable (v1.5) → community-elected with terms and revocation (v2)
+Merchant graduation: regular seller → recurring-payment-eligible → (future tiers)
 
 Both ladders use the same fuel: rating events accumulating on each npub over time. Earned authority replaces gatekept authority. New decisions about who-gets-what-power must always be measured against this primitive: does the rating system already provide the signal needed, or are we inventing trust where reputation could earn it?
 
-### 2.7 Educate at every opportunity
+---
+
+### 2.7 The arbiter trust model
+
+Arbiters hold the tiebreaker share in a 2-of-3 SSS escrow. That is real power. The trust model must match the power — not paper over it.
+The two-layer defense:
+
+Community election (social layer). Each Chama community elects its own arbiter pool via kind:38104 availability events. Not Jetty's hardcoded list. Not federation guardians. The Chamacitos govern themselves — vote arbiters in, revoke them when they fail. Every arbiter in the pool has been socially vetted by the same community that trades under them. v1 ships a hardcoded bootstrap pool (src/arbiters/pool.ts) scoped per-community; v2 replaces the hardcoded list with live election events. The upgrade is additive — the random-assignment layer underneath never changes.
+Random assignment (protocol layer). Once elected, arbiters are assigned by the system from the community pool, not chosen by trade participants. Buyer and seller cannot route a specific trade toward a friendly arbiter. Combined with a large enough pool, this makes targeted collusion require both election fraud and lucky random draws — each harder than the last.
+
+Why federation guardians are the wrong arbiters:
+Federation guardians are already anonymous by design and already hold infrastructure power. Merging federation trust and arbiter trust into the same key concentrates risk invisibly. The Fedimint trust model and the Chama arbiter trust model must stay fully separate. Never merge them.
+
+Protocol enforcement (what the code already guarantees):
+
+- DUPLICATE_PARTICIPANT at LOCK: the same pubkey cannot fill two roles in one trade. Buyer ≠ seller ≠ arbiter is enforced cryptographically.
+- ARBITER_NOT_IN_POOL at JOIN and LOCK: when a community has an elected pool, only pool members can serve as arbiter. Strangers are rejected by the state machine.
+- excludePubkeys in getTrustedArbiterPool: the system strips buyer and seller pubkeys before selecting an arbiter, so they can never be self-assigned even if they appear in the pool.
+- Per-npub storage isolation (v0.1.78+): private chat images, recovery keys, and trade state are scoped per-npub. No cross-role contamination between a user's civilian key and any arbiter key they also hold.
+
+What protocol enforcement cannot prevent:
+Two coordinating people with separate keys can still collude. No cryptographic proof prevents two humans from agreeing off-chain. The community election layer is the only real answer to collusion — a vetted, publicly visible arbiter burns all accumulated reputation to steal one trade. At scale, the attack becomes economically irrational.
+Arbiter key separation at the community level:
+An npub elected as arbiter for a community (e.g. tz-tzs) should be blocked from opening buyer/seller trades in that same community while holding arbiter status. They need a separate civilian key to trade; their arbiter key stays clean. This is not yet enforced at the protocol level (v1 enforces uniqueness per-trade, not per-community-tenure) but is the design target for v2 arbiter role management.
+Fee model — duty over power:
+Arbiters are paid for judgment exercised, not for being assigned. The correct structure is:
+
+No fee (or a negligible standby fee) for peaceful trades where the arbiter is never called
+A meaningful, visible fee only when a dispute actually requires arbitration
+Public "arbiter was needed" history per npub so the community can see which arbiters are active vs. coasting
+
+Outcome-based pay (percentage of trade value on disputes) is how you incentivize manufacturing disputes. Flat dispute-triggered fees keep incentives honest. The exact amounts are a post-v1 empirical question — let real usage data from Nairobi set the price, not a conference deadline.
+The design principle, stated plainly:
+Community-elected trust + protocol-enforced key separation + random assignment from the trusted pool + full public accountability. Trust is earned from the ground up, one vote at a time.
+
+### 2.8 Educate at every opportunity
 
 Chama is not just a marketplace; it is a Bitcoin onboarding surface for users who have never thought about Fedimint, Nostr, ecash, Lightning, or non-custodial protocols in their lives. The product must teach without lecturing, explain without condescending, and build user mental models through small consistent affordances rather than walls of documentation. A landing page and FAQ section will exist, but **the in-product education is what actually moves understanding** — users read help docs only when something has gone wrong; they read tooltips and inline microcopy in the moment they need it.
 

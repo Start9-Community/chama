@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   type EscrowState,
+  type ChatImageAttachment,
   Role,
   Outcome,
   EscrowStatus,
@@ -32,6 +33,7 @@ import { ChatPanel } from "../panels/ChatPanel.js";
 export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, fundingInProgress,
   onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings,
+  onPrewarmFunding,
 }: {
   state: EscrowState; pubkey: string;
   /** User's home community slug — drives State A vs State B subtitle
@@ -56,7 +58,8 @@ export function TradeDetail({
   onClaim: () => Promise<void>;
   onJoin: (role: Role) => void;
   onLock: (savedHandleId?: string) => Promise<void>;
-  onSendChat: (message: string) => void;
+  onPrewarmFunding?: () => void | Promise<void>;
+  onSendChat: (message: string | { message: string; attachments?: ChatImageAttachment[] }) => void;
   onReleasePeriod?: (periodIndex: number) => void | Promise<void>;
   onOpenSettings?: () => void;
 }) {
@@ -87,6 +90,14 @@ export function TradeDetail({
   const myRole = state.participants.buyer === pubkey ? Role.BUYER
     : state.participants.seller === pubkey ? Role.SELLER
     : state.participants.arbiter === pubkey ? Role.ARBITER : null;
+  const participantPubkeys = [
+    state.participants.buyer,
+    state.participants.seller,
+    state.participants.arbiter,
+  ].filter((pk): pk is string => !!pk);
+  const hasDuplicateParticipant = participantPubkeys.length !== new Set(participantPubkeys).size;
+  const currentKeyAlreadyPresent =
+    state.initiator.pubkey === pubkey || participantPubkeys.includes(pubkey);
   // v0.6.5: deterministic preview of which arbiter LOCK will pick from
   // the community pool, used purely for the Trinity-Ring "auto-assigned"
   // dot on CREATED listings that don't yet have a JOINed arbiter. Same
@@ -95,7 +106,10 @@ export function TradeDetail({
   const previewArbiterPk = state.status === EscrowStatus.CREATED
     && !state.participants[Role.ARBITER]
     && state.communityArbiters.length > 0
-    ? (pickArbiterFromPool(state.communityArbiters, state.id) ?? null)
+    ? (pickArbiterFromPool(state.communityArbiters, state.id, [
+        state.participants[Role.BUYER],
+        state.participants[Role.SELLER],
+      ]) ?? null)
     : null;
   const votePrompt = decideVotePrompt(state, pubkey);
   const winner = getWinner(state);
@@ -106,6 +120,33 @@ export function TradeDetail({
     : (state.category === "p2p-trade" || state.category === "bill-pay") ? Role.SELLER
     : null;
   const canILock = !expectedLocker || myRole === expectedLocker;
+  const hasEligibleArbiter =
+    !!state.participants[Role.ARBITER] || !!previewArbiterPk;
+  const lockBlockedByNoArbiter =
+    state.status === EscrowStatus.CREATED &&
+    !!state.participants[Role.BUYER] &&
+    !hasEligibleArbiter;
+  const canJoinAsArbiter =
+    !state.participants.arbiter &&
+    !previewArbiterPk &&
+    (state.communityArbiters.length === 0 || state.communityArbiters.includes(pubkey));
+  const prewarmedEscrowRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!onPrewarmFunding) return;
+    if (state.status !== EscrowStatus.CREATED) return;
+    if (!canILock || bootProbeFailed || fundingInProgress) return;
+    if (prewarmedEscrowRef.current === state.id) return;
+    prewarmedEscrowRef.current = state.id;
+    void onPrewarmFunding();
+  }, [
+    state.id,
+    state.status,
+    canILock,
+    bootProbeFailed,
+    fundingInProgress,
+    onPrewarmFunding,
+  ]);
 
   const lockLabel = state.category === "marketplace" ? "Pay for Item"
     : state.category === "lending" ? "Fund Loan"
@@ -376,8 +417,41 @@ export function TradeDetail({
         </div>
       </div>
 
+      {hasDuplicateParticipant && (
+        <div style={{
+          background: T.redDim, border: `1px solid ${T.red}44`,
+          borderRadius: T.r, padding: 14, marginBottom: 16,
+          color: T.red, fontFamily: T.sans, fontSize: 12, lineHeight: 1.45,
+        }}>
+          This trade has the same key in more than one role. Do not fund it;
+          cancel it or create a fresh trade.
+        </div>
+      )}
+
+      {!hasDuplicateParticipant && lockBlockedByNoArbiter && (
+        <div style={{
+          background: T.amberDim, border: `1px solid ${T.amber}44`,
+          borderRadius: T.r, padding: 14, marginBottom: 16,
+          color: T.amber, fontFamily: T.sans, fontSize: 12, lineHeight: 1.45,
+        }}>
+          No eligible arbiter is available for this buyer and seller pair.
+          A participant cannot also be the arbiter, so this trade should not be funded.
+        </div>
+      )}
+
+      {!myRole && !hasDuplicateParticipant && state.status === EscrowStatus.CREATED && currentKeyAlreadyPresent && (
+        <div style={{
+          background: T.amberDim, border: `1px solid ${T.amber}44`,
+          borderRadius: T.r, padding: 14, marginBottom: 16,
+          color: T.amber, fontFamily: T.sans, fontSize: 12, lineHeight: 1.45,
+        }}>
+          This listing is already tied to your key. Use a different Chama key
+          only if you are deliberately testing the other side.
+        </div>
+      )}
+
       {/* JOIN buttons — show when user is not a participant and slots are open */}
-      {!myRole && state.status === EscrowStatus.CREATED && (
+      {!myRole && !hasDuplicateParticipant && !currentKeyAlreadyPresent && state.status === EscrowStatus.CREATED && (
         <div style={{
           background: T.card, border: `1px solid ${T.border}`,
           borderRadius: T.r, padding: 20, marginBottom: 16,
@@ -405,7 +479,7 @@ export function TradeDetail({
                 offering volunteer-join would contradict that and create
                 two competing arbiters. Communities without a recruited
                 pool still show this button. */}
-            {!state.participants.arbiter && !previewArbiterPk && (
+            {canJoinAsArbiter && (
               <button disabled={joining} onClick={async () => {
                 setJoining(true);
                 try { await onJoin(Role.ARBITER); } finally { setJoining(false); }
@@ -517,8 +591,12 @@ export function TradeDetail({
               unavailable" so the disabled state reads as intentional
               rather than broken. */}
           <button
-            disabled={locking || fundingInProgress || !state.participants.buyer || bootProbeFailed}
-            title={fundingInProgress ? "Another funding operation is in progress. Complete it first." : undefined}
+            disabled={locking || fundingInProgress || !state.participants.buyer || bootProbeFailed || lockBlockedByNoArbiter}
+            title={fundingInProgress
+              ? "Another funding operation is in progress. Complete it first."
+              : lockBlockedByNoArbiter
+                ? "No eligible arbiter is available for this trade."
+                : undefined}
             onClick={async () => {
               setLocking(true);
               try {
@@ -529,17 +607,21 @@ export function TradeDetail({
             }}
             style={{
               width: "100%", padding: "16px", borderRadius: T.rs,
-              background: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed
+              background: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed || lockBlockedByNoArbiter
                 ? T.surface
                 : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
               border: "none",
-              color: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed ? T.muted : T.bg,
+              color: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed || lockBlockedByNoArbiter ? T.muted : T.bg,
               fontFamily: T.mono, fontSize: 14, fontWeight: 800,
-              cursor: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed ? "default" : "pointer",
+              cursor: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed || lockBlockedByNoArbiter ? "default" : "pointer",
               letterSpacing: 0.5, transition: "all 0.2s",
             }}
           >
-            {locking ? "Funding…" : fundingInProgress ? lockLabel + " unavailable" : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
+            {locking
+              ? "Funding…"
+              : fundingInProgress || lockBlockedByNoArbiter
+                ? lockLabel + " unavailable"
+                : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
           </button>
           {fundingInProgress && (
             <div style={{
@@ -549,7 +631,15 @@ export function TradeDetail({
               Another funding operation is in progress. Complete it first.
             </div>
           )}
-          {bootProbeFailed && !fundingInProgress && (
+          {lockBlockedByNoArbiter && !fundingInProgress && (
+            <div style={{
+              textAlign: "center", marginTop: 8,
+              fontSize: 10, color: T.amber, fontFamily: T.mono,
+            }}>
+              No eligible arbiter for this trade
+            </div>
+          )}
+          {bootProbeFailed && !fundingInProgress && !lockBlockedByNoArbiter && (
             <div style={{
               textAlign: "center", marginTop: 8,
               fontSize: 10, color: T.amber, fontFamily: T.mono,

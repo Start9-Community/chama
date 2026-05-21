@@ -53,6 +53,11 @@
 // side-effect of wallet reset.
 
 import type { FedimintClient } from "./fedimint-client.js";
+import {
+  getScopedStorageItem,
+  removeScopedStorageItem,
+  setScopedStorageItem,
+} from "../storage/user-scope.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -101,8 +106,7 @@ type Stash = Record<string, PendingRedemption>;
 
 function loadStash(): Stash {
   try {
-    if (typeof localStorage === "undefined") return {};
-    const raw = localStorage.getItem(PENDING_REDEMPTIONS_KEY);
+    const raw = getScopedStorageItem(PENDING_REDEMPTIONS_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return {};
@@ -115,8 +119,7 @@ function loadStash(): Stash {
 
 function saveStash(stash: Stash): void {
   try {
-    if (typeof localStorage === "undefined") return;
-    localStorage.setItem(PENDING_REDEMPTIONS_KEY, JSON.stringify(stash));
+    setScopedStorageItem(PENDING_REDEMPTIONS_KEY, JSON.stringify(stash));
   } catch (e) {
     // QuotaExceededError is the main concern here. We surface it loudly
     // because failing to persist oobNotes defeats the whole point of
@@ -311,8 +314,7 @@ export async function drainPendingRedemptions(
  */
 export function clearAllPendingRedemptions(): void {
   try {
-    if (typeof localStorage === "undefined") return;
-    localStorage.removeItem(PENDING_REDEMPTIONS_KEY);
+    removeScopedStorageItem(PENDING_REDEMPTIONS_KEY);
   } catch (e) {
     console.warn("[chama] pending-redemptions: clearAll failed:", e);
   }

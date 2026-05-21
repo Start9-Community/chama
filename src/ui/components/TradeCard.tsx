@@ -96,7 +96,10 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
   const previewArbiterPk = state.status === EscrowStatus.CREATED
     && !state.participants[Role.ARBITER]
     && state.communityArbiters.length > 0
-    ? (pickArbiterFromPool(state.communityArbiters, state.id) ?? null)
+    ? (pickArbiterFromPool(state.communityArbiters, state.id, [
+        state.participants[Role.BUYER],
+        state.participants[Role.SELLER],
+      ]) ?? null)
     : null;
 
   const isAmber = variant === "non-matching";

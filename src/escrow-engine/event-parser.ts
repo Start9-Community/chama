@@ -28,7 +28,9 @@ import {
   type ClaimPayload,
   type CompletePayload,
   type CancelPayload,
+  type ChatImageAttachment,
   type ChatPayload,
+  type HandleEnvelope,
   type SubscribePayload,
   type PeriodReleasePayload,
   type ValidationError,
@@ -232,11 +234,39 @@ function validateCancelPayload(data: unknown): data is CancelPayload {
   );
 }
 
+function validateEnvelope(data: unknown): data is HandleEnvelope {
+  const d = data as Record<string, unknown>;
+  const encryptedFor = d?.encryptedFor as Record<string, unknown> | undefined;
+  return !!encryptedFor &&
+    typeof encryptedFor === "object" &&
+    !Array.isArray(encryptedFor) &&
+    Object.values(encryptedFor).every(v => typeof v === "string");
+}
+
+function validateChatAttachment(data: unknown): data is ChatImageAttachment {
+  const d = data as Record<string, unknown>;
+  return (
+    d?.kind === "image" &&
+    typeof d.id === "string" &&
+    typeof d.mimeType === "string" &&
+    d.mimeType.startsWith("image/") &&
+    typeof d.dataUrl === "string" &&
+    d.dataUrl.startsWith("data:image/") &&
+    (d.name === undefined || typeof d.name === "string") &&
+    (d.width === undefined || typeof d.width === "number") &&
+    (d.height === undefined || typeof d.height === "number") &&
+    (d.sizeBytes === undefined || typeof d.sizeBytes === "number")
+  );
+}
+
 function validateChatPayload(data: unknown): data is ChatPayload {
   const d = data as Record<string, unknown>;
   return (
     d.type === "escrow:chat" &&
     typeof d.message === "string" &&
+    (d.attachments === undefined ||
+      (Array.isArray(d.attachments) && d.attachments.every(validateChatAttachment))) &&
+    (d.bodyEnvelope === undefined || validateEnvelope(d.bodyEnvelope)) &&
     typeof d.senderRole === "string" && Object.values(Role).includes(d.senderRole as Role) &&
     typeof d.sentAt === "number"
   );

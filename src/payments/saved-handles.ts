@@ -10,7 +10,7 @@
 //
 // This module owns:
 //   - Persistence of counterparty payment handles in localStorage
-//     (`chama_saved_handles`)
+//     (`chama_saved_handles:<pubkey>` once connected)
 //   - CRUD over saved handles
 //   - The visibility-setter guard that refuses "public" for rails whose
 //     allowPublicHandle === false. The Settings UI is the first line
@@ -18,7 +18,7 @@
 //     second line — defense in depth, in case anything slips past UI.
 //   - The masking utility used by render paths in Browse / profile / list
 //
-// Storage format (localStorage["chama_saved_handles"] is a JSON array):
+// Storage format (localStorage["chama_saved_handles[:pubkey]"] is a JSON array):
 //   [{ id, rail, handle, visibility, createdAt }, ...]
 //
 // IDs are local to this device — they're how the LOCK payload's
@@ -27,6 +27,10 @@
 // alongside is what receivers use.
 
 import { railAllowsPublicHandle } from "./rail-registry.js";
+import {
+  getScopedStorageItem,
+  setScopedStorageItem,
+} from "../storage/user-scope.js";
 
 export const SAVED_HANDLES_STORAGE_KEY = "chama_saved_handles";
 
@@ -71,8 +75,7 @@ export interface SavedHandle {
 
 function readStoredAll(): SavedHandle[] {
   try {
-    if (typeof localStorage === "undefined") return [];
-    const raw = localStorage.getItem(SAVED_HANDLES_STORAGE_KEY);
+    const raw = getScopedStorageItem(SAVED_HANDLES_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -90,11 +93,10 @@ function readAll(): SavedHandle[] {
 
 function writeAll(handles: SavedHandle[]): void {
   try {
-    if (typeof localStorage === "undefined") return;
     // Preserve legacy Lightning rows until payout-destinations.ts has a
     // chance to migrate them into `chama_payout_destinations`.
     const legacyLightning = readStoredAll().filter(h => h.rail === LIGHTNING_RAIL);
-    localStorage.setItem(
+    setScopedStorageItem(
       SAVED_HANDLES_STORAGE_KEY,
       JSON.stringify([...handles.filter(h => h.rail !== LIGHTNING_RAIL), ...legacyLightning]),
     );

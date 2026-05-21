@@ -2,6 +2,12 @@
 // Chama — ChapSmart TZS payout adapter
 // ══════════════════════════════════════════════════════════════════════════
 
+import {
+  getScopedStorageItem,
+  removeScopedStorageItem,
+  setScopedStorageItem,
+} from "../storage/user-scope.js";
+
 export const CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY = "chama_chapsmart_payout_profile";
 
 export interface ChapsmartPayoutProfile {
@@ -50,8 +56,7 @@ function isProfile(x: any): x is ChapsmartPayoutProfile {
 
 export function getChapsmartPayoutProfile(): ChapsmartPayoutProfile | null {
   try {
-    if (typeof localStorage === "undefined") return null;
-    const raw = localStorage.getItem(CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY);
+    const raw = getScopedStorageItem(CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     return isProfile(parsed) ? parsed : null;
@@ -76,9 +81,7 @@ export function saveChapsmartPayoutProfile(input: {
     throw new Error("Enter the recipient's first and last name");
   }
   try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY, JSON.stringify(profile));
-    }
+    setScopedStorageItem(CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY, JSON.stringify(profile));
   } catch {
     // localStorage is best-effort; return the profile so the in-flight
     // payout can still continue.
@@ -88,9 +91,7 @@ export function saveChapsmartPayoutProfile(input: {
 
 export function clearChapsmartPayoutProfile(): void {
   try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.removeItem(CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY);
-    }
+    removeScopedStorageItem(CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY);
   } catch {
     // no-op
   }

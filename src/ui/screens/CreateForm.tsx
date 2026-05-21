@@ -45,6 +45,11 @@ import { T, inputStyle } from "../theme.js";
 import { MIN_REAL_ATOMIC_FUNDING_SATS } from "../../payments/funding-limits.js";
 import { isTestnetMode } from "../../fedimint/index.js";
 import { isSimModeOn } from "../../sim/simMode.js";
+import {
+  getScopedStorageItem,
+  removeScopedStorageItem,
+  setScopedStorageItem,
+} from "../../storage/user-scope.js";
 
 type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
@@ -78,8 +83,7 @@ const FIRST_PUBLISH_KEY_PREFIX = "chama_first_publish_done_";
 
 function readDraft(vertical: Vertical): SavedDraft | null {
   try {
-    if (typeof localStorage === "undefined") return null;
-    const raw = localStorage.getItem(DRAFT_KEY_PREFIX + vertical);
+    const raw = getScopedStorageItem(DRAFT_KEY_PREFIX + vertical);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed?.vertical || !parsed?.formState) return null;
@@ -89,16 +93,13 @@ function readDraft(vertical: Vertical): SavedDraft | null {
 
 function writeDraft(draft: SavedDraft): void {
   try {
-    if (typeof localStorage === "undefined") return;
-    localStorage.setItem(DRAFT_KEY_PREFIX + draft.vertical, JSON.stringify(draft));
+    setScopedStorageItem(DRAFT_KEY_PREFIX + draft.vertical, JSON.stringify(draft));
   } catch { /* no-op */ }
 }
 
 function clearDraft(vertical: Vertical): void {
   try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.removeItem(DRAFT_KEY_PREFIX + vertical);
-    }
+    removeScopedStorageItem(DRAFT_KEY_PREFIX + vertical);
   } catch { /* no-op */ }
 }
 

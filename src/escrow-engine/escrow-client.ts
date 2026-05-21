@@ -39,6 +39,8 @@ import {
   type CompletePayload,
   type CancelPayload,
   type PeriodReleasePayload,
+  type ChatBody,
+  type ChatImageAttachment,
   type ChatPayload,
   type EscrowPayload,
 } from "./types.js";
@@ -409,6 +411,28 @@ export class EscrowClient {
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
 
     const pubkey = await this.getPubkey();
+    const existingRole = this.getMyRole(state, pubkey);
+    if (existingRole) {
+      const err: any = new Error(
+        existingRole === role
+          ? `You are already the ${existingRole} on this trade.`
+          : `You are already the ${existingRole} on this trade, so you can't join as ${role}.`
+      );
+      err.code = "ALREADY_PARTICIPANT";
+      err.role = existingRole;
+      err.requestedRole = role;
+      throw err;
+    }
+    if (state.initiator.pubkey === pubkey) {
+      const err: any = new Error(
+        `You created this trade as ${state.initiator.role}, so you can't join it as ${role}.`
+      );
+      err.code = "ALREADY_PARTICIPANT";
+      err.role = state.initiator.role;
+      err.requestedRole = role;
+      throw err;
+    }
+
     const now = Math.floor(Date.now() / 1000);
     const lastEventId = state.eventChain[state.eventChain.length - 1]?.raw.id;
 
@@ -730,7 +754,10 @@ export class EscrowClient {
 
   // ── Send a chat message ─────────────────────────────────────────────────
 
-  async sendChat(escrowId: string, message: string): Promise<void> {
+  async sendChat(
+    escrowId: string,
+    input: string | { message: string; attachments?: ChatImageAttachment[] },
+  ): Promise<void> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
 
@@ -739,15 +766,42 @@ export class EscrowClient {
     if (!role) throw new Error("You are not a participant in this escrow");
 
     const now = Math.floor(Date.now() / 1000);
+    const message = (typeof input === "string" ? input : input.message).trim();
+    const attachments = typeof input === "string"
+      ? undefined
+      : input.attachments?.filter(a =>
+          a.kind === "image" &&
+          typeof a.id === "string" &&
+          a.mimeType.startsWith("image/") &&
+          a.dataUrl.startsWith("data:image/"),
+        );
+    if (!message && (!attachments || attachments.length === 0)) {
+      throw new Error("Chat message cannot be empty");
+    }
+
+    const chatBody: ChatBody = {
+      message,
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    };
+    const recipients = [
+      state.participants.buyer,
+      state.participants.seller,
+      state.participants.arbiter,
+    ].filter((pk): pk is string => typeof pk === "string" && pk.length > 0);
+    const bodyEnvelope = await createEnvelope(
+      JSON.stringify(chatBody),
+      recipients,
+      (pt, pk) => this.signer.nip44Encrypt(pt, pk),
+    );
 
     const payload: ChatPayload = {
       type: "escrow:chat",
-      message,
+      message: "",
+      bodyEnvelope,
       senderRole: role,
       sentAt: now,
     };
 
-    // Plaintext for testing. TODO: NIP-44 encrypt for production
     const content = JSON.stringify(payload);
 
     const unsigned: UnsignedEvent = {
@@ -764,7 +818,12 @@ export class EscrowClient {
     await this.relayManager.publish(signed);
 
     // Apply chat locally for instant display (don't wait for relay echo)
-    const chatParsed = parseEscrowEvent(signed, JSON.stringify(payload), true);
+    const localPayload: ChatPayload = {
+      ...payload,
+      message: chatBody.message,
+      attachments: chatBody.attachments,
+    };
+    const chatParsed = parseEscrowEvent(signed, JSON.stringify(localPayload), true);
     if (chatParsed.ok) {
       const currentChatState = this.states.get(escrowId);
       if (currentChatState) {
@@ -939,18 +998,17 @@ export class EscrowClient {
       parsed.map(e => `kind:${e.kind}`).join(', '));
     if (parsed.length === 0) return null;
 
-    // PR 4: resolve LOCK handle envelopes before replay. Each LOCK with
-    // a handleEnvelope gets the viewer's entry decrypted into top-level
-    // handle/handleId/rail fields so handleLock applies as before.
-    // Sequential await so a slow signer doesn't fan out into N concurrent
-    // NIP-44 calls per replay; in practice there's at most one LOCK per
-    // chain anyway.
-    for (let i = 0; i < parsed.length; i++) {
-      parsed[i] = await this.resolveLockEnvelope(parsed[i]);
+    // Resolve participant-only envelopes before replay: LOCK handle
+    // reveal plus CHAT body/receipt attachments. Sequential await keeps
+    // a slow signer from fanning out into many concurrent NIP-44 calls.
+    const readableParsed: ParsedEscrowEvent[] = [];
+    for (const event of parsed) {
+      const resolved = await this.resolveParticipantEnvelope(event);
+      if (resolved) readableParsed.push(resolved);
     }
 
     // Sort by dependency chain and replay
-    const sorted = sortEventChain(parsed);
+    const sorted = sortEventChain(readableParsed);
     console.debug(`[escrow] loadEscrow ${escrowId}: sorted chain`, 
       sorted.map(e => `kind:${e.kind}(${e.raw.id.slice(0,6)})`).join(' → '));
     const result = replayEventChain(sorted);
@@ -1060,7 +1118,8 @@ export class EscrowClient {
     // state machine reads handle/handleId/rail at the top level of the
     // payload (whether they came from a legacy PR 3 wire or were
     // synthesized from a PR 4 envelope decrypt). This is the seam.
-    const parsed = await this.resolveLockEnvelope(parseResult.event);
+    const parsed = await this.resolveParticipantEnvelope(parseResult.event);
+    if (!parsed) return;
 
     // Handle chat separately
     if (parsed.kind === EscrowEventKind.CHAT) {
@@ -1219,6 +1278,11 @@ export class EscrowClient {
     }
   }
 
+  private async resolveParticipantEnvelope(parsed: ParsedEscrowEvent): Promise<ParsedEscrowEvent | null> {
+    const withLockEnvelope = await this.resolveLockEnvelope(parsed);
+    return this.resolveChatEnvelope(withLockEnvelope);
+  }
+
   /** PR 4: resolve a LOCK event's handleEnvelope (if present) into
    *  top-level handle/handleId/rail fields on the parsed payload. The
    *  state machine reads from those top-level fields; this seam lets
@@ -1286,6 +1350,60 @@ export class EscrowClient {
         handle: handleData.handle,
         rail: handleData.rail,
         ...(networks && networks.length > 0 ? { handleNetworks: networks } : {}),
+      },
+    };
+  }
+
+  /** Resolve encrypted CHAT bodyEnvelope into cleartext message and
+   *  attachments for this viewer. Legacy plaintext CHAT events (no
+   *  envelope) pass through unchanged. If an enveloped chat cannot be
+   *  decrypted by this signer, return null so replay/live handling skips
+   *  it rather than displaying a blank receipt shell. */
+  private async resolveChatEnvelope(parsed: ParsedEscrowEvent): Promise<ParsedEscrowEvent | null> {
+    if (parsed.kind !== EscrowEventKind.CHAT) return parsed;
+    const chatPayload = parsed.payload as ChatPayload;
+    if (!chatPayload.bodyEnvelope) return parsed;
+    if (chatPayload.message || (chatPayload.attachments?.length ?? 0) > 0) return parsed;
+
+    let myPubkey: string;
+    try {
+      myPubkey = await this.getPubkey();
+    } catch {
+      return null;
+    }
+
+    const cleartext = await decryptFromEnvelope(
+      chatPayload.bodyEnvelope,
+      myPubkey,
+      parsed.pubkey,
+      (ct, sender) => this.signer.nip44Decrypt(ct, sender),
+    );
+    if (cleartext === null) return null;
+
+    let body: ChatBody;
+    try {
+      body = JSON.parse(cleartext);
+    } catch {
+      return null;
+    }
+    if (typeof body.message !== "string") return null;
+    const attachments = Array.isArray(body.attachments)
+      ? body.attachments.filter((a): a is ChatImageAttachment =>
+          a?.kind === "image" &&
+          typeof a.id === "string" &&
+          typeof a.mimeType === "string" &&
+          a.mimeType.startsWith("image/") &&
+          typeof a.dataUrl === "string" &&
+          a.dataUrl.startsWith("data:image/"),
+        )
+      : undefined;
+
+    return {
+      ...parsed,
+      payload: {
+        ...chatPayload,
+        message: body.message,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       },
     };
   }

@@ -3,8 +3,11 @@
 // ══════════════════════════════════════════════════════════════════════════
 //
 // The user's chosen community persists across sessions in localStorage
-// under the key `chama_community`. v2 will migrate this to a NIP-78
-// application-data event so the choice follows the npub across devices.
+// under `chama_community:<pubkey>` once a signer is connected. First-run
+// onboarding may write the legacy `chama_community` key before the pubkey is
+// known; the scoped storage helper claims that value after connect. v2 will
+// migrate this to a NIP-78 application-data event so the choice follows the
+// npub across devices.
 //
 // The slug stored here flows into:
 //   - createEscrow: tags listings with the user's community
@@ -12,6 +15,11 @@
 //   - Browse filter: defaults to listings that match this community
 
 import { DEFAULT_COMMUNITY_SLUG, getCommunityBySlug } from "./registry.js";
+import {
+  getScopedStorageItem,
+  removeScopedStorageItem,
+  setScopedStorageItem,
+} from "../storage/user-scope.js";
 
 export const COMMUNITY_STORAGE_KEY = "chama_community";
 
@@ -21,9 +29,7 @@ export const COMMUNITY_STORAGE_KEY = "chama_community";
  *  falls back to default rather than silently flowing into new listings. */
 export function getUserCommunitySlug(): string {
   try {
-    const raw = typeof localStorage !== "undefined"
-      ? localStorage.getItem(COMMUNITY_STORAGE_KEY)
-      : null;
+    const raw = getScopedStorageItem(COMMUNITY_STORAGE_KEY);
     if (!raw) return DEFAULT_COMMUNITY_SLUG;
     return getCommunityBySlug(raw) ? raw : DEFAULT_COMMUNITY_SLUG;
   } catch {
@@ -40,9 +46,7 @@ export function getUserCommunitySlug(): string {
  *  which guarantees a non-null slug. */
 export function getUserCommunitySlugRaw(): string | null {
   try {
-    const raw = typeof localStorage !== "undefined"
-      ? localStorage.getItem(COMMUNITY_STORAGE_KEY)
-      : null;
+    const raw = getScopedStorageItem(COMMUNITY_STORAGE_KEY);
     if (!raw) return null;
     return getCommunityBySlug(raw) ? raw : null;
   } catch {
@@ -55,8 +59,8 @@ export function getUserCommunitySlugRaw(): string | null {
 export function setUserCommunitySlug(slug: string): void {
   try {
     if (typeof localStorage === "undefined") return;
-    if (!slug) localStorage.removeItem(COMMUNITY_STORAGE_KEY);
-    else localStorage.setItem(COMMUNITY_STORAGE_KEY, slug);
+    if (!slug) removeScopedStorageItem(COMMUNITY_STORAGE_KEY);
+    else setScopedStorageItem(COMMUNITY_STORAGE_KEY, slug);
   } catch {
     // localStorage unavailable (private mode, etc.) — silently no-op.
   }

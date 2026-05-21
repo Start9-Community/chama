@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { T } from "../theme.js";
 import { validateRecoveryKeyInput } from "../../escrow-engine/nsec-signer.js";
@@ -31,6 +31,7 @@ export function NsecLogin({
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [inputError, setInputError] = useState<string | null>(null);
+  const autoSubmittedKeyRef = useRef<string | null>(null);
 
   const handleGenerate = async () => {
     setMode("create");
@@ -66,6 +67,39 @@ export function NsecLogin({
     setInputError(null);
     onSubmit(nsecInput.trim(), remember);
   };
+
+  const generatedActive = generatedNsec !== null && nsecInput.trim() === generatedNsec;
+  const submitDisabled = !nsecInput.trim() || (generatedActive && !backupConfirmed);
+  const showPasteInput = !generatedActive || mode === "paste";
+
+  useEffect(() => {
+    const value = nsecInput.trim();
+    if (!showPasteInput || !value || generatedActive) return;
+    if (generatedNsec && value === generatedNsec && !backupConfirmed) return;
+    if (autoSubmittedKeyRef.current === value) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      const validated = await validateRecoveryKeyInput(value);
+      if (cancelled || !validated.ok) return;
+      autoSubmittedKeyRef.current = value;
+      setInputError(null);
+      onSubmit(value, remember);
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    nsecInput,
+    showPasteInput,
+    generatedActive,
+    generatedNsec,
+    backupConfirmed,
+    remember,
+    onSubmit,
+  ]);
 
   if (!showNsec) {
     return (
@@ -131,10 +165,6 @@ export function NsecLogin({
       </div>
     );
   }
-
-  const generatedActive = generatedNsec !== null && nsecInput.trim() === generatedNsec;
-  const submitDisabled = !nsecInput.trim() || (generatedActive && !backupConfirmed);
-  const showPasteInput = !generatedActive || mode === "paste";
 
   return (
     <div style={{ marginTop: isNative ? 0 : 8, width: "100%", maxWidth: 360 }}>

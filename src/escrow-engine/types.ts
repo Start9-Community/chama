@@ -389,9 +389,35 @@ export interface CancelPayload {
 }
 
 /** Content of a CHAT event */
+export interface ChatImageAttachment {
+  id: string;
+  kind: "image";
+  mimeType: string;
+  dataUrl: string;
+  name?: string;
+  width?: number;
+  height?: number;
+  sizeBytes?: number;
+}
+
+export interface ChatBody {
+  message: string;
+  attachments?: ChatImageAttachment[];
+}
+
 export interface ChatPayload {
   type: "escrow:chat";
+  /** Cleartext message after envelope resolution. On new wire events,
+   *  this is intentionally empty and the readable body lives inside
+   *  bodyEnvelope. Legacy plaintext chat keeps using this field. */
   message: string;
+  /** Cleartext attachments after envelope resolution. New wire events
+   *  carry these inside bodyEnvelope so receipts remain participant-only. */
+  attachments?: ChatImageAttachment[];
+  /** v0.7.x: participant-only encrypted chat body. The sender encrypts
+   *  JSON ChatBody to buyer, seller, and arbiter using the same
+   *  per-recipient envelope pattern as LOCK handle reveal. */
+  bodyEnvelope?: HandleEnvelope;
   senderRole: Role;
   sentAt: number;
 }

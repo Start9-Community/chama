@@ -124,12 +124,23 @@ export class EscrowFedimintBridge {
         "pubkey) before LOCK can fire."
       );
     }
+    const sellerPk = state.participants[Role.SELLER];
+    if (!sellerPk) {
+      throw new Error("Cannot lock — no seller pubkey known for this trade.");
+    }
     const arbiterPubkey = state.participants[Role.ARBITER]
-      ?? pickArbiterFromPool(state.communityArbiters, state.id);
+      ?? pickArbiterFromPool(state.communityArbiters, state.id, [buyerPubkey, sellerPk]);
     if (!arbiterPubkey) {
       throw new Error(
         "Cannot lock — no arbiter available. The trade has no JOINed arbiter " +
-        "and the communityArbiters pool is empty."
+        "and the communityArbiters pool has no eligible backup after excluding " +
+        "the buyer and seller."
+      );
+    }
+    if (arbiterPubkey === buyerPubkey || arbiterPubkey === sellerPk) {
+      throw new Error(
+        "Cannot lock — buyer, seller, and arbiter must be three different keys. " +
+        "(No sats were spent.)"
       );
     }
 
@@ -144,7 +155,6 @@ export class EscrowFedimintBridge {
     );
 
     // Dual-encrypt each share to ALL 3 participants
-    const sellerPk = state.participants[Role.SELLER]!;
     const allPks = [buyerPubkey, sellerPk, arbiterPubkey];
 
     const shares: { shareIndex: number; encryptedFor: Record<string, string> }[] = [];

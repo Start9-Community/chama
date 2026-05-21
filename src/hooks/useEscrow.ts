@@ -72,6 +72,7 @@ import {
   type EscrowState,
   type ParsedEscrowEvent,
   type ChatPayload,
+  type ChatImageAttachment,
   EscrowStatus,
   Role,
   Outcome,
@@ -105,6 +106,7 @@ import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
   minimumAtomicFundingMessage,
 } from "../payments/funding-limits.js";
+import { setLocalStorageUserScope } from "../storage/user-scope.js";
 
 function isExpiredUnfundedEscrow(escrowState: EscrowState, nowSec = Math.floor(Date.now() / 1000)): boolean {
   return (
@@ -310,7 +312,10 @@ export interface UseEscrowActions {
   /** Release a subscription period */
   releasePeriod: (escrowId: string, periodIndex: number) => Promise<EscrowState>;
   /** Send a chat message */
-  sendChat: (escrowId: string, message: string) => Promise<void>;
+  sendChat: (
+    escrowId: string,
+    message: string | { message: string; attachments?: ChatImageAttachment[] },
+  ) => Promise<void>;
   /** Cancel a trade (initiator only, pre-lock) */
   cancel: (escrowId: string, reason?: string) => Promise<EscrowState>;
   /** Load an escrow from relays by ID */
@@ -391,6 +396,8 @@ export interface UseEscrowActions {
    * same error instantly". Never throws.
    */
   probeFederation: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Quietly warm the Fedimint/WASM path before a likely funding action. */
+  prewarmFunding: () => Promise<void>;
   /** Refresh the current balance from the wallet */
   refreshBalance: () => Promise<void>;
   /**
@@ -592,6 +599,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
       const pubkey = await signer.getPublicKey();
       signerRef.current = signer;
+      setLocalStorageUserScope(pubkey);
 
       const callbacks: EscrowClientCallbacks = {
         onStateUpdate: (id, s) => updateEscrow(id, s),
@@ -811,6 +819,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     signerRef.current = null;
     fundingInProgressRef.current = null;
     claimPayoutInProgressRef.current = false;
+    setLocalStorageUserScope(null);
     clearSeedCache();
     setState({
       connected: false,
@@ -862,6 +871,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       fedimint?.cleanup().catch(() => {});
       if (fedimintRef.current === fedimint) fedimintRef.current = null;
       if (bridgeRef.current) bridgeRef.current = null;
+      setLocalStorageUserScope(null);
     };
   }, []);
 
@@ -945,10 +955,17 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // Swallow known duplicate/stale errors — they fire when a user reloads
       // a trade they already joined and the state has advanced past OPEN.
       // Engine strings: "Cannot JOIN in state <x>" and
-      // "Pubkey is already a participant".
+      // same-role duplicate JOIN echoes. Opposite-role self-joins must
+      // surface as real errors; otherwise a seller can tap "Join as Buyer"
+      // and see a false-success path on their own listing.
       const msg = e?.message || "";
-      if (msg.includes("Cannot JOIN") || msg.includes("already a participant") ||
-          msg.includes("TERMINAL")) {
+      const latest = client.getState(escrowId);
+      const currentPubkey = stateRef.current?.pubkey ?? null;
+      const alreadyInRequestedRole =
+        !!currentPubkey && latest?.participants?.[role] === currentPubkey;
+      if (msg.includes("Cannot JOIN") || msg.includes("TERMINAL") ||
+          ((e?.code === "ALREADY_PARTICIPANT" || msg.includes("already a participant")) &&
+            alreadyInRequestedRole)) {
         console.debug("[chama] Join suppressed:", msg);
         saveEscrowId(escrowId, stateRef.current?.pubkey ?? null);
         return client.getState(escrowId)!;
@@ -1233,7 +1250,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
   }, []);
 
-  const sendChat = useCallback(async (escrowId: string, message: string) => {
+  const sendChat = useCallback(async (
+    escrowId: string,
+    message: string | { message: string; attachments?: ChatImageAttachment[] },
+  ) => {
     const client = requireClient();
     await client.sendChat(escrowId, message);
     vibrate(15); // Subtle tap
@@ -2128,6 +2148,22 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           bootProbeState: "failed",
         });
         return { ok: false as const, error: message };
+      }
+    },
+    prewarmFunding: async () => {
+      const fedimint = fedimintRef.current;
+      if (!fedimint || !fedimint.isInitialized() || !fedimint.isJoined()) return;
+      try {
+        await fedimint.probeReachable();
+        const at = Date.now();
+        healthRef.current = { ok: true, at };
+        updateFedimint({
+          lastHealthOk: true,
+          lastHealthAt: at,
+          bootProbeState: "ok",
+        });
+      } catch (e) {
+        console.debug("[chama] prewarmFunding skipped:", e);
       }
     },
     refreshBalance,

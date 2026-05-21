@@ -6,10 +6,14 @@
 // recovery. They are NOT counterparty payment handles and must never flow
 // into listing/payment-handle reveal surfaces.
 //
-// Storage format (localStorage["chama_payout_destinations"] is JSON):
+// Storage format (localStorage["chama_payout_destinations[:pubkey]"] is JSON):
 //   [{ id, address, createdAt, lastUsedAt }, ...]
 
 import { SAVED_HANDLES_STORAGE_KEY, LIGHTNING_RAIL, type SavedHandle } from "./saved-handles.js";
+import {
+  getScopedStorageItem,
+  setScopedStorageItem,
+} from "../storage/user-scope.js";
 
 export const PAYOUT_DESTINATIONS_STORAGE_KEY = "chama_payout_destinations";
 
@@ -48,8 +52,7 @@ function generateId(): string {
 
 function readRaw(): PayoutDestination[] {
   try {
-    if (typeof localStorage === "undefined") return [];
-    const raw = localStorage.getItem(PAYOUT_DESTINATIONS_STORAGE_KEY);
+    const raw = getScopedStorageItem(PAYOUT_DESTINATIONS_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -61,8 +64,7 @@ function readRaw(): PayoutDestination[] {
 
 function writeRaw(destinations: PayoutDestination[]): void {
   try {
-    if (typeof localStorage === "undefined") return;
-    localStorage.setItem(PAYOUT_DESTINATIONS_STORAGE_KEY, JSON.stringify(destinations));
+    setScopedStorageItem(PAYOUT_DESTINATIONS_STORAGE_KEY, JSON.stringify(destinations));
   } catch {
     // localStorage unavailable / quota exceeded — cosmetic persistence
     // failure. The payout itself has already happened.
@@ -78,8 +80,7 @@ function normalizeAddress(address: string): string {
  *  trade-time handle reveal cannot accidentally offer a payout address. */
 export function migrateLegacyLightningHandles(): number {
   try {
-    if (typeof localStorage === "undefined") return 0;
-    const raw = localStorage.getItem(SAVED_HANDLES_STORAGE_KEY);
+    const raw = getScopedStorageItem(SAVED_HANDLES_STORAGE_KEY);
     if (!raw) return 0;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return 0;
@@ -109,7 +110,7 @@ export function migrateLegacyLightningHandles(): number {
 
     if (migrated.length === 0 && keptHandles.length === parsed.length) return 0;
     writeRaw([...migrated, ...existing]);
-    localStorage.setItem(SAVED_HANDLES_STORAGE_KEY, JSON.stringify(keptHandles));
+    setScopedStorageItem(SAVED_HANDLES_STORAGE_KEY, JSON.stringify(keptHandles));
     return migrated.length;
   } catch {
     return 0;

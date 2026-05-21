@@ -27,6 +27,11 @@ import {
   BLF_FEDERATION_INVITE,
   BLF_FEDERATION_ID,
 } from "./federation-invites.js";
+import {
+  getScopedStorageItem,
+  removeScopedStorageItem,
+  setScopedStorageItem,
+} from "../storage/user-scope.js";
 
 export {
   BP_FEDERATION_NAME,
@@ -52,11 +57,9 @@ export const CUSTOM_INVITE_STORAGE_KEY = "chama_federation_invite";
  */
 export function getFederationInvite(): string {
   try {
-    if (typeof localStorage !== "undefined") {
-      const custom = localStorage.getItem(CUSTOM_INVITE_STORAGE_KEY);
-      if (custom && custom.trim().startsWith("fed1")) {
-        return custom.trim();
-      }
+    const custom = getScopedStorageItem(CUSTOM_INVITE_STORAGE_KEY);
+    if (custom && custom.trim().startsWith("fed1")) {
+      return custom.trim();
     }
   } catch {
     // localStorage unavailable (SSR, etc.) — fall through to default
@@ -70,16 +73,15 @@ export function getFederationInvite(): string {
  */
 export function setCustomFederationInvite(inviteCode: string): void {
   try {
-    if (typeof localStorage === "undefined") return;
     const trimmed = inviteCode.trim();
     if (!trimmed) {
-      localStorage.removeItem(CUSTOM_INVITE_STORAGE_KEY);
+      removeScopedStorageItem(CUSTOM_INVITE_STORAGE_KEY);
       return;
     }
     if (!trimmed.startsWith("fed1")) {
       throw new Error("Invite code must start with 'fed1'");
     }
-    localStorage.setItem(CUSTOM_INVITE_STORAGE_KEY, trimmed);
+    setScopedStorageItem(CUSTOM_INVITE_STORAGE_KEY, trimmed);
   } catch (e) {
     throw e instanceof Error ? e : new Error(String(e));
   }
@@ -88,8 +90,7 @@ export function setCustomFederationInvite(inviteCode: string): void {
 /** Whether the user is currently overriding the default federation */
 export function hasCustomFederation(): boolean {
   try {
-    if (typeof localStorage === "undefined") return false;
-    return !!localStorage.getItem(CUSTOM_INVITE_STORAGE_KEY);
+    return !!getScopedStorageItem(CUSTOM_INVITE_STORAGE_KEY);
   } catch {
     return false;
   }
@@ -111,8 +112,7 @@ export const ACTIVE_INVITE_STORAGE_KEY = "chama_active_invite";
 
 export function getActiveInvite(): string | null {
   try {
-    if (typeof localStorage === "undefined") return null;
-    const v = localStorage.getItem(ACTIVE_INVITE_STORAGE_KEY);
+    const v = getScopedStorageItem(ACTIVE_INVITE_STORAGE_KEY);
     const trimmed = v?.trim();
     return trimmed && trimmed.startsWith("fed1") ? trimmed : null;
   } catch {
@@ -122,13 +122,12 @@ export function getActiveInvite(): string | null {
 
 export function setActiveInvite(invite: string): void {
   try {
-    if (typeof localStorage === "undefined") return;
     const trimmed = invite.trim();
     if (!trimmed) {
-      localStorage.removeItem(ACTIVE_INVITE_STORAGE_KEY);
+      removeScopedStorageItem(ACTIVE_INVITE_STORAGE_KEY);
       return;
     }
-    localStorage.setItem(ACTIVE_INVITE_STORAGE_KEY, trimmed);
+    setScopedStorageItem(ACTIVE_INVITE_STORAGE_KEY, trimmed);
   } catch {
     // localStorage unavailable — silently no-op
   }
@@ -136,9 +135,7 @@ export function setActiveInvite(invite: string): void {
 
 export function clearActiveInvite(): void {
   try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.removeItem(ACTIVE_INVITE_STORAGE_KEY);
-    }
+    removeScopedStorageItem(ACTIVE_INVITE_STORAGE_KEY);
   } catch { /* no-op */ }
 }
 
@@ -226,11 +223,9 @@ export function resolveFederationForCommunity(slug: string | null | undefined): 
   //    getFederationInvite(), kept consistent so the "Advanced" path
   //    behaves identically across the codebase.
   try {
-    if (typeof localStorage !== "undefined") {
-      const custom = localStorage.getItem(CUSTOM_INVITE_STORAGE_KEY);
-      if (custom && custom.trim().startsWith("fed1")) {
-        return custom.trim();
-      }
+    const custom = getScopedStorageItem(CUSTOM_INVITE_STORAGE_KEY);
+    if (custom && custom.trim().startsWith("fed1")) {
+      return custom.trim();
     }
   } catch {
     // localStorage unavailable — fall through
