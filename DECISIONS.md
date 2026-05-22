@@ -1034,3 +1034,26 @@ drain it.
 
 ## 2026-05-20 - DECISION (locked): "P2P" renamed to "Exchange" across all user-facing surfaces. 
 P2P renamed to Exchange, Bill Pay renamed to Community Bill Pay across all user-facing surfaces. Internal category enum values (p2p-trade, bill-pay) unchanged. Pill abbreviation: ⚡ EXCHANGE and 🧾 COM. BILL PAY. Full name in Create wizard, Trade Detail, and educational contexts. The "Community" prefix is structural — it anchors the mutual-aid framing where someone helps someone else pay their bill, not a self-service fintech feature. Per Pillar 2.7, the name itself educates.
+
+---
+
+## 2026-05-22 - Arbiter dispute fee: fixed escalation, outcome-independent split
+
+**Decision:** Dispute fees are fixed at 1.5% additional (on top of the
+ambient 0.5%), split equally between buyer and seller regardless of who wins.
+Neither party chooses the amount.
+
+**Rejected alternatives:**
+- User-chosen dispute fee: both parties are adversarial at dispute time and
+  will race to the bottom. The losing party feels doubly robbed.
+- Average of both bids: trivially gameable. Bid 0, counterparty bids high,
+  split the middle.
+- Fee only from the losing party: creates perverse incentive — arbiter may
+  subconsciously favor outcomes that maximize their take.
+
+**Why outcome-independent split works:**
+The arbiter's compensation is decoupled from who wins. No party can buy a
+favorable outcome by paying more. The dispute cost is a known quantity before
+opening — users can price it honestly. Fast arbiter response is incentivized
+because the fee is already locked; slow response is just leaving money on the
+table.

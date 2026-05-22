@@ -163,18 +163,22 @@ export function stashPendingRedemption(input: {
     poisonedAt: existing?.poisonedAt,
   };
   saveStash(stash);
+  console.info(
+    `[claim-trace] pending-stash escrowId=${input.escrowId} ` +
+    `amountMsats=${input.amountMsats} notesHashPrefix=${input.notesHash.slice(0, 16)}`,
+  );
 }
 
 /**
- * Remove an entry from the stash. Called after redeemWithRetry
- * resolves successfully (or returns via the "already spent" branch,
- * which redeemWithRetry internally treats as success).
+ * Remove an entry from the stash. Called only after the caller has a
+ * successful redeem/balance-confirmed path.
  */
 export function clearPendingRedemption(escrowId: string): void {
   const stash = loadStash();
   if (stash[escrowId]) {
     delete stash[escrowId];
     saveStash(stash);
+    console.info(`[claim-trace] pending-clear escrowId=${escrowId}`);
   }
 }
 
@@ -254,10 +258,10 @@ export async function drainPendingRedemptions(
 
     try {
       await fedimint.redeemWithRetry(entry.oobNotes);
-      // Success — or "already spent" which redeemWithRetry treats as
-      // success. Either way the federation has the notes and balance
-      // will reflect shortly. Remove from stash.
-      clearPendingRedemption(entry.escrowId);
+	      // Success: the SDK adapter watched a successful reissue, or the
+	      // fallback redeem path returned cleanly. Terminal mint reissue
+	      // failures throw before here, so the stash is not silently lost.
+	      clearPendingRedemption(entry.escrowId);
       summary.succeeded++;
       console.info(
         `[chama] drained pending redemption for ${entry.escrowId} ` +
@@ -271,10 +275,12 @@ export async function drainPendingRedemptions(
       // one of these strings, retrying across boots won't help — poison.
       const isHardFailure =
         msg.includes("malformed") ||
-        msg.includes("invalid federation") ||
-        msg.includes("not joined") ||
-        msg.includes("parse error") ||
-        msg.includes("invalid note format");
+	        msg.includes("invalid federation") ||
+	        msg.includes("not joined") ||
+	        msg.includes("parse error") ||
+	        msg.includes("invalid note format") ||
+	        msg.includes("mint reissue operation failed") ||
+	        msg.includes("mint notes were consumed");
 
       if (isHardFailure) {
         markPoisoned(

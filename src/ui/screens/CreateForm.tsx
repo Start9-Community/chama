@@ -42,7 +42,10 @@ import { defaultCurrencyForCommunity } from "../../communities/currency.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
 import { type ArbiterWarning, displayCounterpartyName, resolveCreateMintUrl } from "../decisions.js";
 import { T, inputStyle } from "../theme.js";
-import { MIN_REAL_ATOMIC_FUNDING_SATS } from "../../payments/funding-limits.js";
+import {
+  MIN_REAL_ATOMIC_FUNDING_SATS,
+  minimumAtomicFundingMessage,
+} from "../../payments/funding-limits.js";
 import { isTestnetMode } from "../../fedimint/index.js";
 import { isSimModeOn } from "../../sim/simMode.js";
 import {
@@ -738,7 +741,7 @@ function Step2({
           border: `1px solid ${T.amber}44`,
           color: T.amber, fontFamily: T.mono, fontSize: 10, lineHeight: 1.45,
         }}>
-          Minimum real Lightning escrow is {MIN_REAL_ATOMIC_FUNDING_SATS.toLocaleString()} sats.
+          {minimumAtomicFundingMessage()}
         </div>
       )}
 
@@ -987,7 +990,7 @@ function Step3({
           textAlign: "center", marginTop: 6, fontSize: 10,
           color: T.amber, fontFamily: T.mono, lineHeight: 1.45,
         }}>
-          Minimum real Lightning escrow is {MIN_REAL_ATOMIC_FUNDING_SATS.toLocaleString()} sats.
+          {minimumAtomicFundingMessage()}
         </div>
       )}
       <div style={{ textAlign: "center", marginTop: 6, fontSize: 10, color: T.muted, fontFamily: T.mono }}>

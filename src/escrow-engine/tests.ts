@@ -112,9 +112,12 @@ import {
   setActiveInvite,
   setCustomFederationInvite,
   shouldReconcileFederation,
+  expectedFederationIdForInvite,
   BP_FEDERATION_ID,
+  AFRIBIT_KIBERA_FEDERATION_ID,
   BLF_FEDERATION_ID,
   BP_FEDERATION_INVITE,
+  AFRIBIT_KIBERA_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
 import { adaptRealWallet } from "../fedimint/sdk-adapter.js";
@@ -224,10 +227,12 @@ import {
 } from "../payments/balance-recovery.js";
 import {
   estimateLightningSendFeeMsats,
+  hasLightningWithdrawableBalance,
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
   retrySmallerLightningPayoutSats,
 } from "../payments/lightning-fees.js";
+import { makeLightningInvoiceQrPayload } from "../payments/lightning-qr.js";
 import { EscrowFedimintBridge } from "../fedimint/escrow-bridge.js";
 
 // v0.3.0 Phase 5 — ChamaBar label decision
@@ -1244,6 +1249,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "us-blf presents as Global · USD");
   assert(getCommunityBySlug("us-blf")?.flagEmoji === "🌍",
     "Global · USD uses the Africa-facing globe emoji");
+  assert(getCommunityBySlug("us-blf")?.disambiguator === "BLF",
+    "Global USD shows BLF as its backing route in onboarding");
   assert(DEFAULT_COMMUNITY_SLUG === "us-blf", "Default community is us-blf (BLF, v0.5.0)");
   assert(DEFAULT_RELAYS.length >= 5, "Default relay pool has at least 5 stable relays");
   (globalThis as any).localStorage.clear();
@@ -1271,7 +1278,7 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   }).join(",") === BLF_OFFICIAL_ARBITERS[1]!,
     "Official arbiter pool respects participant exclusion");
   assert(getTrustedArbiterPool({ community: "ke-kes" }).length === 0,
-    "Afribit has no baked BLF official arbiters");
+    "Afribit Kibera has no baked BLF official arbiters");
 
   // Lookup with valid + missing slug
   assert(getCommunityBySlug("sn-cfa") !== null, "Valid slug returns community");
@@ -1280,7 +1287,7 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug(undefined) === null, "Undefined slug returns null");
 
   // v0.1.85: every visible pre-seed now pins federationInvite explicitly.
-  // v0.7.0: us-blf and sn-cfa route through BLF; Afribit stays separate.
+  // v0.7.0: us-blf and sn-cfa route through BLF; Afribit Kibera stays separate.
   // Hidden legacy slugs remain resolvable for old listings.
   const allPinned = COMMUNITY_REGISTRY
     .filter(c => !c.hiddenFromPicker)
@@ -1318,8 +1325,10 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     assert(typeof c.notes === "string" && c.notes.includes("canary iroh"),
       `${c.slug} carries the shared browser-reliable note`);
   }
-  assert(getCommunityBySlug("ke-kes")?.disambiguator === "Afribit",
-    "ke-kes disambiguator=Afribit (multi-fed-per-country prep)");
+  assert(getCommunityBySlug("ke-kes")?.displayName === "Kenya · Afribit Kibera · KES",
+    "ke-kes displayName names Afribit Kibera");
+  assert(getCommunityBySlug("ke-kes")?.disambiguator === "Afribit Kibera",
+    "ke-kes disambiguator=Afribit Kibera (multi-fed-per-country prep)");
 
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
@@ -1335,6 +1344,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Picker includes us-blf as the Global USD route");
   assert(picker.some(c => c.slug === "tz-tzs"),
     "Picker includes Tanzania TZS for first-run country selection");
+  assert(picker.some(c => c.slug === "ke-kes" && c.country === "KE" && c.disambiguator === "Afribit Kibera"),
+    "Picker includes Kenya KES as the Afribit Kibera-backed country Chama");
   assert(picker.some(c => c.slug === "cm-xaf"),
     "Picker includes Cameroon XAF for first-run country selection");
   assert(picker.some(c => c.slug === "ao-aoa"),
@@ -1567,8 +1578,14 @@ console.log("\n── BP / BLF RESOLVER ──");
   const keKesInvite = getCommunityBySlug("ke-kes")!.federationInvite!;
   assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
     "ke-kes → registry-pinned invite");
-  assert(keKesInvite !== BP_FEDERATION_INVITE && keKesInvite !== BLF_FEDERATION_INVITE,
-    "ke-kes pins Afribit (distinct from BP and BLF)");
+  assert(keKesInvite === AFRIBIT_KIBERA_FEDERATION_INVITE,
+    "ke-kes pins Afribit Kibera");
+  const afribitFederationIdForComparison: string = AFRIBIT_KIBERA_FEDERATION_ID;
+  const bpFederationIdForComparison: string = BP_FEDERATION_ID;
+  assert(afribitFederationIdForComparison !== bpFederationIdForComparison,
+    "Afribit Kibera federation ID is distinct from BP");
+  assert(expectedFederationIdForInvite(keKesInvite) === AFRIBIT_KIBERA_FEDERATION_ID,
+    "Afribit Kibera invite resolves to its known federation ID for drift detection");
 
   const globalUsdInvite = getCommunityBySlug("global-usd")!.federationInvite!;
   assert(resolveFederationForCommunity("global-usd") === globalUsdInvite,
@@ -1688,6 +1705,15 @@ console.log("\n── FEDERATION DRIFT DETECTION ──");
       walletFederationId: BLF_FEDERATION_ID,
     }) === false,
     "Untracked OPFS does not reconcile when known desired invite already matches actual wallet fed id",
+  );
+  assert(
+    shouldReconcileFederation({
+      previousActiveInvite: null,
+      desiredInvite: AFRIBIT_KIBERA_FEDERATION_INVITE,
+      walletIsJoined: true,
+      walletFederationId: AFRIBIT_KIBERA_FEDERATION_ID,
+    }) === false,
+    "Untracked OPFS does not reconcile when Afribit invite matches actual wallet fed id",
   );
 }
 
@@ -3900,10 +3926,9 @@ console.log("\n── canOfferSubscription ──");
 // History: these once backed the one-trade-at-a-time hard gate on
 // Create + Fund. v0.6.5 retired that gate and the functions are now
 // display helpers — they drive the ChamaBar "in escrow" pill and the
-// ActiveTradePill. The semantics they encode (non-terminal buyer/seller
-// commitments, arbiter status excluded) are still exactly the same;
-// only the consumer surfaces changed. Tests below verify the existing
-// contract still holds.
+// ActiveTradePill. The semantics they encode (live buyer/seller
+// commitments, arbiter status excluded, post-claim trades excluded) are
+// still the display contract. Tests below verify that contract holds.
 console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
 {
   const me = "me_pubkey_aaaa";
@@ -4026,6 +4051,23 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     "CANCELLED escrow doesn't count as commitment",
   );
 
+  // CLAIMED has published the claim event and is no longer a live escrow
+  // commitment for global surfaces. If redemption fails locally, the
+  // detail card shows Claim failed; the purple ActiveTradePill should clear.
+  const claimed = escrow({
+    id: "claimed",
+    status: EscrowStatus.CLAIMED,
+    participants: { buyer: me, seller: other, arbiter: arb },
+  });
+  assert(
+    hasActiveBuyerSellerCommitment({ escrows: [claimed], userPubkey: me }) === false,
+    "CLAIMED escrow doesn't count as active commitment",
+  );
+  assert(
+    findActiveTrade({ escrows: [claimed], userPubkey: me }) === null,
+    "findActiveTrade skips CLAIMED trades",
+  );
+
   // EXPIRED heals in the background, but it no longer blocks the user's
   // next Create/Fund flow.
   const expired = escrow({
@@ -4080,6 +4122,16 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     findActiveTrade({ escrows: [expiredLocked, older], userPubkey: me, nowSec })?.id === "older",
     "findActiveTrade skips expired LOCKED trades and returns the live trade",
   );
+  const newestClaimed = escrow({
+    id: "newest-claimed",
+    status: EscrowStatus.CLAIMED,
+    createdAt: 3000,
+    participants: { buyer: me, seller: other, arbiter: arb },
+  });
+  assert(
+    findActiveTrade({ escrows: [older, newestClaimed], userPubkey: me })?.id === "older",
+    "findActiveTrade skips newer CLAIMED trades and returns the live trade",
+  );
 
   // v0.6.5: countActiveBuyerSellerCommitments — drives the plural-aware
   // ActiveTradePill copy now that multiple concurrent trades are allowed.
@@ -4100,13 +4152,13 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     "Two concurrent live trades count twice (v0.6.5 allows it)",
   );
   assert(
-    countActiveBuyerSellerCommitments({ escrows: [asArbiter, completed, cancelled], userPubkey: me }) === 0,
-    "Arbiter-only + terminal escrows don't count",
+    countActiveBuyerSellerCommitments({ escrows: [asArbiter, completed, cancelled, claimed], userPubkey: me }) === 0,
+    "Arbiter-only + terminal + claimed escrows don't count",
   );
 
   // v0.6.5: sumActiveBuyerSellerTradeMsats — the honest total behind
   // the ActiveTradePill headline. Sums amountMsats across every live
-  // trade (CREATED + LOCKED + APPROVED + CLAIMED), distinct from
+  // trade (CREATED + LOCKED + APPROVED), distinct from
   // activeCommittedMsats which only counts LOCKED+APPROVED.
   assert(
     sumActiveBuyerSellerTradeMsats({ escrows: [], userPubkey: me }) === 0,
@@ -4121,8 +4173,8 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     "CREATE-only listing + LOCKED trade sum together (1M + 1M)",
   );
   assert(
-    sumActiveBuyerSellerTradeMsats({ escrows: [asArbiter, completed, cancelled, expired], userPubkey: me }) === 0,
-    "Arbiter-only + terminal + expired escrows don't contribute",
+    sumActiveBuyerSellerTradeMsats({ escrows: [asArbiter, completed, cancelled, claimed, expired], userPubkey: me }) === 0,
+    "Arbiter-only + terminal + claimed + expired escrows don't contribute",
   );
 }
 
@@ -5131,6 +5183,13 @@ console.log("\n── DESTINATION PICKER — logic ──");
   assert(boltTrim.kind === "bolt11",
     "BOLT11 with surrounding whitespace recognized after trim");
 
+  assert(makeLightningInvoiceQrPayload("  lnbc500n1pfake  ") === "LIGHTNING:LNBC500N1PFAKE",
+    "Lightning QR payload trims and prefixes BOLT11 invoices");
+  assert(makeLightningInvoiceQrPayload("lightning:lnbc500n1pfake") === "LIGHTNING:LNBC500N1PFAKE",
+    "Lightning QR payload avoids double-prefixing existing lightning URIs");
+  assert(makeLightningInvoiceQrPayload("") === "",
+    "Lightning QR payload preserves empty invoice as empty");
+
   const invalid = classifyDestinationInput("zzz garbage");
   assert(invalid.kind === "invalid",
     "Random garbage → invalid");
@@ -6100,7 +6159,7 @@ console.log("\n── RUN FUND AND LOCK ──");
       "LOCK is not dispatched for rejected receive without wallet credit");
   }
 
-  // ── v0.6.5: pre-funded receive-watch `canceled:rejected` → lock-failed
+  // ── v0.6.5: pre-funded receive-watch `canceled:*` → lock-failed
   // If the gateway/federation cancels before any funded signal, no HTLC has
   // been accepted from Chama's perspective. This is safe to surface early.
   {
@@ -6112,7 +6171,7 @@ console.log("\n── RUN FUND AND LOCK ──");
       nowMs += ms;
       if (!firedCancel && wallet.calls.getBalance >= 1) {
         firedCancel = true;
-        wallet.fireReceiveState({ canceled: { reason: "rejected" } });
+        wallet.fireReceiveState({ canceled: { reason: "claim_rejected" } });
       }
     };
     const terminal = await runFundAndLock({
@@ -6130,7 +6189,15 @@ console.log("\n── RUN FUND AND LOCK ──");
       pollIntervalMs: 1_000,
     });
     assert(terminal.kind === "lock-failed",
-      "Pre-funded canceled:rejected remains an early lock-failed terminal");
+      "Pre-funded canceled:claim_rejected remains an early lock-failed terminal");
+    if (terminal.kind === "lock-failed") {
+      assert(/claim_rejected/.test(terminal.error),
+        "Pre-funded cancellation preserves the exact receive cancel reason");
+    }
+    assert(phases.some(p => p.kind === "lock-failed"),
+      "Pre-funded cancellation emits the diagnostic lock-failed phase");
+    assert(!phases.some(p => p.kind === "aborted"),
+      "Internal poll abort does not overwrite the receive cancellation diagnostic");
     assert(wallet.calls.lockAndPublish === 0,
       "LOCK never dispatches for pre-funded cancellation");
   }
@@ -6167,6 +6234,8 @@ console.log("\n── RUN FUND AND LOCK ──");
       "canceled:expired → terminal expired");
     assert(phases.some(p => p.kind === "expired"),
       "expired phase emitted by the watch handler, not by the poll deadline");
+    assert(!phases.some(p => p.kind === "aborted"),
+      "Internal poll abort does not overwrite receive-watch expiry");
   }
 
   // ── v0.6.5: created/waiting_for_payment don't trigger mint-confirming
@@ -6421,13 +6490,16 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       claimAndRedeem: 0,
       payInvoice: 0,
       completeClaim: 0,
+      clearPendingRedemption: 0,
       getBalance: 0,
       saveHandle: 0,
     };
     const handlesSaved: string[] = [];
+    const clearedEscrows: string[] = [];
     return {
       calls,
       handlesSaved,
+      clearedEscrows,
       getBalance: async () => {
         calls.getBalance++;
         return opts.balances[Math.min(i++, opts.balances.length - 1)];
@@ -6444,6 +6516,10 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       },
       completeClaim: async (_id: string) => {
         calls.completeClaim++;
+      },
+      clearPendingRedemption: (id: string) => {
+        calls.clearPendingRedemption++;
+        clearedEscrows.push(id);
       },
       addOrTouchLightningHandle: (address: string) => {
         calls.saveHandle++;
@@ -6466,6 +6542,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
       completeClaim: wallet.completeClaim,
+      clearPendingRedemption: wallet.clearPendingRedemption,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: p => phases.push(p),
@@ -6482,6 +6559,10 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "payInvoice called exactly once after claim confirms");
     assert(wallet.calls.completeClaim === 1,
       "COMPLETE published exactly once after claim balance confirms");
+    assert(wallet.calls.clearPendingRedemption === 1,
+      "Pending redemption stash clears exactly once after claim balance confirms");
+    assert(wallet.clearedEscrows[0] === "esc_claim_1",
+      "Pending redemption clear is scoped to the claimed escrow");
     assert(wallet.calls.saveHandle === 1,
       "addOrTouchLightningHandle called once on success with saveAfter=true");
     assert(wallet.handlesSaved[0] === "alice@phoenix.app",
@@ -6510,6 +6591,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
       completeClaim: wallet.completeClaim,
+      clearPendingRedemption: wallet.clearPendingRedemption,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: () => {},
@@ -6524,6 +6606,8 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "payInvoice NEVER called when balance doesn't confirm");
     assert(wallet.calls.completeClaim === 0,
       "COMPLETE NOT published when claim balance doesn't confirm");
+    assert(wallet.calls.clearPendingRedemption === 0,
+      "Pending redemption stash remains on claim-pending so boot can retry");
     assert(wallet.calls.saveHandle === 0,
       "addOrTouchLightningHandle NOT called on claim-pending (no successful payout)");
   }
@@ -6565,10 +6649,10 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "Handle NOT saved on claim-failed");
   }
 
-  // ── Claim-published throw: continue watching, then complete + pay ───
-  {
-    const partial: any = new Error("Claim published to relays, redeem still settling");
-    partial.claimPublished = true;
+	  // ── Claim-published throw: continue watching, then complete + pay ───
+	  {
+	    const partial: any = new Error("Claim published to relays, redeem still settling");
+	    partial.claimPublished = true;
     const wallet = makeMockWallet({
       balances: [0, 100_000, 100_000],
       claimResult: partial,
@@ -6582,6 +6666,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
       completeClaim: wallet.completeClaim,
+      clearPendingRedemption: wallet.clearPendingRedemption,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: () => {},
@@ -6594,13 +6679,54 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "claimPublished throw + later balance growth → done, not claim-failed");
     assert(wallet.calls.completeClaim === 1,
       "COMPLETE published after claimPublished path balance confirms");
-    assert(wallet.calls.payInvoice === 1,
-      "payInvoice called after claimPublished path balance confirms");
-  }
+    assert(wallet.calls.clearPendingRedemption === 1,
+      "Pending redemption stash clears once claimPublished path balance confirms");
+	    assert(wallet.calls.payInvoice === 1,
+	      "payInvoice called after claimPublished path balance confirms");
+	  }
 
-  // ── Payout-failed: claim confirmed, balance grew, but payInvoice threw
-  // This is the orphan-balance case — recovery banner catches it
-  // (Phase 4 wiring).
+	  // ── Claim-published terminal settlement failure: do not call it in-flight
+	  {
+	    const failed: any = new Error(
+	      "Claim published to relays, but ecash redeem failed: " +
+	      "Mint reissue operation failed after federation consumed the notes"
+	    );
+	    failed.claimPublished = true;
+	    failed.settlementFailed = true;
+	    failed.code = "MINT_REISSUE_FAILED";
+	    const wallet = makeMockWallet({
+	      balances: [0, 0, 0],
+	      claimResult: failed,
+	    });
+	    let nowMs = 0;
+	    const terminal = await runClaimAndPayout({
+	      escrowId: "esc_claim_published_reissue_failed",
+	      bolt11: "lnbc100n1preissuefailed",
+	      expectedDeltaMsats: 100_000,
+	      saveAfter: false,
+	      getBalance: wallet.getBalance,
+	      claimAndRedeem: wallet.claimAndRedeem,
+	      completeClaim: wallet.completeClaim,
+	      clearPendingRedemption: wallet.clearPendingRedemption,
+	      payInvoice: wallet.payInvoice,
+	      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+	      onPhase: () => {},
+	      sleep: async (ms) => { nowMs += ms; },
+	      now: () => nowMs,
+	      confirmTimeoutMs: 30_000,
+	      pollIntervalMs: 1_000,
+	    });
+	    assert(terminal.kind === "claim-failed",
+	      "claimPublished terminal settlement failure → claim-failed, not claim-pending");
+	    assert(wallet.calls.payInvoice === 0,
+	      "payInvoice NOT called when mint reissue terminally failed");
+	    assert(wallet.calls.clearPendingRedemption === 0,
+	      "Pending redemption stash remains when terminal settlement failed");
+	  }
+
+	  // ── Payout-failed: claim confirmed, balance grew, but payInvoice threw
+	  // This is the orphan-balance case — recovery banner catches it
+	  // (Phase 4 wiring).
   {
     const wallet = makeMockWallet({
       balances: [0, 100_000, 100_000],
@@ -6616,6 +6742,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
       completeClaim: wallet.completeClaim,
+      clearPendingRedemption: wallet.clearPendingRedemption,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: () => {},
@@ -6636,6 +6763,8 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "payInvoice was attempted (failed)");
     assert(wallet.calls.completeClaim === 1,
       "COMPLETE still publishes when balance landed but outbound payout failed");
+    assert(wallet.calls.clearPendingRedemption === 1,
+      "Pending redemption stash clears once balance landed even if outbound payout fails");
     assert(wallet.calls.saveHandle === 0,
       "Handle NOT saved when payout failed (orphan = recovery banner's job)");
   }
@@ -6970,6 +7099,10 @@ console.log("\n── LIGHTNING PAYOUT FEE RESERVE ──");
     "50 sat balance shows an about-3-sat Lightning fee reserve");
   assert(maxLightningPayoutSats(2_500) === 0,
     "Tiny balances below outbound fee floor are not offered as LN payouts");
+  assert(!hasLightningWithdrawableBalance(2_500),
+    "Sub-fee dust is not Lightning-withdrawable");
+  assert(hasLightningWithdrawableBalance(50_000),
+    "Balances above the outbound fee floor are Lightning-withdrawable");
   assert(retrySmallerLightningPayoutSats(992) === 496,
     "Too-large recovery retry halves the payout amount to reduce note inputs");
   assert(retrySmallerLightningPayoutSats(1) === 0,
@@ -7724,7 +7857,7 @@ console.log("\n── CLAIM-BRIDGE-THREW DISCRIMINATION ──");
     payInvoiceResult?: "ok" | Error;
   }) {
     let i = 0;
-    const calls = { claimAndRedeem: 0, payInvoice: 0, saveHandle: 0 };
+    const calls = { claimAndRedeem: 0, payInvoice: 0, clearPendingRedemption: 0, saveHandle: 0 };
     return {
       calls,
       getBalance: async () => opts.balances[Math.min(i++, opts.balances.length - 1)],
@@ -7737,6 +7870,7 @@ console.log("\n── CLAIM-BRIDGE-THREW DISCRIMINATION ──");
         calls.payInvoice++;
         if (opts.payInvoiceResult instanceof Error) throw opts.payInvoiceResult;
       },
+      clearPendingRedemption: (_id: string) => { calls.clearPendingRedemption++; },
       addOrTouchLightningHandle: () => { calls.saveHandle++; },
     };
   }
@@ -7827,6 +7961,7 @@ console.log("\n── CLAIM-BRIDGE-THREW DISCRIMINATION ──");
       saveAfter: false,
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
+      clearPendingRedemption: wallet.clearPendingRedemption,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: () => {},
@@ -7853,6 +7988,7 @@ console.log("\n── CLAIM-BRIDGE-THREW DISCRIMINATION ──");
       saveAfter: false,
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
+      clearPendingRedemption: wallet.clearPendingRedemption,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: () => {},
@@ -7882,6 +8018,7 @@ console.log("\n── CLAIM-BRIDGE-THREW DISCRIMINATION ──");
       saveAfter: false,
       getBalance: wallet.getBalance,
       claimAndRedeem: wallet.claimAndRedeem,
+      clearPendingRedemption: wallet.clearPendingRedemption,
       payInvoice: wallet.payInvoice,
       addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
       onPhase: () => {},
@@ -7894,6 +8031,8 @@ console.log("\n── CLAIM-BRIDGE-THREW DISCRIMINATION ──");
       "Clean claim + balance never grows → claim-pending (genuinely in-flight)");
     assert(wallet.calls.payInvoice === 0,
       "payInvoice NOT called on claim-pending");
+    assert(wallet.calls.clearPendingRedemption === 0,
+      "claim-pending preserves pending redemption stash for boot retry");
   }
 
   // ── BRIDGE_THREW_ERROR_CODES is the documented set ─────────────────
@@ -8623,6 +8762,57 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
   {
     const metaTrustedGatewayId =
       "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
+    let helperKey: number | undefined;
+    const h = makeRealWallet({
+      federation: {
+        async getMetaConsensusValue(key?: number) {
+          helperKey = key;
+          return {
+            revision: 1,
+            value: {
+              vetted_gateways: [metaTrustedGatewayId],
+            },
+          };
+        },
+        async getConfig() {
+          return {
+            modules: {
+              0: { kind: "ln" },
+              2: { kind: "meta" },
+            },
+          };
+        },
+        async getFederationId() { return "fed_real"; },
+        async getInviteCode() { return "fed1real"; },
+        async listTransactions() { return []; },
+      },
+    }, [
+      {
+        info: {
+          gateway_id: metaTrustedGatewayId,
+          api: "https://gateway.mainnet-lnd-us-east-1.dev.fedibtc.com/v1",
+          lightning_alias: "Fedi us-east-1 [fedi.xyz]",
+          supports_private_payments: true,
+        },
+        vetted: false,
+        ttl: 60,
+      },
+    ]);
+    const wallet = adaptRealWallet(h.real as any);
+    await wallet.lightning.createInvoice(100_000, "fund");
+
+    assert(helperKey === 0,
+      "Adapter probes canary federation.getMetaConsensusValue with the numeric default key");
+    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts gateway trust from canary getMetaConsensusValue(default)");
+    await wallet.cleanup();
+  }
+
+  // Keep the low-level fallback because older SDKs and some test transports
+  // expose the client RPC before they expose the public helper.
+  {
+    const metaTrustedGatewayId =
+      "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
     const hexJson = Array.from(JSON.stringify({
       vetted_gateways: [metaTrustedGatewayId],
     }))
@@ -8808,14 +8998,24 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
     ]);
     const wallet = adaptRealWallet(h.real as any);
     let threw = false;
+    let diagnostics: any = null;
     try {
       await wallet.lightning.createInvoice(100_000, "fund");
     } catch (e) {
+      diagnostics = (e as any).chamaDiagnostics;
       threw = /No wallet-verifiable Lightning receive gateway/.test((e as Error).message);
     }
 
     assert(threw,
       "Adapter refuses BLF receive invoices when only curated trust exists");
+    assert(diagnostics?.demoSafeFallback?.kind === "sim_mode",
+      "BLF receive trust refusal exposes sim mode as the demo-safe fallback");
+    assert(diagnostics?.demoSafeFallback?.invoiceCreated === false,
+      "BLF receive trust refusal records that no invoice was created");
+    assert(diagnostics?.metaProbe?.curatedGatewayIds?.includes(blfTrustedGatewayId),
+      "BLF receive diagnostics include the known curated gateway ID even though receive fallback is blocked");
+    assert(diagnostics?.metaProbe?.curatedFallbackApplied === false,
+      "BLF receive diagnostics explicitly say curated fallback was not applied");
     assert(h.calls.createInvoice === 0,
       "Adapter does not create a BLF receive QR from curated-only trust");
     await wallet.cleanup();
@@ -8875,14 +9075,24 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
     ]);
     const wallet = adaptRealWallet(h.real as any);
     let threw = false;
+    let diagnostics: any = null;
     try {
       await wallet.lightning.createInvoice(100_000, "fund");
     } catch (e) {
+      diagnostics = (e as any).chamaDiagnostics;
       threw = /No wallet-verifiable Lightning receive gateway/.test((e as Error).message);
     }
 
     assert(threw,
       "Adapter refuses BLF receive when meta exists but this SDK cannot call it");
+    assert(diagnostics?.metaProbe?.metaRpcFailures?.some((failure: string) =>
+      /module=meta key=0/.test(failure)
+    ), "BLF receive diagnostics preserve the failed meta-module probe by kind");
+    assert(diagnostics?.metaProbe?.metaRpcFailures?.some((failure: string) =>
+      /module=4 key=0/.test(failure)
+    ), "BLF receive diagnostics preserve the failed meta-module probe by instance id");
+    assert(diagnostics?.demoSafeFallback?.kind === "sim_mode",
+      "BLF meta access failure still points demos to the no-real-sats fallback");
     assert(h.calls.createInvoice === 0,
       "Adapter does not create a receive QR from config-meta-only curated trust");
     await wallet.cleanup();

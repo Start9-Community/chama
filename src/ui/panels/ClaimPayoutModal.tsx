@@ -90,8 +90,8 @@ type Stage =
   | { kind: "terminal"; terminal: ClaimAndPayoutTerminal };
 
 /** Stashed dispatch arguments from the initial picker resolve. Used by
- *  the claim-bridge-threw retry path to re-dispatch with the same
- *  destination after a successful re-probe. */
+ *  retry paths to re-dispatch with the same destination after a
+ *  successful re-probe. */
 interface DispatchArgs {
   bolt11: string;
   saveAfter: boolean;
@@ -111,8 +111,8 @@ export function ClaimPayoutModal({
   const payoutSats = maxLightningPayoutSats(payoutMsats);
   const reserveSats = lightningPayoutReserveSats(payoutMsats);
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
-  // Retry state: when claim-bridge-threw terminal is up, the "Try
-  // again" button toggles this to render the inline probing spinner.
+  // Retry state: when a retryable terminal is up, the "Try again"
+  // button toggles this to render the inline probing spinner.
   const [retryProbing, setRetryProbing] = useState(false);
   // Stashed dispatch args. Set when the picker resolves; reused on
   // Try-again so the retry uses the exact same destination/save
@@ -121,7 +121,7 @@ export function ClaimPayoutModal({
   const chapsmartEligible = isChapsmartPayoutEligible({ homeCommunity, fiatCurrency });
 
   // Common dispatch helper — used by both the picker's first resolve
-  // and the bridge-threw retry path. Updates stage transitions and
+  // and the terminal retry path. Updates stage transitions and
   // schedules auto-close on success.
   const dispatchClaim = async (args: DispatchArgs) => {
     setStage({ kind: "running", phase: { kind: "claiming" } });
@@ -150,10 +150,10 @@ export function ClaimPayoutModal({
     void dispatchClaim(lastDispatchRef.current);
   };
 
-  // v0.3.1 Phase 1: claim-bridge-threw retry handler. Two-step per
-  // Q2: probe first, then re-dispatch only on probe success. Stays
-  // on terminal with updated error if the probe still fails.
-  const handleBridgeThrewRetry = async () => {
+  // Terminal retry handler. Two-step per Q2: probe first, then
+  // re-dispatch only on probe success. Stays on terminal with updated
+  // error if the probe still fails.
+  const handleClaimRetry = async () => {
     const args = lastDispatchRef.current;
     if (!args) return;
     setRetryProbing(true);
@@ -250,7 +250,7 @@ export function ClaimPayoutModal({
           <TerminalPanel
             terminal={stage.terminal}
             retryProbing={retryProbing}
-            onRetry={handleBridgeThrewRetry}
+            onRetry={handleClaimRetry}
             onClose={() => onClose(stage.terminal)}
           />
         )}
@@ -444,7 +444,8 @@ function TerminalPanel({
   let showRetry = false;
 
   if (terminal.kind === "claim-failed") {
-    title = "Couldn't recover your share";
+    const settlementFailed = /reissue|consumed|settle/i.test(terminal.error);
+    title = settlementFailed ? "Claim did not settle" : "Couldn't recover your share";
     subtitle = terminal.error;
     tone = T.red;
     toneDim = T.redDim;
@@ -465,6 +466,7 @@ function TerminalPanel({
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⏳";
+    showRetry = true;
   } else {
     // payout-failed
     title = "Payout couldn't be sent";

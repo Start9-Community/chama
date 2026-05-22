@@ -575,7 +575,13 @@ export async function runFundAndLock(
     baselineMsats: baseline,
     expectedMsats: opts.amountMsats,
     getBalance: opts.getBalance,
-    onPhase: emit,
+    onPhase: (p) => {
+      // A receive-watch terminal uses watchAbort only to stop the balance
+      // poll. Do not let that internal abort overwrite the richer receive
+      // reason the modal already received (for example canceled:claim_rejected).
+      if (p.kind === "aborted" && watchOverride) return;
+      emit(p);
+    },
     signal: watchAbort.signal,
     paymentDeadlineMs: opts.paymentDeadlineMs,
     mintConfirmTimeoutMs: opts.mintConfirmTimeoutMs,

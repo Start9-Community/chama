@@ -19,17 +19,24 @@ import { sendCommunityRequestToGlobalArbiters } from "../../communities/communit
 
 const QRCode = lazy(() => import("../QRCode.js"));
 type RegionFilter = "east" | "west" | "central" | "global";
+type RegionChoice = {
+  id: RegionFilter;
+  label: string;
+  tint: string;
+};
 type RequestStatus = {
   state: "idle" | "sending" | "sent" | "error";
   message?: string;
 };
 
-const REGION_FILTERS: Array<{ id: RegionFilter; label: string }> = [
-  { id: "east", label: "East Africa" },
-  { id: "west", label: "West Africa" },
-  { id: "central", label: "Central Africa" },
-  { id: "global", label: "Global" },
+const REGION_FILTERS: RegionChoice[] = [
+  { id: "west", label: "West Africa", tint: T.amber },
+  { id: "central", label: "Central Africa", tint: T.purple },
+  { id: "east", label: "East Africa", tint: T.teal },
+  { id: "global", label: "Global", tint: T.accent },
 ];
+// Base globe asset: Pixabay "World, Globe, Africa", stored locally for offline/native onboarding.
+const AFRICA_GLOBE_SRC = "/icons/africa-globe-base.png";
 
 export function ConnectScreen({
   onConnect, onConnectNIP46, onConnectNsec, loading, error, nip46Uri, nip46Waiting,
@@ -267,18 +274,21 @@ function BrandHeader() {
 
 function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
   const communities = useMemo(() => getPickerCommunities(), []);
-  const [region, setRegion] = useState<RegionFilter>("east");
+  const [region, setRegion] = useState<RegionFilter | null>(null);
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestedChama, setRequestedChama] = useState("");
   const [requestNote, setRequestNote] = useState("");
   const [requestStatus, setRequestStatus] = useState<RequestStatus>({ state: "idle" });
-  const visible = communities
-    .filter((c) => regionForCommunity(c) === region)
-    .sort((a, b) => {
-      if (a.country === null && b.country !== null) return -1;
-      if (a.country !== null && b.country === null) return 1;
-      return countryLabel(a).localeCompare(countryLabel(b));
-    });
+  const selectedRegion = REGION_FILTERS.find((r) => r.id === region) ?? null;
+  const visible = region
+    ? communities
+        .filter((c) => regionForCommunity(c) === region)
+        .sort((a, b) => {
+          if (a.country === null && b.country !== null) return -1;
+          if (a.country !== null && b.country === null) return 1;
+          return countryLabel(a).localeCompare(countryLabel(b));
+        })
+    : [];
   const requestReady = requestStatus.state !== "sending" && requestedChama.trim().length > 0;
 
   const sendCommunityRequest = async () => {
@@ -319,25 +329,34 @@ function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
       </div>
 
       <div style={{
-        display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-        gap: 8, width: "100%", maxWidth: 360, marginBottom: 12,
+        display: "grid",
+        gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+        gap: 8, width: "100%", maxWidth: 420, marginBottom: 12,
       }}>
-        {REGION_FILTERS.map(({ id, label }) => (
-          <button
-            key={id}
-            onClick={() => setRegion(id)}
-            style={{
-              padding: "9px 8px", borderRadius: T.rs,
-              background: region === id ? T.accentDim : T.surface,
-              border: `1px solid ${region === id ? T.accent + "66" : T.border}`,
-              color: region === id ? T.accent : T.muted,
-              fontFamily: T.mono, fontSize: 10, fontWeight: 800,
-              cursor: "pointer",
-            }}
-          >
-            {label}
-          </button>
-        ))}
+        {REGION_FILTERS.map(({ id, label, tint }) => {
+          const active = region === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setRegion(id)}
+              aria-pressed={active}
+              style={{
+                minHeight: 112,
+                padding: "10px 8px", borderRadius: T.rs,
+                background: active ? tint + "18" : T.surface,
+                border: `1px solid ${active ? tint + "88" : T.border}`,
+                color: active ? T.text : T.muted,
+                fontFamily: T.mono, fontSize: 10, fontWeight: 800,
+                cursor: "pointer",
+                display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center", gap: 8,
+              }}
+            >
+              <MiniGlobe region={id} active={active} tint={tint} />
+              <span style={{ lineHeight: 1.2 }}>{label}</span>
+            </button>
+          );
+        })}
       </div>
 
       <div style={{ width: "100%", maxWidth: 380, marginBottom: 12 }}>
@@ -427,48 +446,142 @@ function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
         )}
       </div>
 
-      <div style={{
-        display: "grid", gap: 10, width: "100%", maxWidth: 380,
-      }}>
-        {visible.map((community) => (
-          <button
-            key={community.slug}
-            onClick={() => onSelect(community.slug)}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              gap: 12, padding: "13px 14px", borderRadius: T.r,
-              background: T.card, border: `1px solid ${T.border}`,
-              color: T.text, cursor: "pointer", textAlign: "left",
-            }}
-          >
-            <span style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-              <span style={{ fontSize: 26, lineHeight: 1 }}>{community.flagEmoji}</span>
-              <span style={{ minWidth: 0 }}>
-                <span style={{
-                  display: "block", fontFamily: T.sans,
-                  fontSize: 14, fontWeight: 800,
-                }}>
-                  {countryLabel(community)}
+      {region && (
+        <div style={{
+          width: "100%", maxWidth: 380,
+          animation: "fadeIn 0.18s ease-out",
+        }}>
+          <div style={{
+            textAlign: "left", margin: "2px 0 10px",
+            color: selectedRegion?.tint ?? T.accent,
+            fontFamily: T.mono, fontSize: 10, fontWeight: 800,
+            letterSpacing: 1, textTransform: "uppercase",
+          }}>
+            {selectedRegion?.label}
+          </div>
+          <div style={{ display: "grid", gap: 10, width: "100%" }}>
+            {visible.map((community) => (
+              <button
+                key={community.slug}
+                onClick={() => onSelect(community.slug)}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  gap: 12, padding: "13px 14px", borderRadius: T.r,
+                  background: T.card, border: `1px solid ${T.border}`,
+                  color: T.text, cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                  <span style={{ fontSize: 26, lineHeight: 1 }}>{community.flagEmoji}</span>
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{
+                      display: "block", fontFamily: T.sans,
+                      fontSize: 14, fontWeight: 800,
+                    }}>
+                      {countryLabel(community)}
+                    </span>
+                    <span style={{
+                      display: "block", fontFamily: T.mono,
+                      color: T.muted, fontSize: 10, marginTop: 2,
+                    }}>
+                      {community.disambiguator
+                        ? `${community.currency} · ${community.disambiguator}`
+                        : community.currency}
+                    </span>
+                  </span>
                 </span>
                 <span style={{
-                  display: "block", fontFamily: T.mono,
-                  color: T.muted, fontSize: 10, marginTop: 2,
+                  fontFamily: T.mono, color: T.accent,
+                  fontSize: 16, lineHeight: 1,
                 }}>
-                  {community.currency}
+                  →
                 </span>
-              </span>
-            </span>
-            <span style={{
-              fontFamily: T.mono, color: T.accent,
-              fontSize: 16, lineHeight: 1,
-            }}>
-              →
-            </span>
-          </button>
-        ))}
-      </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </>
   );
+}
+
+function MiniGlobe({
+  region,
+  active,
+  tint,
+}: {
+  region: RegionFilter;
+  active: boolean;
+  tint: string;
+}) {
+  const isGlobal = region === "global";
+  const highlightPath = regionHighlightPath(region);
+  const clipId = `africa-globe-clip-${region}`;
+  return (
+    <svg
+      viewBox="0 0 100 100"
+      aria-hidden="true"
+      style={{
+        width: 68,
+        height: 68,
+        display: "block",
+        flexShrink: 0,
+        filter: active ? `drop-shadow(0 0 10px ${tint}55)` : "none",
+      }}
+    >
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="50" cy="50" r="46" />
+        </clipPath>
+      </defs>
+      <circle cx="50" cy="50" r="47" fill={active ? "#102a3f" : "#0c1e2c"} />
+      <g clipPath={`url(#${clipId})`}>
+        <image
+          href={AFRICA_GLOBE_SRC}
+          x="0"
+          y="0"
+          width="100"
+          height="100"
+          preserveAspectRatio="xMidYMid slice"
+          opacity="0.92"
+          style={{ filter: active ? "saturate(0.95) brightness(0.9)" : "saturate(0.8) brightness(0.78)" }}
+        />
+        <circle cx="50" cy="50" r="47" fill="#071018" opacity={isGlobal ? 0.02 : active ? 0.08 : 0.18} />
+        {!isGlobal && (
+          <>
+            <path
+              d={highlightPath}
+              fill="#ff3b30"
+              opacity="0.9"
+            />
+            <path
+              d={highlightPath}
+              fill="none"
+              stroke="#fff7"
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+            />
+          </>
+        )}
+        <circle cx="33" cy="26" r="17" fill="#ffffff22" />
+      </g>
+      <circle cx="50" cy="50" r="46" fill="none" stroke={active ? tint : T.borderHi} strokeWidth="2.2" />
+      <circle cx="50" cy="50" r="42" fill="none" stroke="#ffffff22" strokeWidth="1" />
+    </svg>
+  );
+}
+
+function regionHighlightPath(region: RegionFilter): string {
+  if (region === "west") {
+    return "M29 43 C33 38 42 38 48 42 C46 47 46 51 49 55 C45 58 42 62 41 67 C35 65 30 60 27 54 C25 49 26 45 29 43 Z";
+  }
+  if (region === "east") {
+    return "M55 43 C62 44 68 48 76 53 C72 56 68 60 67 65 C65 70 60 73 56 69 C57 63 56 58 53 53 C54 49 55 46 55 43 Z";
+  }
+  if (region === "central") {
+    return "M42 53 C48 50 56 51 61 56 C61 62 55 67 48 66 C42 65 39 59 42 53 Z";
+  }
+  return "";
 }
 
 function ErrorBox({ children }: { children: string }) {

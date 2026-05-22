@@ -1,4 +1,8 @@
 import { T } from "../theme.js";
+import {
+  lightningPayoutReserveSats,
+  maxLightningPayoutSats,
+} from "../../payments/lightning-fees.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // Chama — DestroyEcashConfirmModal
@@ -48,7 +52,12 @@ export function DestroyEcashConfirmModal({
    *  the shell drops the pending switch (explicit abandonment). */
   onWithdraw: () => void;
 }) {
-  const sats = Math.floor(balanceMsats / 1000);
+  const totalSats = Math.floor(Math.max(0, balanceMsats) / 1000);
+  const recoverableSats = maxLightningPayoutSats(balanceMsats);
+  const reserveSats = lightningPayoutReserveSats(balanceMsats);
+  const recoveryLabel = recoverableSats > 0
+    ? `${recoverableSats.toLocaleString()} sats`
+    : "your recoverable balance";
   return (
     <div style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
@@ -70,16 +79,19 @@ export function DestroyEcashConfirmModal({
           marginBottom: 16,
         }}>
           Switching to <strong>{targetLabel}</strong> will move you to a
-          different Chama. Your local{" "}
-          <strong>{sats > 0 ? `${sats.toLocaleString()} sats` : "balance"}</strong>{" "}
-          needs to be recovered to your Lightning wallet first.
+          different Chama. Your local wallet has{" "}
+          <strong>{totalSats > 0 ? `${totalSats.toLocaleString()} sats` : "a balance"}</strong>{" "}
+          on this Chama; <strong>{recoveryLabel}</strong> can be recovered to
+          your Lightning wallet first.
         </div>
         <div style={{
           fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
           marginBottom: 16,
         }}>
-          Fedimint ecash is bearer cash — once your local Chama is wiped,
-          those sats cannot be recovered from the Chama.
+          This guard is based on local wallet balance, not trade history.
+          {reserveSats > 0 ? ` About ${reserveSats.toLocaleString()} sats are reserved for Lightning fees.` : ""}
+          {" "}Fedimint ecash is bearer cash — once your local Chama is wiped,
+          those sats cannot be recovered from this device.
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {/* Primary: recover, then auto-dispatch the queued switch.
@@ -94,7 +106,7 @@ export function DestroyEcashConfirmModal({
               cursor: "pointer", letterSpacing: 0.3,
             }}
           >
-            ⚡ Recover{sats > 0 ? ` ${sats.toLocaleString()} sats` : ""} and switch →
+            ⚡ Recover{recoverableSats > 0 ? ` ${recoverableSats.toLocaleString()} sats` : ""} and switch →
           </button>
           {/* Secondary: keep current Chama, abandon the switch. */}
           <button

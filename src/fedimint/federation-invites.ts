@@ -20,6 +20,20 @@ export const BP_FEDERATION_INVITE =
   "fed11qgqzxgthwden5te0v9cxjtnzd96xxmmfdckhqunfde3kjurvv4ejucm0d5hsqqfqkggx3jz0tvfv5n7lj0e7gs7nh47z06ry95x4963wfh8xlka7a80su3952t";
 
 export const BP_FEDERATION_ID =
+  "b21068c84f5b12ca4fdf93f3e443d3bd7c27e8642d0d52ea2e4dce6fdbbee9df";
+
+/**
+ * Afribit Kibera — Kenya KES route used for the Adopting Bitcoin Nairobi
+ * demo partner community. This invite resolves to its own federation ID;
+ * keep it distinct from BP so the Chama bar does not mislabel Kenya as the
+ * browser fallback route.
+ */
+export const AFRIBIT_KIBERA_FEDERATION_NAME = "Afribit Kibera";
+
+export const AFRIBIT_KIBERA_FEDERATION_INVITE =
+  "fed11qgqyj3mfwfhksw309ucrxe35vgcryvesxf3nyepsv3jnyepsvgcnxdpjv5urjcfkv4nrydmxxvervef3xcmxxce5x5ergwfnxcukzetr8qen2vnpvsmr2vrzqyqjplegdfhg4qq8f0zeuvjxn8e49sa3tnep7w08dca79wecgjkyszrufgwesp";
+
+export const AFRIBIT_KIBERA_FEDERATION_ID =
   "ff286a6e8a80074bc59e324699f352c3b15cf21f39e76e3be2bb3844ac48087c";
 
 /**

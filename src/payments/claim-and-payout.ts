@@ -45,10 +45,13 @@
 // `claim-pending`    TERMINAL — claim returned (no throw) but balance
 //                    hasn't landed within 60s. Genuinely in-flight —
 //                    sats may still arrive from the federation. The
-//                    recovery banner catches them on next session if
-//                    they do. RESERVED for the no-throw / balance-
-//                    stalled case ONLY; bridge throws now route to
-//                    claim-bridge-threw above.
+//                    pending-redemption stash stays intact so boot can
+//                    retry redeeming the notes; if balance later lands
+//                    but payout does not, the recovery banner takes over.
+//                    RESERVED for the no-throw / balance-stalled case
+//                    ONLY. A post-CLAIM terminal mint reissue failure
+//                    routes to claim-failed so we do not invite retries
+//                    against already-consumed notes.
 // `payout-failed`    TERMINAL — claim succeeded, balance landed, but
 //                    payInvoice threw. ORPHAN balance — the recovery
 //                    banner catches it.
@@ -118,6 +121,22 @@ function moneyDebugEnabled(): boolean {
 function moneyLog(checkpoint: string, fields: Record<string, unknown>): void {
   if (!moneyDebugEnabled()) return;
   const parts: string[] = [`[$$] ${checkpoint}`];
+  for (const [k, v] of Object.entries(fields)) {
+    let val: string;
+    if (v === undefined) val = "undef";
+    else if (v === null) val = "null";
+    else if (typeof v === "string") val = v.length > 64 ? `${v.slice(0, 60)}...(${v.length})` : v;
+    else if (typeof v === "number" || typeof v === "boolean") val = String(v);
+    else val = JSON.stringify(v).slice(0, 80);
+    parts.push(`${k}=${val}`);
+  }
+  // eslint-disable-next-line no-console
+  console.info(parts.join(" "));
+}
+
+function claimTrace(checkpoint: string, fields: Record<string, unknown>): void {
+  if (!moneyDebugEnabled()) return;
+  const parts: string[] = [`[claim-trace] ${checkpoint}`];
   for (const [k, v] of Object.entries(fields)) {
     let val: string;
     if (v === undefined) val = "undef";
@@ -201,6 +220,17 @@ export async function waitForBalanceGrowth(
       elapsedMs,
       result: grew ? "grew" : "waiting",
     });
+    claimTrace("orchestrator-balance-poll", {
+      escrowId: opts.debugId,
+      poll: polls,
+      balanceReadOk,
+      balance,
+      baseline: opts.baselineMsats,
+      delta,
+      requiredDelta,
+      elapsedMs,
+      result: grew ? "grew" : "waiting",
+    });
     if (grew) return "grew";
     if (elapsedMs >= timeoutMs) {
       moneyLog("CLAIM-WAIT", {
@@ -210,6 +240,13 @@ export async function waitForBalanceGrowth(
         requiredDelta,
         elapsedMs,
         result: "timeout",
+      });
+      claimTrace("orchestrator-balance-timeout", {
+        escrowId: opts.debugId,
+        poll: polls,
+        delta,
+        requiredDelta,
+        elapsedMs,
       });
       return "timeout";
     }
@@ -231,6 +268,10 @@ export interface RunClaimAndPayoutDeps {
   /** Publish escrow COMPLETE after the wallet balance has actually
    *  confirmed. Best-effort: failure must not block payout/recovery. */
   completeClaim?: (escrowId: string) => Promise<void>;
+  /** Clear the crash-recovery OOB note stash after balance growth proves
+   *  the redeem landed locally. Atomic claim+payout keeps the stash until
+   *  this point so a claim-pending timeout can be retried on next boot. */
+  clearPendingRedemption?: (escrowId: string) => void;
   /** Bound to addOrTouchLightningHandle. Best-effort post-success save. */
   addOrTouchLightningHandle: (address: string) => void;
 }
@@ -267,7 +308,7 @@ export interface RunClaimAndPayoutOpts extends RunClaimAndPayoutDeps {
  *  Failure modes are split so the recovery banner UX is clean:
  *   - claim-failed: claim threw HARD; balance unchanged; no orphan
  *   - claim-pending: claim returned but balance never landed in 60s;
- *     potential orphan — recovery banner catches on next session
+ *     keep pending-redemption stash so boot can retry the redeem
  *   - payout-failed: claim landed (balance grew), but Lightning send
  *     failed; CONFIRMED orphan — recovery banner is the next stop */
 export async function runClaimAndPayout(
@@ -290,6 +331,11 @@ export async function runClaimAndPayout(
     baseline,
     expectedDeltaMsats: opts.expectedDeltaMsats,
   });
+  claimTrace("orchestrator-baseline", {
+    escrowId: opts.escrowId,
+    baseline,
+    expectedDeltaMsats: opts.expectedDeltaMsats,
+  });
 
   // Phase 1: claim. Decrypt shares, SSS-combine, redeem ecash, publish
   // CLAIM. May resolve via:
@@ -301,6 +347,9 @@ export async function runClaimAndPayout(
   emit({ kind: "claiming" });
   try {
     await opts.claimAndRedeem(opts.escrowId);
+    claimTrace("orchestrator-claim-returned", {
+      escrowId: opts.escrowId,
+    });
   } catch (e: any) {
     const error = errorMessage(e, "Claim failed");
     // v0.3.1 Phase 1: typed bridge errors get their own retry-able
@@ -309,9 +358,25 @@ export async function runClaimAndPayout(
     // escrow-bridge.ts). Other throws — hard claim failures, generic
     // protocol errors — stay on claim-failed (no retry semantic).
     if (isBridgeThrewError(e)) {
+      claimTrace("orchestrator-claim-bridge-threw", {
+        escrowId: opts.escrowId,
+        errMsg: error.slice(0, 120),
+      });
       emit({ kind: "claim-bridge-threw", error });
       return { kind: "claim-bridge-threw", error };
     }
+    // CLAIM already hit relays, but the SDK has reported a terminal mint
+    // reissue failure. Do not fall through to the comforting "still
+    // arriving" copy: repeating the same consumed notes cannot help.
+    if (e?.claimPublished && e?.settlementFailed) {
+      claimTrace("orchestrator-claim-settle-failed", {
+        escrowId: opts.escrowId,
+        errMsg: error.slice(0, 120),
+      });
+      emit({ kind: "claim-failed", error });
+      return { kind: "claim-failed", error };
+    }
+
     // CLAIM already hit relays, but redeem/balance settlement is still
     // uncertain. This is not a hard claim failure; continue into the
     // balance-confirming watchdog. If the balance lands, payout proceeds.
@@ -321,8 +386,16 @@ export async function runClaimAndPayout(
         escrowId: opts.escrowId,
         errMsg: error.slice(0, 120),
       });
+      claimTrace("orchestrator-claim-published-throw", {
+        escrowId: opts.escrowId,
+        errMsg: error.slice(0, 120),
+      });
       // Fall through to confirming below.
     } else {
+      claimTrace("orchestrator-claim-failed", {
+        escrowId: opts.escrowId,
+        errMsg: error.slice(0, 120),
+      });
       emit({ kind: "claim-failed", error });
       return { kind: "claim-failed", error };
     }
@@ -347,11 +420,40 @@ export async function runClaimAndPayout(
     escrowId: opts.escrowId,
     result: grew,
   });
+  claimTrace("orchestrator-confirm-out", {
+    escrowId: opts.escrowId,
+    result: grew,
+  });
   if (grew !== "grew") {
     const error =
-      "Your sats are still arriving from the federation. They'll land shortly — recover them via the banner on Browse if they don't appear within a few minutes.";
+      "Your sats are still arriving from the federation. They'll land shortly. If this trade stays settling, try the claim again.";
     emit({ kind: "claim-pending", error });
     return { kind: "claim-pending", error };
+  }
+
+  if (opts.clearPendingRedemption) {
+    try {
+      opts.clearPendingRedemption(opts.escrowId);
+      moneyLog("CLAIM-STASH-CLEAR", {
+        escrowId: opts.escrowId,
+        result: "success",
+      });
+      claimTrace("orchestrator-stash-clear", {
+        escrowId: opts.escrowId,
+        result: "success",
+      });
+    } catch (e: any) {
+      moneyLog("CLAIM-STASH-CLEAR", {
+        escrowId: opts.escrowId,
+        result: "error",
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+      claimTrace("orchestrator-stash-clear", {
+        escrowId: opts.escrowId,
+        result: "error",
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+    }
   }
 
   // COMPLETE is a statement that the escrow sats are under the winner's
@@ -363,13 +465,25 @@ export async function runClaimAndPayout(
       moneyLog("CLAIM-COMPLETE-IN", {
         escrowId: opts.escrowId,
       });
+      claimTrace("orchestrator-complete-in", {
+        escrowId: opts.escrowId,
+      });
       await opts.completeClaim(opts.escrowId);
       moneyLog("CLAIM-COMPLETE-OUT", {
         escrowId: opts.escrowId,
         result: "success",
       });
+      claimTrace("orchestrator-complete-out", {
+        escrowId: opts.escrowId,
+        result: "success",
+      });
     } catch (e: any) {
       moneyLog("CLAIM-COMPLETE-OUT", {
+        escrowId: opts.escrowId,
+        result: "error",
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+      claimTrace("orchestrator-complete-out", {
         escrowId: opts.escrowId,
         result: "error",
         errMsg: (e?.message || String(e)).slice(0, 120),
@@ -387,6 +501,10 @@ export async function runClaimAndPayout(
       escrowId: opts.escrowId,
       invoicePrefix: opts.bolt11.slice(0, 24),
     });
+    claimTrace("orchestrator-pay-in", {
+      escrowId: opts.escrowId,
+      invoicePrefix: opts.bolt11.slice(0, 24),
+    });
     await opts.payInvoice(opts.bolt11);
   } catch (e: any) {
     const error = errorMessage(e, "Lightning payment failed");
@@ -395,10 +513,19 @@ export async function runClaimAndPayout(
       result: "error",
       errMsg: error.slice(0, 120),
     });
+    claimTrace("orchestrator-pay-out", {
+      escrowId: opts.escrowId,
+      result: "error",
+      errMsg: error.slice(0, 120),
+    });
     emit({ kind: "payout-failed", error });
     return { kind: "payout-failed", error };
   }
   moneyLog("CLAIM-PAY-OUT", {
+    escrowId: opts.escrowId,
+    result: "success",
+  });
+  claimTrace("orchestrator-pay-out", {
     escrowId: opts.escrowId,
     result: "success",
   });
@@ -415,6 +542,9 @@ export async function runClaimAndPayout(
 
   emit({ kind: "done" });
   moneyLog("CLAIM-DONE", {
+    escrowId: opts.escrowId,
+  });
+  claimTrace("orchestrator-done", {
     escrowId: opts.escrowId,
   });
   return { kind: "done" };

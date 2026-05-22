@@ -31,7 +31,8 @@ import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 
 export function TradeDetail({
-  state, pubkey, homeCommunity, bootProbeFailed, fundingInProgress,
+  state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
+  claimBlockedReason,
   onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings,
   onPrewarmFunding,
 }: {
@@ -48,11 +49,20 @@ export function TradeDetail({
    *  computed by App.tsx from fedimint.bootProbeState — passing the
    *  bool keeps TradeDetail's API minimal and explicit. */
   bootProbeFailed: boolean;
+  /** Last Lightning receive attempt failed after the federation itself
+   *  looked reachable. Funding is disabled until reconnect/preflight
+   *  clears the receive-health cache; Claim remains governed by the
+   *  boot probe because outbound payout can still be retry-safe. */
+  receiveUnavailable: boolean;
   /** v0.6.5: true while another runFundAndLock flow is mid-flight on
    *  the shared OPFS wallet. Disables Fund and swaps its label to
    *  "{lockLabel} unavailable" + explanatory subtitle so users see
    *  why the button is greyed rather than just dead. */
   fundingInProgress: boolean;
+  /** Terminal local claim settlement failure. When present, retrying
+   *  the same CLAIM cannot help because the federation already consumed
+   *  the ecash notes and the local mint reissue failed. */
+  claimBlockedReason?: string | null;
   onBack: () => void;
   onVote: (outcome: Outcome) => void;
   onClaim: () => Promise<void>;
@@ -73,6 +83,7 @@ export function TradeDetail({
     listingCommunity: state.community,
     homeCommunity,
   });
+  const fundUnavailable = bootProbeFailed || receiveUnavailable;
   const [voting, setVoting] = useState(false);
   const [joining, setJoining] = useState(false);
   const [locking, setLocking] = useState(false);
@@ -86,7 +97,6 @@ export function TradeDetail({
   // listing). Renders ONCE per pubkey, same gate-pattern as v0.2.0's
   // first-publish honesty card. Dismiss is sticky in localStorage.
   const [stateBDismissed, setStateBDismissed] = useState(() => hasStateBExplained(pubkey));
-  const s = STATUS[state.status] || STATUS.CREATED;
   const myRole = state.participants.buyer === pubkey ? Role.BUYER
     : state.participants.seller === pubkey ? Role.SELLER
     : state.participants.arbiter === pubkey ? Role.ARBITER : null;
@@ -114,6 +124,12 @@ export function TradeDetail({
   const votePrompt = decideVotePrompt(state, pubkey);
   const winner = getWinner(state);
   const iAmWinner = winner?.pubkey === pubkey;
+  const claimRetryBlocked =
+    state.status === EscrowStatus.CLAIMED &&
+    !!claimBlockedReason &&
+    /reissue|consumed|settle/i.test(claimBlockedReason);
+  const statusKey = claimRetryBlocked ? "CLAIM_FAILED" : state.status;
+  const s = STATUS[statusKey] || STATUS.CREATED;
 
   const expectedLocker = state.category === "marketplace" ? Role.BUYER
     : state.category === "lending" ? Role.SELLER
@@ -135,7 +151,7 @@ export function TradeDetail({
   useEffect(() => {
     if (!onPrewarmFunding) return;
     if (state.status !== EscrowStatus.CREATED) return;
-    if (!canILock || bootProbeFailed || fundingInProgress) return;
+    if (!canILock || bootProbeFailed || receiveUnavailable || fundingInProgress) return;
     if (prewarmedEscrowRef.current === state.id) return;
     prewarmedEscrowRef.current = state.id;
     void onPrewarmFunding();
@@ -144,6 +160,7 @@ export function TradeDetail({
     state.status,
     canILock,
     bootProbeFailed,
+    receiveUnavailable,
     fundingInProgress,
     onPrewarmFunding,
   ]);
@@ -177,7 +194,7 @@ export function TradeDetail({
       }}>
         <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg,${s.c},${s.c}00)` }} />
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-          <Badge status={state.status} />
+          <Badge status={statusKey} />
           <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
             {state.createdAt ? new Date(state.createdAt * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
             {" · "}{state.id}
@@ -584,16 +601,18 @@ export function TradeDetail({
           )}
 
           {/* v0.3.1 Phase 3 + v0.6.5: Fund disables on bootProbeFailed
-              (federation unreachable) and on fundingInProgress (another
-              runFundAndLock flow holds the shared OPFS wallet), in
-              addition to its existing locking/buyer guards. When mid-
-              funding, the button label itself changes to "{lockLabel}
-              unavailable" so the disabled state reads as intentional
-              rather than broken. */}
+              (federation unreachable), receiveUnavailable (gateway trust /
+              receive watcher failure), and fundingInProgress (another
+              runFundAndLock flow holds the shared OPFS wallet), in addition
+              to its existing locking/buyer guards. When mid-funding or
+              receive-blocked, the button label changes to "{lockLabel}
+              unavailable" so the disabled state reads as intentional. */}
           <button
-            disabled={locking || fundingInProgress || !state.participants.buyer || bootProbeFailed || lockBlockedByNoArbiter}
+            disabled={locking || fundingInProgress || !state.participants.buyer || fundUnavailable || lockBlockedByNoArbiter}
             title={fundingInProgress
               ? "Another funding operation is in progress. Complete it first."
+              : receiveUnavailable
+                ? "Lightning receive is unavailable on this Chama route. Reconnect or use sim demo."
               : lockBlockedByNoArbiter
                 ? "No eligible arbiter is available for this trade."
                 : undefined}
@@ -607,19 +626,19 @@ export function TradeDetail({
             }}
             style={{
               width: "100%", padding: "16px", borderRadius: T.rs,
-              background: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed || lockBlockedByNoArbiter
+              background: locking || fundingInProgress || !state.participants.buyer || fundUnavailable || lockBlockedByNoArbiter
                 ? T.surface
                 : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
               border: "none",
-              color: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed || lockBlockedByNoArbiter ? T.muted : T.bg,
+              color: locking || fundingInProgress || !state.participants.buyer || fundUnavailable || lockBlockedByNoArbiter ? T.muted : T.bg,
               fontFamily: T.mono, fontSize: 14, fontWeight: 800,
-              cursor: locking || fundingInProgress || !state.participants.buyer || bootProbeFailed || lockBlockedByNoArbiter ? "default" : "pointer",
+              cursor: locking || fundingInProgress || !state.participants.buyer || fundUnavailable || lockBlockedByNoArbiter ? "default" : "pointer",
               letterSpacing: 0.5, transition: "all 0.2s",
             }}
           >
             {locking
               ? "Funding…"
-              : fundingInProgress || lockBlockedByNoArbiter
+              : fundingInProgress || receiveUnavailable || lockBlockedByNoArbiter
                 ? lockLabel + " unavailable"
                 : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
           </button>
@@ -645,6 +664,14 @@ export function TradeDetail({
               fontSize: 10, color: T.amber, fontFamily: T.mono,
             }}>
               Federation unreachable — reconnect first
+            </div>
+          )}
+          {receiveUnavailable && !bootProbeFailed && !fundingInProgress && !lockBlockedByNoArbiter && (
+            <div style={{
+              textAlign: "center", marginTop: 8,
+              fontSize: 10, color: T.amber, fontFamily: T.mono,
+            }}>
+              Lightning receive unavailable — reconnect or use sim demo
             </div>
           )}
           <div style={{
@@ -847,10 +874,10 @@ export function TradeDetail({
           disables with "Federation unreachable — reconnect first"
           subtitle. The Reconnect CTA lives in ChamaBar (single
           source of truth). */}
-      {state.status === EscrowStatus.APPROVED && iAmWinner && !state.subscription && (
+      {(state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED) && iAmWinner && !state.subscription && (
         <div style={{ marginBottom: 16 }}>
           <button
-            disabled={claiming || bootProbeFailed}
+            disabled={claiming || bootProbeFailed || claimRetryBlocked}
             onClick={async () => {
               setClaiming(true);
               try {
@@ -861,16 +888,22 @@ export function TradeDetail({
             }}
             style={{
               width: "100%", padding: "18px", borderRadius: T.rs,
-              background: claiming || bootProbeFailed
+              background: claimRetryBlocked
+                ? T.redDim
+                : claiming || bootProbeFailed
                 ? T.surface
                 : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
-              border: "none",
-              color: claiming || bootProbeFailed ? T.muted : T.bg,
+              border: claimRetryBlocked ? `1px solid ${T.red}55` : "none",
+              color: claimRetryBlocked ? T.red : claiming || bootProbeFailed ? T.muted : T.bg,
               fontFamily: T.mono, fontSize: 15, fontWeight: 800,
-              cursor: claiming || bootProbeFailed ? "default" : "pointer", letterSpacing: 1,
-              animation: (claiming || bootProbeFailed) ? "none" : "pulse 2s ease-in-out infinite",
+              cursor: claiming || bootProbeFailed || claimRetryBlocked ? "default" : "pointer", letterSpacing: 1,
+              animation: (claiming || bootProbeFailed || claimRetryBlocked) ? "none" : "pulse 2s ease-in-out infinite",
             }}>
-            {claiming ? "Claiming…" : "⚡ CLAIM YOUR SATS"}
+            {claimRetryBlocked
+              ? "✕ CLAIM DID NOT SETTLE"
+              : claiming
+              ? state.status === EscrowStatus.CLAIMED ? "Retrying claim…" : "Claiming…"
+              : state.status === EscrowStatus.CLAIMED ? "⚡ RETRY CLAIM" : "⚡ CLAIM YOUR SATS"}
           </button>
           {bootProbeFailed && (
             <div style={{
@@ -878,6 +911,22 @@ export function TradeDetail({
               fontSize: 10, color: T.amber, fontFamily: T.mono,
             }}>
               Federation unreachable — reconnect first
+            </div>
+          )}
+          {claimRetryBlocked && (
+            <div style={{
+              textAlign: "center", marginTop: 8,
+              fontSize: 10, color: T.red, fontFamily: T.mono,
+            }}>
+              Ecash redeem failed after federation consumed the notes — retry is disabled
+            </div>
+          )}
+          {!bootProbeFailed && !claimRetryBlocked && state.status === EscrowStatus.CLAIMED && (
+            <div style={{
+              textAlign: "center", marginTop: 8,
+              fontSize: 10, color: T.amber, fontFamily: T.mono,
+            }}>
+              Claim already published — retry only settles/pays out after wallet balance confirms
             </div>
           )}
         </div>

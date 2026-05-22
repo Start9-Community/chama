@@ -16,7 +16,8 @@
 
 import { useEffect, useRef, useState, lazy, Suspense } from "react";
 import { T } from "../theme.js";
-import { isSimModeOn } from "../../sim/simMode.js";
+import { isSimModeOn, setSimMode } from "../../sim/simMode.js";
+import { makeLightningInvoiceQrPayload } from "../../payments/lightning-qr.js";
 import type {
   FundAndLockPhase,
   FundAndLockTerminal,
@@ -448,6 +449,7 @@ function InvoiceDisplay({
   const mins = Math.floor(remainingSec / 60);
   const secs = remainingSec % 60;
   const isMintConfirming = phaseKind === "mint-confirming";
+  const qrPayload = makeLightningInvoiceQrPayload(bolt11);
 
   return (
     <>
@@ -458,8 +460,15 @@ function InvoiceDisplay({
         {isMintConfirming ? "PAYMENT DETECTED · CREDITING…" : "SCAN OR COPY TO PAY"}
       </div>
       <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-        <Suspense fallback={<div style={{ width: 200, height: 200, background: T.surface, borderRadius: T.rs }} />}>
-          <QRCode data={bolt11} size={200} fgColor={isMintConfirming ? "#fbbf24" : "#a78bfa"} />
+        <Suspense fallback={<div style={{ width: 280, height: 280, background: "#fff", borderRadius: T.rs }} />}>
+          <QRCode
+            data={qrPayload}
+            size={280}
+            fgColor="#050505"
+            bgColor="#ffffff"
+            margin={4}
+            alt="Lightning invoice QR code"
+          />
         </Suspense>
       </div>
       <div style={{
@@ -785,12 +794,17 @@ function LockFailedState({
 }: { error: string; onCancel: () => void }) {
   const isWalletVerifiableGatewayError =
     /wallet-verifiable Lightning receive gateway/i.test(error);
+  const isReceiveRejection =
+    /Federation didn't accept the payment|canceled:|claim_rejected|before Chama received ecash/i.test(error);
   const diagnostics = extractChamaDiagnostics(error);
+  const showSimFallback = isWalletVerifiableGatewayError && !isSimModeOn();
   const title = isWalletVerifiableGatewayError
     ? "Funding unavailable here"
+    : isReceiveRejection
+      ? "Receive rejected"
     : "Couldn't lock the trade";
   const detail = isWalletVerifiableGatewayError
-    ? "This federation is listing Lightning receive gateways, but none are wallet-verifiable from this browser. Chama did not create an invoice, so no sats were requested."
+    ? "This federation is listing Lightning receive gateways, but none are wallet-verifiable from this browser. Chama did not create an invoice, so no sats were requested. Use sim demo to keep presenting without real sats."
     : error;
 
   return (
@@ -821,6 +835,32 @@ function LockFailedState({
           Copy Fedimint diagnostics
         </button>
       )}
+      {!diagnostics && isReceiveRejection && (
+        <button
+          onClick={() => navigator.clipboard?.writeText(error).catch(() => {})}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.redDim, border: `1px solid ${T.red}44`,
+            color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+            cursor: "pointer", marginBottom: 8,
+          }}
+        >
+          Copy receive failure
+        </button>
+      )}
+      {showSimFallback && (
+        <button
+          onClick={openSimDemo}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.amberDim, border: `1px solid ${T.amber}55`,
+            color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+            cursor: "pointer", marginBottom: 8,
+          }}
+        >
+          Open sim demo
+        </button>
+      )}
       <button
         onClick={onCancel}
         style={{
@@ -841,4 +881,15 @@ function extractChamaDiagnostics(error: string): string | null {
   const index = error.indexOf(marker);
   if (index === -1) return null;
   return error.slice(index + marker.length).trim() || null;
+}
+
+function openSimDemo(): void {
+  setSimMode(true);
+  try {
+    const next = new URL(window.location.href);
+    next.searchParams.set("sim", "1");
+    window.location.assign(next.toString());
+  } catch {
+    window.location.reload();
+  }
 }

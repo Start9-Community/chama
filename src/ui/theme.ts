@@ -35,6 +35,7 @@ export const STATUS = {
   LOCKED:    { c: T.purple, bg: T.purpleDim, l: "Sats in escrow",  mode: "working"  as StatusMode },
   APPROVED:  { c: T.accent, bg: T.accentDim, l: "Ready to claim",  mode: "active"   as StatusMode },
   CLAIMED:   { c: T.amber,  bg: T.amberDim,  l: "Settling",        mode: "working"  as StatusMode },
+  CLAIM_FAILED: { c: T.red, bg: T.redDim, l: "Claim failed",        mode: "active"   as StatusMode },
   COMPLETED: { c: T.green,  bg: T.greenDim,  l: "Done",            mode: "resolved" as StatusMode },
   EXPIRED:   { c: T.red,    bg: T.redDim,    l: "Timed out",       mode: "active"   as StatusMode },
   CANCELLED: { c: T.muted,  bg: T.surface,   l: "Cancelled",       mode: "resolved" as StatusMode },

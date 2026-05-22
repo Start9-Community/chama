@@ -50,6 +50,8 @@ import { AtomicFundingModal } from "./panels/AtomicFundingModal.js";
 import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
 import { addOrTouchPayoutDestination, listPayoutDestinations } from "../payments/payout-destinations.js";
+import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
+import { listPendingRedemptions } from "../fedimint/pending-redemptions.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
   minimumAtomicFundingMessage,
@@ -71,6 +73,22 @@ type View =
   | "saved-handles"
   | "payout-destinations"
   | "advanced";
+
+type PendingDestroyConfirm = {
+  invite: string;
+  label: string;
+  balanceMsats: number;
+  activeInvite: string;
+  /** v0.2.0 item 1: when set, navigate to this escrow's detail
+   *  after the switch confirms. Used by listing-tap dispatch when
+   *  a recoverable balance forces confirmation before the silent
+   *  switch to the listing's fed can happen. */
+  navigateToEscrowAfter?: string;
+  /** Community-pill taps optimistically update the visual community
+   *  before surfacing the balance guard. If the user cancels the guard,
+   *  restore the old community/filter alongside the active invite. */
+  restoreCommunitySlug?: string | null;
+};
 
 const TAB_FOR_VIEW: Record<View, Tab> = {
   browse: "browse",
@@ -153,17 +171,7 @@ export default function App() {
   const [showFundModal, setShowFundModal] = useState(false);
   const [autoLoginChecked, setAutoLoginChecked] = useState(false);
   const [showQRScanner, setShowQRScanner] = useState(false);
-  const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<{
-    invite: string;
-    label: string;
-    balanceMsats: number;
-    activeInvite: string;
-    /** v0.2.0 item 1: when set, navigate to this escrow's detail
-     *  after the switch confirms. Used by listing-tap dispatch when
-     *  balance > 0 forces destroy-confirm before the silent switch
-     *  to the listing's fed can happen. */
-    navigateToEscrowAfter?: string;
-  } | null>(null);
+  const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<PendingDestroyConfirm | null>(null);
   const [autoInitDone, setAutoInitDone] = useState(false);
   // v0.2.0 item 1: brief inline overlay during silent re-init triggered
   // by listing-tap. Sub-second on a healthy fed; modal-free.
@@ -201,6 +209,7 @@ export default function App() {
     fiatCurrency?: string | null;
     resolve: () => void;
   } | null>(null);
+  const [blockedClaimReasons, setBlockedClaimReasons] = useState<Record<string, string>>({});
   // v0.3.0 Phase 4: RecoveryPayoutModal mount state. Single mount used
   // by BOTH the failure-mode RecoveryBanner (no follow-up after drain)
   // AND the DestroyEcashConfirmModal flow (queues pendingSwitchAfter-
@@ -330,7 +339,7 @@ export default function App() {
           : "your previous community";
     actions.initFedimint(target.invite).catch((e: any) => {
       if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
-        setPendingDestroyConfirm({
+        queueDestroyConfirm({
           invite: e.desiredInvite,
           label: failureLabel,
           balanceMsats: e.balanceMsats || 0,
@@ -487,6 +496,71 @@ export default function App() {
   // helper retired with the filter.
   void browseCommunity;
   const selected = selectedId ? escrows.get(selectedId) : null;
+  const selectedPoisonedClaimReason = selected
+    ? listPendingRedemptions().find(entry =>
+        entry.escrowId === selected.id &&
+        !!entry.lastError &&
+        !!entry.poisonedAt
+      )?.lastError ?? null
+    : null;
+  const selectedClaimBlockedReason = selected
+    ? blockedClaimReasons[selected.id] ?? selectedPoisonedClaimReason
+    : null;
+
+  const queueDestroyConfirm = (request: PendingDestroyConfirm | null) => {
+    if (!request) {
+      setPendingDestroyConfirm(null);
+      return;
+    }
+
+    if (hasLightningWithdrawableBalance(request.balanceMsats)) {
+      setPendingDestroyConfirm(request);
+      return;
+    }
+
+    // Nothing recoverable: sub-fee/sub-sat dust must not open the
+    // "Recover & switch" path because that path can only send whole sats.
+    setPendingDestroyConfirm(null);
+    (async () => {
+      try {
+        setSwitchingToCommunity({ displayName: request.label });
+        if (fedimint.federationId) {
+          await actions.switchFederation(request.invite);
+        } else {
+          await actions.initFedimint(request.invite);
+        }
+        setToast({ message: `On ${request.label}.`, type: "success" });
+        if (request.navigateToEscrowAfter) {
+          setSelectedId(request.navigateToEscrowAfter);
+          setView("detail");
+        }
+      } catch (e: any) {
+        if (
+          (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE"
+            || e?.code === "SWITCH_REFUSED_NONZERO_BALANCE")
+          && hasLightningWithdrawableBalance(e.balanceMsats || 0)
+        ) {
+          setPendingDestroyConfirm({
+            ...request,
+            balanceMsats: e.balanceMsats || 0,
+            activeInvite: e.previousActiveInvite || request.activeInvite,
+          });
+          return;
+        }
+        if ("restoreCommunitySlug" in request) {
+          const restoreSlug = request.restoreCommunitySlug;
+          actions.setCommunity(restoreSlug ?? "");
+          setBrowseCommunity(restoreSlug ?? DEFAULT_COMMUNITY_SLUG);
+        }
+        setToast({
+          message: e?.message || `Couldn't switch to ${request.label}. Try again.`,
+          type: "error",
+        });
+      } finally {
+        setSwitchingToCommunity(null);
+      }
+    })();
+  };
 
   // v0.1.66.32: refetch on tap when local state may be stale.
   // v0.2.0 item 1: federation-follows-listing dispatch. When the user
@@ -557,7 +631,7 @@ export default function App() {
             // Race: balance was zero at decision time, became non-zero
             // before the switch landed. Surface the modal with the
             // navigate-after target so confirm-then-navigate still works.
-            setPendingDestroyConfirm({
+            queueDestroyConfirm({
               invite: effect.targetInvite,
               label: effect.displayName,
               balanceMsats: e.balanceMsats || 0,
@@ -581,7 +655,7 @@ export default function App() {
     // the modal. After confirm, the switch happens AND we navigate to
     // the listing detail (per v0.2.0 spec the listing-tap user intent
     // carries through the modal).
-    setPendingDestroyConfirm({
+    queueDestroyConfirm({
       invite: effect.targetInvite,
       label: effect.displayName,
       balanceMsats: effect.balanceMsats,
@@ -621,7 +695,7 @@ export default function App() {
     actions,
     setToast,
     setBrowseCommunity,
-    setPendingDestroyConfirm,
+    setPendingDestroyConfirm: queueDestroyConfirm,
   });
 
   const switchTab = (t: Tab) => {
@@ -884,8 +958,20 @@ export default function App() {
             if (!terminal) {
               // User dismissed picker before resolving — silent.
             } else if (terminal.kind === "done") {
+              setBlockedClaimReasons(prev => {
+                if (!prev[pendingClaim.escrowId]) return prev;
+                const next = { ...prev };
+                delete next[pendingClaim.escrowId];
+                return next;
+              });
               setToast({ message: "Sats sent to your wallet!", type: "success" });
             } else if (terminal.kind === "claim-failed") {
+              if (/reissue|consumed|settle/i.test(terminal.error)) {
+                setBlockedClaimReasons(prev => ({
+                  ...prev,
+                  [pendingClaim.escrowId]: terminal.error,
+                }));
+              }
               setToast({ message: terminal.error, type: "error" });
             } else if (terminal.kind === "claim-bridge-threw") {
               // v0.3.1 Phase 1: structural failure (FED_PROBE_FAILED /
@@ -918,7 +1004,7 @@ export default function App() {
           zero. The destroy escape (v0.2.0's tertiary button) is gone
           — Sandbox-mode users who truly need to nuke OPFS use
           Settings → Advanced → Sandbox → Reset OPFS. */}
-      {pendingDestroyConfirm && (
+      {pendingDestroyConfirm && hasLightningWithdrawableBalance(pendingDestroyConfirm.balanceMsats) && (
         <DestroyEcashConfirmModal
           targetLabel={pendingDestroyConfirm.label}
           balanceMsats={pendingDestroyConfirm.balanceMsats}
@@ -942,6 +1028,11 @@ export default function App() {
           }}
           onCancel={() => {
             actions.setCustomInvite(pendingDestroyConfirm.activeInvite);
+            if ("restoreCommunitySlug" in pendingDestroyConfirm) {
+              const restoreSlug = pendingDestroyConfirm.restoreCommunitySlug;
+              actions.setCommunity(restoreSlug ?? "");
+              setBrowseCommunity(restoreSlug ?? DEFAULT_COMMUNITY_SLUG);
+            }
             setPendingDestroyConfirm(null);
             actions.initFedimint(pendingDestroyConfirm.activeInvite).catch((e: any) =>
               setToast({ message: e?.message || "Re-init failed", type: "error" })
@@ -1025,7 +1116,9 @@ export default function App() {
             // reconnect first" subtitle when this is true. Reconnect
             // dispatch lives in ChamaBar only.
             bootProbeFailed={fedimint.bootProbeState === "failed"}
+            receiveUnavailable={fedimint.lastHealthOk === false}
             fundingInProgress={midFunding}
+            claimBlockedReason={selectedClaimBlockedReason}
             onBack={() => { setView("browse"); setSelectedId(null); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
@@ -1099,9 +1192,7 @@ export default function App() {
                 selected.amountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
               ) {
                 setToast({
-                  message:
-                    `${minimumAtomicFundingMessage()} Tiny invoices can be ` +
-                    "accepted by a Lightning gateway and still reject before ecash mints.",
+                  message: `${minimumAtomicFundingMessage()} Enter a positive amount for a real Lightning escrow.`,
                   type: "error",
                 });
                 return;

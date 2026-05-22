@@ -998,12 +998,32 @@ export class EscrowClient {
       parsed.map(e => `kind:${e.kind}`).join(', '));
     if (parsed.length === 0) return null;
 
-    // Resolve participant-only envelopes before replay: LOCK handle
-    // reveal plus CHAT body/receipt attachments. Sequential await keeps
-    // a slow signer from fanning out into many concurrent NIP-44 calls.
-    const readableParsed: ParsedEscrowEvent[] = [];
+    // Resolve only LOCK handle envelopes first, then preflight the
+    // state-changing chain before decrypting CHAT bodies. Old invalid
+    // escrow histories can contain image receipts; decrypting those before
+    // we know the chain is usable causes signer extensions to dump huge
+    // base64 payloads into the console.
+    const lockResolvedParsed: ParsedEscrowEvent[] = [];
     for (const event of parsed) {
-      const resolved = await this.resolveParticipantEnvelope(event);
+      lockResolvedParsed.push(await this.resolveLockEnvelope(event));
+    }
+    const preflightSorted = sortEventChain(
+      lockResolvedParsed.filter((event) => event.kind !== EscrowEventKind.CHAT),
+    );
+    const preflight = replayEventChain(preflightSorted);
+    if (!preflight.ok) {
+      console.debug(`[escrow] loadEscrow ${escrowId}: replay skipped historical invalid chain — ${preflight.error.code}: ${preflight.error.message}`);
+      this.callbacks.onValidationError?.(escrowId, preflight.error.message, preflight.error.eventId);
+      console.debug(`[escrow] Kept failed escrow ${escrowId} in saved list for later recovery/rehydration`);
+      return null;
+    }
+
+    // Resolve CHAT body/receipt attachments only after the chain preflight
+    // succeeds. Sequential await keeps a slow signer from fanning out into
+    // many concurrent NIP-44 calls.
+    const readableParsed: ParsedEscrowEvent[] = [];
+    for (const event of lockResolvedParsed) {
+      const resolved = await this.resolveChatEnvelope(event);
       if (resolved) readableParsed.push(resolved);
     }
 
@@ -1014,12 +1034,12 @@ export class EscrowClient {
     const result = replayEventChain(sorted);
 
     if (!result.ok) {
-      console.error(`[escrow] loadEscrow ${escrowId}: replay FAILED — ${result.error.code}: ${result.error.message}`);
+      console.debug(`[escrow] loadEscrow ${escrowId}: replay FAILED — ${result.error.code}: ${result.error.message}`);
       this.callbacks.onValidationError?.(escrowId, result.error.message, result.error.eventId);
       // Money-path safety: a replay failure can be caused by partial relay
       // history, late events, or an invalid remote event. Keep the local
       // pointer so later rehydration or recovery surfaces can still find it.
-      console.warn(`[escrow] Kept failed escrow ${escrowId} in saved list for later recovery/rehydration`);
+      console.debug(`[escrow] Kept failed escrow ${escrowId} in saved list for later recovery/rehydration`);
       return null;
     }
     console.debug(`[escrow] loadEscrow ${escrowId}: replay OK — state is ${result.state.status}`);

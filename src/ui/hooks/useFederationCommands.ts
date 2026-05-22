@@ -35,7 +35,13 @@ export interface FederationCommandsDeps {
   setToast: (t: { message: string; type: "success" | "error" | "info" }) => void;
   setBrowseCommunity: (slug: string) => void;
   setPendingDestroyConfirm: (
-    p: { invite: string; label: string; balanceMsats: number; activeInvite: string } | null,
+    p: {
+      invite: string;
+      label: string;
+      balanceMsats: number;
+      activeInvite: string;
+      restoreCommunitySlug?: string | null;
+    } | null,
   ) => void;
 }
 
@@ -158,6 +164,7 @@ export function useFederationCommands(deps: FederationCommandsDeps): FederationC
       label: effect.displayName,
       balanceMsats: effect.balanceMsats,
       activeInvite: effect.currentInvite,
+      restoreCommunitySlug: previousCommunityRaw,
     });
   };
 

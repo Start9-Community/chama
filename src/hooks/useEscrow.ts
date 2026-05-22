@@ -94,14 +94,17 @@ import {
   setActiveInvite,
   clearActiveInvite,
   shouldReconcileFederation,
+  federationNameForInvite,
   deriveCreateFedTags,
 } from "../fedimint/index.js";
 import type { LnReceiveStateKind } from "../fedimint/index.js";
+import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
+import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
   minimumAtomicFundingMessage,
@@ -294,7 +297,7 @@ export interface UseEscrowActions {
    * split for the recovery banner UX:
    *   claim-failed   — claim threw hard; no orphan
    *   claim-pending  — claim returned but balance hasn't landed in 60s;
-   *                    sats may still arrive (recovery banner catches)
+   *                    pending redemption stash remains for boot retry
    *   payout-failed  — claim landed but LN send failed; orphan balance
    *                    (recovery banner is the next stop)
    *   done           — payout sent
@@ -331,9 +334,10 @@ export interface UseEscrowActions {
    * Idempotent: safe to call multiple times.
    *
    * v0.1.82+: throws `RECONCILE_REFUSED_NONZERO_BALANCE` if the OPFS-bound
-   * federation differs from the desired one AND the local wallet holds
-   * sats (or the balance can't be verified). The UI must surface a
-   * destroy-confirm modal before retrying with `{ force: true }`.
+   * federation differs from the desired one AND the local wallet holds a
+   * Lightning-withdrawable balance (or the balance can't be verified). The
+   * UI must surface a destroy-confirm modal before retrying with
+   * `{ force: true }`.
    */
   initFedimint: (inviteCode?: string, options?: { force?: boolean }) => Promise<void>;
   /**
@@ -415,10 +419,10 @@ export interface UseEscrowActions {
    *
    * Destructive: any ecash held in the previous federation becomes
    * stranded until you switch back. The v0.1.76 balance guard refuses
-   * the switch if `getBalance() > 0` unless `{ force: true }` is passed,
-   * which the UI must only do after explicit user confirmation. The
-   * Nostr-backed seed survives — trade history, escrows, and signer
-   * are unaffected.
+   * the switch if the current balance is Lightning-withdrawable unless
+   * `{ force: true }` is passed, which the UI must only do after explicit
+   * user confirmation. The Nostr-backed seed survives — trade history,
+   * escrows, and signer are unaffected.
    */
   switchFederation: (inviteCode: string, options?: { force?: boolean }) => Promise<void>;
   /** (Re-)start the Browse feed subscription for public listings. */
@@ -610,7 +614,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           vibrate([20, 30, 20]);
         },
         onValidationError: (id, error, eventId) => {
-          console.warn(`[escrow] Validation error on ${id}: ${error} (event: ${eventId})`);
+          console.debug(`[escrow] Validation error on ${id}: ${error} (event: ${eventId})`);
         },
         onRelayStatus: (url, status) => updateRelayStatus(url, status),
       };
@@ -1412,12 +1416,15 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       //
       // CRITICAL: ecash on the OPFS-bound fed is bearer cash. A silent
       // wipe destroys it. So before wiping, peek the balance:
-      //   - balance === 0           → safe to wipe + rejoin silently
-      //   - balance > 0 && !force   → REFUSE; throw structured error
-      //                               that the UI catches and surfaces
-      //                               as a destroy-confirm modal.
-      //   - balance > 0 && force    → user-confirmed destruction;
-      //                               proceed.
+      //   - no Lightning-withdrawable balance → safe to wipe + rejoin
+      //                                        silently. Tiny dust cannot
+      //                                        be recovered through the UI.
+      //   - withdrawable balance && !force    → REFUSE; throw structured
+      //                                        error that the UI catches and
+      //                                        surfaces as a destroy-confirm
+      //                                        modal.
+      //   - withdrawable balance && force     → user-confirmed destruction;
+      //                                        proceed.
       //
       // This is the load-bearing safety. Without it, a refresh + wrong
       // fed pick destroys notes purely and simply (reproduced twice
@@ -1452,7 +1459,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           opfsBalanceMsats = -1;
         }
 
-        if (!force && opfsBalanceMsats !== 0) {
+        const balanceUnknown = opfsBalanceMsats < 0;
+        const balanceWithdrawable = hasLightningWithdrawableBalance(opfsBalanceMsats);
+        if (!force && (balanceUnknown || balanceWithdrawable)) {
           const sats = opfsBalanceMsats > 0
             ? Math.floor(opfsBalanceMsats / 1000)
             : null;
@@ -1604,7 +1613,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         initialized: true,
         joined: true,
         federationId,
-        federationName: usingCustom ? "External route" : BP_FEDERATION_NAME,
+        federationName: federationNameForInvite(effectiveInvite)
+          ?? (usingCustom ? "External route" : BP_FEDERATION_NAME),
         isCustom: usingCustom,
         balanceMsats,
         busy: false,
@@ -1665,9 +1675,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
   const setCustomInvite = useCallback((inviteCode: string) => {
     setCustomFederationInvite(inviteCode);
+    const trimmed = inviteCode.trim();
     updateFedimint({
-      isCustom: !!inviteCode.trim(),
-      federationName: inviteCode.trim() ? "External route" : BP_FEDERATION_NAME,
+      isCustom: !!trimmed,
+      federationName: federationNameForInvite(trimmed)
+        ?? (trimmed ? "External route" : BP_FEDERATION_NAME),
     });
   }, [updateFedimint]);
 
@@ -1741,11 +1753,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // operation. Promoted from devSwitchFederation in PR 5 — the prior
   // localStorage.chama_dev_fed_switch gate has been dropped.
   //
-  // Safety: the v0.1.76 fund-loss guard refuses if `getBalance() > 0`
-  // unless `{ force: true }` is passed. Fedimint ecash is bearer cash
-  // and lives only in the local OPFS file — wiping it without checking
-  // has destroyed real user sats in the past. Callers (UI) must only
-  // pass force after explicit user confirmation.
+  // Safety: the v0.1.76 fund-loss guard refuses if the balance is
+  // Lightning-withdrawable unless `{ force: true }` is passed. Fedimint
+  // ecash is bearer cash and lives only in the local OPFS file — wiping
+  // it without checking has destroyed real user sats in the past. Callers
+  // (UI) must only pass force after explicit user confirmation.
   const switchFederation = useCallback(async (
     inviteCode: string,
     options: { force?: boolean } = {},
@@ -1757,7 +1769,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       throw new Error("Invite code must start with 'fed1'");
     }
 
-    // v0.1.76 fund-loss protection: balance-aware refusal.
+    // v0.1.76 fund-loss protection: balance-aware refusal. v0.7.2
+    // aligns this with the recovery UI: sub-fee dust cannot be sent out
+    // through Lightning, so it should not strand users behind a
+    // "Recover 0 sats" modal.
     let currentBalanceMsats: number | null = null;
     try {
       if (fedimintRef.current) {
@@ -1766,7 +1781,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     } catch (e) {
       console.debug("[chama] switch-fed: balance read failed:", e);
     }
-    if (!force && currentBalanceMsats !== null && currentBalanceMsats > 0) {
+    if (
+      !force
+      && currentBalanceMsats !== null
+      && hasLightningWithdrawableBalance(currentBalanceMsats)
+    ) {
       const sats = Math.floor(currentBalanceMsats / 1000);
       const err = new Error(
         `Refusing federation switch: ${sats} sats would be permanently ` +
@@ -1899,7 +1918,23 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       );
     }
 
-    return fedimint.createInvoice(amountMsats, description, onReceiveState);
+    try {
+      const invoice = await fedimint.createInvoice(amountMsats, description, onReceiveState);
+      const receiveOkAt = Date.now();
+      healthRef.current = { ok: true, at: receiveOkAt };
+      updateFedimint({ lastHealthOk: true, lastHealthAt: receiveOkAt });
+      return invoice;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      const receiveFailedAt = Date.now();
+      healthRef.current = { ok: false, at: receiveFailedAt };
+      updateFedimint({
+        lastHealthOk: false,
+        lastHealthAt: receiveFailedAt,
+        error: message,
+      });
+      throw e;
+    }
   }, [markFedimintWalletNotReady, updateFedimint]);
 
   // v0.3.0 Phase 2: atomic fund-and-lock orchestrator. Composes the
@@ -1929,9 +1964,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       !isTestnetMode() &&
       opts.amountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
     ) {
-      const err =
-        `${minimumAtomicFundingMessage()} Tiny invoices can be accepted by ` +
-        "a Lightning gateway and still reject before ecash mints.";
+      const err = `${minimumAtomicFundingMessage()} Enter a positive amount for a real Lightning escrow.`;
       opts.onPhase({ kind: "lock-failed", error: err });
       return { kind: "lock-failed", error: err };
     }
@@ -2043,7 +2076,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         // after redeemEcash returns.
         claimAndRedeem: async (id: string) => {
           try {
-            return await bridge.claimAndRedeem(id);
+            return await bridge.claimAndRedeem(id, { clearPendingOnRedeem: false });
           } catch (e: any) {
             const msg = e?.message || String(e);
             if (isStaleClaim(msg)) {
@@ -2056,6 +2089,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         completeClaim: async (id: string) => {
           await client.complete(id);
         },
+        clearPendingRedemption,
         payInvoice: async (bolt11: string) => {
           await bridge.payInvoice(bolt11);
           refreshBalanceRef.current?.().catch(() => {});

@@ -50,8 +50,15 @@ interface RealMintService {
     amountMsats: number
   ): Promise<{ notes: string; operation_id: string }>;
   redeemEcash(notes: string): Promise<string>;
+  subscribeReissueExternalNotes?(
+    operationId: string,
+    onSuccess?: (state: RealReissueExternalNotesState) => void,
+    onError?: (error: string) => void
+  ): () => void;
   parseNotes(oobNotes: string): Promise<number>;
 }
+
+type RealReissueExternalNotesState = "Created" | "Issuing" | "Done" | string | Record<string, unknown>;
 
 type RealLnReceiveState =
   | "created"
@@ -112,6 +119,17 @@ type RealLightningTransaction = {
   outcome?: string;
 };
 
+type RealMintTransaction = {
+  kind: "mint";
+  type: "reissue" | "spend_oob";
+  operationId: string;
+  outcome?: string;
+  amountMsats?: number;
+  timestamp?: number;
+};
+
+type RealTransaction = RealLightningTransaction | RealMintTransaction | Record<string, unknown>;
+
 interface RealLightningService {
   createInvoice(
     amountMsats: number,
@@ -149,9 +167,11 @@ interface RealLightningService {
 
 interface RealFederationService {
   getConfig?(): Promise<unknown>;
+  getMetaConsensusValue?(key?: number): Promise<unknown | null>;
   getFederationId(): Promise<string>;
   getInviteCode(peer?: number): Promise<string | null>;
-  listTransactions?(limit?: number): Promise<RealLightningTransaction[]>;
+  getOperation?(operationId: string): Promise<unknown | null>;
+  listTransactions?(limit?: number): Promise<RealTransaction[]>;
   [key: string]: unknown;
 }
 
@@ -178,6 +198,7 @@ export interface RealFedimintWallet {
 
 const RECEIVE_WATCH_TIMEOUT_MS = 16 * 60 * 1000;
 const PAY_WATCH_TIMEOUT_MS = 60 * 1000;
+const REISSUE_WATCH_TIMEOUT_MS = 90 * 1000;
 
 const CURATED_LIGHTNING_GATEWAY_TRUST: Record<string, string[]> = {
   // Bitcoin Life Federation. The guardian admin UI exposes this gateway in
@@ -199,6 +220,96 @@ function formatReceiveState(state: RealLnReceiveState): string {
   if (typeof state === "string") return state;
   if ("canceled" in state) return `canceled:${state.canceled.reason}`;
   return Object.keys(state)[0] ?? "unknown";
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function summarizeReceiveOutcome(outcome: unknown): unknown {
+  if (typeof outcome === "string") return outcome;
+  const record = recordOf(outcome);
+  if (!record) return typeof outcome;
+  if ("canceled" in record) {
+    const canceled = recordOf(record.canceled);
+    return {
+      canceled: {
+        reason: typeof canceled?.reason === "string" ? canceled.reason : null,
+      },
+    };
+  }
+  return { keys: Object.keys(record).sort() };
+}
+
+function summarizeReceiveOperationLog(log: unknown): Record<string, unknown> {
+  const operation = recordOf(log);
+  const meta = recordOf(operation?.meta);
+  const variant = recordOf(meta?.variant);
+  const receive = recordOf(variant?.receive);
+  const pay = recordOf(variant?.pay);
+  const outPoint = recordOf(receive?.out_point);
+  const outcomeBox = recordOf(operation?.outcome);
+  const invoice = typeof receive?.invoice === "string"
+    ? receive.invoice
+    : typeof pay?.invoice === "string"
+      ? pay.invoice
+      : null;
+
+  return {
+    present: !!operation,
+    module: typeof operation?.operation_module_kind === "string"
+      ? operation.operation_module_kind
+      : null,
+    amountMsats: typeof meta?.amount === "number" ? meta.amount : null,
+    variant: receive ? "receive" : pay ? "pay" : null,
+    gatewayId: typeof receive?.gateway_id === "string"
+      ? receive.gateway_id
+      : typeof pay?.gateway_id === "string"
+        ? pay.gateway_id
+        : null,
+    txid: typeof outPoint?.txid === "string" ? outPoint.txid : null,
+    outIdx: typeof outPoint?.out_idx === "number" ? outPoint.out_idx : null,
+    invoicePrefix: invoice ? invoice.slice(0, 24) : null,
+    invoiceLen: invoice ? invoice.length : null,
+    outcome: summarizeReceiveOutcome(outcomeBox?.outcome),
+    extraMetaKeys: recordOf(meta?.extra_meta)
+      ? Object.keys(recordOf(meta?.extra_meta)!).sort()
+      : [],
+  };
+}
+
+async function traceReceiveOperation(
+  real: RealFedimintWallet,
+  operationId: string,
+  checkpoint: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const getOperation = real.federation.getOperation;
+  if (typeof getOperation !== "function") {
+    console.info(
+      `[chama] LN receive trace ${operationId} ${checkpoint}: getOperation unavailable`,
+      extra,
+    );
+    return;
+  }
+
+  try {
+    const log = await getOperation.call(real.federation, operationId);
+    console.info(
+      `[chama] LN receive trace ${operationId} ${checkpoint}`,
+      {
+        ...extra,
+        operation: summarizeReceiveOperationLog(log),
+      },
+    );
+  } catch (e) {
+    console.warn(
+      `[chama] LN receive trace ${operationId} ${checkpoint}: getOperation failed`,
+      e,
+    );
+  }
 }
 
 /**
@@ -386,6 +497,109 @@ function shouldResumeReceive(tx: RealLightningTransaction): boolean {
   return tx.outcome !== "claimed" &&
     tx.outcome !== "canceled" &&
     tx.outcome !== "unexpected_error";
+}
+
+function isMintReissueTransaction(tx: RealTransaction): tx is RealMintTransaction {
+  const record = recordOf(tx);
+  return record?.kind === "mint" &&
+    record.type === "reissue" &&
+    typeof record.operationId === "string";
+}
+
+function shouldResumeMintReissue(tx: RealMintTransaction): boolean {
+  return !isMintReissueDoneOutcome(tx.outcome) &&
+    !isMintReissueFailedOutcome(tx.outcome);
+}
+
+function normalizeMsats(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function isAlreadyReissuedError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return msg.includes("already reissued") ||
+    msg.includes("already spent") ||
+    msg.includes("already redeemed") ||
+    msg.includes("already used") ||
+    msg.includes("double spend") ||
+    msg.includes("double-spend") ||
+    msg.includes("note already");
+}
+
+function compactJson(value: unknown, max = 360): string {
+  try {
+    return JSON.stringify(value).slice(0, max);
+  } catch {
+    return String(value).slice(0, max);
+  }
+}
+
+function hasVariant(value: unknown, terms: string[]): boolean {
+  if (typeof value === "string") {
+    const lower = value.toLowerCase();
+    return terms.some((term) => lower.includes(term));
+  }
+  const record = recordOf(value);
+  if (!record) return false;
+  for (const [key, nested] of Object.entries(record)) {
+    const lowerKey = key.toLowerCase();
+    if (terms.some((term) => lowerKey.includes(term))) return true;
+    if (typeof nested === "string") {
+      const lowerNested = nested.toLowerCase();
+      if (terms.some((term) => lowerNested.includes(term))) return true;
+    }
+  }
+  return false;
+}
+
+function formatMintReissueState(state: RealReissueExternalNotesState): string {
+  if (typeof state === "string") return state;
+  const record = recordOf(state);
+  if (!record) return String(state);
+  const [key, value] = Object.entries(record)[0] ?? ["object", state];
+  return `${key}:${compactJson(value)}`;
+}
+
+function isMintReissueDoneOutcome(outcome: unknown): boolean {
+  return hasVariant(outcome, ["done", "success", "succeeded"]);
+}
+
+function isMintReissueFailedOutcome(outcome: unknown): boolean {
+  return hasVariant(outcome, [
+    "fail",
+    "error",
+    "canceled",
+    "cancelled",
+    "rejected",
+    "unexpected",
+  ]);
+}
+
+function isMintReissueDoneState(state: RealReissueExternalNotesState): boolean {
+  return isMintReissueDoneOutcome(state);
+}
+
+function isMintReissueFailedState(state: RealReissueExternalNotesState): boolean {
+  return isMintReissueFailedOutcome(state);
+}
+
+function mintReissueFailedError(tx: RealMintTransaction): Error {
+  const err: any = new Error(
+    `Mint reissue operation failed after federation consumed the notes (${summarizeMintReissueTx(tx)})`
+  );
+  err.code = "MINT_REISSUE_FAILED";
+  err.operationId = tx.operationId;
+  err.outcome = tx.outcome;
+  return err;
+}
+
+function summarizeMintReissueTx(tx: RealMintTransaction): string {
+  return [
+    tx.operationId.slice(0, 16),
+    `amount=${tx.amountMsats ?? "unknown"}`,
+    `outcome=${tx.outcome ?? "unknown"}`,
+    `ts=${tx.timestamp ?? "unknown"}`,
+  ].join(" ");
 }
 
 function normalizeGatewayId(value: unknown): string | null {
@@ -612,9 +826,9 @@ type LowLevelRpcClient = {
 // that JSON value; they are not themselves meta-module keys.
 const META_DEFAULT_KEY = 0;
 const FEDIMINT_SDK_DIAGNOSTICS = {
-  "@fedimint/core": "0.1.3",
-  "@fedimint/transport-web": "0.1.2",
-  "@fedimint/fedimint-client-wasm-bundler": "0.1.1",
+  "@fedimint/core": "0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031",
+  "@fedimint/transport-web": "0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031",
+  "@fedimint/fedimint-client-wasm-bundler": "0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031",
 };
 
 type GatewayTrustProbeSummary = {
@@ -623,7 +837,9 @@ type GatewayTrustProbeSummary = {
   metaModuleRefs: string[];
   metaRpcFailures: string[];
   metaVettedGatewayIds: string[];
+  curatedGatewayIds: string[];
   curatedFallbackAllowed: boolean;
+  curatedFallbackApplied: boolean;
 };
 
 function summarizeMetaProbeResult(value: unknown): string {
@@ -712,6 +928,23 @@ async function getMetaModuleConsensus(
   moduleRefs: Set<string>,
   failures?: string[],
 ): Promise<unknown[]> {
+  const helper = real.federation.getMetaConsensusValue;
+  if (typeof helper === "function") {
+    try {
+      const result = await helper.call(real.federation, META_DEFAULT_KEY);
+      console.info(
+        `[chama] federation.getMetaConsensusValue key=${META_DEFAULT_KEY}(default) -> ${summarizeMetaProbeResult(result)}`,
+      );
+      if (result !== null && result !== undefined) return [result];
+    } catch (e) {
+      const message = summarizeError(e);
+      failures?.push(`helper key=${META_DEFAULT_KEY}: ${message}`);
+      console.info(
+        `[chama] federation.getMetaConsensusValue failed key=${META_DEFAULT_KEY}(default): ${message}`,
+      );
+    }
+  }
+
   const lowLevel = getLowLevelRpc(real);
   if (!lowLevel) return [];
 
@@ -750,23 +983,34 @@ async function getMetaModuleConsensus(
   return values;
 }
 
+async function getCuratedGatewayIds(real: RealFedimintWallet): Promise<string[]> {
+  try {
+    const federationId = normalizeFederationId(await real.federation.getFederationId());
+    if (!federationId) return [];
+    return CURATED_LIGHTNING_GATEWAY_TRUST[federationId] ?? [];
+  } catch (e) {
+    console.debug("[chama] Could not read federation ID for curated gateway trust:", e);
+    return [];
+  }
+}
+
 async function addCuratedGatewayTrust(
   real: RealFedimintWallet,
   trusted: Set<string>,
   purpose: "receive" | "pay",
-): Promise<void> {
+): Promise<string[]> {
+  const curated = await getCuratedGatewayIds(real);
+  if (curated.length === 0) return [];
+  for (const gatewayId of curated) trusted.add(gatewayId);
   try {
     const federationId = normalizeFederationId(await real.federation.getFederationId());
-    if (!federationId) return;
-    const curated = CURATED_LIGHTNING_GATEWAY_TRUST[federationId];
-    if (!curated) return;
-    for (const gatewayId of curated) trusted.add(gatewayId);
     console.info(
       `[chama] LN ${purpose} curated-vetted gateway IDs for ${federationId}: ${curated.join(", ")}`,
     );
   } catch (e) {
     console.debug("[chama] Could not read federation ID for curated gateway trust:", e);
   }
+  return curated;
 }
 
 async function getMetaVettedGatewayIds(
@@ -777,6 +1021,8 @@ async function getMetaVettedGatewayIds(
   let configContainsMetaModule = false;
   const metaModuleRefs = new Set<string>();
   const metaRpcFailures: string[] = [];
+  let curatedGatewayIds: string[] = [];
+  let curatedFallbackApplied = false;
 
   if (typeof real.federation.getConfig === "function") {
     try {
@@ -797,8 +1043,13 @@ async function getMetaVettedGatewayIds(
     for (const value of consensusValues) collectVettedGatewayIds(value, trusted);
   }
 
+  if (trusted.size === 0) {
+    curatedGatewayIds = await getCuratedGatewayIds(real);
+  }
+
   if (trusted.size === 0 && purpose === "pay") {
-    await addCuratedGatewayTrust(real, trusted, purpose);
+    curatedGatewayIds = await addCuratedGatewayTrust(real, trusted, purpose);
+    curatedFallbackApplied = curatedGatewayIds.length > 0;
   } else if (trusted.size === 0 && purpose === "receive") {
     console.warn(
       configContainsMetaModule
@@ -822,7 +1073,9 @@ async function getMetaVettedGatewayIds(
       metaModuleRefs: [...metaModuleRefs],
       metaRpcFailures,
       metaVettedGatewayIds: [...trusted],
+      curatedGatewayIds,
       curatedFallbackAllowed: purpose === "pay",
+      curatedFallbackApplied,
     },
   };
 }
@@ -843,7 +1096,7 @@ async function buildGatewayTrustDiagnostics(args: {
       : "no_trusted_lightning_pay_gateway",
     federationId,
     sdkPackages: FEDIMINT_SDK_DIAGNOSTICS,
-    jsSdkModuleKinds: ["", "ln", "mint", "wallet"],
+    jsSdkModuleKinds: ["", "ln", "meta", "mint", "wallet"],
     gateways: args.gateways.map((gateway) => ({
       gatewayId: gateway.info?.gateway_id ?? null,
       alias: gateway.info?.lightning_alias ?? null,
@@ -852,6 +1105,18 @@ async function buildGatewayTrustDiagnostics(args: {
       supportsPrivatePayments: gateway.info?.supports_private_payments ?? null,
     })),
     metaProbe: args.probe,
+    demoSafeFallback: args.purpose === "receive"
+      ? {
+          kind: "sim_mode",
+          invoiceCreated: false,
+          reason: "No Lightning invoice was created because receive gateway trust could not be wallet-verified.",
+          activation: "?sim=1",
+        }
+      : {
+          kind: "retry_payout",
+          invoiceCreated: null,
+          reason: "Outbound payout can be retried because claimed sats remain in the Chama wallet.",
+        },
     interpretation: args.purpose === "receive"
       ? "The federation advertises gateways, but the browser wallet could not prove any receive gateway is trusted. Showing a QR here can take Lightning payment and then reject before ecash mints."
       : "The federation advertises gateways, but the browser wallet could not prove any pay gateway is trusted.",
@@ -864,6 +1129,7 @@ export function adaptRealWallet(
 ): IFedimintWallet {
   const activeReceiveWatches = new Set<() => void>();
   const armedReceiveOperationIds = new Set<string>();
+  const armedMintReissueOperationIds = new Set<string>();
 
   const summarizeGateway = (
     gateway: RealLightningGateway,
@@ -1043,6 +1309,151 @@ export function adaptRealWallet(
     });
   };
 
+  const waitForMintReissue = async (operationId: string): Promise<void> => {
+    const subscribeReissue = real.mint.subscribeReissueExternalNotes?.bind(real.mint);
+    if (typeof subscribeReissue !== "function") {
+      console.warn(
+        `[chama] mint redeem ${operationId}: SDK has no reissue subscription; falling back to balance polling`,
+      );
+      return;
+    }
+
+    console.info(`[chama] mint redeem ${operationId}: watching reissue status`);
+    await new Promise<void>((resolve, reject) => {
+      let done = false;
+      let unsubscribe: (() => void) | null = null;
+      let unsubscribeAfterAssign = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        timeoutId = null;
+        if (unsubscribe) {
+          try { unsubscribe(); }
+          catch (e) { console.debug("[chama] mint redeem unsubscribe threw:", e); }
+        } else {
+          unsubscribeAfterAssign = true;
+        }
+      };
+
+      const finish = (error?: Error) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve();
+      };
+
+      timeoutId = setTimeout(() => {
+        finish(new Error(`Mint reissue timed out for operation ${operationId}`));
+      }, REISSUE_WATCH_TIMEOUT_MS);
+      (timeoutId as { unref?: () => void }).unref?.();
+
+	      try {
+	        unsubscribe = subscribeReissue(
+	          operationId,
+	          (state) => {
+	            const stateLabel = formatMintReissueState(state);
+	            console.info(`[chama] mint redeem ${operationId}: ${stateLabel}`, state);
+	            if (isMintReissueDoneState(state)) {
+	              finish();
+	            } else if (isMintReissueFailedState(state)) {
+	              const err: any = new Error(
+	                `Mint reissue operation failed after federation consumed the notes (${operationId}: ${stateLabel})`
+	              );
+	              err.code = "MINT_REISSUE_FAILED";
+	              err.operationId = operationId;
+	              err.state = state;
+	              finish(err);
+	            }
+	          },
+	          (error) => {
+	            console.warn(`[chama] mint redeem ${operationId}: stream error`, error);
+	            const err: any = new Error(error || "Mint reissue failed");
+	            err.code = "MINT_REISSUE_FAILED";
+	            err.operationId = operationId;
+	            finish(err);
+	          },
+	        );
+        if (unsubscribeAfterAssign) {
+          try { unsubscribe(); }
+          catch (e) { console.debug("[chama] mint redeem unsubscribe threw:", e); }
+        }
+      } catch (e) {
+        console.warn(`[chama] mint redeem ${operationId}: subscribe failed`, e);
+        finish(e instanceof Error ? e : new Error(String(e)));
+      }
+    });
+  };
+
+  const listMintReissueTransactions = async (limit = 100): Promise<RealMintTransaction[]> => {
+    if (typeof real.federation.listTransactions !== "function") return [];
+    const txs = await real.federation.listTransactions(limit);
+    return txs.filter(isMintReissueTransaction);
+  };
+
+  const resumeMintReissueFromHistory = async (
+    expectedMsats: number | null,
+    source: "already-reissued" | "open" | "join",
+  ): Promise<string | null> => {
+    let txs: RealMintTransaction[] = [];
+    try {
+      txs = await listMintReissueTransactions(100);
+    } catch (e) {
+      console.warn(`[chama] mint reissue history scan failed (${source})`, e);
+      return null;
+    }
+
+    const candidates = txs
+      .filter((tx) => expectedMsats === null || normalizeMsats(tx.amountMsats) === expectedMsats)
+      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+
+    console.info(
+      `[chama] mint reissue history (${source}) expected=${expectedMsats ?? "unknown"} ` +
+        `candidates=${candidates.map(summarizeMintReissueTx).join(" | ") || "none"}`,
+    );
+
+	    const latest = candidates[0] ?? null;
+	    if (latest && isMintReissueFailedOutcome(latest.outcome)) {
+	      throw mintReissueFailedError(latest);
+	    }
+	    if (latest && isMintReissueDoneOutcome(latest.outcome)) {
+	      console.info(
+	        `[chama] mint redeem ${latest.operationId}: latest historical reissue is already ${latest.outcome}`,
+	      );
+	      return latest.operationId;
+	    }
+
+	    const pending = candidates.find(shouldResumeMintReissue);
+	    const match = pending ?? latest;
+	    if (!match) return null;
+
+	    if (isMintReissueDoneOutcome(match.outcome)) {
+	      console.info(
+	        `[chama] mint redeem ${match.operationId}: matching historical reissue is already ${match.outcome}`,
+	      );
+	      return match.operationId;
+	    }
+
+	    if (isMintReissueFailedOutcome(match.outcome)) {
+	      throw mintReissueFailedError(match);
+	    }
+
+    if (armedMintReissueOperationIds.has(match.operationId)) {
+      console.info(`[chama] mint redeem ${match.operationId}: reissue watch already armed`);
+      return match.operationId;
+    }
+
+    armedMintReissueOperationIds.add(match.operationId);
+    try {
+      console.info(`[chama] mint redeem ${match.operationId}: resuming historical reissue (${source})`);
+      await waitForMintReissue(match.operationId);
+      return match.operationId;
+    } finally {
+      armedMintReissueOperationIds.delete(match.operationId);
+    }
+  };
+
   const armReceiveWatch = (
     operationId: string,
     strict = true,
@@ -1078,10 +1489,12 @@ export function adaptRealWallet(
       unsubscribe = real.lightning.subscribeLnReceive(
         operationId,
         (state) => {
+          const stateLabel = formatReceiveState(state);
           console.info(
-            `[chama] LN receive ${operationId}: ${formatReceiveState(state)}`,
+            `[chama] LN receive ${operationId}: ${stateLabel}`,
             state,
           );
+          void traceReceiveOperation(real, operationId, `state:${stateLabel}`);
           // v0.6.5: forward the classified state to an external
           // listener (the orchestrator) so it can advance UI phases
           // without waiting for the 5s balance poll. Defensive
@@ -1097,6 +1510,7 @@ export function adaptRealWallet(
         },
         (error) => {
           console.warn(`[chama] LN receive watch failed for ${operationId}:`, error);
+          void traceReceiveOperation(real, operationId, "stream-error", { error });
           stop();
         },
       );
@@ -1120,11 +1534,12 @@ export function adaptRealWallet(
     try {
       const txs = await real.federation.listTransactions(100);
       for (const tx of txs) {
-        if (shouldResumeReceive(tx)) {
+        const record = recordOf(tx);
+        if (record?.kind === "ln" && record.type === "receive" && shouldResumeReceive(tx as RealLightningTransaction)) {
           console.info(
-            `[chama] Resuming pending LN receive from ${source}: ${tx.operationId}`,
+            `[chama] Resuming pending LN receive from ${source}: ${(tx as RealLightningTransaction).operationId}`,
           );
-          armReceiveWatch(tx.operationId, false);
+          armReceiveWatch((tx as RealLightningTransaction).operationId, false);
         }
       }
     } catch (e) {
@@ -1132,10 +1547,37 @@ export function adaptRealWallet(
     }
   };
 
+  const armPendingMintReissueWatches = async (source: "open" | "join"): Promise<void> => {
+    try {
+      const txs = await listMintReissueTransactions(100);
+      const pending = txs.filter(shouldResumeMintReissue);
+      if (pending.length > 0) {
+        console.info(
+          `[chama] Pending mint reissue scan (${source}): ` +
+            pending.map(summarizeMintReissueTx).join(" | "),
+        );
+      }
+      for (const tx of pending) {
+        if (armedMintReissueOperationIds.has(tx.operationId)) continue;
+        armedMintReissueOperationIds.add(tx.operationId);
+        void waitForMintReissue(tx.operationId)
+          .catch((e) => {
+            console.warn(`[chama] Couldn't resume mint reissue ${tx.operationId}:`, e);
+          })
+          .finally(() => {
+            armedMintReissueOperationIds.delete(tx.operationId);
+          });
+      }
+    } catch (e) {
+      console.debug(`[chama] Pending mint reissue scan failed on ${source}:`, e);
+    }
+  };
+
   return {
     async open() {
       await real.open();
       await armPendingReceiveWatches("open");
+      await armPendingMintReissueWatches("open");
     },
 
     isOpen() {
@@ -1145,6 +1587,7 @@ export function adaptRealWallet(
     async joinFederation(inviteCode: string) {
       await real.joinFederation(inviteCode);
       await armPendingReceiveWatches("join");
+      await armPendingMintReissueWatches("join");
     },
 
     recovery: {
@@ -1177,7 +1620,48 @@ export function adaptRealWallet(
         return result.notes;
       },
       async redeemEcash(oobNotes: string) {
-        await real.mint.redeemEcash(oobNotes);
+        let expectedMsats: number | null = null;
+        try { expectedMsats = await real.mint.parseNotes(oobNotes); } catch {}
+
+        let operationId: string;
+        try {
+          operationId = await real.mint.redeemEcash(oobNotes);
+          console.info(`[chama] mint redeem ${operationId}: submitted`);
+          await waitForMintReissue(operationId);
+        } catch (e) {
+          if (!isAlreadyReissuedError(e)) throw e;
+          console.warn(
+            `[chama] mint redeem: notes already reissued; searching local operation history ` +
+              `expected=${expectedMsats ?? "unknown"}`,
+            e,
+          );
+	          const historicalOperationId = await resumeMintReissueFromHistory(
+	            expectedMsats,
+	            "already-reissued",
+	          );
+	          if (!historicalOperationId) {
+	            const err: any = new Error(
+	              "Mint notes were consumed by the federation, but no local reissue operation was found to confirm wallet credit."
+	            );
+	            err.code = "MINT_REISSUE_UNKNOWN";
+	            err.cause = e;
+	            throw err;
+	          }
+	          operationId = historicalOperationId;
+	        }
+
+        try {
+          await real.recovery.waitForAllRecoveries();
+        } catch (e) {
+          console.debug(`[chama] mint redeem ${operationId}: recovery wait after reissue failed`, e);
+        }
+
+        let balanceAfter: number | undefined;
+        try { balanceAfter = await real.balance.getBalance(); } catch {}
+        console.info(
+          `[chama] mint redeem ${operationId}: confirmed balance=${balanceAfter ?? "unknown"}`,
+        );
+        return operationId;
       },
       async parseNotes(oobNotes: string) {
         const total = await real.mint.parseNotes(oobNotes);
@@ -1198,6 +1682,13 @@ export function adaptRealWallet(
           undefined,
           gateway,
         );
+        void traceReceiveOperation(real, result.operation_id, "invoice-created", {
+          amountMsats,
+          gatewayId: gateway?.gateway_id ?? null,
+          gatewayAlias: gateway?.lightning_alias ?? null,
+          invoiceLen: result.invoice.length,
+          invoicePrefix: result.invoice.slice(0, 24),
+        });
         // v0.6.5: pass the listener through to the watch so the
         // orchestrator can react to `funded` etc. in real time.
         armReceiveWatch(result.operation_id, true, onReceiveState);
@@ -1571,12 +2062,10 @@ export async function createRealWallet(
   const attemptInit = async (fname: string) => {
     const t = new WasmWorkerTransport();
     registerTransport(t as unknown as AnyTransport);
-    const d = new WalletDirector(t, /* lazy */ true);
-    // _client is protected; cast through unknown to reach initialize()
-    const tc = (d as unknown as {
-      _client: { initialize(testFilename?: string): Promise<boolean> };
-    })._client;
-    await tc.initialize(fname);
+    const d = new WalletDirector(t, fname, /* lazy */ true);
+    await (d as unknown as {
+      initialize(dbPath?: string): Promise<unknown>;
+    }).initialize(fname);
     return { d, t };
   };
 
@@ -1652,11 +2141,10 @@ export async function createRealWallet(
     const { WasmWorkerTransport: WT2 } = await import("@fedimint/transport-web");
     const t2 = new WT2();
     registerTransport(t2 as unknown as AnyTransport);
-    const d2 = new WD2(t2, /* lazy */ true);
-    const tc2 = (d2 as unknown as {
-      _client: { initialize(testFilename?: string): Promise<boolean> };
-    })._client;
-    await tc2.initialize(freshName);
+    const d2 = new WD2(t2, freshName, /* lazy */ true);
+    await (d2 as unknown as {
+      initialize(dbPath?: string): Promise<unknown>;
+    }).initialize(freshName);
 
     const dt2 = d2 as unknown as {
       setMnemonic(words: string[]): Promise<boolean>;

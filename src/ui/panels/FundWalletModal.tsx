@@ -1,6 +1,7 @@
 import { useState, useEffect, lazy, Suspense, type WheelEvent } from "react";
 import { T, inputStyle } from "../theme.js";
-import { isSimModeOn } from "../../sim/simMode.js";
+import { isSimModeOn, setSimMode } from "../../sim/simMode.js";
+import { makeLightningInvoiceQrPayload } from "../../payments/lightning-qr.js";
 
 const QRCode = lazy(() => import("../QRCode.js"));
 
@@ -111,6 +112,8 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
   const copyText = (text: string) => {
     navigator.clipboard?.writeText(text).catch(() => {});
   };
+  const diagnostics = err ? extractChamaDiagnostics(err) : null;
+  const gatewayTrustError = !!err && /wallet-verifiable Lightning receive gateway/i.test(err);
 
   const tabBtn = (t: "receive" | "send", label: string) => (
     <button onClick={() => { setTab(t); setErr(null); setSuccess(null); setInvoice(null); setEcashOutput(null); }} style={{
@@ -185,8 +188,15 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
         {tab === "receive" && invoice && !received && (<>
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 8, letterSpacing: 1, textAlign: "center" }}>SCAN OR COPY TO PAY</div>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-            <Suspense fallback={<div style={{ width: 200, height: 200, background: T.surface, borderRadius: T.rs }} />}>
-              <QRCode data={invoice} size={200} fgColor="#a78bfa" />
+            <Suspense fallback={<div style={{ width: 280, height: 280, background: "#fff", borderRadius: T.rs }} />}>
+              <QRCode
+                data={makeLightningInvoiceQrPayload(invoice)}
+                size={280}
+                fgColor="#050505"
+                bgColor="#ffffff"
+                margin={4}
+                alt="Lightning invoice QR code"
+              />
             </Suspense>
           </div>
           {(() => {
@@ -283,8 +293,50 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
         </>)}
 
         {success && <div style={{ marginTop: 12, padding: 10, borderRadius: T.rs, background: T.greenDim, border: `1px solid ${T.green}44`, color: T.green, fontFamily: T.mono, fontSize: 10 }}>{success}</div>}
-        {err && <div style={{ marginTop: 12, padding: 10, borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}44`, color: T.red, fontFamily: T.mono, fontSize: 10 }}>{err}</div>}
+        {err && (
+          <>
+            <div style={{ marginTop: 12, padding: 10, borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}44`, color: T.red, fontFamily: T.mono, fontSize: 10, wordBreak: "break-word" }}>
+              {gatewayTrustError
+                ? "Funding unavailable here. Chama did not create an invoice because this browser could not verify a trusted receive gateway."
+                : err}
+            </div>
+            {diagnostics && (
+              <button
+                onClick={() => copyText(diagnostics)}
+                style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}44`, color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginTop: 8 }}
+              >
+                Copy Fedimint diagnostics
+              </button>
+            )}
+            {gatewayTrustError && !isSimModeOn() && (
+              <button
+                onClick={openSimDemo}
+                style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.amberDim, border: `1px solid ${T.amber}55`, color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer", marginTop: 8 }}
+              >
+                Open sim demo
+              </button>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
+}
+
+function extractChamaDiagnostics(error: string): string | null {
+  const marker = "Chama diagnostics:";
+  const index = error.indexOf(marker);
+  if (index === -1) return null;
+  return error.slice(index + marker.length).trim() || null;
+}
+
+function openSimDemo(): void {
+  setSimMode(true);
+  try {
+    const next = new URL(window.location.href);
+    next.searchParams.set("sim", "1");
+    window.location.assign(next.toString());
+  } catch {
+    window.location.reload();
+  }
 }

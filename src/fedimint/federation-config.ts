@@ -23,6 +23,9 @@ import {
   BP_FEDERATION_NAME,
   BP_FEDERATION_INVITE,
   BP_FEDERATION_ID,
+  AFRIBIT_KIBERA_FEDERATION_NAME,
+  AFRIBIT_KIBERA_FEDERATION_INVITE,
+  AFRIBIT_KIBERA_FEDERATION_ID,
   BLF_FEDERATION_NAME,
   BLF_FEDERATION_INVITE,
   BLF_FEDERATION_ID,
@@ -37,6 +40,9 @@ export {
   BP_FEDERATION_NAME,
   BP_FEDERATION_INVITE,
   BP_FEDERATION_ID,
+  AFRIBIT_KIBERA_FEDERATION_NAME,
+  AFRIBIT_KIBERA_FEDERATION_INVITE,
+  AFRIBIT_KIBERA_FEDERATION_ID,
   BLF_FEDERATION_NAME,
   BLF_FEDERATION_INVITE,
   BLF_FEDERATION_ID,
@@ -147,6 +153,7 @@ function normalizeFederationId(value: string | null | undefined): string | null 
 export function expectedFederationIdForInvite(invite: string | null | undefined): string | null {
   const trimmed = invite?.trim();
   if (trimmed === BP_FEDERATION_INVITE) return BP_FEDERATION_ID;
+  if (trimmed === AFRIBIT_KIBERA_FEDERATION_INVITE) return AFRIBIT_KIBERA_FEDERATION_ID;
   if (trimmed === BLF_FEDERATION_INVITE) return BLF_FEDERATION_ID;
   return null;
 }
@@ -280,10 +287,10 @@ export interface FederationPreset {
 
 /**
  * Curated federation list. Intentionally minimal: BP (the universal
- * browser-friendly fallback) and BLF (an explicit opt-in option, not
- * the default). Private federations are NOT baked into this file —
- * Community Leaders surface their federations organically via the
- * permissionless community-add primitive (see addCustomCommunity in
+ * browser-friendly fallback), BLF (an explicit opt-in option), and partner
+ * federations already pinned by the curated community registry. New
+ * community-led federations should still enter through the permissionless
+ * community-add primitive (see addCustomCommunity in
  * src/communities/registry.ts; v1.5 will publish kind:38112 community
  * claims to Nostr for cross-client discovery).
  *
@@ -299,6 +306,14 @@ export const CURATED_PRESETS: FederationPreset[] = [
     source: "curated",
   },
   {
+    name: AFRIBIT_KIBERA_FEDERATION_NAME,
+    federationId: AFRIBIT_KIBERA_FEDERATION_ID,
+    inviteCode: AFRIBIT_KIBERA_FEDERATION_INVITE,
+    description: "Kenya KES route for Afribit Kibera.",
+    source: "curated",
+    region: "Kenya",
+  },
+  {
     name: BLF_FEDERATION_NAME,
     federationId: BLF_FEDERATION_ID,
     inviteCode: BLF_FEDERATION_INVITE,
@@ -306,6 +321,12 @@ export const CURATED_PRESETS: FederationPreset[] = [
     source: "curated",
   },
 ];
+
+export function federationNameForInvite(invite: string | null | undefined): string | null {
+  const trimmed = invite?.trim();
+  if (!trimmed) return null;
+  return CURATED_PRESETS.find((preset) => preset.inviteCode === trimmed)?.name ?? null;
+}
 
 /**
  * Fetch the live public federation list from Fedimint Observer.

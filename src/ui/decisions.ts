@@ -15,7 +15,7 @@ import {
   DEFAULT_COMMUNITY_SLUG,
 } from "../communities/registry.js";
 import { BP_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
-import { maxLightningPayoutSats } from "../payments/lightning-fees.js";
+import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
 import {
   type EscrowState,
   EscrowStatus,
@@ -24,10 +24,6 @@ import {
   Outcome,
   TERMINAL_STATES,
 } from "../escrow-engine/types.js";
-
-function hasLightningWithdrawableBalance(balanceMsats: number): boolean {
-  return maxLightningPayoutSats(balanceMsats) > 0;
-}
 
 export const MAIN_SURFACE_RECOVERY_MIN_SATS = 1_000;
 
@@ -399,6 +395,11 @@ function isPastEscrowDeadline(e: EscrowState, nowSec: number): boolean {
 
 function isLiveBuyerSellerCommitment(e: EscrowState, nowSec: number): boolean {
   if (TERMINAL_STATES.has(e.status)) return false;
+  // CLAIMED means the trade has left the live escrow phase. Successful
+  // claims move on to COMPLETED; locally failed redemptions stay visible on
+  // the detail screen as "Claim failed", but should not keep the global
+  // ActiveTradePill alive.
+  if (e.status === EscrowStatus.CLAIMED) return false;
   // v0.6.5 update: prior versions excluded CREATE-only public listings
   // (no JOIN ACK yet) so a seller could keep listing without the old
   // one-trade-at-a-time gate blocking them. With that gate retired,
@@ -461,10 +462,10 @@ export function countActiveBuyerSellerCommitments(inputs: {
  * user is in. Drives the ActiveTradePill's amount headline.
  *
  * Distinct from `activeCommittedMsats` (which sums only LOCKED +
- * APPROVED — money *actually* in escrow). This sums every live
- * trade's amountMsats regardless of stage (CREATED + LOCKED +
- * APPROVED + CLAIMED), because the pill says "3 active trades · X
- * sats" — the implied reading is total trade value, not just sats
+ * APPROVED - money *actually* in escrow). This sums every live
+ * trade's amountMsats regardless of live stage (CREATED + LOCKED +
+ * APPROVED), because the pill says "3 active trades · X
+ * sats" - the implied reading is total trade value, not just sats
  * currently locked. Two surfaces, two truthful readings:
  *   ActiveTradePill   → "what's the gravitational weight of my live
  *                        trade activity right now?"     (this helper)
@@ -513,9 +514,8 @@ export function isMidFunding(inputs: {
 
 /**
  * v0.4.2 hotfix round 3: msats the user has committed to active escrows
- * as buyer or seller. Returns the SUM across all active non-terminal
- * commitments (LOCKED / APPROVED / CLAIMED — anything past CREATE but
- * before COMPLETED/CANCELLED). Used by decideChamaBarLabel to drive
+ * as buyer or seller. Returns the SUM across all active funded
+ * commitments (LOCKED / APPROVED). Used by decideChamaBarLabel to drive
  * the "X sats in escrow" pill during LOCKED state when the wallet
  * balance is correctly 0 (the user has SPENT the ecash into SSS shares).
  *

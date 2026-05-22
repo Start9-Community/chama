@@ -16,7 +16,6 @@ const STATUS_LABEL: Partial<Record<EscrowStatus, string>> = {
   [EscrowStatus.CREATED]: "open",
   [EscrowStatus.LOCKED]: "in escrow",
   [EscrowStatus.APPROVED]: "ready to claim",
-  [EscrowStatus.CLAIMED]: "settling",
   [EscrowStatus.EXPIRED]: "timed out",
 };
 

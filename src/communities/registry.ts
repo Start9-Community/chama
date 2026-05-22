@@ -24,7 +24,11 @@
 // federation-config.js — the latter imports back into registry for
 // resolveFederationForCommunity, and we'd hit a TDZ on COMMUNITY_REGISTRY
 // initialization if we let that cycle stand.
-import { BP_FEDERATION_INVITE, BLF_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
+import {
+  AFRIBIT_KIBERA_FEDERATION_INVITE,
+  BP_FEDERATION_INVITE,
+  BLF_FEDERATION_INVITE,
+} from "../fedimint/federation-invites.js";
 
 export interface Community {
   /** Stable wire identifier — must never change once published. Lower-case
@@ -131,12 +135,29 @@ function blfCountryChama(seed: CountryChamaSeed): Community {
   };
 }
 
+const KENYA_AFRIBIT_CHAMA: Community = {
+  slug: "ke-kes",
+  displayName: "Kenya · Afribit Kibera · KES",
+  currency: "KES",
+  countries: ["KE"],
+  languages: ["sw", "en"],
+  // Afribit Kibera invite — Adopting Bitcoin Nairobi demo partner.
+  federationInvite: AFRIBIT_KIBERA_FEDERATION_INVITE,
+  flagEmoji: "🇰🇪",
+  country: "KE",
+  browserReliable: true,
+  notes: IROH_LIMITATION_NOTE,
+  disambiguator: "Afribit Kibera",
+  hiddenFromPicker: false,
+};
+
 const EAST_AFRICA_COUNTRY_CHAMAS: Community[] = [
   blfCountryChama({ country: "BI", name: "Burundi", currency: "BIF", languages: ["rn", "fr", "en"] }),
   blfCountryChama({ country: "KM", name: "Comoros", currency: "KMF", languages: ["ar", "fr"] }),
   blfCountryChama({ country: "DJ", name: "Djibouti", currency: "DJF", languages: ["fr", "ar"] }),
   blfCountryChama({ country: "ER", name: "Eritrea", currency: "ERN", languages: ["ti", "ar", "en"] }),
   blfCountryChama({ country: "ET", name: "Ethiopia", currency: "ETB", languages: ["am", "en"] }),
+  KENYA_AFRIBIT_CHAMA,
   blfCountryChama({ country: "MG", name: "Madagascar", currency: "MGA", languages: ["mg", "fr"] }),
   blfCountryChama({ country: "MW", name: "Malawi", currency: "MWK", languages: ["en", "ny"] }),
   blfCountryChama({ country: "MU", name: "Mauritius", currency: "MUR", languages: ["en", "fr"] }),
@@ -201,7 +222,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     country: null,
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
-    disambiguator: null,
+    disambiguator: "BLF",
     hiddenFromPicker: false,
   },
   {
@@ -233,22 +254,6 @@ export const COMMUNITY_REGISTRY: Community[] = [
     notes: IROH_LIMITATION_NOTE,
     disambiguator: null,
     hiddenFromPicker: true,
-  },
-  {
-    slug: "ke-kes",
-    displayName: "Kenya · Afribit · KES",
-    currency: "KES",
-    countries: ["KE"],
-    languages: ["sw", "en"],
-    // Afribit invite — Adopting Bitcoin Nairobi demo partner.
-    federationInvite:
-      "fed11qgqyj3mfwfhksw309ucrxe35vgcryvesxf3nyepsv3jnyepsvgcnxdpjv5urjcfkv4nrydmxxvervef3xcmxxce5x5ergwfnxcukzetr8qen2vnpvsmr2vrzqyqjplegdfhg4qq8f0zeuvjxn8e49sa3tnep7w08dca79wecgjkyszrufgwesp",
-    flagEmoji: "🇰🇪",
-    country: "KE",
-    browserReliable: true,
-    notes: IROH_LIMITATION_NOTE,
-    disambiguator: "Afribit",
-    hiddenFromPicker: false,
   },
   ...EAST_AFRICA_COUNTRY_CHAMAS,
   {

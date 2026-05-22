@@ -141,7 +141,38 @@ Outcome-based pay (percentage of trade value on disputes) is how you incentivize
 The design principle, stated plainly:
 Community-elected trust + protocol-enforced key separation + random assignment from the trusted pool + full public accountability. Trust is earned from the ground up, one vote at a time.
 
-### 2.8 Educate at every opportunity
+### 2.8 Arbiter fee structure
+
+Arbiter compensation has two tiers, both non-negotiable and protocol-enforced:
+
+**Ambient fee — 0.5% on every trade, always.**
+Every trade that completes pays 0.5% to the assigned arbiter, regardless of
+whether they were ever called. This is not a tax — it is the cost of having a
+trusted human available and invested in the community's health. Arbiters who
+collect ambient fees on many trades have strong incentive to stay present,
+maintain their reputation, and recruit more users. They become organic
+ambassadors for Chama.
+
+**Dispute escalation fee — 1.5% additional, split equally between both
+parties regardless of outcome.**
+When a dispute is opened, an additional 1.5% of the trade value is charged:
+0.75% from the buyer's side, 0.75% from the seller's side. This applies even
+to the winning party. The fee is fixed — neither party can bid it up or down.
+
+This design is intentional:
+- Neither party can influence the arbiter's incentive by offering more.
+- Opening a frivolous dispute has a real cost, deterring bad-faith escalation.
+- The arbiter earns more on harder work automatically, with no negotiation.
+- The losing party pays 0.75% on top of losing the trade — a minor sting,
+  not a punishment.
+
+**Total arbiter take on a disputed trade: 2% of trade value.**
+
+The fee is not configurable, not negotiable, and not optional. Arbiters who
+want to earn more attract more volume to their community. That is the only
+lever available to them.
+
+### 2.9 Educate at every opportunity
 
 Chama is not just a marketplace; it is a Bitcoin onboarding surface for users who have never thought about Fedimint, Nostr, ecash, Lightning, or non-custodial protocols in their lives. The product must teach without lecturing, explain without condescending, and build user mental models through small consistent affordances rather than walls of documentation. A landing page and FAQ section will exist, but **the in-product education is what actually moves understanding** — users read help docs only when something has gone wrong; they read tooltips and inline microcopy in the moment they need it.
 

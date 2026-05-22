@@ -9,9 +9,20 @@ interface QRCodeProps {
   size?: number;
   fgColor?: string;
   bgColor?: string;
+  margin?: number;
+  alt?: string;
+  errorCorrectionLevel?: "L" | "M" | "Q" | "H";
 }
 
-export function QRCode({ data, size = 220, fgColor = "#a78bfa", bgColor = "#111118" }: QRCodeProps) {
+export function QRCode({
+  data,
+  size = 220,
+  fgColor = "#a78bfa",
+  bgColor = "#111118",
+  margin = 2,
+  alt = "QR code",
+  errorCorrectionLevel = "L",
+}: QRCodeProps) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
 
@@ -25,12 +36,12 @@ export function QRCode({ data, size = 220, fgColor = "#a78bfa", bgColor = "#1111
 
         const url = await QRCodeLib.toDataURL(data, {
           width: size,
-          margin: 2,
+          margin,
           color: {
             dark: fgColor,
             light: bgColor,
           },
-          errorCorrectionLevel: "L", // Low EC for long URIs
+          errorCorrectionLevel,
         });
 
         if (!cancelled) setDataUrl(url);
@@ -41,7 +52,7 @@ export function QRCode({ data, size = 220, fgColor = "#a78bfa", bgColor = "#1111
     })();
 
     return () => { cancelled = true; };
-  }, [data, size, fgColor, bgColor]);
+  }, [data, size, fgColor, bgColor, margin, errorCorrectionLevel]);
 
   if (error) {
     return (
@@ -76,7 +87,7 @@ export function QRCode({ data, size = 220, fgColor = "#a78bfa", bgColor = "#1111
   return (
     <img
       src={dataUrl}
-      alt="Scan to connect"
+      alt={alt}
       width={size}
       height={size}
       style={{ borderRadius: 8 }}

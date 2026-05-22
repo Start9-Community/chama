@@ -39,6 +39,10 @@ export function maxLightningPayoutSats(balanceMsats: number): number {
   return lo;
 }
 
+export function hasLightningWithdrawableBalance(balanceMsats: number): boolean {
+  return maxLightningPayoutSats(balanceMsats) > 0;
+}
+
 export function lightningPayoutReserveSats(balanceMsats: number): number {
   const payoutSats = maxLightningPayoutSats(balanceMsats);
   return Math.max(0, Math.ceil((Math.max(0, balanceMsats) - payoutSats * 1000) / 1000));

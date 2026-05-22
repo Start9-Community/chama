@@ -53,7 +53,7 @@ export interface IFedimintWallet {
     /** Spend notes from wallet — returns OOB ecash string */
     spendNotes(amountMsats: number): Promise<string>;
     /** Redeem OOB ecash notes into wallet */
-    redeemEcash(oobNotes: string): Promise<void>;
+    redeemEcash(oobNotes: string): Promise<string | void>;
     /** Parse OOB notes to inspect amount without redeeming */
     parseNotes(oobNotes: string): Promise<{ total_amount: number }>;
   };
@@ -132,6 +132,22 @@ function mlog(checkpoint: string, fields: Record<string, unknown>): void {
   if (!mlogEnabled()) return;
   // Stable shape: [$$] CHECKPOINT key=value key=value ...
   const parts: string[] = [`[$$] ${checkpoint}`];
+  for (const [k, v] of Object.entries(fields)) {
+    let val: string;
+    if (v === undefined) val = "undef";
+    else if (v === null) val = "null";
+    else if (typeof v === "string") val = v.length > 64 ? `${v.slice(0, 60)}...(${v.length})` : v;
+    else if (typeof v === "number" || typeof v === "boolean") val = String(v);
+    else val = JSON.stringify(v).slice(0, 80);
+    parts.push(`${k}=${val}`);
+  }
+  // eslint-disable-next-line no-console
+  console.info(parts.join(" "));
+}
+
+function claimTrace(checkpoint: string, fields: Record<string, unknown>): void {
+  if (!mlogEnabled()) return;
+  const parts: string[] = [`[claim-trace] ${checkpoint}`];
   for (const [k, v] of Object.entries(fields)) {
     let val: string;
     if (v === undefined) val = "undef";
@@ -913,6 +929,11 @@ export class FedimintClient {
       parsedTotalMsats: parsed.total_amount,
       oobNotesLen: oobNotes.length,
     });
+    claimTrace("reconstruct-ok", {
+      fed: this._federationId,
+      hashPrefix: actualHash.slice(0, 16),
+      parsedTotalMsats: parsed.total_amount,
+    });
 
     return {
       notesHash: actualHash,
@@ -925,9 +946,10 @@ export class FedimintClient {
    * Redeem OOB ecash notes into the wallet with defensive retry.
    *
    * redeemEcash is NOT strictly idempotent — Fedimint rejects a second
-   * submission of the same notes with a double-spend error. We treat
-   * that rejection as *success*: the federation accepted the notes on
-   * a prior attempt, and the balance stream will catch up.
+   * submission of the same notes with a double-spend error. The real SDK
+   * adapter handles "already reissued" by finding and watching the local
+   * reissue operation. This generic fallback only treats older double-spend
+   * wordings as already accepted.
    *
    * IMPORTANT: the error strings below are educated guesses based on
    * Fedimint's generic semantics. @fedimint/core does not document its
@@ -956,11 +978,16 @@ export class FedimintClient {
       oobNotesLen: oobNotes.length,
       balanceBefore: _redeemBalBefore,
     });
+    claimTrace("redeem-in", {
+      fed: this._federationId,
+      amountMsats: _redeemAmount,
+      balanceBefore: _redeemBalBefore,
+    });
 
     let lastErr: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        await wallet.mint.redeemEcash(oobNotes);
+        const operationId = await wallet.mint.redeemEcash(oobNotes);
         // [$$] REDEEM-TRY — success path
         let _redeemBalAfter: number | undefined;
         try { _redeemBalAfter = await wallet.balance.getBalance(); } catch {}
@@ -968,6 +995,14 @@ export class FedimintClient {
           fed: this._federationId,
           attempt,
           result: "success",
+          operationId,
+          balanceAfter: _redeemBalAfter,
+        });
+        claimTrace("redeem-try", {
+          fed: this._federationId,
+          attempt,
+          result: "success",
+          operationId,
           balanceAfter: _redeemBalAfter,
         });
         // [$$] REDEEM-OUT — final delta check
@@ -983,10 +1018,20 @@ export class FedimintClient {
             ? (_redeemBalAfter - _redeemBalBefore) === _redeemAmount
             : undefined,
         });
+        claimTrace("redeem-out", {
+          fed: this._federationId,
+          expectedMsats: _redeemAmount,
+          balanceBefore: _redeemBalBefore,
+          balanceAfter: _redeemBalAfter,
+          balanceDelta: (_redeemBalBefore !== undefined && _redeemBalAfter !== undefined)
+            ? _redeemBalAfter - _redeemBalBefore
+            : undefined,
+        });
         return;
       } catch (e) {
         lastErr = e;
         const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+        const code = typeof (e as any)?.code === "string" ? (e as any).code : "";
 
         // Already-accepted variants — federation has the notes, balance
         // will reflect shortly. Treat as success.
@@ -1008,10 +1053,23 @@ export class FedimintClient {
             result: "already-accepted",
             errMsg: msg.slice(0, 80),
           });
+          claimTrace("redeem-try", {
+            fed: this._federationId,
+            attempt,
+            result: "already-accepted",
+            errMsg: msg.slice(0, 80),
+          });
           // [$$] REDEEM-OUT — exit on already-accepted
           let _bAft: number | undefined;
           try { _bAft = await wallet.balance.getBalance(); } catch {}
           mlog("REDEEM-OUT", {
+            fed: this._federationId,
+            expectedMsats: _redeemAmount,
+            balanceBefore: _redeemBalBefore,
+            balanceAfter: _bAft,
+            note: "already-accepted-path",
+          });
+          claimTrace("redeem-out", {
             fed: this._federationId,
             expectedMsats: _redeemAmount,
             balanceBefore: _redeemBalBefore,
@@ -1023,14 +1081,24 @@ export class FedimintClient {
 
         // Hard failures — surface immediately, don't retry.
         if (
+          code === "MINT_REISSUE_FAILED" ||
+          code === "MINT_REISSUE_UNKNOWN" ||
           msg.includes("malformed") ||
           msg.includes("invalid federation") ||
           msg.includes("not joined") ||
           msg.includes("parse error") ||
-          msg.includes("invalid note format")
+          msg.includes("invalid note format") ||
+          msg.includes("mint reissue operation failed") ||
+          msg.includes("mint notes were consumed")
         ) {
           // [$$] REDEEM-TRY — hard failure
           mlog("REDEEM-TRY", {
+            fed: this._federationId,
+            attempt,
+            result: "hard-fail",
+            errMsg: msg.slice(0, 120),
+          });
+          claimTrace("redeem-try", {
             fed: this._federationId,
             attempt,
             result: "hard-fail",
@@ -1055,6 +1123,13 @@ export class FedimintClient {
           errMsg: msg.slice(0, 120),
           willRetry: attempt < maxAttempts,
         });
+        claimTrace("redeem-try", {
+          fed: this._federationId,
+          attempt,
+          result: "transient",
+          errMsg: msg.slice(0, 120),
+          willRetry: attempt < maxAttempts,
+        });
         // Backoff schedule: ~500ms, ~1500ms, ~3500ms with jitter.
         if (attempt < maxAttempts) {
           const delay = 500 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 200);
@@ -1069,6 +1144,12 @@ export class FedimintClient {
 
     // [$$] REDEEM-OUT — exhausted retries, final fail
     mlog("REDEEM-OUT", {
+      fed: this._federationId,
+      expectedMsats: _redeemAmount,
+      balanceBefore: _redeemBalBefore,
+      note: "all-retries-failed",
+    });
+    claimTrace("redeem-out", {
       fed: this._federationId,
       expectedMsats: _redeemAmount,
       balanceBefore: _redeemBalBefore,

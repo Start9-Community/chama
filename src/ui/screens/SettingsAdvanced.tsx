@@ -4,6 +4,10 @@ import { T } from "../theme.js";
 import { isPowerUserModeOn, setPowerUserMode } from "../powerUserMode.js";
 import { SwitchFederationPanel } from "../panels/SwitchFederationPanel.js";
 import { isSimModeOn } from "../../sim/simMode.js";
+import {
+  lightningPayoutReserveSats,
+  maxLightningPayoutSats,
+} from "../../payments/lightning-fees.js";
 
 // Settings → Advanced — the home of Power-user mode (formerly
 // "Sandbox mode" through v0.4.1) and the federation-switching tools
@@ -49,6 +53,11 @@ export function SettingsAdvanced({
   // switcher and OPFS reset stay behind power-user — those are
   // dangerous in real life and pointless in sim.
   const simOn = isSimModeOn();
+  const balanceMsats = Math.max(0, Math.floor(fedimint.balanceMsats ?? 0));
+  const wholeSats = Math.floor(balanceMsats / 1000);
+  const recoverableSats = maxLightningPayoutSats(balanceMsats);
+  const reserveSats = lightningPayoutReserveSats(balanceMsats);
+  const routeLabel = fedimint.federationName || (fedimint.joined ? "Joined route" : "No Chama");
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -66,6 +75,47 @@ export function SettingsAdvanced({
           Advanced
         </span>
         <span style={{ width: 50 }} />
+      </div>
+
+      <div style={{
+        background: T.card, border: `1px solid ${T.border}`,
+        borderRadius: T.r, padding: 16, marginBottom: 16,
+      }}>
+        <div style={{
+          fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+          letterSpacing: 1, marginBottom: 10,
+        }}>
+          LOCAL WALLET BALANCE
+        </div>
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+          gap: 8,
+          marginBottom: 12,
+        }}>
+          <BalanceMetric label="Raw" value={balanceMsats.toLocaleString()} suffix="msats" />
+          <BalanceMetric label="Whole" value={wholeSats.toLocaleString()} suffix="sats" />
+          <BalanceMetric label="Recoverable" value={recoverableSats.toLocaleString()} suffix="sats" tone={recoverableSats > 0 ? T.amber : T.muted} />
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.6 }}>
+          Route: <span style={{ color: T.text }}>{routeLabel}</span>
+          {" · "}
+          Status: <span style={{ color: fedimint.joined ? T.green : fedimint.busy ? T.amber : T.muted }}>
+            {fedimint.joined ? "joined" : fedimint.busy ? "connecting" : "not joined"}
+          </span>
+          {" · "}
+          Lightning reserve: <span style={{ color: reserveSats > 0 ? T.amber : T.muted }}>
+            {reserveSats.toLocaleString()} sats
+          </span>
+        </div>
+        {fedimint.federationId && (
+          <div style={{
+            fontSize: 9, color: T.muted, fontFamily: T.mono,
+            marginTop: 8, wordBreak: "break-all",
+          }}>
+            fed {fedimint.federationId}
+          </div>
+        )}
       </div>
 
       {/* Power-user toggle */}
@@ -216,6 +266,52 @@ export function SettingsAdvanced({
           mode above to reveal them.
         </div>
       )}
+    </div>
+  );
+}
+
+function BalanceMetric({
+  label,
+  value,
+  suffix,
+  tone = T.text,
+}: {
+  label: string;
+  value: string;
+  suffix: string;
+  tone?: string;
+}) {
+  return (
+    <div style={{
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: T.rs,
+      padding: "10px 8px",
+      minWidth: 0,
+    }}>
+      <div style={{
+        fontSize: 9,
+        color: T.muted,
+        fontFamily: T.mono,
+        textTransform: "uppercase",
+        letterSpacing: 0.8,
+        marginBottom: 5,
+      }}>
+        {label}
+      </div>
+      <div style={{
+        fontSize: 13,
+        color: tone,
+        fontFamily: T.mono,
+        fontWeight: 800,
+        lineHeight: 1.2,
+        wordBreak: "break-word",
+      }}>
+        {value}
+      </div>
+      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 3 }}>
+        {suffix}
+      </div>
     </div>
   );
 }

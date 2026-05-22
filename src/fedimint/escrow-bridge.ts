@@ -14,10 +14,35 @@
 import { type EscrowClient, type Signer } from "../escrow-engine/escrow-client.js";
 import { type FedimintClient, type SSSShare } from "./fedimint-client.js";
 import { stashPendingRedemption, clearPendingRedemption } from "./pending-redemptions.js";
-import { type EscrowState, type LockShareEntry, Role, Outcome } from "../escrow-engine/types.js";
+import { type EscrowState, type LockShareEntry, EscrowEventKind, Role, Outcome } from "../escrow-engine/types.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
+
+function claimTraceEnabled(): boolean {
+  try {
+    return typeof localStorage !== "undefined"
+      && localStorage.getItem("chama_debug_money") !== null;
+  } catch {
+    return false;
+  }
+}
+
+function claimTrace(checkpoint: string, fields: Record<string, unknown>): void {
+  if (!claimTraceEnabled()) return;
+  const parts: string[] = [`[claim-trace] ${checkpoint}`];
+  for (const [k, v] of Object.entries(fields)) {
+    let val: string;
+    if (v === undefined) val = "undef";
+    else if (v === null) val = "null";
+    else if (typeof v === "string") val = v.length > 64 ? `${v.slice(0, 60)}...(${v.length})` : v;
+    else if (typeof v === "number" || typeof v === "boolean") val = String(v);
+    else val = JSON.stringify(v).slice(0, 80);
+    parts.push(`${k}=${val}`);
+  }
+  // eslint-disable-next-line no-console
+  console.info(parts.join(" "));
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 // BRIDGE
@@ -232,12 +257,23 @@ export class EscrowFedimintBridge {
    *
    * After this, the money is in the winner's wallet.
    */
-  async claimAndRedeem(escrowId: string): Promise<EscrowState> {
+  async claimAndRedeem(
+    escrowId: string,
+    opts: { clearPendingOnRedeem?: boolean } = {},
+  ): Promise<EscrowState> {
     const state = this.escrow.getState(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
 
     const myPubkey = await this.signer.getPublicKey();
     const winner = getWinner(state);
+    claimTrace("bridge-in", {
+      escrowId,
+      status: state.status,
+      outcome: state.resolvedOutcome,
+      myPubkey: myPubkey.slice(0, 8),
+      winnerRole: winner?.role,
+      winnerPubkey: winner?.pubkey?.slice(0, 8),
+    });
     if (!winner || winner.pubkey !== myPubkey) {
       throw new Error("You are not the winner of this escrow");
     }
@@ -294,6 +330,11 @@ export class EscrowFedimintBridge {
       decryptedPartnerShare,
       state.lock.notesHash
     );
+    claimTrace("bridge-reconstructed", {
+      escrowId,
+      notesHashPrefix: notesHash.slice(0, 16),
+      oobNotesLen: oobNotes.length,
+    });
 
     // v0.4.4 federation gates (fed-ID equality) ──────────────────────────
     // Probe reachability of the redeemer's wallet, and verify it sits on
@@ -316,6 +357,11 @@ export class EscrowFedimintBridge {
     let redeemProbe: { fed: string | null };
     try {
       redeemProbe = await this.fedimint.probeReachable();
+      claimTrace("bridge-probe", {
+        escrowId,
+        expectedFed: expectedFed ?? "none",
+        actualFed: redeemProbe.fed,
+      });
     } catch (probeErr) {
       // v0.3.1 Phase 1: honest copy. This throw fires BEFORE
       // stashPendingRedemption (below, ~line 341) AND before the CLAIM
@@ -351,12 +397,25 @@ export class EscrowFedimintBridge {
       throw err;
     }
 
-    const stateAfterClaim = await this.escrow.claim(escrowId, notesHash);
+    const existingClaim = state.eventChain.find((e: any) => {
+      const payload = e.payload;
+      return (e.kind === EscrowEventKind.CLAIM || payload?.type === "escrow:claim") &&
+        payload?.claimerRole === winner.role &&
+        payload?.notesHashVerification === notesHash;
+    });
+    claimTrace("bridge-claim-event", {
+      escrowId,
+      existingClaim: Boolean(existingClaim),
+      notesHashPrefix: notesHash.slice(0, 16),
+    });
+    const stateAfterClaim = existingClaim
+      ? state
+      : await this.escrow.claim(escrowId, notesHash);
 
     // v0.1.68: Stash oobNotes to localStorage BEFORE attempting redeem.
     // ───────────────────────────────────────────────────────────────────
     // At this point:
-    //   - The chain has advanced: CLAIM is published, trade is COMPLETED.
+    //   - The chain has advanced: CLAIM is published, trade is settling.
     //   - The reconstructed oobNotes bearer token exists only on this
     //     JS stack frame.
     //   - If the app closes before redeemWithRetry resolves, the token
@@ -376,13 +435,30 @@ export class EscrowFedimintBridge {
       notesHash,
       amountMsats: state.amountMsats,
     });
+    claimTrace("bridge-stashed", {
+      escrowId,
+      amountMsats: state.amountMsats,
+      notesHashPrefix: notesHash.slice(0, 16),
+    });
 
     try {
       await this.fedimint.redeemWithRetry(oobNotes);
+      claimTrace("bridge-redeem-ok", {
+        escrowId,
+        clearPendingOnRedeem: opts.clearPendingOnRedeem !== false,
+      });
       // Redeem confirmed (or already-spent, which redeemWithRetry treats
       // as success). Federation has the notes, stash is no longer needed.
-      clearPendingRedemption(escrowId);
+      if (opts.clearPendingOnRedeem !== false) {
+        clearPendingRedemption(escrowId);
+      }
     } catch (redeemErr) {
+      const redeemCode = (redeemErr as any)?.code;
+      claimTrace("bridge-redeem-error", {
+        escrowId,
+        code: redeemCode,
+        errMsg: (redeemErr instanceof Error ? redeemErr.message : String(redeemErr)).slice(0, 120),
+      });
       // Stash stays. The boot-drain on next initFedimint() will retry.
       // UI error surface is unchanged from v0.1.67.
       const wrapped = new Error(
@@ -390,6 +466,13 @@ export class EscrowFedimintBridge {
           (redeemErr instanceof Error ? redeemErr.message : String(redeemErr))
       );
       (wrapped as any).claimPublished = true;
+      if (
+        redeemCode === "MINT_REISSUE_FAILED" ||
+        redeemCode === "MINT_REISSUE_UNKNOWN"
+      ) {
+        (wrapped as any).settlementFailed = true;
+        (wrapped as any).code = redeemCode;
+      }
       (wrapped as any).cause = redeemErr;
       throw wrapped;
     }
