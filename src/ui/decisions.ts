@@ -12,6 +12,7 @@
 
 import {
   getCommunityBySlug,
+  getPickerCommunities,
   DEFAULT_COMMUNITY_SLUG,
 } from "../communities/registry.js";
 import { BP_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
@@ -175,7 +176,7 @@ export type AutoInitTarget =
       kind: "use-default";
       invite: string;
       defaultCommunity: string;
-      reason: "first-time-npub";
+      reason: "first-time-npub" | "active-invite-without-home";
     };
 
 export interface AutoInitInputs {
@@ -212,24 +213,41 @@ export function decideAutoInitTarget(inputs: AutoInitInputs): AutoInitTarget {
   }
 
   // First-time-npub: no home AND no active. Assign BLF + Global USD
-  // silently. The defaultCommunity slug becomes the user's home (the
-  // shell calls actions.setCommunity with it), so subsequent reloads
-  // land them in branch 2 (use-home) — first-time-default fires
-  // exactly once per npub.
-  if (!inputs.activeInvite) {
-    const defaultCommunity = getCommunityBySlug(DEFAULT_COMMUNITY_SLUG);
+  // silently. Active-known-without-home is the same repair path when
+  // the invite maps to a visible community: every user needs a scoped
+  // home, and refresh must not preserve a route with no identity pill.
+  const inferredCommunity = inputs.activeInvite
+    ? inferCommunitySlugForInvite(inputs.activeInvite)
+    : DEFAULT_COMMUNITY_SLUG;
+  if (inferredCommunity) {
+    const defaultCommunity = getCommunityBySlug(inferredCommunity);
     const defaultInvite = defaultCommunity?.federationInvite ?? BP_FEDERATION_INVITE;
     return {
       kind: "use-default",
       invite: defaultInvite,
-      defaultCommunity: DEFAULT_COMMUNITY_SLUG,
-      reason: "first-time-npub",
+      defaultCommunity: inferredCommunity,
+      reason: inputs.activeInvite ? "active-invite-without-home" : "first-time-npub",
     };
   }
 
-  // Sandbox-style: active invite without home. Manual reconnect /
-  // community-pill tap is the right path.
+  // Unknown custom invite without a home remains Sandbox-style: manual
+  // reconnect / community-pill tap is the right path because no visible
+  // community identity can be inferred.
   return { kind: "skip" };
+}
+
+function inferCommunitySlugForInvite(invite: string | null): string | null {
+  const trimmed = invite?.trim();
+  if (!trimmed) return null;
+
+  const defaultCommunity = getCommunityBySlug(DEFAULT_COMMUNITY_SLUG);
+  if (defaultCommunity?.federationInvite === trimmed) {
+    return DEFAULT_COMMUNITY_SLUG;
+  }
+
+  return [...getPickerCommunities()]
+    .find((community) => community.federationInvite === trimmed)
+    ?.slug ?? null;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

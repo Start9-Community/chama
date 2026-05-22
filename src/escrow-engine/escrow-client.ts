@@ -432,6 +432,18 @@ export class EscrowClient {
       err.requestedRole = role;
       throw err;
     }
+    if (role === Role.ARBITER && !state.communityArbiters.includes(pubkey)) {
+      const err: any = new Error(
+        state.communityArbiters.length === 0
+          ? "This trade has no trusted arbiter pool, so you can't join it as arbiter."
+          : "Your key is not in this trade's trusted arbiter pool."
+      );
+      err.code = state.communityArbiters.length === 0
+        ? "ARBITER_POOL_EMPTY"
+        : "ARBITER_NOT_IN_POOL";
+      err.requestedRole = role;
+      throw err;
+    }
 
     const now = Math.floor(Date.now() / 1000);
     const lastEventId = state.eventChain[state.eventChain.length - 1]?.raw.id;

@@ -145,7 +145,7 @@ export function TradeDetail({
   const canJoinAsArbiter =
     !state.participants.arbiter &&
     !previewArbiterPk &&
-    (state.communityArbiters.length === 0 || state.communityArbiters.includes(pubkey));
+    state.communityArbiters.includes(pubkey);
   const prewarmedEscrowRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -491,11 +491,9 @@ export function TradeDetail({
               </button>
             )}
             {/* v0.6.5: hide the Join-as-Arbiter affordance when the
-                community pool will auto-assign one. The slot reads as
-                filled (Trinity Ring dot is solid + "Auto · xxxx"), so
-                offering volunteer-join would contradict that and create
-                two competing arbiters. Communities without a recruited
-                pool still show this button. */}
+                community pool will auto-assign one. v0.8.0 tightens
+                the empty-pool case too: no pool means no trusted arbiter
+                slot, not "anyone may volunteer." */}
             {canJoinAsArbiter && (
               <button disabled={joining} onClick={async () => {
                 setJoining(true);

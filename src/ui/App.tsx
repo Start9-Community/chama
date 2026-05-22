@@ -187,6 +187,7 @@ export default function App() {
     invite: string;
     label: string;
     navigateToEscrowAfter?: string;
+    persistCustom?: boolean;
   } | null>(null);
   // v0.3.0 Phase 2: AtomicFundingModal mount state. When the user taps
   // Fund on a listing, we stash the pending fund-and-lock here and the
@@ -244,9 +245,13 @@ export default function App() {
       try {
         setToast({ message: `Switching to ${target.label}…`, type: "info" });
         if (fedimint.federationId) {
-          await actions.switchFederation(target.invite);
+          await actions.switchFederation(target.invite, {
+            persistCustom: target.persistCustom !== false,
+          });
         } else {
-          await actions.initFedimint(target.invite);
+          await actions.initFedimint(target.invite, {
+            persistCustom: target.persistCustom !== false,
+          });
         }
         setToast({ message: `Joined ${target.label}!`, type: "success" });
         if (target.navigateToEscrowAfter) {
@@ -261,6 +266,15 @@ export default function App() {
       }
     })();
   }, [pendingSwitchAfterWithdraw, fedimint.balanceMsats, fedimint.federationId, actions]);
+
+  // Once a signer is known, localStorage reads switch from legacy
+  // browser-wide keys to per-npub keys. Keep Browse's identity pill in
+  // lockstep with that scoped home so a stale pre-connect selection
+  // cannot visually disagree with the wallet route we auto-init below.
+  useEffect(() => {
+    if (!connected) return;
+    setBrowseCommunity(getUserCommunitySlugRaw() ?? DEFAULT_COMMUNITY_SLUG);
+  }, [connected, pubkey]);
 
   // Auto-login: on native platforms, check for saved nsec in secure storage
   useEffect(() => {
@@ -308,12 +322,29 @@ export default function App() {
     if (connectedRelays === 0) return;
     if (fedimint.joined || fedimint.busy || fedimint.initialized) return;
 
+    const activeInvite = getActiveInvite();
+    const homeCommunity = getUserCommunitySlugRaw();
     const target = decideAutoInitTarget({
-      activeInvite: getActiveInvite(),
-      homeCommunity: getUserCommunitySlugRaw(),
+      activeInvite,
+      homeCommunity,
       hasCurrentEscrow: false,
       balanceMsats: 0,
     });
+
+    if ((import.meta as any).env?.DEV) {
+      const targetInvite = "invite" in target ? target.invite : null;
+      console.info("[chama] auto-init target", {
+        homeCommunity,
+        activeInvite: activeInvite ? activeInvite.slice(0, 24) + "…" : null,
+        targetKind: target.kind,
+        targetCommunity: target.kind === "use-home"
+          ? target.slug
+          : target.kind === "use-default"
+            ? target.defaultCommunity
+            : null,
+        targetInvite: targetInvite ? targetInvite.slice(0, 24) + "…" : null,
+      });
+    }
 
     if (target.kind === "skip") return;
     setAutoInitDone(true);
@@ -324,6 +355,9 @@ export default function App() {
     // per npub, not on every refresh.
     if (target.kind === "use-default") {
       actions.setCommunity(target.defaultCommunity);
+      setBrowseCommunity(target.defaultCommunity);
+    } else if (target.kind === "use-home") {
+      setBrowseCommunity(target.slug);
     }
 
     // All branches dispatch through initFedimint(invite). The v0.1.74
@@ -524,10 +558,11 @@ export default function App() {
     (async () => {
       try {
         setSwitchingToCommunity({ displayName: request.label });
+        const persistCustom = !("restoreCommunitySlug" in request);
         if (fedimint.federationId) {
-          await actions.switchFederation(request.invite);
+          await actions.switchFederation(request.invite, { persistCustom });
         } else {
-          await actions.initFedimint(request.invite);
+          await actions.initFedimint(request.invite, { persistCustom });
         }
         setToast({ message: `On ${request.label}.`, type: "success" });
         if (request.navigateToEscrowAfter) {
@@ -1019,6 +1054,7 @@ export default function App() {
               invite: pendingDestroyConfirm.invite,
               label: pendingDestroyConfirm.label,
               navigateToEscrowAfter: pendingDestroyConfirm.navigateToEscrowAfter,
+              persistCustom: !("restoreCommunitySlug" in pendingDestroyConfirm),
             });
             setPendingDestroyConfirm(null);
             setPendingRecovery({

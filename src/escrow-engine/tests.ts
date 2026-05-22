@@ -344,7 +344,7 @@ function makeParsedEvent<T extends EscrowPayload>(
 
 // ── Standard event builders ───────────────────────────────────────────────
 
-function createEvent(opts: { communityArbiters?: string[] } = {}): ParsedEscrowEvent<CreatePayload> {
+function createEvent(opts: { community?: string; communityArbiters?: string[] } = {}): ParsedEscrowEvent<CreatePayload> {
   return makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
     type: "escrow:create",
     description: "Sell 100k sats for $50 USD via Zelle",
@@ -352,6 +352,7 @@ function createEvent(opts: { communityArbiters?: string[] } = {}): ParsedEscrowE
     fiatAmount: 50,
     fiatCurrency: "USD",
     category: "p2p-trade",
+    community: opts.community,
     mintUrl: "fed11q...",
     platformFeeBps: 50,
     platformFeePubkey: PLATFORM_PK,
@@ -612,14 +613,32 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
   }
 }
 
-// Empty pool: any arbiter accepted
+// Legacy empty pool without a named community: any arbiter accepted
 {
   const create = createEvent(); // no pool
   const r1 = applyEvent(null, create);
   if (r1.ok) {
     const anyArbiter = joinEvent(Role.ARBITER, "99".repeat(32), create.raw.id);
     assertOk(applyEvent(r1.state, anyArbiter),
-      "Empty pool means any arbiter pubkey can JOIN");
+      "Legacy empty-pool trades without a community can still accept volunteer arbiters");
+  }
+}
+
+// Community empty pool: volunteer arbiters are rejected and replay skips them
+{
+  const create = createEvent({ community: "ke-kes", communityArbiters: [] });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const anyArbiter = joinEvent(Role.ARBITER, "99".repeat(32), create.raw.id);
+    assertErr(applyEvent(r1.state, anyArbiter), "ARBITER_POOL_EMPTY",
+      "Community trades with no arbiter pool reject volunteer arbiters");
+    const replayed = replayEventChain([create, anyArbiter]);
+    assertOk(replayed,
+      "Replay skips stale volunteer arbiter JOINs on empty-pool community trades");
+    if (replayed.ok) {
+      assert(replayed.state.participants[Role.ARBITER] === null,
+        "Skipped volunteer arbiter does not fill the arbiter slot");
+    }
   }
 }
 
@@ -650,6 +669,36 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
     }
     assert(refused, "Client refuses seller self-join as buyer");
     assert(publishedJoin === null, "Client self-join refusal publishes no JOIN event");
+  }
+}
+
+// Client preflight refuses volunteer arbiter joins before publishing to relays
+{
+  const create = createEvent({ community: "ke-kes", communityArbiters: [] });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    let publishedJoin: NostrEvent | null = null;
+    const volunteerClient = new EscrowClient({
+      async getPublicKey() { return ARBITER_PK; },
+      async signEvent(event: UnsignedEvent) {
+        return { ...event, id: "volunteer_arbiter_signed", pubkey: ARBITER_PK, sig: "sig" } as NostrEvent;
+      },
+      async nip44Encrypt(plaintext: string) { return plaintext; },
+      async nip44Decrypt(ciphertext: string) { return ciphertext; },
+    }, { relays: [] });
+    (volunteerClient as any).states.set(ESCROW_ID, r1.state);
+    (volunteerClient as any).relayManager.publish = async (event: NostrEvent) => {
+      publishedJoin = event;
+      return { accepted: 1, rejected: 0, errors: [] };
+    };
+    let refused = false;
+    try {
+      await volunteerClient.joinEscrow(ESCROW_ID, Role.ARBITER);
+    } catch (e: any) {
+      refused = e?.code === "ARBITER_POOL_EMPTY";
+    }
+    assert(refused, "Client refuses volunteer arbiter join when community pool is empty");
+    assert(publishedJoin === null, "Client volunteer-arbiter refusal publishes no JOIN event");
   }
 }
 
@@ -1277,8 +1326,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     excludePubkeys: [BLF_OFFICIAL_ARBITERS[0]!],
   }).join(",") === BLF_OFFICIAL_ARBITERS[1]!,
     "Official arbiter pool respects participant exclusion");
-  assert(getTrustedArbiterPool({ community: "ke-kes" }).length === 0,
-    "Afribit Kibera has no baked BLF official arbiters");
+  assert(getTrustedArbiterPool({ community: "ke-kes" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "Afribit Kibera carries the Chama bootstrap arbiter pool until live elections");
 
   // Lookup with valid + missing slug
   assert(getCommunityBySlug("sn-cfa") !== null, "Valid slug returns community");
@@ -1599,13 +1648,19 @@ console.log("\n── BP / BLF RESOLVER ──");
   assert(usBlfInvite === BLF_FEDERATION_INVITE,
     "us-blf pins BLF for the public Global USD route");
 
-  // Custom invite override beats community resolution
+  // Custom invite override only applies when no selected community has a
+  // pinned invite. Community identity wins so stale sandbox state cannot
+  // show Kenya while joining BLF/BP.
   const fakeCustomInvite = "fed1qcustom_user_pasted_invite_for_resolver_test";
   setCustomFederationInvite(fakeCustomInvite);
-  assert(resolveFederationForCommunity("sn-cfa") === fakeCustomInvite,
-    "Custom invite overrides community resolution");
+  assert(resolveFederationForCommunity("sn-cfa") === snCfaInvite,
+    "Pinned community invite beats stale custom invite");
+  assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
+    "Afribit community invite beats stale custom invite");
   assert(resolveFederationForCommunity(null) === fakeCustomInvite,
-    "Custom invite overrides null slug too");
+    "Custom invite overrides null slug");
+  assert(resolveFederationForCommunity("xx-unknown") === fakeCustomInvite,
+    "Custom invite overrides unknown community slug");
 
   // Cleanup so other tests aren't poisoned
   setCustomFederationInvite("");
@@ -3284,18 +3339,45 @@ console.log("\n── AUTO-INIT TARGET ──");
       "First-time use-default carries the 'first-time-npub' reason");
   }
 
-  // 7) Sandbox-style user — active invite without a community pick.
-  //    No-home + active still falls to skip (we don't know which
-  //    community the user intended; manual reconnect is the right
-  //    path). The use-default branch is gated on !activeInvite.
-  const sandboxNoHome = decideAutoInitTarget({
+  // 7) Known active invite without a community pick now repairs into a
+  //    scoped home. This catches profiles that have an old active fed
+  //    but no scoped community.
+  const blfNoHome = decideAutoInitTarget({
     activeInvite: BLF_FEDERATION_INVITE,
     homeCommunity: null,
     hasCurrentEscrow: false,
     balanceMsats: 0,
   });
-  assert(sandboxNoHome.kind === "skip",
-    "Sandbox user with active invite but no home → skip (manual reconnect)");
+  assert(blfNoHome.kind === "use-default",
+    "Known active invite without home → use-default repair");
+  if (blfNoHome.kind === "use-default") {
+    assert(blfNoHome.defaultCommunity === "us-blf",
+      "BLF active invite repairs to us-blf");
+    assert(blfNoHome.reason === "active-invite-without-home",
+      "Active-without-home repair is labeled");
+  }
+
+  const afribitNoHome = decideAutoInitTarget({
+    activeInvite: AFRIBIT_KIBERA_FEDERATION_INVITE,
+    homeCommunity: null,
+    hasCurrentEscrow: false,
+    balanceMsats: 0,
+  });
+  assert(afribitNoHome.kind === "use-default",
+    "Afribit active invite without home → use-default repair");
+  if (afribitNoHome.kind === "use-default") {
+    assert(afribitNoHome.defaultCommunity === "ke-kes",
+      "Afribit active invite repairs to Kenya Afribit");
+  }
+
+  const customNoHome = decideAutoInitTarget({
+    activeInvite: "fed1qcustomunknownroute",
+    homeCommunity: null,
+    hasCurrentEscrow: false,
+    balanceMsats: 0,
+  });
+  assert(customNoHome.kind === "skip",
+    "Unknown custom active invite without home remains manual reconnect");
 }
 
 // ── 29. BROWSER SUPPORT BANNER GATE ─────────────────────────────────────
@@ -3732,6 +3814,17 @@ console.log("\n── per-npub localStorage scoping ──");
   setUserCommunitySlug("ke-kes");
   assert(getUserCommunitySlugRaw() === "ke-kes",
     "Second npub can persist an independent home Chama");
+  setLocalStorageUserScope(null);
+  (globalThis as any).localStorage.setItem(COMMUNITY_STORAGE_KEY, "tz-tzs");
+  assert(getUserCommunitySlugRaw() === "tz-tzs",
+    "Logged-out UI shows the pre-connect community choice");
+  setLocalStorageUserScope("bob");
+  assert(getUserCommunitySlugRaw() === "tz-tzs",
+    "Pre-connect visible choice overrides the signed-in npub's older home Chama");
+  assert((globalThis as any).localStorage.getItem(scopedStorageKey(COMMUNITY_STORAGE_KEY)) === "tz-tzs",
+    "Override migrates into the signed-in npub scope");
+  assert((globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY) === null,
+    "Pre-connect override is claimed so another npub does not inherit it");
   setLocalStorageUserScope("alice");
   assert(getUserCommunitySlugRaw() === "tz-tzs",
     "Switching back restores the first npub's home Chama");

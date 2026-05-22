@@ -339,7 +339,7 @@ export interface UseEscrowActions {
    * UI must surface a destroy-confirm modal before retrying with
    * `{ force: true }`.
    */
-  initFedimint: (inviteCode?: string, options?: { force?: boolean }) => Promise<void>;
+  initFedimint: (inviteCode?: string, options?: { force?: boolean; persistCustom?: boolean }) => Promise<void>;
   /**
    * Persist a custom federation invite code for future sessions.
    * Pass empty string to clear and revert to the default.
@@ -424,7 +424,7 @@ export interface UseEscrowActions {
    * user confirmation. The Nostr-backed seed survives — trade history,
    * escrows, and signer are unaffected.
    */
-  switchFederation: (inviteCode: string, options?: { force?: boolean }) => Promise<void>;
+  switchFederation: (inviteCode: string, options?: { force?: boolean; persistCustom?: boolean }) => Promise<void>;
   /** (Re-)start the Browse feed subscription for public listings. */
   watchPublicListings: (since?: number) => void;
   /**
@@ -1321,13 +1321,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
   const initFedimint = useCallback(async (
     inviteCode?: string,
-    options?: { force?: boolean },
+    options?: { force?: boolean; persistCustom?: boolean },
   ) => {
     if (!clientRef.current || !signerRef.current) {
       throw new Error("Connect to relays before initializing Fedimint");
     }
 
     const force = options?.force === true;
+    const persistCustom = options?.persistCustom !== false;
 
     updateFedimint({ busy: true, error: null });
 
@@ -1336,7 +1337,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // explicit arg > custom stored invite > community.federationInvite
       // > BLF default.
       const userCommunity = getUserCommunitySlug();
-      const desiredInvite = inviteCode?.trim()
+      const explicitInvite = inviteCode?.trim() || "";
+      const communityInvite = getCommunityBySlug(userCommunity)?.federationInvite ?? null;
+      const desiredInvite = explicitInvite
         || resolveFederationForCommunity(userCommunity);
       const previousActiveInvite = getActiveInvite();
 
@@ -1429,12 +1432,26 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // This is the load-bearing safety. Without it, a refresh + wrong
       // fed pick destroys notes purely and simply (reproduced twice
       // during v0.1.81 testing).
+      const walletIsJoined = fedimint.isJoined();
+      const walletFederationId = fedimint.getFederationId();
       const driftDetected = shouldReconcileFederation({
         previousActiveInvite,
         desiredInvite,
-        walletIsJoined: fedimint.isJoined(),
-        walletFederationId: fedimint.getFederationId(),
+        walletIsJoined,
+        walletFederationId,
       });
+      if ((import.meta as any).env?.DEV) {
+        console.info("[chama] initFedimint route", {
+          userCommunity,
+          explicitInvite: explicitInvite ? explicitInvite.slice(0, 24) + "…" : null,
+          communityInvite: communityInvite ? communityInvite.slice(0, 24) + "…" : null,
+          desiredInvite: desiredInvite.slice(0, 24) + "…",
+          previousActiveInvite: previousActiveInvite ? previousActiveInvite.slice(0, 24) + "…" : null,
+          walletIsJoined,
+          walletFederationId,
+          driftDetected,
+        });
+      }
 
       if (driftDetected) {
         const fundingSignal = fundingInProgressRef.current;
@@ -1533,7 +1550,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       }
 
       const effectiveInvite = desiredInvite;
-      const usingCustom = hasCustomFederation() || !!inviteCode?.trim();
+      const usingCommunityPinnedInvite =
+        !!communityInvite && effectiveInvite === communityInvite && !persistCustom;
+      const staleCustomOverriddenByCommunity =
+        !!communityInvite && effectiveInvite === communityInvite && !explicitInvite;
+      const usingCustom =
+        persistCustom
+        && !staleCustomOverriddenByCommunity
+        && (!!explicitInvite || hasCustomFederation());
 
       // Join federation (idempotent in the SDK when already on the
       // same fed; lands cleanly on the new fed when post-wipe).
@@ -1542,6 +1566,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // PR 5: record the actually-joined invite so the next cold start
       // can reconcile if the user later switches preference.
       setActiveInvite(effectiveInvite);
+      if (usingCustom && explicitInvite && persistCustom) {
+        setCustomFederationInvite(effectiveInvite);
+      } else if (usingCommunityPinnedInvite || staleCustomOverriddenByCommunity) {
+        setCustomFederationInvite("");
+      }
 
       // Construct the bridge now that we have a working wallet
       bridgeRef.current = new EscrowFedimintBridge(
@@ -1760,9 +1789,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // (UI) must only pass force after explicit user confirmation.
   const switchFederation = useCallback(async (
     inviteCode: string,
-    options: { force?: boolean } = {},
+    options: { force?: boolean; persistCustom?: boolean } = {},
   ) => {
     const { force = false } = options;
+    const persistCustom = options.persistCustom !== false;
 
     const trimmed = inviteCode.trim();
     if (!trimmed.startsWith("fed1")) {
@@ -1829,10 +1859,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const activePubkey = await signerRef.current?.getPublicKey().catch(() => null) ?? null;
       await resetLocalFedimintWallet({ storageScope: activePubkey });
 
-      // Step 3 — persist the new invite as the custom override so future
-      // reloads stay on this fed (mirrors the picker's non-default-preset
-      // flow now living in Sandbox via SwitchFederationPanel).
-      setCustomFederationInvite(trimmed);
+      // Step 3 — persist only Advanced/Sandbox/custom switches as custom
+      // overrides. Community taps pass persistCustom:false; those should
+      // clear stale custom state so the selected community's pinned invite
+      // remains the source of truth on reload.
+      if (persistCustom) setCustomFederationInvite(trimmed);
+      else setCustomFederationInvite("");
 
       // Step 4 — clear React state so initFedimint can rebuild from scratch.
       // Reset health probe cache too — the new fed needs its own probe.
@@ -1850,7 +1882,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // Step 5 — re-init with the new invite. Reuses the existing
       // initFedimint flow which probes the Nostr seed, joins the new
       // fed, and wires up the balance subscriber.
-      await initFedimint(trimmed);
+      await initFedimint(trimmed, { persistCustom });
 
       console.info("[chama] federation switch complete");
     } catch (e) {

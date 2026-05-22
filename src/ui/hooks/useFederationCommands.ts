@@ -87,9 +87,9 @@ export function useFederationCommands(deps: FederationCommandsDeps): FederationC
       try {
         setToast({ message: `Switching to ${effect.displayName}…`, type: "info" });
         if (fedimint.federationId) {
-          await actions.switchFederation(effect.targetInvite);
+          await actions.switchFederation(effect.targetInvite, { persistCustom: false });
         } else {
-          await actions.initFedimint(effect.targetInvite);
+          await actions.initFedimint(effect.targetInvite, { persistCustom: false });
         }
         setToast({ message: `On ${effect.displayName}.`, type: "success" });
       } catch (e: any) {

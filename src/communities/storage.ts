@@ -16,6 +16,7 @@
 
 import { DEFAULT_COMMUNITY_SLUG, getCommunityBySlug } from "./registry.js";
 import {
+  claimLegacyStorageItem,
   getScopedStorageItem,
   removeScopedStorageItem,
   setScopedStorageItem,
@@ -29,7 +30,7 @@ export const COMMUNITY_STORAGE_KEY = "chama_community";
  *  falls back to default rather than silently flowing into new listings. */
 export function getUserCommunitySlug(): string {
   try {
-    const raw = getScopedStorageItem(COMMUNITY_STORAGE_KEY);
+    const raw = claimLegacyStorageItem(COMMUNITY_STORAGE_KEY);
     if (!raw) return DEFAULT_COMMUNITY_SLUG;
     return getCommunityBySlug(raw) ? raw : DEFAULT_COMMUNITY_SLUG;
   } catch {
@@ -46,7 +47,7 @@ export function getUserCommunitySlug(): string {
  *  which guarantees a non-null slug. */
 export function getUserCommunitySlugRaw(): string | null {
   try {
-    const raw = getScopedStorageItem(COMMUNITY_STORAGE_KEY);
+    const raw = claimLegacyStorageItem(COMMUNITY_STORAGE_KEY);
     if (!raw) return null;
     return getCommunityBySlug(raw) ? raw : null;
   } catch {

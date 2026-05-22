@@ -210,8 +210,8 @@ export function shouldReconcileFederation(inputs: {
 // `us-blf` registry entry, sandbox-mode picker, or pasted custom invite.
 //
 // Precedence (highest first):
-//   1. User's pasted custom invite (the manual-override escape hatch)
-//   2. The community's federationInvite (when the registry has one)
+//   1. The community's federationInvite (when the registry has one)
+//   2. User's pasted custom invite (manual override only without a pinned community)
 //   3. BP fallback
 //
 import { getCommunityBySlug } from "../communities/registry.js";
@@ -219,16 +219,26 @@ import { getCommunityBySlug } from "../communities/registry.js";
 /**
  * Resolve the federation invite code for a given community slug.
  *
- * - If the user has set a custom invite, it always wins (manual override).
- * - Otherwise, look up the community in the registry. If the entry has a
- *   non-null federationInvite, use it.
+ * - Look up the community in the registry first. If the entry has a
+ *   non-null federationInvite, use it. A selected community is an identity
+ *   choice and must not be silently overridden by stale custom-route state.
+ * - Otherwise, if the user has set a custom invite, use it as the manual
+ *   override escape hatch.
  * - Otherwise (community null/unknown, or its federationInvite is null),
  *   fall back to BP.
  */
 export function resolveFederationForCommunity(slug: string | null | undefined): string {
-  // 1. Manual override beats everything — same precedence as
-  //    getFederationInvite(), kept consistent so the "Advanced" path
-  //    behaves identically across the codebase.
+  // 1. Community-mapped invite, if any. v0.8.0: this intentionally beats
+  //    custom storage so a stale BLF/BP custom override cannot leave the UI
+  //    showing Kenya while the wallet joins a different federation.
+  const community = getCommunityBySlug(slug);
+  if (community?.federationInvite) {
+    return community.federationInvite;
+  }
+
+  // 2. Manual override only applies when there is no pinned community
+  //    route. The Advanced/Sandbox picker still calls init/switch with an
+  //    explicit invite and persists this key there.
   try {
     const custom = getScopedStorageItem(CUSTOM_INVITE_STORAGE_KEY);
     if (custom && custom.trim().startsWith("fed1")) {
@@ -236,12 +246,6 @@ export function resolveFederationForCommunity(slug: string | null | undefined): 
     }
   } catch {
     // localStorage unavailable — fall through
-  }
-
-  // 2. Community-mapped invite, if any.
-  const community = getCommunityBySlug(slug);
-  if (community?.federationInvite) {
-    return community.federationInvite;
   }
 
   // 3. BP fallback. Browser-friendly universal default per §2.5.

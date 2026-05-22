@@ -259,13 +259,23 @@ function handleJoin(state: EscrowState, event: ParsedEscrowEvent<JoinPayload>): 
     );
   }
 
-  // Arbiter must be in the community pool (when one exists)
-  if (p.role === Role.ARBITER && state.communityArbiters.length > 0
-      && !state.communityArbiters.includes(event.pubkey)) {
-    return err("ARBITER_NOT_IN_POOL",
-      "Arbiter pubkey is not in this trade's communityArbiters pool",
-      event.raw.id
-    );
+  // Arbiter must be in the community pool. Legacy no-community chains
+  // may still use volunteer arbiters, but a named community with an empty
+  // pool means "no trusted arbiter configured," not "anyone may join."
+  if (p.role === Role.ARBITER) {
+    if (state.community && state.communityArbiters.length === 0) {
+      return err("ARBITER_POOL_EMPTY",
+        "This community trade has no trusted arbiter pool",
+        event.raw.id
+      );
+    }
+    if (state.communityArbiters.length > 0
+        && !state.communityArbiters.includes(event.pubkey)) {
+      return err("ARBITER_NOT_IN_POOL",
+        "Arbiter pubkey is not in this trade's communityArbiters pool",
+        event.raw.id
+      );
+    }
   }
 
   const next = cloneState(state);
@@ -965,9 +975,12 @@ export function replayEventChain(events: ParsedEscrowEvent[]): TransitionResult 
   //   - DUPLICATE_CREATE: relay returned same CREATE twice
   //   - ROLE_TAKEN: duplicate JOIN for same role from a different pubkey
   //     after the slot was already filled (rare; prefer first-writer-wins)
+  //   - ARBITER_POOL_EMPTY / ARBITER_NOT_IN_POOL: stale volunteer arbiter
+  //     JOINs on community trades; ignore rather than poisoning the chain
   const benignCodes = new Set([
     "ALREADY_VOTED", "ALREADY_JOINED", "ALREADY_SUBSCRIBED",
     "DUPLICATE_CREATE", "ROLE_TAKEN", "TERMINAL_STATE",
+    "ARBITER_POOL_EMPTY", "ARBITER_NOT_IN_POOL",
   ]);
 
   for (const event of events) {

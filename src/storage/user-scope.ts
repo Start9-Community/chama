@@ -6,8 +6,8 @@
 // federation route, saved handles, payout destinations, payout profiles,
 // and crash-recovery queues. They should follow the active npub, not the
 // browser profile. First-run onboarding can still write before a signer is
-// known; once connect() learns the pubkey, the scoped reader claims that
-// legacy value exactly once.
+// known; stores that stage visible logged-out choices can explicitly claim
+// that legacy value once the pubkey is known.
 
 let activeUserScope: string | null = null;
 
@@ -38,7 +38,10 @@ export function getScopedStorageItem(baseKey: string): string | null {
 
     const scopedKey = scopedStorageKey(baseKey, scope);
     const scoped = localStorage.getItem(scopedKey);
-    if (scoped !== null) return scoped;
+    if (scoped !== null) {
+      localStorage.removeItem(baseKey);
+      return scoped;
+    }
 
     const legacy = localStorage.getItem(baseKey);
     if (legacy !== null) {
@@ -46,6 +49,29 @@ export function getScopedStorageItem(baseKey: string): string | null {
       localStorage.removeItem(baseKey);
     }
     return legacy;
+  } catch {
+    return null;
+  }
+}
+
+/** Claim a pre-connect legacy value into the active user scope, even if
+ *  that scope already had an older value. Use only for settings where
+ *  the logged-out UI can visibly stage a new choice before the signer
+ *  pubkey is known. */
+export function claimLegacyStorageItem(baseKey: string): string | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const scope = getLocalStorageUserScope();
+    if (!scope) return localStorage.getItem(baseKey);
+
+    const legacy = localStorage.getItem(baseKey);
+    if (legacy !== null) {
+      localStorage.setItem(scopedStorageKey(baseKey, scope), legacy);
+      localStorage.removeItem(baseKey);
+      return legacy;
+    }
+
+    return getScopedStorageItem(baseKey);
   } catch {
     return null;
   }
