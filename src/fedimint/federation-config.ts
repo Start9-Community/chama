@@ -59,7 +59,7 @@ export const CUSTOM_INVITE_STORAGE_KEY = "chama_federation_invite";
  * Custom user invite wins; otherwise fall back to BP — the universal
  * browser-friendly default. Community-aware callers should prefer
  * `resolveFederationForCommunity(slug)` so a community-pinned invite
- * (e.g. ke-kes → Afribit) is honored.
+ * (e.g. ke-kes → BLF while Kenya's native route is disabled) is honored.
  */
 export function getFederationInvite(): string {
   try {
@@ -291,8 +291,7 @@ export interface FederationPreset {
 
 /**
  * Curated federation list. Intentionally minimal: BP (the universal
- * browser-friendly fallback), BLF (an explicit opt-in option), and partner
- * federations already pinned by the curated community registry. New
+ * browser-friendly fallback) and BLF (an explicit opt-in option). New
  * community-led federations should still enter through the permissionless
  * community-add primitive (see addCustomCommunity in
  * src/communities/registry.ts; v1.5 will publish kind:38112 community
@@ -308,14 +307,6 @@ export const CURATED_PRESETS: FederationPreset[] = [
     inviteCode: BP_FEDERATION_INVITE,
     description: "Browser-friendly default. Safe starting point.",
     source: "curated",
-  },
-  {
-    name: AFRIBIT_KIBERA_FEDERATION_NAME,
-    federationId: AFRIBIT_KIBERA_FEDERATION_ID,
-    inviteCode: AFRIBIT_KIBERA_FEDERATION_INVITE,
-    description: "Kenya KES route for Afribit Kibera.",
-    source: "curated",
-    region: "Kenya",
   },
   {
     name: BLF_FEDERATION_NAME,

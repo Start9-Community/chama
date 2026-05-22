@@ -94,10 +94,10 @@ function readOfficialPool(community?: string | null): string[] {
   if (record.federationInvite === BLF_FEDERATION_INVITE) {
     return BLF_OFFICIAL_ARBITERS;
   }
-  // v0.8.0: native-federation communities (Afribit, future Bitsacco,
-  // etc.) still need Chama's bootstrap arbiter pool until the v2 live
-  // election path replaces hardcoded lists. The federation route and
-  // the social arbiter pool are separate product layers.
+  // v0.8.0: native-federation communities (future Bitsacco, etc.) still
+  // need Chama's bootstrap arbiter pool until the v2 live election path
+  // replaces hardcoded lists. The federation route and the social arbiter
+  // pool are separate product layers.
   if (!record.hiddenFromPicker) return BLF_OFFICIAL_ARBITERS;
   return [];
 }

@@ -1327,7 +1327,7 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   }).join(",") === BLF_OFFICIAL_ARBITERS[1]!,
     "Official arbiter pool respects participant exclusion");
   assert(getTrustedArbiterPool({ community: "ke-kes" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
-    "Afribit Kibera carries the Chama bootstrap arbiter pool until live elections");
+    "Kenya KES is BLF-backed for now and carries the official BLF arbiters");
 
   // Lookup with valid + missing slug
   assert(getCommunityBySlug("sn-cfa") !== null, "Valid slug returns community");
@@ -1336,7 +1336,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug(undefined) === null, "Undefined slug returns null");
 
   // v0.1.85: every visible pre-seed now pins federationInvite explicitly.
-  // v0.7.0: us-blf and sn-cfa route through BLF; Afribit Kibera stays separate.
+  // v0.8.1: public country routes all point at BLF until native federation
+  // gateway/trust paths are proven by community leaders.
   // Hidden legacy slugs remain resolvable for old listings.
   const allPinned = COMMUNITY_REGISTRY
     .filter(c => !c.hiddenFromPicker)
@@ -1374,10 +1375,10 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     assert(typeof c.notes === "string" && c.notes.includes("canary iroh"),
       `${c.slug} carries the shared browser-reliable note`);
   }
-  assert(getCommunityBySlug("ke-kes")?.displayName === "Kenya · Afribit Kibera · KES",
-    "ke-kes displayName names Afribit Kibera");
-  assert(getCommunityBySlug("ke-kes")?.disambiguator === "Afribit Kibera",
-    "ke-kes disambiguator=Afribit Kibera (multi-fed-per-country prep)");
+  assert(getCommunityBySlug("ke-kes")?.displayName === "Kenya · KES",
+    "ke-kes displayName names Kenya KES without a disabled federation brand");
+  assert(getCommunityBySlug("ke-kes")?.disambiguator === null,
+    "ke-kes disambiguator is null while Kenya is routed through BLF");
 
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
@@ -1393,8 +1394,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Picker includes us-blf as the Global USD route");
   assert(picker.some(c => c.slug === "tz-tzs"),
     "Picker includes Tanzania TZS for first-run country selection");
-  assert(picker.some(c => c.slug === "ke-kes" && c.country === "KE" && c.disambiguator === "Afribit Kibera"),
-    "Picker includes Kenya KES as the Afribit Kibera-backed country Chama");
+  assert(picker.some(c => c.slug === "ke-kes" && c.country === "KE" && c.disambiguator === null),
+    "Picker includes Kenya KES as a BLF-backed country Chama");
   assert(picker.some(c => c.slug === "cm-xaf"),
     "Picker includes Cameroon XAF for first-run country selection");
   assert(picker.some(c => c.slug === "ao-aoa"),
@@ -1627,14 +1628,14 @@ console.log("\n── BP / BLF RESOLVER ──");
   const keKesInvite = getCommunityBySlug("ke-kes")!.federationInvite!;
   assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
     "ke-kes → registry-pinned invite");
-  assert(keKesInvite === AFRIBIT_KIBERA_FEDERATION_INVITE,
-    "ke-kes pins Afribit Kibera");
-  const afribitFederationIdForComparison: string = AFRIBIT_KIBERA_FEDERATION_ID;
+  assert(keKesInvite === BLF_FEDERATION_INVITE,
+    "ke-kes pins BLF while Afribit is disabled");
+  const blfFederationIdForComparison: string = BLF_FEDERATION_ID;
   const bpFederationIdForComparison: string = BP_FEDERATION_ID;
-  assert(afribitFederationIdForComparison !== bpFederationIdForComparison,
-    "Afribit Kibera federation ID is distinct from BP");
-  assert(expectedFederationIdForInvite(keKesInvite) === AFRIBIT_KIBERA_FEDERATION_ID,
-    "Afribit Kibera invite resolves to its known federation ID for drift detection");
+  assert(blfFederationIdForComparison !== bpFederationIdForComparison,
+    "BLF federation ID is distinct from BP");
+  assert(expectedFederationIdForInvite(keKesInvite) === BLF_FEDERATION_ID,
+    "Kenya KES invite resolves to BLF for drift detection");
 
   const globalUsdInvite = getCommunityBySlug("global-usd")!.federationInvite!;
   assert(resolveFederationForCommunity("global-usd") === globalUsdInvite,
@@ -1656,7 +1657,7 @@ console.log("\n── BP / BLF RESOLVER ──");
   assert(resolveFederationForCommunity("sn-cfa") === snCfaInvite,
     "Pinned community invite beats stale custom invite");
   assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
-    "Afribit community invite beats stale custom invite");
+    "Kenya community invite beats stale custom invite");
   assert(resolveFederationForCommunity(null) === fakeCustomInvite,
     "Custom invite overrides null slug");
   assert(resolveFederationForCommunity("xx-unknown") === fakeCustomInvite,
@@ -1768,7 +1769,7 @@ console.log("\n── FEDERATION DRIFT DETECTION ──");
       walletIsJoined: true,
       walletFederationId: AFRIBIT_KIBERA_FEDERATION_ID,
     }) === false,
-    "Untracked OPFS does not reconcile when Afribit invite matches actual wallet fed id",
+    "Legacy Afribit OPFS does not reconcile when its invite still matches actual wallet fed id",
   );
 }
 
@@ -3363,12 +3364,8 @@ console.log("\n── AUTO-INIT TARGET ──");
     hasCurrentEscrow: false,
     balanceMsats: 0,
   });
-  assert(afribitNoHome.kind === "use-default",
-    "Afribit active invite without home → use-default repair");
-  if (afribitNoHome.kind === "use-default") {
-    assert(afribitNoHome.defaultCommunity === "ke-kes",
-      "Afribit active invite repairs to Kenya Afribit");
-  }
+  assert(afribitNoHome.kind === "skip",
+    "Disabled Afribit active invite without home remains manual reconnect");
 
   const customNoHome = decideAutoInitTarget({
     activeInvite: "fed1qcustomunknownroute",

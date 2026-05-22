@@ -25,7 +25,6 @@
 // resolveFederationForCommunity, and we'd hit a TDZ on COMMUNITY_REGISTRY
 // initialization if we let that cycle stand.
 import {
-  AFRIBIT_KIBERA_FEDERATION_INVITE,
   BP_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-invites.js";
@@ -80,8 +79,8 @@ export interface Community {
 /** Shared notes string. v0.5.0 reality: the Fedimint canary SDK
  *  (0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031) bumped
  *  iroh-relay to 0.90, which clears the 400 Bad Request that gated
- *  browser WebSocket transport across every federation we have access
- *  to (BP, BLF, Afribit, etc.). End-to-end browser flows — join,
+ *  browser WebSocket transport across the federations we actively route
+ *  through (BP, BLF, etc.). End-to-end browser flows — join,
  *  mint, claim — verified working. The flag stays in the schema so
  *  individual entries can flip back to false if a specific federation
  *  ever regresses. */
@@ -135,21 +134,14 @@ function blfCountryChama(seed: CountryChamaSeed): Community {
   };
 }
 
-const KENYA_AFRIBIT_CHAMA: Community = {
-  slug: "ke-kes",
-  displayName: "Kenya · Afribit Kibera · KES",
-  currency: "KES",
-  countries: ["KE"],
-  languages: ["sw", "en"],
-  // Afribit Kibera invite — Adopting Bitcoin Nairobi demo partner.
-  federationInvite: AFRIBIT_KIBERA_FEDERATION_INVITE,
-  flagEmoji: "🇰🇪",
+// Temporary test route: keep the stable Kenya `ke-kes` community identity,
+// but back it with BLF until the Afribit gateway/trust path is proven.
+const KENYA_BLF_CHAMA: Community = blfCountryChama({
   country: "KE",
-  browserReliable: true,
-  notes: IROH_LIMITATION_NOTE,
-  disambiguator: "Afribit Kibera",
-  hiddenFromPicker: false,
-};
+  name: "Kenya",
+  currency: "KES",
+  languages: ["sw", "en"],
+});
 
 const EAST_AFRICA_COUNTRY_CHAMAS: Community[] = [
   blfCountryChama({ country: "BI", name: "Burundi", currency: "BIF", languages: ["rn", "fr", "en"] }),
@@ -157,7 +149,7 @@ const EAST_AFRICA_COUNTRY_CHAMAS: Community[] = [
   blfCountryChama({ country: "DJ", name: "Djibouti", currency: "DJF", languages: ["fr", "ar"] }),
   blfCountryChama({ country: "ER", name: "Eritrea", currency: "ERN", languages: ["ti", "ar", "en"] }),
   blfCountryChama({ country: "ET", name: "Ethiopia", currency: "ETB", languages: ["am", "en"] }),
-  KENYA_AFRIBIT_CHAMA,
+  KENYA_BLF_CHAMA,
   blfCountryChama({ country: "MG", name: "Madagascar", currency: "MGA", languages: ["mg", "fr"] }),
   blfCountryChama({ country: "MW", name: "Malawi", currency: "MWK", languages: ["en", "ny"] }),
   blfCountryChama({ country: "MU", name: "Mauritius", currency: "MUR", languages: ["en", "fr"] }),
