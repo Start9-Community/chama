@@ -456,7 +456,9 @@ export interface UseEscrowActions {
 
 function vibrate(pattern: number | number[] = 50) {
   if (typeof navigator !== "undefined" && navigator.vibrate) {
-    navigator.vibrate(pattern);
+    try {
+      navigator.vibrate(pattern);
+    } catch {}
   }
 }
 
@@ -560,8 +562,6 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       next.set(escrowId, escrowState);
       return { ...prev, escrows: next };
     });
-    // Haptic on state changes
-    vibrate(30);
   }, []);
 
   const updateRelayStatus = useCallback((relayUrl: string, status: string) => {

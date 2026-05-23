@@ -12,6 +12,30 @@
 import type { Signer, UnsignedEvent } from "./escrow-client.js";
 import type { NostrEvent } from "./types.js";
 
+const DECRYPT_CACHE_LIMIT = 128;
+
+function cachePromise<T>(
+  cache: Map<string, Promise<T>>,
+  key: string,
+  load: () => Promise<T>,
+): Promise<T> {
+  const existing = cache.get(key);
+  if (existing) return existing;
+
+  const promise = load().catch((err) => {
+    cache.delete(key);
+    throw err;
+  });
+  cache.set(key, promise);
+
+  if (cache.size > DECRYPT_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+
+  return promise;
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // NIP-07 SIGNER — Browser extension (nos2x, Alby, etc.)
 // ══════════════════════════════════════════════════════════════════════════
@@ -22,6 +46,9 @@ import type { NostrEvent } from "./types.js";
  * Also works with Fedi's NIP-07 provider when running as a Mini-App.
  */
 export class NIP07Signer implements Signer {
+  private pubkeyPromise: Promise<string> | null = null;
+  private decryptCache: Map<string, Promise<string>> = new Map();
+
   private getNostr(): any {
     if (typeof window === "undefined" || !(window as any).nostr) {
       throw new Error("NIP-07 extension not found — install nos2x, Alby, or similar");
@@ -30,7 +57,13 @@ export class NIP07Signer implements Signer {
   }
 
   async getPublicKey(): Promise<string> {
-    return this.getNostr().getPublicKey();
+    if (!this.pubkeyPromise) {
+      this.pubkeyPromise = Promise.resolve(this.getNostr().getPublicKey()).catch((err) => {
+        this.pubkeyPromise = null;
+        throw err;
+      });
+    }
+    return this.pubkeyPromise;
   }
 
   async signEvent(event: UnsignedEvent): Promise<NostrEvent> {
@@ -58,14 +91,20 @@ export class NIP07Signer implements Signer {
   }
 
   async nip44Decrypt(ciphertext: string, senderPubkey: string): Promise<string> {
-    const nostr = this.getNostr();
-    if (nostr.nip44?.decrypt) {
-      return nostr.nip44.decrypt(senderPubkey, ciphertext);
-    }
-    if (nostr.nip04?.decrypt) {
-      return nostr.nip04.decrypt(senderPubkey, ciphertext);
-    }
-    throw new Error("Extension does not support NIP-44 or NIP-04 decryption");
+    return cachePromise(
+      this.decryptCache,
+      `${senderPubkey}:${ciphertext}`,
+      async () => {
+        const nostr = this.getNostr();
+        if (nostr.nip44?.decrypt) {
+          return nostr.nip44.decrypt(senderPubkey, ciphertext);
+        }
+        if (nostr.nip04?.decrypt) {
+          return nostr.nip04.decrypt(senderPubkey, ciphertext);
+        }
+        throw new Error("Extension does not support NIP-44 or NIP-04 decryption");
+      },
+    );
   }
 }
 
@@ -84,6 +123,9 @@ export class NIP07Signer implements Signer {
  *   - fediInternal for ecash operations (not used here — that's layer #3)
  */
 export class FediSigner implements Signer {
+  private pubkeyPromise: Promise<string> | null = null;
+  private decryptCache: Map<string, Promise<string>> = new Map();
+
   private getNostr(): any {
     if (typeof window === "undefined" || !(window as any).nostr) {
       throw new Error("Fedi runtime not detected — are you running inside Fedi?");
@@ -100,7 +142,13 @@ export class FediSigner implements Signer {
   }
 
   async getPublicKey(): Promise<string> {
-    return this.getNostr().getPublicKey();
+    if (!this.pubkeyPromise) {
+      this.pubkeyPromise = Promise.resolve(this.getNostr().getPublicKey()).catch((err) => {
+        this.pubkeyPromise = null;
+        throw err;
+      });
+    }
+    return this.pubkeyPromise;
   }
 
   async signEvent(event: UnsignedEvent): Promise<NostrEvent> {
@@ -117,11 +165,17 @@ export class FediSigner implements Signer {
   }
 
   async nip44Decrypt(ciphertext: string, senderPubkey: string): Promise<string> {
-    const nostr = this.getNostr();
-    if (nostr.nip44?.decrypt) {
-      return nostr.nip44.decrypt(senderPubkey, ciphertext);
-    }
-    throw new Error("Fedi NIP-44 decryption not available");
+    return cachePromise(
+      this.decryptCache,
+      `${senderPubkey}:${ciphertext}`,
+      async () => {
+        const nostr = this.getNostr();
+        if (nostr.nip44?.decrypt) {
+          return nostr.nip44.decrypt(senderPubkey, ciphertext);
+        }
+        throw new Error("Fedi NIP-44 decryption not available");
+      },
+    );
   }
 }
 

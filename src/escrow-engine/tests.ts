@@ -263,6 +263,7 @@ import {
   adaptNIP46BunkerSigner,
   createNip46PairingSecret,
 } from "./nip46-signer.js";
+import { FediSigner, NIP07Signer } from "./signers.js";
 import { validateRecoveryKeyInput } from "./nsec-signer.js";
 import {
   getLocalStorageUserScope,
@@ -3819,6 +3820,91 @@ console.log("\n── Fedi Mini-App ecash funding path ──");
   } finally {
     if (originalWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = originalWindow;
+  }
+
+  {
+    const originalWindow = (globalThis as any).window;
+    try {
+      let publicKeyCalls = 0;
+      let decryptCalls = 0;
+      (globalThis as any).window = {
+        nostr: {
+          async getPublicKey() {
+            publicKeyCalls++;
+            return "aa".repeat(32);
+          },
+          async signEvent(event: UnsignedEvent) {
+            return { ...event, id: "signed", pubkey: "aa".repeat(32), sig: "sig" };
+          },
+          nip44: {
+            async encrypt(recipient: string, plaintext: string) {
+              return `enc:${recipient}:${plaintext}`;
+            },
+            async decrypt(sender: string, ciphertext: string) {
+              decryptCalls++;
+              return `dec:${sender}:${ciphertext}`;
+            },
+          },
+        },
+      };
+
+      const signer = new NIP07Signer();
+      const [pk1, pk2] = await Promise.all([signer.getPublicKey(), signer.getPublicKey()]);
+      assert(pk1 === pk2 && publicKeyCalls === 1,
+        "NIP-07 signer caches concurrent getPublicKey calls");
+
+      const [dec1, dec2] = await Promise.all([
+        signer.nip44Decrypt("cipher-a", "bb".repeat(32)),
+        signer.nip44Decrypt("cipher-a", "bb".repeat(32)),
+      ]);
+      assert(dec1 === dec2 && decryptCalls === 1,
+        "NIP-07 signer caches repeated decrypts for the same ciphertext");
+
+      await signer.nip44Decrypt("cipher-b", "bb".repeat(32));
+      assert(decryptCalls === 2,
+        "NIP-07 signer still decrypts distinct ciphertexts");
+    } finally {
+      if (originalWindow === undefined) delete (globalThis as any).window;
+      else (globalThis as any).window = originalWindow;
+    }
+  }
+
+  {
+    const originalWindow = (globalThis as any).window;
+    try {
+      let decryptCalls = 0;
+      (globalThis as any).window = {
+        fediInternal: {},
+        nostr: {
+          async getPublicKey() {
+            return "cc".repeat(32);
+          },
+          async signEvent(event: UnsignedEvent) {
+            return { ...event, id: "signed", pubkey: "cc".repeat(32), sig: "sig" };
+          },
+          nip44: {
+            async encrypt(recipient: string, plaintext: string) {
+              return `enc:${recipient}:${plaintext}`;
+            },
+            async decrypt(sender: string, ciphertext: string) {
+              decryptCalls++;
+              return `dec:${sender}:${ciphertext}`;
+            },
+          },
+        },
+      };
+
+      const signer = new FediSigner();
+      const [dec1, dec2] = await Promise.all([
+        signer.nip44Decrypt("fedi-cipher", "dd".repeat(32)),
+        signer.nip44Decrypt("fedi-cipher", "dd".repeat(32)),
+      ]);
+      assert(FediSigner.isAvailable() && dec1 === dec2 && decryptCalls === 1,
+        "Fedi signer caches repeated decrypts for the same ciphertext");
+    } finally {
+      if (originalWindow === undefined) delete (globalThis as any).window;
+      else (globalThis as any).window = originalWindow;
+    }
   }
 
   function makeParseWallet(parseAmountMsats: number) {
