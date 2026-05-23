@@ -127,7 +127,9 @@ import {
   stashPendingRedemption,
 } from "../fedimint/pending-redemptions.js";
 import {
+  recoverSeedWordsFromEvents,
   queryUntilFound,
+  SEED_DECRYPT_RETRY_DELAYS_MS,
   SEED_RECOVERY_RETRY_DELAYS_MS,
 } from "../fedimint/seed-manager.js";
 import { deriveCreateFedTags } from "../fedimint/create-fed-tags.js";
@@ -4230,6 +4232,63 @@ console.log("\n── SEED RECOVERY RETRY ──");
     && SEED_RECOVERY_RETRY_DELAYS_MS[1] === 2000
     && SEED_RECOVERY_RETRY_DELAYS_MS[2] === 4000,
     "Default retry schedule is 1s / 2s / 4s");
+
+  // Seed-event decrypt retry — separate from relay query retry. This
+  // covers Fedi Mini-App cold starts where the seed event is present,
+  // but the first NIP-44 self-decrypt fails before Reconnect succeeds.
+  {
+    const pubkey = "ab".repeat(32);
+    const mnemonic = "must agree milk little stem coyote renew canoe shock diet normal frequent";
+    const seedEvent: NostrEvent = {
+      id: "seed-event-new",
+      pubkey,
+      created_at: 200,
+      kind: 30078,
+      tags: [["d", "chama-fedimint-seed-v1"]],
+      content: "encrypted-seed",
+      sig: "sig",
+    };
+    let decryptCalls = 0;
+    const sleepCalls: number[] = [];
+    const signer: Signer = {
+      async getPublicKey() { return pubkey; },
+      async signEvent(event: UnsignedEvent) {
+        return { ...event, id: "signed", pubkey, sig: "sig" };
+      },
+      async nip44Encrypt(plaintext: string) { return plaintext; },
+      async nip44Decrypt(_ciphertext: string, _senderPubkey: string) {
+        decryptCalls++;
+        if (decryptCalls < 3) throw new Error("Fedi decrypt path not ready yet");
+        return mnemonic;
+      },
+    };
+
+    const recovered = await recoverSeedWordsFromEvents(
+      [seedEvent],
+      pubkey,
+      signer,
+      {
+        delaysMs: [10, 20, 30],
+        sleepFn: async (ms) => { sleepCalls.push(ms); },
+      },
+    );
+
+    assert(recovered?.event.id === "seed-event-new",
+      "Seed decrypt retry recovers the seed event after transient signer failures");
+    assert(recovered?.words.join(" ") === mnemonic,
+      "Seed decrypt retry returns the recovered mnemonic words");
+    assert(decryptCalls === 3,
+      "Seed decrypt retry re-attempts NIP-44 until the signer is ready");
+    assert(sleepCalls.length === 2 && sleepCalls[0] === 10 && sleepCalls[1] === 20,
+      "Seed decrypt retry stops sleeping once decrypt succeeds");
+  }
+
+  assert(SEED_DECRYPT_RETRY_DELAYS_MS.length === 3,
+    "Default seed decrypt retry schedule has 3 retries");
+  assert(SEED_DECRYPT_RETRY_DELAYS_MS[0] === 750
+    && SEED_DECRYPT_RETRY_DELAYS_MS[1] === 1500
+    && SEED_DECRYPT_RETRY_DELAYS_MS[2] === 3000,
+    "Default seed decrypt retry schedule is 750ms / 1.5s / 3s");
 }
 
 // ── 31c. canOfferSubscription (v0.2.0 item 7 — graduated trust gate) ────
