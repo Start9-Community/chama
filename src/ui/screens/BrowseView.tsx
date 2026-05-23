@@ -48,48 +48,58 @@ export function BrowseView({
 
   const totalListings = matchingListings.length + nonMatchingListings.length;
   const homeCommunity = getCommunityBySlug(browseCommunity);
+  const browseSummary = totalListings === 0
+    ? "No listings yet"
+    : `${totalListings} ${totalListings === 1 ? "listing" : "listings"}${
+      matchingListings.length > 0
+        ? ` · ${matchingListings.length} on your Chama`
+        : ""
+    }`;
 
   return (
     <div style={{ padding: 16 }}>
       <div style={{
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-        marginBottom: 14,
-        gap: 10,
+        display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+        marginBottom: 16,
+        gap: 12,
       }}>
-        <div style={{
-          fontSize: 12, color: T.muted, fontFamily: T.mono, flexShrink: 0,
-        }}>
-          {totalListings === 0
-            ? "No listings yet"
-            : (
-              <>
-                <span style={{ color: T.text, fontWeight: 700 }}>{totalListings}</span>
-                {totalListings === 1 ? " listing" : " listings"}
-                {matchingListings.length > 0 && (
-                  <>
-                    {" · "}
-                    <span style={{ color: T.text, fontWeight: 700 }}>{matchingListings.length}</span>
-                    {" on your Chama"}
-                  </>
-                )}
-              </>
-            )}
+        <div style={{ minWidth: 0 }}>
+          <h1 style={{
+            margin: 0, color: T.text, fontFamily: T.sans,
+            fontSize: 30, lineHeight: 1.05, fontWeight: 800,
+          }}>
+            Browse
+          </h1>
+          <div style={{
+            marginTop: 6, fontSize: 12, color: T.muted,
+            fontFamily: T.mono, whiteSpace: "nowrap" as const,
+            overflow: "hidden", textOverflow: "ellipsis",
+          }}>
+            {browseSummary}
+          </div>
         </div>
         {homeCommunity && (
           <button
             title={homeCommunity.displayName}
             onClick={() => setShowCommunityPicker((v) => !v)}
             style={{
-              padding: "4px 10px", borderRadius: 14,
+              padding: "7px 10px", borderRadius: 18,
               background: T.surface, border: `1px solid ${T.border}`,
               fontFamily: T.mono, fontSize: 11,
               display: "flex", alignItems: "center", gap: 6,
               color: T.text, cursor: "pointer", minWidth: 0,
+              maxWidth: 174, flexShrink: 0,
             }}
           >
-            <span style={{ fontSize: 14, lineHeight: 1 }}>{homeCommunity.flagEmoji}</span>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {homeCommunity.disambiguator ?? homeCommunity.displayName}
+            <span style={{ fontSize: 16, lineHeight: 1 }}>{homeCommunity.flagEmoji}</span>
+            <span style={{
+              minWidth: 0, display: "flex", flexDirection: "column",
+              alignItems: "flex-start", lineHeight: 1.1,
+            }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 122 }}>
+                {homeCommunity.disambiguator ?? homeCommunity.displayName}
+              </span>
+              <span style={{ color: T.muted, fontSize: 9 }}>{homeCommunity.currency}</span>
             </span>
             <span style={{ color: T.muted, fontSize: 9 }}>{showCommunityPicker ? "▲" : "▼"}</span>
           </button>
@@ -119,7 +129,7 @@ export function BrowseView({
                 fontFamily: T.mono, fontSize: 11, fontWeight: 600,
                 cursor: "pointer", transition: "all 0.15s",
                 whiteSpace: "nowrap" as const,
-                letterSpacing: 0.2,
+                letterSpacing: 0,
               }}
             >
               {c.i ? c.i + " " : ""}{c.l}
@@ -154,7 +164,7 @@ export function BrowseView({
                   fontFamily: T.mono, fontSize: 11, fontWeight: 600,
                   cursor: "pointer", transition: "all 0.15s",
                   whiteSpace: "nowrap" as const,
-                  letterSpacing: 0.2,
+                  letterSpacing: 0,
                 }}
               >
                 {c.flagEmoji} {c.displayName}
@@ -202,7 +212,7 @@ export function BrowseView({
                 <div style={{ flex: 1, height: 1, background: T.border }} />
                 <div style={{
                   fontSize: 9, color: T.muted, fontFamily: T.mono,
-                  letterSpacing: 1.2, textTransform: "uppercase",
+                  letterSpacing: 0, textTransform: "uppercase",
                   whiteSpace: "nowrap" as const,
                 }}>
                   {nonMatchingListings.length} listing{nonMatchingListings.length !== 1 ? "s" : ""} on other routes
@@ -232,7 +242,7 @@ export function BrowseView({
           style={{
             background: "none", border: "none", padding: 0,
             color: T.muted, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
-            cursor: "pointer", letterSpacing: 0.8, textTransform: "uppercase",
+            cursor: "pointer", letterSpacing: 0, textTransform: "uppercase",
           }}
         >
           {showAdvancedTools ? "▲" : "▼"} Advanced tools
