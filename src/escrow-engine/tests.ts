@@ -7402,12 +7402,12 @@ console.log("\n── LIGHTNING PAYOUT FEE RESERVE ──");
 // ── 41c. REAL LIGHTNING FUNDING GUARDRAILS ───────────────────────────────
 console.log("\n── REAL LIGHTNING FUNDING GUARDRAILS ──");
 {
-  assert(MIN_REAL_ATOMIC_FUNDING_SATS === 1_000,
-    "Real Lightning funding floor stays above the ~50-sat claim_rejected range");
-  assert(MIN_REAL_ATOMIC_FUNDING_MSATS === 1_000_000,
+  assert(MIN_REAL_ATOMIC_FUNDING_SATS === 1,
+    "Real Lightning funding floor allows tiny Fedi ecash test locks");
+  assert(MIN_REAL_ATOMIC_FUNDING_MSATS === 1_000,
     "Real Lightning funding floor is exposed in msats for lock gating");
-  assert(minimumAtomicFundingMessage().includes("1,000 sats"),
-    "Real Lightning funding floor copy names the 1,000 sat minimum");
+  assert(minimumAtomicFundingMessage().includes("1 sat"),
+    "Real Lightning funding floor copy names the 1 sat minimum");
 }
 
 // ── 42. CHAMA BAR LABEL DECISION (v0.3.0 Phase 5) ────────────────────────
