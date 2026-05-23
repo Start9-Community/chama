@@ -6,6 +6,7 @@ set -euo pipefail
 #   ./scripts/release.sh [--patch|--minor|--major] -F /tmp/chama-commit.txt
 #   ./scripts/release.sh --patch --no-deploy -F /tmp/chama-commit.txt
 #   ./scripts/release.sh --current
+#   ./scripts/release.sh --deploy-live
 #
 # Modes:
 #   default   Clean-tree release: run gates, bump package version, commit,
@@ -14,6 +15,10 @@ set -euo pipefail
 #             run gates, build with that version, tag/push the current
 #             commit if needed, deploy. Use this after a manually versioned
 #             checkpoint commit has already landed on main.
+#   --deploy-live
+#             Deploy already-pushed origin/main to getchama.app without
+#             creating commits or pushing tags. This is the safe post-push
+#             lane for manual checkpoint releases.
 
 # ── Parse release options FIRST and shift them off ─────────────────────
 BUMP_TYPE="patch"
@@ -24,6 +29,10 @@ while [ $# -gt 0 ]; do
   case "${1:-}" in
     --current|--deploy-current)
       RELEASE_MODE="current"
+      shift
+      ;;
+    --deploy-live|--deploy-only)
+      RELEASE_MODE="deploy-live"
       shift
       ;;
     --patch)
@@ -69,6 +78,12 @@ if [ "$RELEASE_MODE" = "current" ]; then
     echo "   It deploys the already-committed package.json version at HEAD."
     exit 1
   fi
+elif [ "$RELEASE_MODE" = "deploy-live" ]; then
+  if [ -n "${1:-}" ]; then
+    echo "❌ --deploy-live does not take a commit message."
+    echo "   It deploys the already-pushed origin/main without git push/tag."
+    exit 1
+  fi
 elif [ "${1:-}" = "-F" ]; then
   if [ -z "${2:-}" ]; then
     echo "❌ -F requires a file path"
@@ -91,6 +106,7 @@ else
   echo "   Usage: ./scripts/release.sh [--patch|--minor|--major] \"subject line\""
   echo "          ./scripts/release.sh [--patch|--minor|--major] -F /tmp/commit.txt"
   echo "          ./scripts/release.sh --current"
+  echo "          ./scripts/release.sh --deploy-live"
   exit 1
 fi
 
@@ -138,7 +154,7 @@ fi
 CURRENT_PKG_VERSION=$(node -p "require('./package.json').version")
 LAST_TAG_VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "")
 
-if [ "$RELEASE_MODE" != "current" ] && [ -n "$LAST_TAG_VERSION" ] && [ "$CURRENT_PKG_VERSION" != "$LAST_TAG_VERSION" ]; then
+if [ "$RELEASE_MODE" = "bump" ] && [ -n "$LAST_TAG_VERSION" ] && [ "$CURRENT_PKG_VERSION" != "$LAST_TAG_VERSION" ]; then
   echo "⚠️  package.json ($CURRENT_PKG_VERSION) doesn't match last tag (v$LAST_TAG_VERSION)."
   echo "   This usually means a previous release.sh run errored mid-way."
   echo "   Either reset package.json to $LAST_TAG_VERSION, or confirm to continue:"
@@ -181,6 +197,24 @@ npm run predeploy
 # embeds the new __APP_VERSION__ value.
 echo "🔎 Running production build gate..."
 npm run build
+
+if [ "$RELEASE_MODE" = "deploy-live" ]; then
+  NEW_VERSION="$CURRENT_PKG_VERSION"
+  COMMIT_SHA=$(git rev-parse HEAD)
+
+  if ! grep -R "$NEW_VERSION" dist/*.html dist/assets/*.js >/dev/null 2>&1; then
+    echo "❌ Built dist does not appear to contain app version $NEW_VERSION."
+    echo "   Refusing to deploy a bundle with a stale version badge."
+    exit 1
+  fi
+
+  echo "🚀 Deploying origin/main@$COMMIT_SHA as v$NEW_VERSION..."
+  npx cap sync android
+  scp -r -i ~/.ssh/.id_satoshi_market dist/* satoshi@satoshimarket.app:~/chama-dist/
+
+  echo "✅ Deployed v$NEW_VERSION from origin/main@$COMMIT_SHA"
+  exit 0
+fi
 
 if [ "$RELEASE_MODE" = "current" ]; then
   NEW_VERSION="$CURRENT_PKG_VERSION"

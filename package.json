@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "test": "npx tsx src/escrow-engine/tests.ts",
     "typecheck": "tsc --noEmit",
-    "predeploy": "npm run typecheck && npm test"
+    "predeploy": "npm run typecheck && npm test",
+    "deploy:live": "./scripts/release.sh --deploy-live",
+    "release:current": "./scripts/release.sh --current"
   },
   "dependencies": {
     "@capacitor-mlkit/barcode-scanning": "^8.0.1",
