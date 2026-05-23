@@ -9,14 +9,16 @@ function blurNumberInputOnWheel(e: WheelEvent<HTMLInputElement>) {
   e.currentTarget.blur();
 }
 
-export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpendNotes, balanceMsats }: {
+export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpendNotes, onRedeemEcash, balanceMsats }: {
   onClose: () => void;
   onCreateInvoice: (amountSats: number, description: string) => Promise<string>;
   onPayInvoice: (bolt11: string) => Promise<void>;
   onSpendNotes: (amountMsats: number) => Promise<string>;
+  onRedeemEcash: (oobNotes: string) => Promise<void>;
   balanceMsats: number;
 }) {
   const [tab, setTab] = useState<"receive" | "send">("receive");
+  const [receiveType, setReceiveType] = useState<"lightning" | "ecash">("lightning");
   const [amountSats, setAmountSats] = useState("10000");
   const [description, setDescription] = useState("Chama top-up");
   const [invoice, setInvoice] = useState<string | null>(null);
@@ -25,6 +27,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
   const [success, setSuccess] = useState<string | null>(null);
   const [sendType, setSendType] = useState<"lightning" | "ecash">("lightning");
   const [bolt11Input, setBolt11Input] = useState("");
+  const [ecashInput, setEcashInput] = useState("");
   const [ecashOutput, setEcashOutput] = useState<string | null>(null);
 
   // Receive-confirmation tracking.
@@ -92,6 +95,17 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
     } finally { setBusy(false); }
   };
 
+  const handleRedeemEcash = async () => {
+    if (!ecashInput.trim()) { setErr("Paste ecash notes"); return; }
+    setBusy(true); setErr(null); setSuccess(null);
+    try {
+      await onRedeemEcash(ecashInput.trim());
+      setSuccess("Ecash redeemed!"); setEcashInput("");
+    } catch (e: any) {
+      setErr(e.message || "Redeem failed");
+    } finally { setBusy(false); }
+  };
+
   const handleSpendAll = async () => {
     if (balanceMsats <= 0) { setErr("No balance to send"); return; }
     setBusy(true); setErr(null);
@@ -149,22 +163,40 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
 
         {/* RECEIVE */}
         {tab === "receive" && !invoice && (<>
-          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>AMOUNT (SATS)</div>
-          <input
-            type="number"
-            value={amountSats}
-            onChange={(e) => setAmountSats(e.target.value)}
-            onWheel={blurNumberInputOnWheel}
-            style={{ ...inputStyle, marginBottom: 12 }}
-          />
-          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>DESCRIPTION</div>
-          <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} style={{ ...inputStyle, marginBottom: 16 }} />
-          <button disabled={busy} onClick={handleGenerate} style={{
-            width: "100%", padding: "12px 16px", borderRadius: T.rs,
-            background: busy ? T.surface : T.accent, border: `1px solid ${T.accent}`,
-            color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,
-            cursor: busy ? "not-allowed" : "pointer",
-          }}>{busy ? "Generating..." : "⚡ Generate Lightning invoice"}</button>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button onClick={() => { setReceiveType("lightning"); setErr(null); setSuccess(null); }} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: receiveType === "lightning" ? `1px solid ${T.accent}` : `1px solid ${T.border}`, background: receiveType === "lightning" ? T.accentDim : T.surface, color: receiveType === "lightning" ? T.accent : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Lightning</button>
+            <button onClick={() => { setReceiveType("ecash"); setErr(null); setSuccess(null); }} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: receiveType === "ecash" ? `1px solid ${T.amber}` : `1px solid ${T.border}`, background: receiveType === "ecash" ? T.amberDim : T.surface, color: receiveType === "ecash" ? T.amber : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Ecash</button>
+          </div>
+
+          {receiveType === "lightning" && (<>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>AMOUNT (SATS)</div>
+            <input
+              type="number"
+              value={amountSats}
+              onChange={(e) => setAmountSats(e.target.value)}
+              onWheel={blurNumberInputOnWheel}
+              style={{ ...inputStyle, marginBottom: 12 }}
+            />
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>DESCRIPTION</div>
+            <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} style={{ ...inputStyle, marginBottom: 16 }} />
+            <button disabled={busy} onClick={handleGenerate} style={{
+              width: "100%", padding: "12px 16px", borderRadius: T.rs,
+              background: busy ? T.surface : T.accent, border: `1px solid ${T.accent}`,
+              color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+              cursor: busy ? "not-allowed" : "pointer",
+            }}>{busy ? "Generating..." : "⚡ Generate Lightning invoice"}</button>
+          </>)}
+
+          {receiveType === "ecash" && (<>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>PASTE ECASH NOTES</div>
+            <textarea value={ecashInput} onChange={(e) => setEcashInput(e.target.value)} placeholder="fedimint..." rows={4} style={{ ...inputStyle, resize: "vertical" as const, marginBottom: 12, minHeight: 90 }} />
+            <button disabled={busy} onClick={handleRedeemEcash} style={{
+              width: "100%", padding: "12px 16px", borderRadius: T.rs,
+              background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`,
+              color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+              cursor: busy ? "not-allowed" : "pointer",
+            }}>{busy ? "Redeeming..." : "Redeem ecash notes"}</button>
+          </>)}
         </>)}
 
         {tab === "receive" && invoice && received && (

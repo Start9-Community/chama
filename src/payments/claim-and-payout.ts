@@ -61,6 +61,8 @@
 // shows "still arriving" reassurance; `claim-failed` shows terminal
 // no-recovery framing; `payout-failed` points at the recovery banner.
 
+import { markSatsTracesDrained, recordSatsTrace } from "./sats-trace.js";
+
 // ── Phase types ──────────────────────────────────────────────────────────
 
 export type ClaimAndPayoutPhase =
@@ -431,6 +433,9 @@ export async function runClaimAndPayout(
     return { kind: "claim-pending", error };
   }
 
+  let balanceAfterClaim: number | undefined;
+  try { balanceAfterClaim = await opts.getBalance(); } catch {}
+
   if (opts.clearPendingRedemption) {
     try {
       opts.clearPendingRedemption(opts.escrowId);
@@ -508,6 +513,13 @@ export async function runClaimAndPayout(
     await opts.payInvoice(opts.bolt11);
   } catch (e: any) {
     const error = errorMessage(e, "Lightning payment failed");
+    recordSatsTrace({
+      source: "claim",
+      escrowId: opts.escrowId,
+      amountMsats: opts.expectedDeltaMsats,
+      balanceMsats: balanceAfterClaim,
+      reason: "claim-payout-failed",
+    });
     moneyLog("CLAIM-PAY-OUT", {
       escrowId: opts.escrowId,
       result: "error",
@@ -529,6 +541,20 @@ export async function runClaimAndPayout(
     escrowId: opts.escrowId,
     result: "success",
   });
+
+  let balanceAfterPayout: number | undefined;
+  try { balanceAfterPayout = await opts.getBalance(); } catch {}
+  if (balanceAfterPayout !== undefined && Math.floor(Math.max(0, balanceAfterPayout) / 1000) > 0) {
+    recordSatsTrace({
+      source: "claim",
+      escrowId: opts.escrowId,
+      amountMsats: opts.expectedDeltaMsats,
+      balanceMsats: balanceAfterPayout,
+      reason: "claim-payout-leftover",
+    });
+  } else if (balanceAfterPayout !== undefined) {
+    markSatsTracesDrained("claim-payout-drained");
+  }
 
   // Phase 4: best-effort handle save. Failures here are cosmetic —
   // the payout already succeeded.

@@ -29,6 +29,7 @@
 // orchestrator) don't have to reach into sdk-adapter directly.
 import type { LnReceiveStateKind } from "./sdk-adapter.js";
 export type { LnReceiveStateKind };
+import type { ChamaOperationMeta } from "../payments/sats-trace.js";
 
 /**
  * Fedimint wallet instance — mirrors @fedimint/core FedimintWallet API.
@@ -51,9 +52,9 @@ export interface IFedimintWallet {
 
   mint: {
     /** Spend notes from wallet — returns OOB ecash string */
-    spendNotes(amountMsats: number): Promise<string>;
+    spendNotes(amountMsats: number, meta?: ChamaOperationMeta): Promise<string>;
     /** Redeem OOB ecash notes into wallet */
-    redeemEcash(oobNotes: string): Promise<string | void>;
+    redeemEcash(oobNotes: string, meta?: ChamaOperationMeta): Promise<string | void>;
     /** Parse OOB notes to inspect amount without redeeming */
     parseNotes(oobNotes: string): Promise<{ total_amount: number }>;
   };
@@ -69,9 +70,10 @@ export interface IFedimintWallet {
       amountMsats: number,
       description: string,
       onReceiveState?: (kind: LnReceiveStateKind) => void,
+      meta?: ChamaOperationMeta,
     ): Promise<{ invoice: string; operationId: string }>;
     /** Pay a Lightning invoice from federation balance */
-    payInvoice(bolt11: string): Promise<{ operationId: string }>;
+    payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<{ operationId: string }>;
   };
 
   federation: {
@@ -611,18 +613,18 @@ export class FedimintClient {
    *
    * This is what gets split into SSS shares for escrow.
    */
-  async spendNotes(amountMsats: number): Promise<string> {
+  async spendNotes(amountMsats: number, meta?: ChamaOperationMeta): Promise<string> {
     const wallet = this.requireWallet();
-    return wallet.mint.spendNotes(amountMsats);
+    return wallet.mint.spendNotes(amountMsats, meta);
   }
 
   /**
    * Redeem ecash notes into the wallet balance.
    * Used by the escrow winner after reconstructing from SSS shares.
    */
-  async redeemEcash(oobNotes: string): Promise<void> {
+  async redeemEcash(oobNotes: string, meta?: ChamaOperationMeta): Promise<void> {
     const wallet = this.requireWallet();
-    await wallet.mint.redeemEcash(oobNotes);
+    await wallet.mint.redeemEcash(oobNotes, meta);
   }
 
   /**
@@ -715,12 +717,14 @@ export class FedimintClient {
     amountMsats: number,
     description: string,
     onReceiveState?: (kind: LnReceiveStateKind) => void,
+    meta?: ChamaOperationMeta,
   ): Promise<string> {
     const wallet = this.requireWallet();
     const result = await wallet.lightning.createInvoice(
       amountMsats,
       description,
       onReceiveState,
+      meta,
     );
     return result.invoice;
   }
@@ -729,7 +733,7 @@ export class FedimintClient {
    * Pay a Lightning invoice from the federation balance.
    * Used for outbound payments.
    */
-  async payInvoice(bolt11: string): Promise<void> {
+  async payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<void> {
     const wallet = this.requireWallet();
     let balanceBefore: number | undefined;
     try { balanceBefore = await wallet.balance.getBalance(); } catch {}
@@ -740,7 +744,7 @@ export class FedimintClient {
       balanceBefore,
     });
     try {
-      await wallet.lightning.payInvoice(bolt11);
+      await wallet.lightning.payInvoice(bolt11, meta);
       let balanceAfter: number | undefined;
       try { balanceAfter = await wallet.balance.getBalance(); } catch {}
       mlog("PAY-OUT", {
@@ -789,7 +793,8 @@ export class FedimintClient {
     totalMsats: number,
     fees: {
       arbiterFeeMsats: number;
-    }
+    },
+    meta?: ChamaOperationMeta,
   ): Promise<EscrowLockBundle> {
     const wallet = this.requireWallet();
 
@@ -828,7 +833,7 @@ export class FedimintClient {
     });
 
     // Step 1: Spend the full amount as ecash notes
-    const oobNotes = await wallet.mint.spendNotes(totalMsats);
+    const oobNotes = await wallet.mint.spendNotes(totalMsats, meta);
 
     // [$$] LOCK-SPEND — what spendNotes actually returned
     let _spentParsed: number | undefined;
@@ -859,6 +864,69 @@ export class FedimintClient {
 
     // [$$] LOCK-OUT — final breakdown leaving the bridge
     mlog("LOCK-OUT", {
+      fed: this._federationId,
+      notesHashPrefix: notesHash.slice(0, 16),
+      sellerReceivesMsats,
+      arbiterFeeMsats,
+      totalMsats,
+    });
+
+    return {
+      notesHash,
+      shares,
+      totalMsats,
+      sellerReceivesMsats,
+      arbiterFeeMsats,
+    };
+  }
+
+  /**
+   * Lock already-generated OOB ecash notes into 2-of-3 SSS escrow.
+   *
+   * Used by Fedi Mini-App flows where the Fedi host wallet generates
+   * ecash directly via `window.fediInternal.generateEcash`. This avoids
+   * the browser SDK Lightning receive path entirely, while keeping the
+   * same hash + Shamir escrow format as the normal `spendNotes` path.
+   */
+  async createEscrowLockFromNotes(
+    oobNotes: string,
+    totalMsats: number,
+    fees: {
+      arbiterFeeMsats: number;
+    },
+    _meta?: ChamaOperationMeta,
+  ): Promise<EscrowLockBundle> {
+    const wallet = this.requireWallet();
+
+    const arbiterFeeMsats = fees.arbiterFeeMsats;
+    const sellerReceivesMsats = totalMsats - arbiterFeeMsats;
+
+    if (sellerReceivesMsats <= 0) {
+      throw new Error("Arbiter fee exceeds total amount — seller would receive nothing");
+    }
+
+    const parsed = await wallet.mint.parseNotes(oobNotes);
+    if (parsed.total_amount !== totalMsats) {
+      throw new Error(
+        `Fedi wallet generated ${parsed.total_amount} msats, ` +
+        `but this trade requires ${totalMsats} msats. No LOCK was published.`,
+      );
+    }
+
+    mlog("LOCK-EXTERNAL-IN", {
+      fed: this._federationId,
+      totalMsats,
+      arbiterFeeMsats,
+      sellerReceivesMsats,
+      oobNotesLen: oobNotes.length,
+      parsedTotalMsats: parsed.total_amount,
+    });
+
+    const notesHash = await hashNotes(oobNotes);
+    const notesBytes = new TextEncoder().encode(oobNotes);
+    const shares = await shamirSplit(notesBytes, 3, 2);
+
+    mlog("LOCK-EXTERNAL-OUT", {
       fed: this._federationId,
       notesHashPrefix: notesHash.slice(0, 16),
       sellerReceivesMsats,
@@ -961,7 +1029,11 @@ export class FedimintClient {
    * @param oobNotes The OOB ecash string from reconstructAndVerify
    * @param maxAttempts Total attempts including the first. Default 3.
    */
-  async redeemWithRetry(oobNotes: string, maxAttempts = 3): Promise<void> {
+  async redeemWithRetry(
+    oobNotes: string,
+    maxAttempts = 3,
+    meta?: ChamaOperationMeta,
+  ): Promise<void> {
     const wallet = this.requireWallet();
 
     // [$$] REDEEM-IN — entering redeem with intended amount
@@ -987,7 +1059,7 @@ export class FedimintClient {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const operationId = await wallet.mint.redeemEcash(oobNotes);
+        const operationId = await wallet.mint.redeemEcash(oobNotes, meta);
         // [$$] REDEEM-TRY — success path
         let _redeemBalAfter: number | undefined;
         try { _redeemBalAfter = await wallet.balance.getBalance(); } catch {}

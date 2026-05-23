@@ -39,6 +39,13 @@ export interface RecoveryPayoutModalProps {
   subtitle?: string;
   /** Bound to actions.payInvoice. */
   payInvoice: (bolt11: string) => Promise<void>;
+  /** Optional balance reader for trace cleanup after payout. */
+  getBalance?: () => Promise<number>;
+  /** Optional provenance for tagging the recovery send. */
+  traceContext?: {
+    escrowId?: string;
+    amountMsats?: number;
+  };
   /** Bound to addOrTouchPayoutDestination from payout-destinations.ts. */
   addOrTouchPayoutDestination: (address: string) => void;
   /** Closed when the modal terminates (success, cancel, or error).
@@ -58,6 +65,8 @@ export function RecoveryPayoutModal({
   title,
   subtitle,
   payInvoice,
+  getBalance,
+  traceContext,
   addOrTouchPayoutDestination,
   onClose,
 }: RecoveryPayoutModalProps) {
@@ -99,6 +108,8 @@ export function RecoveryPayoutModal({
             saveAfter: opts.saveAfter,
             addressUsed: opts.addressUsed,
             payInvoice,
+            getBalance,
+            traceContext,
             addOrTouchLightningHandle: addOrTouchPayoutDestination,
             onPhase: (phase) => setStage({ kind: "running", phase }),
           });

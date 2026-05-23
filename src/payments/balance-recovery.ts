@@ -18,6 +18,8 @@
 // + saveAfter + addressUsed → bump the saved-handle list. Failures
 // here are cosmetic (the payout already succeeded).
 
+import { markSatsTracesDrained, recordSatsTrace } from "./sats-trace.js";
+
 export type RecoveryPayoutPhase =
   | { kind: "paying-invoice" }
   | { kind: "done" }
@@ -37,6 +39,13 @@ export interface RunRecoveryPayoutOpts {
   addressUsed?: string;
   /** Bound to bridge.payInvoice. */
   payInvoice: (bolt11: string) => Promise<void>;
+  /** Optional balance reader for post-payout trace cleanup. */
+  getBalance?: () => Promise<number>;
+  /** Optional provenance when the recovery surface knows the source. */
+  traceContext?: {
+    escrowId?: string;
+    amountMsats?: number;
+  };
   /** Bound to addOrTouchLightningHandle. Best-effort post-success. */
   addOrTouchLightningHandle: (address: string) => void;
   /** Phase callback. */
@@ -80,6 +89,25 @@ export async function runRecoveryPayout(
       opts.addOrTouchLightningHandle(opts.addressUsed);
     } catch {
       // Cosmetic — payout already succeeded.
+    }
+  }
+
+  if (opts.getBalance) {
+    try {
+      const balance = await opts.getBalance();
+      if (Math.floor(Math.max(0, balance) / 1000) > 0) {
+        recordSatsTrace({
+          source: "recovery",
+          escrowId: opts.traceContext?.escrowId,
+          amountMsats: opts.traceContext?.amountMsats,
+          balanceMsats: balance,
+          reason: "recovery-leftover",
+        });
+      } else {
+        markSatsTracesDrained("recovery-drained");
+      }
+    } catch {
+      // Best-effort trace cleanup only.
     }
   }
 

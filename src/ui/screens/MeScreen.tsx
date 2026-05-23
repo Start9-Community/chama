@@ -30,6 +30,10 @@ import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
 } from "../../payments/lightning-fees.js";
+import {
+  describeSatsTrace,
+  type SatsTraceEntry,
+} from "../../payments/sats-trace.js";
 import { T } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 
@@ -60,6 +64,7 @@ export function MeScreen({
   onOpenAdvanced,
   balanceMsats,
   hasActiveCommitment,
+  satsTrace,
   onRecoverSats,
   onSignOut,
 }: {
@@ -74,6 +79,7 @@ export function MeScreen({
   onOpenAdvanced: () => void;
   balanceMsats: number;
   hasActiveCommitment: boolean;
+  satsTrace?: SatsTraceEntry | null;
   onRecoverSats: () => void;
   onSignOut: () => void;
 }) {
@@ -84,7 +90,8 @@ export function MeScreen({
   const localRecoverableSats = maxLightningPayoutSats(balanceMsats);
   const localReserveSats = lightningPayoutReserveSats(balanceMsats);
   const showLocalRecovery = !hasActiveCommitment && localRecoverySats > 0;
-  const isQuietDust = localRecoverySats < MAIN_SURFACE_RECOVERY_MIN_SATS;
+  const isSmallLeftover = localRecoverySats < MAIN_SURFACE_RECOVERY_MIN_SATS;
+  const traceCopy = describeSatsTrace(satsTrace ?? null);
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -127,20 +134,20 @@ export function MeScreen({
 
       {showLocalRecovery && (
         <div style={{
-          background: T.card, border: `1px solid ${isQuietDust ? T.border : T.amber + "66"}`,
+          background: T.card, border: `1px solid ${isSmallLeftover ? T.border : T.amber + "66"}`,
           borderRadius: T.r, padding: 20, marginBottom: 16,
         }}>
           <div style={{
-            fontSize: 11, fontWeight: 600, color: isQuietDust ? T.muted : T.amber,
+            fontSize: 11, fontWeight: 600, color: isSmallLeftover ? T.muted : T.amber,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 12,
           }}>
             SATS RECOVERY
           </div>
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
-            {isQuietDust ? (
+            {isSmallLeftover ? (
               <>
-                {localRecoverySats.toLocaleString()} sat{localRecoverySats !== 1 ? "s" : ""} saved from payout fee dust.
-                Chama keeps tiny leftovers out of the main flow and lets them accumulate here.
+                {localRecoverySats.toLocaleString()} sat{localRecoverySats !== 1 ? "s" : ""} saved as a small leftover.
+                Chama keeps small leftovers out of the main flow and lets them accumulate here.
               </>
             ) : (
               <>
@@ -149,6 +156,21 @@ export function MeScreen({
               </>
             )}
           </div>
+          {traceCopy && (
+            <div style={{
+              marginTop: 10, padding: "9px 10px",
+              background: T.surface, border: `1px solid ${T.border}`,
+              borderRadius: T.rs, color: T.muted,
+              fontFamily: T.mono, fontSize: 10, lineHeight: 1.45,
+            }}>
+              TRACE · {traceCopy}
+              {satsTrace?.escrowId ? (
+                <div style={{ wordBreak: "break-all" as const, marginTop: 4 }}>
+                  {satsTrace.escrowId}
+                </div>
+              ) : null}
+            </div>
+          )}
           <button
             onClick={onRecoverSats}
             disabled={localRecoverableSats <= 0}

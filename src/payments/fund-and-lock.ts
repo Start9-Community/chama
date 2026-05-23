@@ -43,6 +43,8 @@
 // SOMETHING land but not the full amount, modeled on the v0.1.62
 // claim-watchdog pattern.
 
+import { recordSatsTrace } from "./sats-trace.js";
+
 // ── Phase types ──────────────────────────────────────────────────────────
 
 /** Phases emitted during the polling loop (a sub-set of the orchestrator's
@@ -73,6 +75,8 @@ export type FundingPhase =
 export type FundAndLockPhase =
   | { kind: "creating-invoice" }
   | { kind: "creating-invoice-slow" }
+  | { kind: "requesting-fedi-ecash" }
+  | { kind: "fedi-ecash-created" }
   | { kind: "receive-watch-ready" }
   | { kind: "invoice-created"; bolt11: string; expiresAt: number }
   | { kind: "receive-rejected"; reason: string }
@@ -611,6 +615,20 @@ export async function runFundAndLock(
   }
 
   if (polled.kind !== "payment-confirmed") {
+    try {
+      const balance = await opts.getBalance();
+      if (balance > baseline) {
+        recordSatsTrace({
+          source: "funding",
+          escrowId: opts.escrowId,
+          amountMsats: opts.amountMsats,
+          balanceMsats: balance,
+          reason: `funding-${polled.kind}`,
+        });
+      }
+    } catch {
+      // Best-effort trace only.
+    }
     return polled;
   }
 
@@ -626,6 +644,20 @@ export async function runFundAndLock(
     return { kind: "locked" };
   } catch (e: any) {
     const err = e?.message || "LOCK failed";
+    try {
+      const balance = await opts.getBalance();
+      if (balance > baseline) {
+        recordSatsTrace({
+          source: "funding",
+          escrowId: opts.escrowId,
+          amountMsats: opts.amountMsats,
+          balanceMsats: balance,
+          reason: "lock-failed-after-funding",
+        });
+      }
+    } catch {
+      // Best-effort trace only.
+    }
     emit({ kind: "lock-failed", error: err });
     return { kind: "lock-failed", error: err };
   }

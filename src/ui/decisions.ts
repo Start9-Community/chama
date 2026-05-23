@@ -26,7 +26,7 @@ import {
   TERMINAL_STATES,
 } from "../escrow-engine/types.js";
 
-export const MAIN_SURFACE_RECOVERY_MIN_SATS = 1_000;
+export const MAIN_SURFACE_RECOVERY_MIN_SATS = 2_000;
 
 function hasMainSurfaceRecoveryBalance(balanceMsats: number): boolean {
   const sats = Math.floor(Math.max(0, balanceMsats) / 1000);

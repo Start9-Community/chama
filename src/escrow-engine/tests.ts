@@ -232,6 +232,20 @@ import {
   maxLightningPayoutSats,
   retrySmallerLightningPayoutSats,
 } from "../payments/lightning-fees.js";
+import {
+  MIN_REAL_ATOMIC_FUNDING_MSATS,
+  MIN_REAL_ATOMIC_FUNDING_SATS,
+  minimumAtomicFundingMessage,
+} from "../payments/funding-limits.js";
+import {
+  buildChamaOperationMeta,
+  describeSatsTrace,
+  getBestSatsTrace,
+  listOpenSatsTraces,
+  markSatsTracesDrained,
+  recordSatsTrace,
+  SATS_TRACE_STORAGE_KEY,
+} from "../payments/sats-trace.js";
 import { makeLightningInvoiceQrPayload } from "../payments/lightning-qr.js";
 import { EscrowFedimintBridge } from "../fedimint/escrow-bridge.js";
 
@@ -3728,6 +3742,134 @@ console.log("\n── PROBE REACHABILITY ──");
   }
 }
 
+// ── 29e. Fedi Mini-App ecash funding path ───────────────────────────────
+//
+// Fedi's Mini-App runtime exposes ecash-native wallet primitives. Chama
+// must not run those notes through the broken Lightning receive path; it
+// asks Fedi to generate OOB notes, verifies the exact amount, then locks
+// those notes directly.
+console.log("\n── Fedi Mini-App ecash funding path ──");
+{
+  const {
+    generateFediEcash,
+    msatsToExactSats,
+  } = await import("../fedimint/fedi-internal.js");
+  const { FedimintClient } = await import("../fedimint/fedimint-client.js");
+
+  assert(msatsToExactSats(1_000_000) === 1_000,
+    "Fedi ecash helper converts exact msats to sats");
+  let nonWholeSatRejected = false;
+  try {
+    msatsToExactSats(1_000_001);
+  } catch (e: any) {
+    nonWholeSatRejected = /whole-sat/.test(e?.message || "");
+  }
+  assert(nonWholeSatRejected,
+    "Fedi ecash helper rejects non-whole-sat amounts before moving money");
+
+  const originalWindow = (globalThis as any).window;
+  try {
+    let requestedAmount: number | null = null;
+    (globalThis as any).window = {
+      fediInternal: {
+        async generateEcash(req: { amount: number }) {
+          requestedAmount = req.amount;
+          return { notes: "oob-notes-from-fedi" };
+        },
+        async receiveEcash(_ecash: string) {
+          return { msats: 1_000_000 };
+        },
+      },
+    };
+    const generated = await generateFediEcash(1_000_000, "test trade");
+    assert(generated.notes === "oob-notes-from-fedi",
+      "generateFediEcash unwraps Fedi's {notes} response");
+    assert(requestedAmount === 1_000,
+      "generateFediEcash asks Fedi for sats, not msats");
+
+    (globalThis as any).window.fediInternal.generateEcash = async () => "raw-oob-notes";
+    const rawGenerated = await generateFediEcash(2_000_000);
+    assert(rawGenerated.notes === "raw-oob-notes",
+      "generateFediEcash also accepts older/native raw-string responses");
+  } finally {
+    if (originalWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = originalWindow;
+  }
+
+  function makeParseWallet(parseAmountMsats: number) {
+    return {
+      async open() {},
+      isOpen() { return true; },
+      recovery: {
+        async hasPendingRecoveries() { return false; },
+        async waitForAllRecoveries() {},
+      },
+      async joinFederation(_invite: string) {},
+      balance: {
+        async getBalance() { return 0; },
+        subscribeBalance(_cb: (b: number) => void) { return () => {}; },
+      },
+      mint: {
+        async spendNotes(_msat: number): Promise<string> {
+          throw new Error("spendNotes must not be called for Fedi external ecash");
+        },
+        async redeemEcash(_oob: string) {},
+        async parseNotes(_oob: string) { return { total_amount: parseAmountMsats }; },
+      },
+      lightning: {
+        async createInvoice(_msat: number, _desc: string) {
+          throw new Error("createInvoice must not be called for Fedi external ecash");
+        },
+        async payInvoice(_b: string) { return { operationId: "op0" }; },
+      },
+      federation: {
+        async getFederationId() { return BLF_FEDERATION_ID; },
+        async getInviteCode() { return BLF_FEDERATION_INVITE; },
+      },
+      async cleanup() {},
+    };
+  }
+
+  {
+    const client = new FedimintClient(
+      {},
+      async () => makeParseWallet(1_000_000),
+    );
+    await client.init();
+    const bundle = await client.createEscrowLockFromNotes(
+      "fedi-oob-notes",
+      1_000_000,
+      { arbiterFeeMsats: 0 },
+    );
+    assert(bundle.shares.length === 3,
+      "createEscrowLockFromNotes splits externally generated notes into 3 shares");
+    assert(bundle.totalMsats === 1_000_000,
+      "createEscrowLockFromNotes preserves the exact trade amount");
+    await client.cleanup();
+  }
+
+  {
+    const client = new FedimintClient(
+      {},
+      async () => makeParseWallet(999_000),
+    );
+    await client.init();
+    let mismatchRejected = false;
+    try {
+      await client.createEscrowLockFromNotes(
+        "wrong-amount-notes",
+        1_000_000,
+        { arbiterFeeMsats: 0 },
+      );
+    } catch (e: any) {
+      mismatchRejected = /requires 1000000/.test(e?.message || "");
+    }
+    assert(mismatchRejected,
+      "createEscrowLockFromNotes refuses to LOCK when parsed notes do not exactly match the trade amount");
+    await client.cleanup();
+  }
+}
+
 // ── 30. setUserCommunitySlug LOCALSTORAGE ROUNDTRIP ─────────────────────
 //
 // The community-tap handler in App.tsx calls actions.setCommunity(slug),
@@ -4390,6 +4532,10 @@ console.log("\n── shouldShowRecoveryBanner + identifyStrandedEcashSource ─
     "Small recovered balance → no main-flow banner",
   );
   assert(
+    shouldShowRecoveryBanner({ balanceMsats: 1_500_000, hasCurrentEscrow: false }) === false,
+    "1,500 sat leftover → no main-flow banner",
+  );
+  assert(
     shouldShowRecoveryBanner({ balanceMsats: 0, hasCurrentEscrow: false }) === false,
     "Zero balance → no banner",
   );
@@ -4538,6 +4684,60 @@ console.log("\n── shouldShowRecoveryBanner + identifyStrandedEcashSource ─
   });
   assert(mostRecent?.escrowId === "newer",
     "Most recent CLAIM by timestamp wins");
+}
+
+// ── 31f. sats trace provenance ──────────────────────────────────────────
+console.log("\n── SATS TRACE PROVENANCE ──");
+{
+  (globalThis as any).localStorage.clear();
+  setLocalStorageUserScope("trace_user");
+
+  const entry = recordSatsTrace({
+    source: "claim",
+    escrowId: "trace-escrow-001",
+    amountMsats: 2_000_000,
+    balanceMsats: 1_500_000,
+    reason: "claim-payout-leftover",
+    operationIds: { reissue: "mint_op_1" },
+  });
+  assert(entry.escrowId === "trace-escrow-001",
+    "Trace records escrow id for leftover sats");
+  assert(listOpenSatsTraces().length === 1,
+    "Open trace is listed");
+  assert(getBestSatsTrace(1_500_000)?.escrowId === "trace-escrow-001",
+    "Best trace returns the latest open leftover source");
+  assert(describeSatsTrace(entry)?.includes("trace-esc") === true,
+    "Trace description includes shortened trade id");
+
+  recordSatsTrace({
+    source: "claim",
+    escrowId: "trace-escrow-001",
+    balanceMsats: 1_000_000,
+    operationIds: { pay: "ln_pay_1" },
+  });
+  const updated = listOpenSatsTraces()[0];
+  assert(updated.balanceMsats === 1_000_000,
+    "Trace upsert refreshes current leftover balance");
+  assert(updated.operationIds?.reissue === "mint_op_1" && updated.operationIds?.pay === "ln_pay_1",
+    "Trace upsert merges operation ids");
+
+  const meta = buildChamaOperationMeta({
+    flow: "claim_reissue",
+    escrowId: "trace-escrow-001",
+    amountMsats: 2_000_000,
+    notesHashPrefix: "abc123",
+  });
+  assert(meta.chama_escrow_id === "trace-escrow-001",
+    "Operation metadata carries escrow id");
+  assert(meta.chama_flow === "claim_reissue",
+    "Operation metadata carries flow");
+
+  markSatsTracesDrained("test-drained");
+  assert(listOpenSatsTraces().length === 0,
+    "Draining closes open traces");
+  assert((globalThis as any).localStorage.getItem(scopedStorageKey(SATS_TRACE_STORAGE_KEY)) !== null,
+    "Trace store is scoped per user");
+  setLocalStorageUserScope(null);
 }
 
 // ── 31f. decideListingTapEffect (items 1 + 4) ───────────────────────────
@@ -7199,6 +7399,17 @@ console.log("\n── LIGHTNING PAYOUT FEE RESERVE ──");
     "Too-large retry stops when there is no smaller whole-sat payout");
 }
 
+// ── 41c. REAL LIGHTNING FUNDING GUARDRAILS ───────────────────────────────
+console.log("\n── REAL LIGHTNING FUNDING GUARDRAILS ──");
+{
+  assert(MIN_REAL_ATOMIC_FUNDING_SATS === 1_000,
+    "Real Lightning funding floor stays above the ~50-sat claim_rejected range");
+  assert(MIN_REAL_ATOMIC_FUNDING_MSATS === 1_000_000,
+    "Real Lightning funding floor is exposed in msats for lock gating");
+  assert(minimumAtomicFundingMessage().includes("1,000 sats"),
+    "Real Lightning funding floor copy names the 1,000 sat minimum");
+}
+
 // ── 42. CHAMA BAR LABEL DECISION (v0.3.0 Phase 5) ────────────────────────
 //
 // decideChamaBarLabel maps wallet balance + actual committed escrow value
@@ -7252,11 +7463,11 @@ console.log("\n── CHAMA BAR LABEL ──");
   // usually post-payout fee dust, and should not occupy the main top UI.
   {
     const r = decideChamaBarLabel({
-      balanceMsats: 100_000,
+      balanceMsats: 1_500_000,
       hasActiveBuyerSellerCommitment: false,
     });
     assert(r.kind === "ready",
-      "Small idle balance → ready (quiet dust lives in Me)");
+      "1,500 sat idle balance → ready (small leftovers live in Me)");
   }
 
   // Material positive balance + NO active commitment → stranded
@@ -8758,8 +8969,10 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
   }
 
   // Some Fedi-style federations publish gateway trust in meta.vetted_gateways
-  // while list_gateways still reports vetted=false. Treat the meta field as
-  // an additive federation trust signal, matching the Fedi app behavior.
+  // while list_gateways still reports vetted=false. Production claim_rejected
+  // logs prove that metadata-only trust is not enough for receive invoices:
+  // the payer can send sats, then the federation rejects the gateway claim
+  // before ecash mints. Refuse that receive path before showing a QR.
   {
     const metaTrustedGatewayId =
       "0284cf7053be11bb23e59381861299dbaf7670c60dd62c928479c235a53bd95fe4";
@@ -8791,13 +9004,26 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       },
     ]);
     const wallet = adaptRealWallet(h.real as any);
-    await wallet.lightning.createInvoice(100_000, "fund");
+    let threw = false;
+    let diagnostics: any = null;
+    try {
+      await wallet.lightning.createInvoice(100_000, "fund");
+    } catch (e) {
+      diagnostics = (e as any).chamaDiagnostics;
+      threw = /No wallet-verifiable Lightning receive gateway/.test((e as Error).message);
+    }
 
-    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
-      "Adapter accepts a gateway trusted by meta.vetted_gateways even when SDK vetted=false");
+    assert(threw,
+      "Adapter refuses receive invoices when gateway trust is metadata-only");
+    assert(diagnostics?.metaProbe?.metaVettedGatewayIds?.includes(metaTrustedGatewayId),
+      "Receive refusal diagnostics include the metadata-vetted gateway ID");
+    assert(h.calls.createInvoice === 0,
+      "Adapter does not create a receive QR from metadata-only trust");
     await wallet.cleanup();
   }
 
+  // Metadata-only gateway trust remains useful for outbound payout because the
+  // sats are already in Chama's wallet and payout can be retried.
   // Guardian admin UIs can expose meta fields as key/value records in the
   // static global config, without installing the fedimint meta module.
   {
@@ -8838,10 +9064,10 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       },
     ]);
     const wallet = adaptRealWallet(h.real as any);
-    await wallet.lightning.createInvoice(100_000, "fund");
+    await wallet.lightning.payInvoice("lnbc100n1payout");
 
-    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
-      "Adapter accepts gateway trust from config meta key/value records without a meta module");
+    assert(h.calls.payInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts outbound gateway trust from config meta key/value records without a meta module");
     await wallet.cleanup();
   }
 
@@ -8889,12 +9115,12 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       },
     ]);
     const wallet = adaptRealWallet(h.real as any);
-    await wallet.lightning.createInvoice(100_000, "fund");
+    await wallet.lightning.payInvoice("lnbc100n1payout");
 
     assert(helperKey === 0,
       "Adapter probes canary federation.getMetaConsensusValue with the numeric default key");
-    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
-      "Adapter accepts gateway trust from canary getMetaConsensusValue(default)");
+    assert(h.calls.payInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts outbound gateway trust from canary getMetaConsensusValue(default)");
     await wallet.cleanup();
   }
 
@@ -8963,7 +9189,7 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       },
     ]);
     const wallet = adaptRealWallet(h.real as any);
-    await wallet.lightning.createInvoice(100_000, "fund");
+    await wallet.lightning.payInvoice("lnbc100n1payout");
 
     assert(rpcCalls.some((call) =>
       call.module === "meta" &&
@@ -8971,8 +9197,8 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       (call.body as { key?: unknown })?.key === 0 &&
       call.clientName === "test-client"
     ), "Adapter probes the browser meta module RPC by kind + numeric default key");
-    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
-      "Adapter accepts a gateway trusted by hex-encoded meta.get_consensus default value even when SDK vetted=false");
+    assert(h.calls.payInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts outbound gateway trust from hex-encoded meta.get_consensus default value even when SDK vetted=false");
     await wallet.cleanup();
   }
 
@@ -9033,12 +9259,12 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       },
     ]);
     const wallet = adaptRealWallet(h.real as any);
-    await wallet.lightning.createInvoice(100_000, "fund");
+    await wallet.lightning.payInvoice("lnbc100n1payout");
 
     assert(rpcCalls.some((call) => (call.body as { key?: unknown })?.key === 0),
       "Adapter probes the numeric default meta key for object-style gateway trust");
-    assert(h.calls.createInvoiceGatewayId === metaTrustedGatewayId,
-      "Adapter accepts byte-array gateway trust from meta.get_consensus(default)");
+    assert(h.calls.payInvoiceGatewayId === metaTrustedGatewayId,
+      "Adapter accepts outbound byte-array gateway trust from meta.get_consensus(default)");
     await wallet.cleanup();
   }
 
@@ -9102,10 +9328,12 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       "BLF receive trust refusal exposes sim mode as the demo-safe fallback");
     assert(diagnostics?.demoSafeFallback?.invoiceCreated === false,
       "BLF receive trust refusal records that no invoice was created");
-    assert(diagnostics?.metaProbe?.curatedGatewayIds?.includes(blfTrustedGatewayId),
-      "BLF receive diagnostics include the known curated gateway ID even though receive fallback is blocked");
-    assert(diagnostics?.metaProbe?.curatedFallbackApplied === false,
-      "BLF receive diagnostics explicitly say curated fallback was not applied");
+	    assert(diagnostics?.metaProbe?.curatedGatewayIds?.includes(blfTrustedGatewayId),
+	      "BLF receive diagnostics include the known curated gateway ID even though receive fallback is blocked");
+	    assert(diagnostics?.metaProbe?.curatedFallbackAllowed === false,
+	      "BLF receive diagnostics explicitly say curated fallback is not allowed");
+	    assert(diagnostics?.metaProbe?.curatedFallbackApplied === false,
+	      "BLF receive diagnostics explicitly say curated fallback was not applied");
     assert(h.calls.createInvoice === 0,
       "Adapter does not create a BLF receive QR from curated-only trust");
     await wallet.cleanup();
@@ -9254,10 +9482,44 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
       "real wallet cleanup still runs");
   }
 
+  // Missing gateway introspection is also unsafe for receive: do not fall back
+  // to the SDK's default gateway because that can recreate claim_rejected.
+  {
+    const h = makeRealWallet();
+    delete (h.real.lightning as any).listGateways;
+    const wallet = adaptRealWallet(h.real as any);
+    let threw = false;
+    try {
+      await wallet.lightning.createInvoice(100_000, "fund");
+    } catch (e) {
+      threw = /No wallet-verifiable Lightning receive gateway/.test((e as Error).message);
+    }
+
+    assert(threw,
+      "Adapter refuses receive invoices when the SDK cannot list gateways");
+    assert(h.calls.createInvoice === 0,
+      "Adapter does not fall back to the SDK default gateway for receive");
+  }
+
   // If the SDK refuses the receive subscription, do not show an invoice.
   {
     const h = makeRealWallet({
       lightning: {
+        async updateGatewayCache() {},
+        async listGateways() {
+          return [
+            {
+              info: {
+                gateway_id: "vetted_gateway_456",
+                api: "https://vetted-gateway.example.test",
+                lightning_alias: "Vetted Gateway",
+                supports_private_payments: false,
+              },
+              vetted: true,
+              ttl: 60,
+            },
+          ];
+        },
         async createInvoice() {
           return { invoice: "lnbc100n1punwatched", operation_id: "ln_op_bad" };
         },

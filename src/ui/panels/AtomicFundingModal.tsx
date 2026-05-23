@@ -58,6 +58,8 @@ export interface AtomicFundingModalProps {
 type ModalPhase =
   | { kind: "creating-invoice" }
   | { kind: "creating-invoice-slow" }
+  | { kind: "requesting-fedi-ecash" }
+  | { kind: "fedi-ecash-created" }
   | { kind: "awaiting-payment"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming-slow"; bolt11: string; expiresAt: number }
@@ -134,6 +136,10 @@ export function AtomicFundingModal({
             // createFundingInvoice call against the hard timeout
             // underneath; this just keeps the user informed.
             setPhase({ kind: "creating-invoice-slow" });
+            return;
+          }
+          if (p.kind === "requesting-fedi-ecash" || p.kind === "fedi-ecash-created") {
+            setPhase(p);
             return;
           }
           if (p.kind === "receive-watch-ready") {
@@ -287,6 +293,12 @@ export function AtomicFundingModal({
           <CreatingInvoice slow={true} onCancel={handleCancel} />
         )}
 
+        {phase.kind === "requesting-fedi-ecash" && (
+          <RequestingFediEcash amountSats={amountSats} onCancel={handleCancel} />
+        )}
+
+        {phase.kind === "fedi-ecash-created" && <PaymentConfirmed amountSats={amountSats} />}
+
         {(phase.kind === "awaiting-payment" || phase.kind === "mint-confirming") && (
           <InvoiceDisplay
             bolt11={phase.bolt11}
@@ -370,6 +382,55 @@ export function AtomicFundingModal({
 }
 
 // ── Sub-components ──────────────────────────────────────────────────────
+
+function RequestingFediEcash({
+  amountSats,
+  onCancel,
+}: {
+  amountSats: number;
+  onCancel: () => void;
+}) {
+  return (
+    <div style={{
+      padding: "24px 16px", textAlign: "center",
+      background: T.surface, border: `1px solid ${T.border}`,
+      borderRadius: T.r,
+    }}>
+      <div style={{
+        width: 28, height: 28, borderRadius: "50%",
+        border: `3px solid ${T.accent}`,
+        borderTopColor: "transparent",
+        animation: "spin 1s linear infinite",
+        margin: "0 auto 14px",
+      }} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{
+        fontSize: 12, fontWeight: 700, color: T.accent,
+        fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
+      }}>
+        REQUESTING FEDI ECASH…
+      </div>
+      <div style={{
+        fontSize: 11, color: T.muted, fontFamily: T.mono,
+        lineHeight: 1.5, marginBottom: 12,
+      }}>
+        Approve {amountSats.toLocaleString()} sats in Fedi. Chama will
+        lock the ecash notes directly, without a Lightning receive QR.
+      </div>
+      <button
+        onClick={onCancel}
+        style={{
+          padding: "8px 16px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 10,
+          fontWeight: 700, cursor: "pointer", letterSpacing: 0.3,
+        }}
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
 
 function CreatingInvoice({
   slow,

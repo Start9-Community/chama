@@ -15,3 +15,11 @@ export { isTestnetMode, createMockWallet } from "./mock-wallet.js";
 export { drainPendingRedemptions } from "./pending-redemptions.js";
 export { deriveCreateFedTags } from "./create-fed-tags.js";
 export type { CreateFedTags, CreateFedTagsInputs } from "./create-fed-tags.js";
+export {
+  generateFediEcash,
+  getFediInternal,
+  hasFediInternalEcash,
+  msatsToExactSats,
+  receiveFediEcash,
+} from "./fedi-internal.js";
+export type { FediEcashRequest, FediInternalProvider } from "./fedi-internal.js";

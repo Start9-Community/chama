@@ -51,6 +51,12 @@ import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
 import { addOrTouchPayoutDestination, listPayoutDestinations } from "../payments/payout-destinations.js";
 import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
+import {
+  buildChamaOperationMeta,
+  getBestSatsTrace,
+  recordSatsTrace,
+  type SatsTraceEntry,
+} from "../payments/sats-trace.js";
 import { listPendingRedemptions } from "../fedimint/pending-redemptions.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
@@ -220,6 +226,10 @@ export default function App() {
   const [pendingRecovery, setPendingRecovery] = useState<{
     title: string;
     subtitle?: string;
+    traceContext?: {
+      escrowId?: string;
+      amountMsats?: number;
+    };
   } | null>(null);
   // Browser-support banner state lives in a dedicated hook so the
   // per-pubkey scoping (Bug E from v0.1.85 smoke testing) stays
@@ -452,9 +462,51 @@ export default function App() {
     fundingInProgress: midFunding,
     claimPayoutInProgress,
   });
-  const strandedSource = pubkey && showRecoveryBanner
+  const walletBalanceMsats = fedimint.balanceMsats ?? 0;
+  const hasTraceableIdleBalance = Math.floor(Math.max(0, walletBalanceMsats) / 1000) > 0
+    && committedMsats <= 0
+    && !midFunding
+    && !claimPayoutInProgress;
+  const traceableStrandedSource = pubkey && hasTraceableIdleBalance
     ? identifyStrandedEcashSource({ escrows: escrows.values(), userPubkey: pubkey })
     : null;
+  const strandedSource = showRecoveryBanner ? traceableStrandedSource : null;
+  const bestSatsTrace: SatsTraceEntry | null = getBestSatsTrace(walletBalanceMsats);
+  const displayedSatsTrace: SatsTraceEntry | null = bestSatsTrace ?? (
+    traceableStrandedSource
+      ? {
+          id: `inferred_${traceableStrandedSource.escrowId}`,
+          source: "claim",
+          status: "open",
+          escrowId: traceableStrandedSource.escrowId,
+          amountMsats: traceableStrandedSource.amountMsats,
+          balanceMsats: walletBalanceMsats,
+          reason: "inferred-from-claim-history",
+          createdAt: now,
+          updatedAt: now,
+        }
+      : null
+  );
+  const recoveryTraceContext = pendingRecovery?.traceContext ?? {
+    escrowId: traceableStrandedSource?.escrowId ?? bestSatsTrace?.escrowId,
+    amountMsats: traceableStrandedSource?.amountMsats ?? bestSatsTrace?.amountMsats,
+  };
+
+  useEffect(() => {
+    if (!traceableStrandedSource || bestSatsTrace) return;
+    recordSatsTrace({
+      source: "claim",
+      escrowId: traceableStrandedSource.escrowId,
+      amountMsats: traceableStrandedSource.amountMsats,
+      balanceMsats: walletBalanceMsats,
+      reason: "inferred-from-claim-history",
+    });
+  }, [
+    bestSatsTrace?.id,
+    traceableStrandedSource?.escrowId,
+    traceableStrandedSource?.amountMsats,
+    walletBalanceMsats,
+  ]);
 
   // v0.2.0 item 10: arbiter attention warning. Computed once at App
   // level and threaded into the Create wizard. Fires alongside the
@@ -893,7 +945,10 @@ export default function App() {
           // mount below).
           bootProbeState: fedimint.bootProbeState,
         })}
-        onTapStranded={() => setPendingRecovery({ title: "Recover sats" })}
+        onTapStranded={() => setPendingRecovery({
+          title: "Recover sats",
+          traceContext: recoveryTraceContext,
+        })}
         showReconnect={getUserCommunitySlugRaw() !== null || getActiveInvite() !== null}
         onInit={() => actions.initFedimint().catch(
           (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
@@ -934,6 +989,7 @@ export default function App() {
           }
           onPayInvoice={(bolt11) => actions.payInvoice(bolt11)}
           onSpendNotes={(amountMsats) => actions.spendNotes(amountMsats)}
+          onRedeemEcash={(oobNotes) => actions.redeemEcash(oobNotes)}
           balanceMsats={fedimint.balanceMsats ?? 0}
         />
       )}
@@ -1060,6 +1116,7 @@ export default function App() {
             setPendingRecovery({
               title: "Recover & switch Chama",
               subtitle: `Send to your Lightning wallet, then switch to ${pendingDestroyConfirm.label}.`,
+              traceContext: recoveryTraceContext,
             });
           }}
           onCancel={() => {
@@ -1087,7 +1144,17 @@ export default function App() {
           savedDestinations={listPayoutDestinations()}
           title={pendingRecovery.title}
           subtitle={pendingRecovery.subtitle}
-          payInvoice={(bolt11) => actions.payInvoice(bolt11)}
+          payInvoice={(bolt11) => actions.payInvoice(
+            bolt11,
+            buildChamaOperationMeta({
+              flow: "recovery_payout",
+              escrowId: recoveryTraceContext.escrowId,
+              amountMsats: fedimint.balanceMsats ?? recoveryTraceContext.amountMsats,
+              reason: pendingRecovery.title,
+            }),
+          )}
+          getBalance={actions.getBalance}
+          traceContext={recoveryTraceContext}
           addOrTouchPayoutDestination={(addr) => { addOrTouchPayoutDestination(addr); }}
           onClose={(terminal) => {
             setPendingRecovery(null);
@@ -1290,6 +1357,7 @@ export default function App() {
                 // pending federation switch.
                 setPendingRecovery({
                   title: "Recover sats",
+                  traceContext: recoveryTraceContext,
                 });
               }}
             />
@@ -1321,7 +1389,11 @@ export default function App() {
             ratings={null /* v0.2.0: no rating events yet; v0.2.1 wires the aggregator */}
             balanceMsats={fedimint.balanceMsats ?? 0}
             hasActiveCommitment={hasActiveCommitment}
-            onRecoverSats={() => setPendingRecovery({ title: "Recover sats" })}
+            satsTrace={displayedSatsTrace}
+            onRecoverSats={() => setPendingRecovery({
+              title: "Recover sats",
+              traceContext: recoveryTraceContext,
+            })}
             onOpenTrade={openEscrow}
             onOpenSavedHandles={() => setView("saved-handles")}
             onOpenPayoutDestinations={() => setView("payout-destinations")}
@@ -1421,6 +1493,7 @@ export default function App() {
                 // pending federation switch.
                 setPendingRecovery({
                   title: "Recover sats",
+                  traceContext: recoveryTraceContext,
                 });
               }}
             />

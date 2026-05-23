@@ -15,16 +15,16 @@
 //   - mint.parseNotes returns number (msats)           → wrap as { total_amount }
 //   - ln.createInvoice returns { invoice, operation_id } and must keep
 //     subscribe_ln_receive alive until the receive is claimed
-//   - ln.createInvoice receives an explicit federation-vetted gateway.
-//     Unvetted receive gateways can fund the HTLC and still have the claim
-//     transaction rejected before ecash is minted, so we refuse to show an
-//     invoice when no federation-trusted receive gateway is available.
+//   - ln.createInvoice receives an explicit SDK-vetted gateway. Unvetted
+//     receive gateways can fund the HTLC and still have the claim transaction
+//     rejected before ecash is minted, so we refuse to show an invoice unless
+//     the wallet marks the gateway with gateway.vetted=true.
 //   - ln.payInvoice also receives an explicit federation-trusted gateway.
 //     Leaving outbound payment to the SDK default can pick an untrusted gateway
 //     and fail after claim/redeem succeeds.
 //     Some Fedi-era federations publish gateway trust in config meta
 //     (`vetted_gateways`) while the SDK still reports gateway.vetted=false,
-//     so we accept either signal.
+//     so we accept either signal for outbound payout only.
 //   - federation.getInviteCode returns string | null   → throw if null
 //   - joinFederation returns boolean                   → unwrap
 //   - subscribeBalance(onSuccess, onError) => CancelFn → one-arg wrapper
@@ -32,6 +32,7 @@
 // No change to the FedimintClient public API. Swap the factory and go.
 
 import type { IFedimintWallet } from "./fedimint-client.js";
+import type { ChamaOperationMeta } from "../payments/sats-trace.js";
 
 // ── Minimal structural types for the real SDK ────────────────────────────
 // We define these locally so that a consumer without @fedimint/core
@@ -47,9 +48,16 @@ interface RealBalanceService {
 
 interface RealMintService {
   spendNotes(
-    amountMsats: number
+    amountMsats: number,
+    tryCancelAfter?: number | { nanos: number; secs: number },
+    includeInvite?: boolean,
+    extraMeta?: ChamaOperationMeta,
   ): Promise<{ notes: string; operation_id: string }>;
   redeemEcash(notes: string): Promise<string>;
+  reissueExternalNotes?(
+    notes: string,
+    extraMeta?: ChamaOperationMeta,
+  ): Promise<string>;
   subscribeReissueExternalNotes?(
     operationId: string,
     onSuccess?: (state: RealReissueExternalNotesState) => void,
@@ -135,11 +143,13 @@ interface RealLightningService {
     amountMsats: number,
     description: string,
     expiryTime?: number,
-    gatewayInfo?: RealGatewayInfo
+    gatewayInfo?: RealGatewayInfo,
+    extraMeta?: ChamaOperationMeta,
   ): Promise<{ invoice: string; operation_id: string }>;
   payInvoice(
     invoice: string,
-    gatewayInfo?: RealGatewayInfo
+    gatewayInfo?: RealGatewayInfo,
+    extraMeta?: ChamaOperationMeta,
   ): Promise<RealOutgoingLightningPayment | unknown>;
   payInvoiceSync?(
     invoice: string,
@@ -1043,9 +1053,7 @@ async function getMetaVettedGatewayIds(
     for (const value of consensusValues) collectVettedGatewayIds(value, trusted);
   }
 
-  if (trusted.size === 0) {
-    curatedGatewayIds = await getCuratedGatewayIds(real);
-  }
+  curatedGatewayIds = await getCuratedGatewayIds(real);
 
   if (trusted.size === 0 && purpose === "pay") {
     curatedGatewayIds = await addCuratedGatewayTrust(real, trusted, purpose);
@@ -1053,8 +1061,8 @@ async function getMetaVettedGatewayIds(
   } else if (trusted.size === 0 && purpose === "receive") {
     console.warn(
       configContainsMetaModule
-        ? "[chama] LN receive skipped curated gateway fallback because this browser SDK could not verify federation meta; receive invoices require wallet-verifiable gateway trust"
-        : "[chama] LN receive skipped curated gateway fallback; receive invoices require wallet-verifiable gateway trust",
+        ? "[chama] LN receive skipped curated gateway fallback because receive invoices require SDK-vetted gateway trust"
+        : "[chama] LN receive skipped curated gateway fallback; receive invoices require SDK-vetted gateway trust",
     );
   }
 
@@ -1092,7 +1100,7 @@ async function buildGatewayTrustDiagnostics(args: {
   } catch {}
   return {
     issue: args.purpose === "receive"
-      ? "no_wallet_verifiable_lightning_receive_gateway"
+      ? "no_sdk_vetted_lightning_receive_gateway"
       : "no_trusted_lightning_pay_gateway",
     federationId,
     sdkPackages: FEDIMINT_SDK_DIAGNOSTICS,
@@ -1118,7 +1126,7 @@ async function buildGatewayTrustDiagnostics(args: {
           reason: "Outbound payout can be retried because claimed sats remain in the Chama wallet.",
         },
     interpretation: args.purpose === "receive"
-      ? "The federation advertises gateways, but the browser wallet could not prove any receive gateway is trusted. Showing a QR here can take Lightning payment and then reject before ecash mints."
+      ? "The federation advertises gateways, but this browser wallet does not mark any receive gateway as SDK-vetted. Metadata-only or curated receive trust can still produce claim_rejected after the payer sends sats, so no QR is created."
       : "The federation advertises gateways, but the browser wallet could not prove any pay gateway is trusted.",
   };
 }
@@ -1153,7 +1161,28 @@ export function adaptRealWallet(
   const getTrustedLightningGateway = async (
     purpose: "receive" | "pay",
   ): Promise<RealGatewayInfo | undefined> => {
-    if (typeof real.lightning.listGateways !== "function") return undefined;
+    if (typeof real.lightning.listGateways !== "function") {
+      if (purpose === "receive") {
+        const diagnostic = {
+          issue: "gateway_list_unavailable",
+          purpose,
+          sdkPackages: FEDIMINT_SDK_DIAGNOSTICS,
+          interpretation: "This browser Fedimint SDK cannot list Lightning gateways, so Chama cannot verify receive gateway trust. No QR is created.",
+        };
+        const error = new Error(
+          `No wallet-verifiable Lightning receive gateway is available for this federation. ` +
+            `Refusing to show a QR code that may take payment and reject before ecash mints.\n\n` +
+            `Chama diagnostics:\n${JSON.stringify(diagnostic, null, 2)}`,
+        );
+        (error as Error & { chamaDiagnostics?: Record<string, unknown> }).chamaDiagnostics =
+          diagnostic;
+        throw error;
+      }
+      console.warn(
+        "[chama] LN pay gateway selection unavailable; falling back to SDK default gateway",
+      );
+      return undefined;
+    }
 
     try {
       if (typeof real.lightning.updateGatewayCache === "function") {
@@ -1181,7 +1210,18 @@ export function adaptRealWallet(
         candidate.info &&
         metaVettedGatewayIds.has(candidate.info.gateway_id?.toLowerCase() ?? "")
       );
-      const trustedGateway = vettedGateway ?? metaVettedGateway;
+      const trustedGateway = purpose === "receive"
+        ? vettedGateway
+        : vettedGateway ?? metaVettedGateway;
+      if (purpose === "receive" && !vettedGateway && metaVettedGateway?.info) {
+        console.warn(
+          `[chama] LN receive refusing meta-vetted-only gateway; SDK reports gateway.vetted=false: ${summarizeGateway(
+            metaVettedGateway,
+            gateways.indexOf(metaVettedGateway),
+            gateways.length,
+          )}`,
+        );
+      }
       if (!trustedGateway?.info) {
         if (selectableGateways.length > 0) {
           const diagnostic = await buildGatewayTrustDiagnostics({
@@ -1207,8 +1247,9 @@ export function adaptRealWallet(
         return undefined;
       }
 
+      const trustTier = vettedGateway ? "SDK-vetted" : "meta-vetted";
       console.info(
-        `[chama] LN ${purpose} using ${vettedGateway ? "SDK-vetted" : "meta-vetted"} gateway: ${summarizeGateway(
+        `[chama] LN ${purpose} using ${trustTier} gateway: ${summarizeGateway(
           trustedGateway,
           gateways.indexOf(trustedGateway),
           gateways.length,
@@ -1615,17 +1656,19 @@ export function adaptRealWallet(
     },
 
     mint: {
-      async spendNotes(amountMsats: number) {
-        const result = await real.mint.spendNotes(amountMsats);
+      async spendNotes(amountMsats: number, meta?: ChamaOperationMeta) {
+        const result = await real.mint.spendNotes(amountMsats, undefined, false, meta ?? {});
         return result.notes;
       },
-      async redeemEcash(oobNotes: string) {
+      async redeemEcash(oobNotes: string, meta?: ChamaOperationMeta) {
         let expectedMsats: number | null = null;
         try { expectedMsats = await real.mint.parseNotes(oobNotes); } catch {}
 
         let operationId: string;
         try {
-          operationId = await real.mint.redeemEcash(oobNotes);
+          operationId = real.mint.reissueExternalNotes
+            ? await real.mint.reissueExternalNotes(oobNotes, meta ?? {})
+            : await real.mint.redeemEcash(oobNotes);
           console.info(`[chama] mint redeem ${operationId}: submitted`);
           await waitForMintReissue(operationId);
         } catch (e) {
@@ -1674,6 +1717,7 @@ export function adaptRealWallet(
         amountMsats: number,
         description: string,
         onReceiveState?: (kind: LnReceiveStateKind) => void,
+        meta?: ChamaOperationMeta,
       ) {
         const gateway = await getTrustedLightningGateway("receive");
         const result = await real.lightning.createInvoice(
@@ -1681,6 +1725,7 @@ export function adaptRealWallet(
           description,
           undefined,
           gateway,
+          meta ?? {},
         );
         void traceReceiveOperation(real, result.operation_id, "invoice-created", {
           amountMsats,
@@ -1697,7 +1742,7 @@ export function adaptRealWallet(
           operationId: result.operation_id,
         };
       },
-      async payInvoice(bolt11: string) {
+      async payInvoice(bolt11: string, meta?: ChamaOperationMeta) {
         const gateway = await getTrustedLightningGateway("pay");
         let result: unknown;
         const startedAt = Date.now();
@@ -1705,7 +1750,7 @@ export function adaptRealWallet(
           `[chama] LN pay submit-in gateway=${gateway?.gateway_id ?? "default"} invoiceLen=${bolt11.length}`,
         );
         try {
-          result = await real.lightning.payInvoice(bolt11, gateway);
+          result = await real.lightning.payInvoice(bolt11, gateway, meta ?? {});
         } catch (e: any) {
           const error = normalizePaySubmitError(e);
           console.warn(

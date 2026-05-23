@@ -12,12 +12,13 @@
 // This is the integration layer the UI calls for the money-critical steps.
 
 import { type EscrowClient, type Signer } from "../escrow-engine/escrow-client.js";
-import { type FedimintClient, type SSSShare } from "./fedimint-client.js";
+import { type EscrowLockBundle, type FedimintClient, type SSSShare } from "./fedimint-client.js";
 import { stashPendingRedemption, clearPendingRedemption } from "./pending-redemptions.js";
 import { type EscrowState, type LockShareEntry, EscrowEventKind, Role, Outcome } from "../escrow-engine/types.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
+import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
 
 function claimTraceEnabled(): boolean {
   try {
@@ -59,41 +60,15 @@ export class EscrowFedimintBridge {
     this.signer = signer;
   }
 
-  // ── Lock: Spend ecash → SSS split → encrypt shares → publish LOCK ──────
-
-  /**
-   * Full lock flow:
-   *   0. v0.1.72: Probe-and-verify locker's federation matches CREATE's.
-   *   1. Spend ecash from Fedimint wallet (total trade amount)
-   *   2. Split into 2-of-3 SSS shares
-   *   3. NIP-44 encrypt each share to its recipient
-   *   4. Publish the LOCK event to Nostr relays
-   *
-   * After this, the money is in escrow — no one can move it alone.
-   */
-  async lockAndPublish(escrowId: string, opts: {
-    /** PR 3: ID of a saved handle in the seller's localStorage. The
-     *  bridge resolves it to cleartext at lock time and includes both
-     *  the cleartext + audit ID in the (encrypted) LockPayload so the
-     *  buyer and arbiter can read where to send fiat. Optional —
-     *  marketplace digital trades and raw escrows don't need it. */
-    savedHandleId?: string;
-  } = {}): Promise<EscrowState> {
+  private async prepareLockContext(escrowId: string): Promise<{
+    state: EscrowState;
+    buyerPubkey: string;
+    sellerPk: string;
+    arbiterPubkey: string;
+  }> {
     const state = this.escrow.getState(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
 
-    // v0.4.4 federation gates (fed-ID equality) ──────────────────────────
-    // Pre-flight: confirm the wallet's federation matches the trade's
-    // `fed` tag. On mismatch, refuse to spend at all — no money moves.
-    // probeReachable also doubles as the pre-spend reachability check
-    // (its throw surfaces as FED_PROBE_FAILED so the UI can offer a
-    // clean retry path).
-    //
-    // Legacy trades without payload.fed: allow (no gate). The wallet's
-    // own spendNotes call below will surface any deeper federation
-    // fault via its native error path. v0.1.72-era fedPrefix tags are
-    // ignored — new CREATE events no longer emit them (see
-    // useEscrow.createEscrow and deriveCreateFedTags).
     const createEvent = state.eventChain.find(
       (e: any) => e.kind === 38100 || e.payload?.type === "escrow:create"
     );
@@ -128,19 +103,6 @@ export class EscrowFedimintBridge {
       }
     }
 
-    // PR 1 atomic-funding: derive buyer + arbiter pubkeys before spending.
-    // LOCK is self-describing — it carries both pubkeys directly — so the
-    // chain no longer relies on prior JOIN events to populate slots.
-    //
-    // Buyer:   if a JOIN ACK landed pre-LOCK, use that pubkey. Otherwise
-    //          we don't know who's paying yet and refuse to spend.
-    // Arbiter: prefer a JOINed arbiter; fall back to deterministic
-    //          round-robin selection across the trade's communityArbiters
-    //          pool keyed by escrow id (v0.6.5). Same escrow id always
-    //          maps to the same pool slot, so relay replay is idempotent
-    //          and load distributes evenly across arbiters at trade
-    //          creation. If both are empty there's no one to assign and
-    //          we refuse to spend.
     const buyerPubkey = state.participants[Role.BUYER];
     if (!buyerPubkey) {
       throw new Error(
@@ -169,17 +131,21 @@ export class EscrowFedimintBridge {
       );
     }
 
-    // v0.1.71: no platformFeeBps passed.
-    // Lock math is now seller + arbiter only. Platform fee is collected
-    // out-of-band via Lightning at trade completion.
-    const lockBundle = await this.fedimint.createEscrowLock(
-      state.amountMsats,
-      {
-        arbiterFeeMsats: state.fees.arbiterMsats,
-      }
-    );
+    return { state, buyerPubkey, sellerPk, arbiterPubkey };
+  }
 
-    // Dual-encrypt each share to ALL 3 participants
+  private async publishLockBundle(
+    escrowId: string,
+    state: EscrowState,
+    lockBundle: EscrowLockBundle,
+    participants: {
+      buyerPubkey: string;
+      sellerPk: string;
+      arbiterPubkey: string;
+    },
+    opts: { savedHandleId?: string } = {},
+  ): Promise<EscrowState> {
+    const { buyerPubkey, sellerPk, arbiterPubkey } = participants;
     const allPks = [buyerPubkey, sellerPk, arbiterPubkey];
 
     const shares: { shareIndex: number; encryptedFor: Record<string, string> }[] = [];
@@ -195,13 +161,6 @@ export class EscrowFedimintBridge {
       shares.push({ shareIndex: i, encryptedFor });
     }
 
-    // PR 3 handle reveal: resolve the seller's chosen saved handle to
-    // cleartext at lock time. The cleartext flows inside the LockPayload
-    // (NIP-44-protected by encryption-config), so it never appears on
-    // the public listing or chat — only the three trade participants
-    // see it once payment lands. handleId is the seller's local audit
-    // reference; opaque to other participants but useful for the seller
-    // to cross-check which saved handle was used.
     let handleId: string | undefined;
     let handle: string | undefined;
     let rail: string | undefined;
@@ -212,16 +171,10 @@ export class EscrowFedimintBridge {
         handleId = saved.id;
         handle = saved.handle;
         rail = saved.rail;
-        // v0.6.5: networks (mobile-money tags on phone numbers) ride
-        // through the LOCK envelope so the three participants see them
-        // alongside the cleartext handle.
         if (saved.networks && saved.networks.length > 0) {
           handleNetworks = saved.networks;
         }
       } else {
-        // Stale ID — the saved handle was deleted between selection and
-        // lock. Don't crash the lock; just emit without the handle and
-        // let the participants chat to coordinate. The trade still works.
         console.warn(
           `[chama] lockAndPublish: savedHandleId ${opts.savedHandleId} ` +
           `not found in local storage — proceeding without handle reveal`
@@ -241,6 +194,64 @@ export class EscrowFedimintBridge {
       rail,
       handleNetworks,
     });
+  }
+
+  // ── Lock: Spend ecash → SSS split → encrypt shares → publish LOCK ──────
+
+  /**
+   * Full lock flow:
+   *   0. v0.1.72: Probe-and-verify locker's federation matches CREATE's.
+   *   1. Spend ecash from Fedimint wallet (total trade amount)
+   *   2. Split into 2-of-3 SSS shares
+   *   3. NIP-44 encrypt each share to its recipient
+   *   4. Publish the LOCK event to Nostr relays
+   *
+   * After this, the money is in escrow — no one can move it alone.
+   */
+  async lockAndPublish(escrowId: string, opts: {
+    /** PR 3: ID of a saved handle in the seller's localStorage. The
+     *  bridge resolves it to cleartext at lock time and includes both
+     *  the cleartext + audit ID in the (encrypted) LockPayload so the
+     *  buyer and arbiter can read where to send fiat. Optional —
+     *  marketplace digital trades and raw escrows don't need it. */
+    savedHandleId?: string;
+  } = {}): Promise<EscrowState> {
+    const context = await this.prepareLockContext(escrowId);
+    const lockBundle = await this.fedimint.createEscrowLock(
+      context.state.amountMsats,
+      {
+        arbiterFeeMsats: context.state.fees.arbiterMsats,
+      },
+      buildChamaOperationMeta({
+        flow: "lock_spend",
+        escrowId,
+        amountMsats: context.state.amountMsats,
+      }),
+    );
+    return this.publishLockBundle(escrowId, context.state, lockBundle, context, opts);
+  }
+
+  async preflightLock(escrowId: string): Promise<void> {
+    await this.prepareLockContext(escrowId);
+  }
+
+  async lockAndPublishWithEcash(escrowId: string, oobNotes: string, opts: {
+    savedHandleId?: string;
+  } = {}): Promise<EscrowState> {
+    const context = await this.prepareLockContext(escrowId);
+    const lockBundle = await this.fedimint.createEscrowLockFromNotes(
+      oobNotes,
+      context.state.amountMsats,
+      {
+        arbiterFeeMsats: context.state.fees.arbiterMsats,
+      },
+      buildChamaOperationMeta({
+        flow: "lock_external_ecash",
+        escrowId,
+        amountMsats: context.state.amountMsats,
+      }),
+    );
+    return this.publishLockBundle(escrowId, context.state, lockBundle, context, opts);
   }
 
   // ── Claim: Decrypt shares → SSS combine → verify → redeem → publish CLAIM
@@ -442,7 +453,16 @@ export class EscrowFedimintBridge {
     });
 
     try {
-      await this.fedimint.redeemWithRetry(oobNotes);
+      await this.fedimint.redeemWithRetry(
+        oobNotes,
+        3,
+        buildChamaOperationMeta({
+          flow: "claim_reissue",
+          escrowId,
+          amountMsats: state.amountMsats,
+          notesHashPrefix: notesHash.slice(0, 16),
+        }),
+      );
       claimTrace("bridge-redeem-ok", {
         escrowId,
         clearPendingOnRedeem: opts.clearPendingOnRedeem !== false,
@@ -665,12 +685,16 @@ export class EscrowFedimintBridge {
   // hook layer consistent (always calls bridge.*) and makes it easy to
   // add logging/metrics around wallet ops in one place.
 
-  async payInvoice(bolt11: string): Promise<void> {
-    await this.fedimint.payInvoice(bolt11);
+  async payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<void> {
+    await this.fedimint.payInvoice(bolt11, meta);
   }
 
-  async spendNotes(amountMsats: number): Promise<string> {
+  async spendNotes(amountMsats: number, meta?: ChamaOperationMeta): Promise<string> {
     // FedimintClient exposes spendNotes via its wallet; route through there.
-    return await this.fedimint.spendNotes(amountMsats);
+    return await this.fedimint.spendNotes(amountMsats, meta);
+  }
+
+  async redeemEcash(oobNotes: string, meta?: ChamaOperationMeta): Promise<void> {
+    await this.fedimint.redeemEcash(oobNotes, meta);
   }
 }
