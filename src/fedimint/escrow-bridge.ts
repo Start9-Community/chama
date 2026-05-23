@@ -19,6 +19,7 @@ import { getWinner } from "../escrow-engine/state-machine.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
+import { receiveFediEcash } from "./fedi-internal.js";
 
 function claimTraceEnabled(): boolean {
   try {
@@ -270,7 +271,10 @@ export class EscrowFedimintBridge {
    */
   async claimAndRedeem(
     escrowId: string,
-    opts: { clearPendingOnRedeem?: boolean } = {},
+    opts: {
+      clearPendingOnRedeem?: boolean;
+      redeemWith?: "browser-sdk" | "fedi-internal";
+    } = {},
   ): Promise<EscrowState> {
     const state = this.escrow.getState(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
@@ -453,18 +457,28 @@ export class EscrowFedimintBridge {
     });
 
     try {
-      await this.fedimint.redeemWithRetry(
-        oobNotes,
-        3,
-        buildChamaOperationMeta({
-          flow: "claim_reissue",
+      if (opts.redeemWith === "fedi-internal") {
+        const receivedMsats = await receiveFediEcash(oobNotes, state.amountMsats);
+        claimTrace("bridge-fedi-receive-ok", {
           escrowId,
-          amountMsats: state.amountMsats,
-          notesHashPrefix: notesHash.slice(0, 16),
-        }),
-      );
+          expectedMsats: state.amountMsats,
+          receivedMsats: receivedMsats ?? "unknown",
+        });
+      } else {
+        await this.fedimint.redeemWithRetry(
+          oobNotes,
+          3,
+          buildChamaOperationMeta({
+            flow: "claim_reissue",
+            escrowId,
+            amountMsats: state.amountMsats,
+            notesHashPrefix: notesHash.slice(0, 16),
+          }),
+        );
+      }
       claimTrace("bridge-redeem-ok", {
         escrowId,
+        redeemWith: opts.redeemWith ?? "browser-sdk",
         clearPendingOnRedeem: opts.clearPendingOnRedeem !== false,
       });
       // Redeem confirmed (or already-spent, which redeemWithRetry treats
@@ -487,17 +501,30 @@ export class EscrowFedimintBridge {
       );
       (wrapped as any).claimPublished = true;
       if (
+        opts.redeemWith === "fedi-internal" ||
         redeemCode === "MINT_REISSUE_FAILED" ||
         redeemCode === "MINT_REISSUE_UNKNOWN"
       ) {
         (wrapped as any).settlementFailed = true;
-        (wrapped as any).code = redeemCode;
+        (wrapped as any).code = opts.redeemWith === "fedi-internal"
+          ? "FEDI_RECEIVE_FAILED"
+          : redeemCode;
       }
       (wrapped as any).cause = redeemErr;
       throw wrapped;
     }
 
     return stateAfterClaim;
+  }
+
+  async claimAndReceiveFedi(
+    escrowId: string,
+    opts: { clearPendingOnRedeem?: boolean } = {},
+  ): Promise<EscrowState> {
+    return this.claimAndRedeem(escrowId, {
+      ...opts,
+      redeemWith: "fedi-internal",
+    });
   }
 
   // ── Pre-claim verification (optional but recommended) ───────────────────

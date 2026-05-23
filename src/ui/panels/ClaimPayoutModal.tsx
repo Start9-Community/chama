@@ -25,7 +25,7 @@
 // the same terminal with an updated error message. Avoids the confusing
 // "tapped Try again, got same error instantly" UX (Pillar 2.7).
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { T } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
@@ -73,6 +73,10 @@ export interface ClaimPayoutModalProps {
       onPhase: (phase: ClaimAndPayoutPhase) => void;
     },
   ) => Promise<ClaimAndPayoutTerminal>;
+  /** Fedi Mini-App path: claim directly into the host Fedi wallet with
+   *  window.fediInternal.receiveEcash instead of asking for a Lightning
+   *  payout destination. */
+  claimTarget?: "lightning" | "fedi-wallet";
   /** v0.3.1 Phase 1: bound to actions.probeFederation. Called from the
    *  Try-again button on claim-bridge-threw terminal. Returns ok/error
    *  shape (never throws). The retry path only re-dispatches the claim
@@ -105,6 +109,7 @@ export function ClaimPayoutModal({
   homeCommunity,
   fiatCurrency,
   claimAndPayout,
+  claimTarget = "lightning",
   probeFederation,
   onClose,
 }: ClaimPayoutModalProps) {
@@ -138,6 +143,17 @@ export function ClaimPayoutModal({
       setTimeout(() => onClose(terminal), 1500);
     }
   };
+
+  useEffect(() => {
+    if (claimTarget !== "fedi-wallet") return;
+    if (stage.kind !== "picking") return;
+    if (lastDispatchRef.current) return;
+    lastDispatchRef.current = {
+      bolt11: "fedi-internal://receive-ecash",
+      saveAfter: false,
+    };
+    void dispatchClaim(lastDispatchRef.current);
+  }, [claimTarget, stage.kind]);
 
   const resolveDestination = (bolt11: string, opts: { saveAfter: boolean; addressUsed?: string }) => {
     lastDispatchRef.current = {
@@ -181,6 +197,18 @@ export function ClaimPayoutModal({
   // internally. We pass amountSats so the LNURL resolver requests an
   // invoice of exactly the right size.
   if (stage.kind === "picking") {
+    if (claimTarget === "fedi-wallet") {
+      return (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: 16, animation: "fadeIn 0.2s ease",
+          }}
+        />
+      );
+    }
+
     return (
       <DestinationPicker
         amountSats={payoutSats}

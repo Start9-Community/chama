@@ -5,7 +5,7 @@ import { Preferences } from "@capacitor/preferences";
 import { useEscrow } from "../hooks/useEscrow.js";
 import { type EscrowState, EscrowStatus, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
-import { getActiveInvite, isTestnetMode } from "../fedimint/index.js";
+import { getActiveInvite, hasFediInternalEcash, isTestnetMode } from "../fedimint/index.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
 
@@ -1042,6 +1042,7 @@ export default function App() {
           homeCommunity={getUserCommunitySlugRaw()}
           fiatCurrency={pendingClaim.fiatCurrency}
           claimAndPayout={actions.claimAndPayout}
+          claimTarget={hasFediInternalEcash() ? "fedi-wallet" : "lightning"}
           probeFederation={actions.probeFederation}
           onClose={(terminal) => {
             const { resolve } = pendingClaim;

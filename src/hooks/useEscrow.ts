@@ -2164,6 +2164,30 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       ? prev
       : { ...prev, claimPayoutInProgress: true });
     try {
+      if (hasFediInternalEcash()) {
+        args.onPhase({ kind: "claiming" });
+        try {
+          await bridge.claimAndReceiveFedi(escrowId, { clearPendingOnRedeem: true });
+          await client.complete(escrowId);
+          refreshBalanceRef.current?.().catch(() => {});
+          args.onPhase({ kind: "done" });
+          return { kind: "done" };
+        } catch (e: any) {
+          const msg = e?.message || String(e);
+          if (isStaleClaim(msg)) {
+            console.debug("[chama] Fedi claim suppressed (stale):", msg);
+            args.onPhase({ kind: "done" });
+            return { kind: "done" };
+          }
+          if (e?.code === "FED_PROBE_FAILED" || e?.code === "FED_MISMATCH") {
+            args.onPhase({ kind: "claim-bridge-threw", error: msg });
+            return { kind: "claim-bridge-threw", error: msg };
+          }
+          args.onPhase({ kind: "claim-failed", error: msg });
+          return { kind: "claim-failed", error: msg };
+        }
+      }
+
       const { runClaimAndPayout } = await import("../payments/claim-and-payout.js");
       return await runClaimAndPayout({
         escrowId,

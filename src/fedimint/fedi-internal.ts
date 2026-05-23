@@ -15,7 +15,17 @@ export interface FediInternalProvider {
   generateEcash?: (
     request: FediEcashRequest,
   ) => Promise<string | { notes?: string; ecash?: string }>;
-  receiveEcash?: (ecash: string) => Promise<{ msats: number }>;
+  receiveEcash?: (ecash: string) => Promise<
+    | number
+    | string
+    | {
+        msats?: number;
+        amountMsats?: number;
+        amount_msats?: number;
+        amount?: number | string | { msats?: number; msat?: number };
+      }
+    | void
+  >;
 }
 
 export function getFediInternal(): FediInternalProvider | null {
@@ -67,14 +77,51 @@ export async function generateFediEcash(
   return { notes, amountSats };
 }
 
-export async function receiveFediEcash(ecash: string): Promise<number> {
+function extractReceivedMsats(result: Awaited<ReturnType<NonNullable<FediInternalProvider["receiveEcash"]>>>): number | null {
+  if (typeof result === "number" && Number.isFinite(result)) return result;
+  if (typeof result === "string" && result.trim() && Number.isFinite(Number(result))) {
+    return Number(result);
+  }
+  if (!result || typeof result !== "object") return null;
+
+  const direct =
+    result.msats ??
+    result.amountMsats ??
+    result.amount_msats;
+  if (typeof direct === "number" && Number.isFinite(direct)) return direct;
+
+  const amount = result.amount;
+  if (typeof amount === "number" && Number.isFinite(amount)) return amount;
+  if (typeof amount === "string" && amount.trim() && Number.isFinite(Number(amount))) {
+    return Number(amount);
+  }
+  if (amount && typeof amount === "object") {
+    const nested = amount.msats ?? amount.msat;
+    if (typeof nested === "number" && Number.isFinite(nested)) return nested;
+  }
+
+  return null;
+}
+
+export async function receiveFediEcash(
+  ecash: string,
+  expectedMsats?: number,
+): Promise<number | null> {
   const provider = getFediInternal();
   if (!provider || typeof provider.receiveEcash !== "function") {
     throw new Error("Fedi wallet ecash receive is not available in this browser.");
   }
   const result = await provider.receiveEcash(ecash);
-  if (!result || !Number.isFinite(result.msats)) {
-    throw new Error("Fedi wallet did not return the received ecash amount.");
+  const msats = extractReceivedMsats(result);
+  if (
+    msats !== null &&
+    expectedMsats !== undefined &&
+    Number.isSafeInteger(expectedMsats) &&
+    msats !== expectedMsats
+  ) {
+    throw new Error(
+      `Fedi wallet received ${msats} msats, but this claim expected ${expectedMsats} msats.`,
+    );
   }
-  return result.msats;
+  return msats;
 }

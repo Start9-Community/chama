@@ -3753,6 +3753,7 @@ console.log("\n── Fedi Mini-App ecash funding path ──");
   const {
     generateFediEcash,
     msatsToExactSats,
+    receiveFediEcash,
   } = await import("../fedimint/fedi-internal.js");
   const { FedimintClient } = await import("../fedimint/fedimint-client.js");
 
@@ -3791,6 +3792,30 @@ console.log("\n── Fedi Mini-App ecash funding path ──");
     const rawGenerated = await generateFediEcash(2_000_000);
     assert(rawGenerated.notes === "raw-oob-notes",
       "generateFediEcash also accepts older/native raw-string responses");
+
+    const received = await receiveFediEcash("claim-oob-notes", 1_000_000);
+    assert(received === 1_000_000,
+      "receiveFediEcash unwraps Fedi's {msats} response");
+
+    (globalThis as any).window.fediInternal.receiveEcash = async () => ({ amount: { msats: 2_000_000 } });
+    const nestedReceived = await receiveFediEcash("claim-oob-notes", 2_000_000);
+    assert(nestedReceived === 2_000_000,
+      "receiveFediEcash accepts nested amount.msats responses");
+
+    (globalThis as any).window.fediInternal.receiveEcash = async () => undefined;
+    const unreportedReceived = await receiveFediEcash("claim-oob-notes");
+    assert(unreportedReceived === null,
+      "receiveFediEcash accepts success responses that omit an amount");
+
+    (globalThis as any).window.fediInternal.receiveEcash = async () => ({ msats: 999_000 });
+    let receiveMismatchRejected = false;
+    try {
+      await receiveFediEcash("claim-oob-notes", 1_000_000);
+    } catch (e: any) {
+      receiveMismatchRejected = /expected 1000000/.test(e?.message || "");
+    }
+    assert(receiveMismatchRejected,
+      "receiveFediEcash rejects amount mismatches when Fedi reports an amount");
   } finally {
     if (originalWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = originalWindow;
