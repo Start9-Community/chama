@@ -27,6 +27,18 @@ export function isFediWebViewSignInEnvironment(env: Pick<SignInEnvironment, "use
   return env.hasFediInternal || /\bFedi\b/i.test(env.userAgent);
 }
 
+export function isAndroidFediWebViewEnvironment(
+  env: Pick<SignInEnvironment, "userAgent" | "hasFediInternal">
+): boolean {
+  return /Android/i.test(env.userAgent) && isFediWebViewSignInEnvironment(env);
+}
+
+export function shouldApplyCssSafeAreaInsets(
+  env: Pick<SignInEnvironment, "userAgent" | "hasFediInternal">
+): boolean {
+  return !isAndroidFediWebViewEnvironment(env);
+}
+
 export function shouldOfferNIP46Signer(env: SignInEnvironment): boolean {
   return (
     !env.isNativePlatform &&

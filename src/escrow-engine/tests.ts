@@ -261,6 +261,7 @@ import {
 import {
   isFediWebViewSignInEnvironment,
   isMobileSignInEnvironment,
+  shouldApplyCssSafeAreaInsets,
   shouldOfferNIP46Signer,
 } from "../ui/sign-in-environment.js";
 import {
@@ -8032,6 +8033,13 @@ console.log("\n── SIGN-IN OPTION ENVIRONMENT GATE ──");
     "Touch Macintosh/iPad desktop UA is detected as mobile for sign-in gating");
   assert(isFediWebViewSignInEnvironment(fediWebView),
     "Fedi webview is detected from fediInternal/user-agent hints");
+  assert(!shouldApplyCssSafeAreaInsets(fediWebView),
+    "Android Fedi webview opts out of Chama CSS safe-area padding");
+  assert(shouldApplyCssSafeAreaInsets({
+    ...fediWebView,
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Fedi Mobile",
+  }),
+    "iPhone Fedi webview keeps CSS safe-area padding");
   assert(shouldOfferNIP46Signer(desktop),
     "NIP-46 signer app is offered on standalone desktop web");
   assert(!shouldOfferNIP46Signer(androidChrome),

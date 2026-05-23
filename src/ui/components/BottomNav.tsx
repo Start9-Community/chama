@@ -1,4 +1,5 @@
 import { T } from "../theme.js";
+import { getSignInEnvironment, shouldApplyCssSafeAreaInsets } from "../sign-in-environment.js";
 
 export type Tab = "browse" | "create" | "me";
 
@@ -10,6 +11,7 @@ export function BottomNav({ active, onSelect }: {
   active: Tab;
   onSelect: (t: Tab) => void;
 }) {
+  const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(getSignInEnvironment());
   const items: { id: Tab; label: string; icon: string }[] = [
     { id: "browse", label: "Browse", icon: "🔍" },
     { id: "create", label: "Create", icon: "+" },
@@ -21,7 +23,7 @@ export function BottomNav({ active, onSelect }: {
       background: T.surface, borderTop: `1px solid ${T.border}`,
       display: "flex", justifyContent: "center",
       zIndex: 100,
-      paddingBottom: "env(safe-area-inset-bottom, 0px)",
+      paddingBottom: useSafeAreaInsets ? "env(safe-area-inset-bottom, 0px)" : 0,
     }}>
       <div style={{
         display: "flex", width: "100%", maxWidth: 520,

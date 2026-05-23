@@ -283,7 +283,7 @@ function OnboardingShell({ children }: { children: ReactNode }) {
   return (
     <div style={{
       display: "flex", flexDirection: "column", alignItems: "center",
-      justifyContent: "center", minHeight: "100vh", padding: "36px 18px",
+      justifyContent: "center", minHeight: "100dvh", padding: "36px 18px",
       textAlign: "center",
       background: `linear-gradient(180deg, ${T.bg} 0%, #0d0d14 46%, ${T.bg} 100%)`,
     }}>

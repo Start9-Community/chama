@@ -66,6 +66,7 @@ import { SavedHandlesPanel } from "./panels/SavedHandlesPanel.js";
 import { PayoutDestinationsPanel } from "./panels/PayoutDestinationsPanel.js";
 import { SimModePill, SimEntryModal, SIM_PILL_HEIGHT } from "../sim/SimModeBanner.js";
 import { isSimModeOn } from "../sim/simMode.js";
+import { getSignInEnvironment, shouldApplyCssSafeAreaInsets } from "./sign-in-environment.js";
 
 const QRScanner = lazy(() => import("./QRScanner.js"));
 
@@ -793,11 +794,20 @@ export default function App() {
 
   // ── Not connected → show connect screen ──
   const simOn = isSimModeOn();
+  const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(getSignInEnvironment());
+  const safeAreaTop = useSafeAreaInsets ? "env(safe-area-inset-top, 0px)" : 0;
+  const shellPaddingTop = simOn
+    ? (useSafeAreaInsets ? `calc(${SIM_PILL_HEIGHT}px + env(safe-area-inset-top, 0px))` : SIM_PILL_HEIGHT)
+    : safeAreaTop;
+  const shellPaddingBottom = useSafeAreaInsets
+    ? `calc(${BOTTOM_NAV_HEIGHT}px + env(safe-area-inset-bottom, 0px))`
+    : BOTTOM_NAV_HEIGHT;
+
   if (!connected) {
     return (
       <div style={{
-        background: T.bg, color: T.text, minHeight: "100vh", fontFamily: T.sans,
-        paddingTop: simOn ? SIM_PILL_HEIGHT : 0,
+        background: T.bg, color: T.text, minHeight: "100dvh", fontFamily: T.sans,
+        paddingTop: shellPaddingTop,
       }}>
         <style>{globalCss}</style>
         <SimModePill />
@@ -875,10 +885,10 @@ export default function App() {
 
   return (
     <div style={{
-      background: T.bg, color: T.text, minHeight: "100vh",
+      background: T.bg, color: T.text, minHeight: "100dvh",
       fontFamily: T.sans, maxWidth: 520, margin: "0 auto",
-      paddingBottom: BOTTOM_NAV_HEIGHT,
-      paddingTop: simOn ? SIM_PILL_HEIGHT : 0,
+      paddingBottom: shellPaddingBottom,
+      paddingTop: shellPaddingTop,
     }}>
       <style>{globalCss}</style>
       <SimModePill />
