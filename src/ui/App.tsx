@@ -25,6 +25,7 @@ import {
   findActiveTrade,
   identifyStrandedEcashSource,
   isMidFunding,
+  shouldShowOnBrowse,
   listingMatchesActiveRoute,
 } from "./decisions.js";
 import { Toast } from "./components/Toast.js";
@@ -523,12 +524,6 @@ export default function App() {
   // aggregator and the gate naturally opens for qualifying sellers.
   const userCanSubscribe = canOfferSubscription({ ratings: null });
 
-  const matchesBrowseCategory = (s: EscrowState) => {
-    if (browseCategory === "all") return true;
-    if (browseCategory === "subscription") return s.subscription !== null;
-    return s.category === browseCategory;
-  };
-
   // v0.2.0 item 4: browse two-section layout. matchingListings render
   // first as normal cards; nonMatchingListings render below an
   // "N LISTINGS ON OTHER FEDERATIONS" divider with amber tint per
@@ -542,9 +537,7 @@ export default function App() {
   // switched routes without changing their home community.
   const myActiveInvite = fedimint.joined ? getActiveInvite() : null;
   const visibleListings = visibleTrades.filter(s =>
-    !isParticipant(s)
-    && s.status === EscrowStatus.CREATED
-    && matchesBrowseCategory(s)
+    shouldShowOnBrowse({ escrow: s, browseCategory, nowSec: now })
   );
   const listingMatchesRoute = (s: EscrowState) => listingMatchesActiveRoute({
     listingMintUrl: s.mintUrl,

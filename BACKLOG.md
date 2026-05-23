@@ -59,6 +59,15 @@ candidate list with the older roadmap.
       full chain catches up. Browse should render only open listings by
       other users; terminal user trades belong in Me/history.
 
+- [ ] **15-minute join reservation before lock.** When a buyer or seller
+      joins a CREATED trade, reserve that role for 15 minutes while they
+      lock/fund. If no LOCK lands before the reservation expires, free the
+      role again so another user can join. Auto-assigned arbiters are not
+      reservations and must not start this timer. This needs protocol-level
+      convergence, not just local Browse filtering: clients must agree on
+      join time, stale role handling, and the event shape for cleanup or
+      replacement.
+
 - [ ] **Sim manual-fund + Recovery Banner collision.** In sim mode, manual
       fund can create a recoverable balance with no active trade, triggering
       the production recovery banner. Either remove manual fund from sim

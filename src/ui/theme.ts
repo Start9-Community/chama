@@ -78,8 +78,8 @@ export const CAT_LABEL: Record<string, string> = {
 // (or "all"/"subscription" as cross-cutting filters).
 export const BROWSE_CATS: { id: string; l: string; i: string }[] = [
   { id: "all",          l: "All",          i: "" },
-  { id: "p2p-trade",    l: "P2P",          i: "⚡" },
-  { id: "bill-pay",     l: "Bill Pay",     i: "🧾" },
+  { id: "p2p-trade",    l: "Exchange",     i: "⚡" },
+  { id: "bill-pay",     l: "Com. Bill Pay", i: "🧾" },
   { id: "marketplace",  l: "Market",       i: "🏪" },
   { id: "lending",      l: "Lending",      i: "🤝" },
   { id: "subscription", l: "Repeats",      i: "🔄" },

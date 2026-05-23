@@ -509,6 +509,32 @@ export function sumActiveBuyerSellerTradeMsats(inputs: {
 }
 
 /**
+ * Browse is the public market surface, not only "things I am not in".
+ * A listing remains browsable while it is CREATED, including:
+ *   - the seller's own freshly-created listing
+ *   - a buyer/arbiter JOIN ACK that has not produced LOCK yet
+ *
+ * LOCK is the actual money-moving transition. Once LOCK lands, the trade
+ * leaves Browse and lives on the active-trade/detail surfaces. Expired
+ * CREATED listings are hidden while the sentinel catches up and publishes
+ * CANCEL.
+ */
+export function shouldShowOnBrowse(inputs: {
+  escrow: EscrowState;
+  browseCategory: string;
+  nowSec?: number;
+}): boolean {
+  const { escrow, browseCategory } = inputs;
+  if (escrow.status !== EscrowStatus.CREATED) return false;
+  if (isPastEscrowDeadline(escrow, inputs.nowSec ?? Math.floor(Date.now() / 1000))) {
+    return false;
+  }
+  if (browseCategory === "all") return true;
+  if (browseCategory === "subscription") return escrow.subscription !== null;
+  return escrow.category === browseCategory;
+}
+
+/**
  * v0.6.5 funding-operation gate. True while runFundAndLock is mid-flight
  * (between creating-invoice and the locked/lock-failed/expired/aborted
  * terminal phases). The only condition that should disable a second

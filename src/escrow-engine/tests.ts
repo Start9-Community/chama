@@ -3150,6 +3150,7 @@ import {
   shouldShowRecoveryBanner,
   identifyStrandedEcashSource,
   decideListingTapEffect,
+  shouldShowOnBrowse,
   listingMatchesActiveRoute,
   resolveCreateMintUrl,
   decideArbiterWarning,
@@ -4414,6 +4415,10 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     findActiveTrade({ escrows: [listingOnly], userPubkey: me })?.id === "listing-only",
     "findActiveTrade now surfaces CREATE-only listings the user posted",
   );
+  assert(
+    shouldShowOnBrowse({ escrow: listingOnly, browseCategory: "all" }) === true,
+    "Browse shows the seller's own CREATED listing until lock lands",
+  );
 
   const joinedCreated = escrow({
     id: "joined-created",
@@ -4427,6 +4432,28 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
   assert(
     hasActiveBuyerSellerCommitment({ escrows: [joinedCreated], userPubkey: me }) === true,
     "CREATED trade with a JOIN event counts as active",
+  );
+  assert(
+    shouldShowOnBrowse({ escrow: joinedCreated, browseCategory: "all" }) === true,
+    "Browse keeps JOINed-but-not-locked listings visible",
+  );
+  assert(
+    shouldShowOnBrowse({ escrow: joinedCreated, browseCategory: "bill-pay" }) === false,
+    "Browse category filter still hides non-matching CREATED listings",
+  );
+  assert(
+    shouldShowOnBrowse({ escrow: { ...joinedCreated, status: EscrowStatus.LOCKED }, browseCategory: "all" }) === false,
+    "Browse hides listing once LOCK succeeds",
+  );
+  assert(
+    shouldShowOnBrowse({
+      escrow: {
+        ...joinedCreated,
+        expiresAt: Math.floor(Date.now() / 1000) - 1,
+      },
+      browseCategory: "all",
+    }) === false,
+    "Browse hides expired CREATED listings while sentinel cleanup catches up",
   );
 
   // User as buyer, LOCKED → commitment.

@@ -1,6 +1,7 @@
-import { type EscrowState, EscrowStatus } from "../../escrow-engine/types.js";
+import { type EscrowState, EscrowStatus, Role } from "../../escrow-engine/types.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
-import { T, CAT_ICON, fmtSats, STATUS } from "../theme.js";
+import { pickArbiterFromPool } from "../../arbiters/pool.js";
+import { T, CAT_ICON, fmtSats, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER } from "../theme.js";
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
 // chama_browse_amber_tint_sorted. Quiet, not alarmist — it's a
@@ -30,6 +31,14 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
     ? `${state.fiatAmount.toLocaleString()} ${state.fiatCurrency}`
     : null;
   const secondaryLine = fiatLine ?? fulfillmentLabel(state.fulfillment);
+  const previewArbiterPk = state.status === EscrowStatus.CREATED
+    && !state.participants[Role.ARBITER]
+    && state.communityArbiters.length > 0
+    ? (pickArbiterFromPool(state.communityArbiters, state.id, [
+        state.participants[Role.BUYER],
+        state.participants[Role.SELLER],
+      ]) ?? null)
+    : null;
 
   return (
     <div onClick={onSelect} style={{
@@ -93,6 +102,7 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
           <div style={{
             display: "flex", alignItems: "baseline", gap: 7,
             minWidth: 0, flexWrap: "wrap",
+            marginBottom: 12,
           }}>
             <span style={{ fontSize: 23, fontWeight: 800, color: T.accent, fontFamily: T.mono, lineHeight: 1 }}>
               {fmtSats(state.amountMsats)} sats
@@ -101,6 +111,11 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
               {secondaryLine}
             </span>
           </div>
+          <MiniTrinityRing
+            state={state}
+            pubkey={pubkey}
+            previewArbiterPk={previewArbiterPk}
+          />
         </div>
 
         <div style={{
@@ -122,7 +137,7 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
               width: 6, height: 6, borderRadius: "50%",
               background: status.c, boxShadow: `0 0 8px ${status.c}66`,
             }} />
-            {compactStatusLabel(state.status)}
+            {compactStatusLabel(state)}
           </span>
           <div>
             {myRole && (
@@ -149,8 +164,8 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
 }
 
 function shortCategoryLabel(category: string): string {
-  if (category === "p2p-trade") return "P2P";
-  if (category === "bill-pay") return "Bill Pay";
+  if (category === "p2p-trade") return "Exchange";
+  if (category === "bill-pay") return "Com. Bill Pay";
   if (category === "marketplace") return "Market";
   if (category === "lending") return "Lending";
   if (category === "raw-escrow") return "Raw";
@@ -163,7 +178,14 @@ function fulfillmentLabel(fulfillment: EscrowState["fulfillment"]): string {
   return "Service";
 }
 
-function compactStatusLabel(status: EscrowStatus): string {
+function compactStatusLabel(state: EscrowState): string {
+  const { status } = state;
+  if (
+    status === EscrowStatus.CREATED &&
+    (!!state.participants[Role.BUYER] || !!state.participants[Role.ARBITER])
+  ) {
+    return "Joined";
+  }
   if (status === EscrowStatus.CREATED) return "Open";
   if (status === EscrowStatus.LOCKED) return "Escrow";
   if (status === EscrowStatus.APPROVED) return "Claim";
@@ -172,6 +194,66 @@ function compactStatusLabel(status: EscrowStatus): string {
   if (status === EscrowStatus.EXPIRED) return "Timed out";
   if (status === EscrowStatus.CANCELLED) return "Closed";
   return status;
+}
+
+function MiniTrinityRing({
+  state,
+  pubkey,
+  previewArbiterPk,
+}: {
+  state: EscrowState;
+  pubkey: string;
+  previewArbiterPk: string | null;
+}) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 5,
+      minWidth: 0,
+    }}>
+      {TRINITY_RING_ORDER.map((role, index) => {
+        const previousRole = TRINITY_RING_ORDER[index - 1];
+        const realPk = state.participants[role];
+        const autoAssigned = role === Role.ARBITER && !realPk && !!previewArbiterPk;
+        const pk = realPk ?? (autoAssigned ? previewArbiterPk : null);
+        const filled = !!pk;
+        const color = ROLE_COLOR[role] ?? T.muted;
+        const isYou = pk === pubkey;
+        const connectorRole = role === Role.ARBITER || previousRole === Role.ARBITER
+          ? Role.ARBITER
+          : role;
+        const connectorColor = ROLE_COLOR[connectorRole] ?? T.muted;
+        const connectorFilled = connectorRole === Role.ARBITER
+          ? !!(state.participants[Role.ARBITER] ?? previewArbiterPk)
+          : filled;
+        return (
+          <div key={role} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            {index > 0 && (
+              <span style={{
+                width: 12, height: 1,
+                background: connectorFilled ? `${connectorColor}55` : T.border,
+                display: "inline-block",
+              }} />
+            )}
+            <span
+              title={filled ? `${role}: ${isYou ? "You" : pk}` : `${role}: open`}
+              style={{
+                width: 22, height: 22, borderRadius: "50%",
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                border: `1px ${filled ? "solid" : "dashed"} ${filled ? color : T.border}`,
+                background: filled ? (autoAssigned ? `${color}12` : `${color}22`) : T.surface,
+                color: filled ? color : T.muted,
+                fontFamily: T.mono, fontSize: 10, fontWeight: 800,
+                opacity: autoAssigned ? 0.78 : 1,
+                boxShadow: isYou ? `0 0 0 2px ${color}22` : "none",
+              }}
+            >
+              {ROLE_ICON[role] ?? "?"}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function compactTimeRemaining(state: EscrowState): { label: string; tone: string } | null {
