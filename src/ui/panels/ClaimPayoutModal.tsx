@@ -36,8 +36,8 @@ import {
   saveChapsmartPayoutProfile,
 } from "../../payments/chapsmart-payout.js";
 import {
-  lightningPayoutReserveSats,
-  maxLightningPayoutSats,
+  claimPayoutReserveSats,
+  claimPayoutSats,
 } from "../../payments/lightning-fees.js";
 import type {
   ClaimAndPayoutPhase,
@@ -113,8 +113,8 @@ export function ClaimPayoutModal({
   probeFederation,
   onClose,
 }: ClaimPayoutModalProps) {
-  const payoutSats = maxLightningPayoutSats(payoutMsats);
-  const reserveSats = lightningPayoutReserveSats(payoutMsats);
+  const payoutSats = claimPayoutSats(payoutMsats, claimTarget);
+  const reserveSats = claimPayoutReserveSats(payoutMsats, claimTarget);
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
   // Retry state: when a retryable terminal is up, the "Try again"
   // button toggles this to render the inline probing spinner.

@@ -228,6 +228,8 @@ import {
   type RecoveryPayoutPhase,
 } from "../payments/balance-recovery.js";
 import {
+  claimPayoutReserveSats,
+  claimPayoutSats,
   estimateLightningSendFeeMsats,
   hasLightningWithdrawableBalance,
   lightningPayoutReserveSats,
@@ -7557,6 +7559,12 @@ console.log("\n── LIGHTNING PAYOUT FEE RESERVE ──");
     "50 sat balance pays a 47 sat invoice, leaving fee headroom");
   assert(lightningPayoutReserveSats(50_000) === 3,
     "50 sat balance shows an about-3-sat Lightning fee reserve");
+  assert(claimPayoutSats(55_000, "fedi-wallet") === 55,
+    "Fedi wallet claim display shows the exact ecash payout with no LN reserve");
+  assert(claimPayoutReserveSats(55_000, "fedi-wallet") === 0,
+    "Fedi wallet claim display reserves zero sats for outbound Lightning fees");
+  assert(claimPayoutSats(55_000, "lightning") === maxLightningPayoutSats(55_000),
+    "Lightning claim display still uses outbound fee reserve math");
   assert(maxLightningPayoutSats(2_500) === 0,
     "Tiny balances below outbound fee floor are not offered as LN payouts");
   assert(!hasLightningWithdrawableBalance(2_500),

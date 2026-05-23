@@ -2,7 +2,11 @@ import { useMemo, useState, lazy, Suspense, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { T } from "../theme.js";
 import { NsecLogin } from "../panels/NsecLogin.js";
-import { getSignInEnvironment, shouldOfferNIP46Signer } from "../sign-in-environment.js";
+import {
+  getSignInEnvironment,
+  isFediWebViewSignInEnvironment,
+  shouldOfferNIP46Signer,
+} from "../sign-in-environment.js";
 import {
   CENTRAL_AFRICA_COUNTRY_CODES,
   EAST_AFRICA_COUNTRY_CODES,
@@ -54,6 +58,7 @@ export function ConnectScreen({
     ...getSignInEnvironment(),
     isNativePlatform: isNative,
   };
+  const isFediWebView = isFediWebViewSignInEnvironment(signInEnvironment);
   const offerNIP46Signer = shouldOfferNIP46Signer(signInEnvironment);
   const [homeSlug, setHomeSlug] = useState<string | null>(() => getUserCommunitySlugRaw());
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -165,58 +170,67 @@ export function ConnectScreen({
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", maxWidth: 360 }}>
-        <NsecLogin
-          onSubmit={onConnectNsec}
-          friendly
-          friendlySecondary={!isNative ? {
-            label: loading ? "Connecting..." : "Use Fedi or browser signer",
-            onClick: onConnect,
-            disabled: loading,
-          } : undefined}
-        />
-
-        <button
-          onClick={() => setShowAdvanced(!showAdvanced)}
-          style={{
-            width: "100%", padding: "10px", borderRadius: T.r,
-            background: "transparent", border: "none",
-            color: T.muted, fontFamily: T.mono, fontSize: 11,
-            cursor: "pointer",
-          }}
-        >
-          {showAdvanced ? "▲ Hide power-user options" : "▼ Power-user options"}
-        </button>
-
-        {showAdvanced && (
+        {isFediWebView ? (
+          <FediOnlyConnectButton
+            loading={loading}
+            onConnect={onConnect}
+          />
+        ) : (
           <>
+            <NsecLogin
+              onSubmit={onConnectNsec}
+              friendly
+              friendlySecondary={!isNative ? {
+                label: loading ? "Connecting..." : "Use Fedi or browser signer",
+                onClick: onConnect,
+                disabled: loading,
+              } : undefined}
+            />
+
             <button
-              onClick={() => setShowRecoveryKey(!showRecoveryKey)}
+              onClick={() => setShowAdvanced(!showAdvanced)}
               style={{
-                width: "100%", padding: "14px", borderRadius: T.r,
-                background: T.surface,
-                border: `1px solid ${T.border}`,
-                color: T.text,
-                fontFamily: T.sans, fontSize: 13, fontWeight: 700,
+                width: "100%", padding: "10px", borderRadius: T.r,
+                background: "transparent", border: "none",
+                color: T.muted, fontFamily: T.mono, fontSize: 11,
                 cursor: "pointer",
               }}
             >
-              {showRecoveryKey ? "Hide recovery key entry" : "Use a Chama recovery key"}
+              {showAdvanced ? "▲ Hide power-user options" : "▼ Power-user options"}
             </button>
-            {showRecoveryKey && <NsecLogin onSubmit={onConnectNsec} defaultOpen />}
-            {offerNIP46Signer && !nip46Uri && (
-              <button
-                onClick={onConnectNIP46}
-                disabled={loading || nip46Waiting}
-                style={{
-                  width: "100%", padding: "14px", borderRadius: T.r,
-                  background: "transparent",
-                  border: `1px solid ${T.border}`,
-                  color: T.muted, fontFamily: T.sans, fontSize: 13, fontWeight: 600,
-                  cursor: loading || nip46Waiting ? "default" : "pointer",
-                }}
-              >
-                {nip46Waiting ? "Waiting..." : "Use a signer app"}
-              </button>
+
+            {showAdvanced && (
+              <>
+                <button
+                  onClick={() => setShowRecoveryKey(!showRecoveryKey)}
+                  style={{
+                    width: "100%", padding: "14px", borderRadius: T.r,
+                    background: T.surface,
+                    border: `1px solid ${T.border}`,
+                    color: T.text,
+                    fontFamily: T.sans, fontSize: 13, fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {showRecoveryKey ? "Hide recovery key entry" : "Use a Chama recovery key"}
+                </button>
+                {showRecoveryKey && <NsecLogin onSubmit={onConnectNsec} defaultOpen />}
+                {offerNIP46Signer && !nip46Uri && (
+                  <button
+                    onClick={onConnectNIP46}
+                    disabled={loading || nip46Waiting}
+                    style={{
+                      width: "100%", padding: "14px", borderRadius: T.r,
+                      background: "transparent",
+                      border: `1px solid ${T.border}`,
+                      color: T.muted, fontFamily: T.sans, fontSize: 13, fontWeight: 600,
+                      cursor: loading || nip46Waiting ? "default" : "pointer",
+                    }}
+                  >
+                    {nip46Waiting ? "Waiting..." : "Use a signer app"}
+                  </button>
+                )}
+              </>
             )}
           </>
         )}
@@ -231,6 +245,37 @@ export function ConnectScreen({
         Community trust + Bitcoin settlement.
       </div>
     </OnboardingShell>
+  );
+}
+
+function FediOnlyConnectButton({
+  loading,
+  onConnect,
+}: {
+  loading: boolean;
+  onConnect: () => void;
+}) {
+  return (
+    <div style={{ width: "100%", maxWidth: 360 }}>
+      <button
+        onClick={onConnect}
+        disabled={loading}
+        style={{
+          width: "100%", padding: "16px", borderRadius: T.r,
+          background: T.accent, border: "none", color: T.bg,
+          fontFamily: T.sans, fontSize: 15, fontWeight: 800,
+          cursor: loading ? "default" : "pointer",
+        }}
+      >
+        {loading ? "Connecting..." : "Continue with Fedi"}
+      </button>
+      <div style={{
+        fontSize: 10, color: T.muted, fontFamily: T.sans,
+        textAlign: "center", marginTop: 12, lineHeight: 1.5,
+      }}>
+        Chama will use the signer and wallet already provided by Fedi.
+      </div>
+    </div>
   );
 }
 

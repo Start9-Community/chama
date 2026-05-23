@@ -48,6 +48,20 @@ export function lightningPayoutReserveSats(balanceMsats: number): number {
   return Math.max(0, Math.ceil((Math.max(0, balanceMsats) - payoutSats * 1000) / 1000));
 }
 
+export type ClaimPayoutTarget = "lightning" | "fedi-wallet";
+
+export function claimPayoutSats(balanceMsats: number, target: ClaimPayoutTarget): number {
+  if (target === "fedi-wallet") {
+    return Math.max(0, Math.floor(balanceMsats / 1000));
+  }
+  return maxLightningPayoutSats(balanceMsats);
+}
+
+export function claimPayoutReserveSats(balanceMsats: number, target: ClaimPayoutTarget): number {
+  if (target === "fedi-wallet") return 0;
+  return lightningPayoutReserveSats(balanceMsats);
+}
+
 export function retrySmallerLightningPayoutSats(currentPayoutSats: number): number {
   const current = Math.max(0, Math.floor(currentPayoutSats));
   if (current <= 1) return 0;

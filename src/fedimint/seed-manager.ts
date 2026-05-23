@@ -391,7 +391,7 @@ export async function getOrCreateSeed(
       // Instead, throw so the caller can show an error to the user.
       throw new Error(
         "Couldn't decrypt your Fedimint seed from Nostr yet. Tap Reconnect and try again. " +
-        "Try using the same signer (NIP-07 extension) that originally created your seed. " +
+        "In Fedi, use Continue with Fedi. In a browser, use the same NIP-07 signer that originally created your seed. " +
         "If you've never joined a federation, click 'Reset local wallet' to start fresh."
       );
     }
