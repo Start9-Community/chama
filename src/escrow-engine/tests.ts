@@ -204,6 +204,16 @@ import {
   getTrustedArbiterPool,
   normalizeTrustedArbiterInput,
 } from "../arbiters/pool.js";
+import {
+  AMBIENT_ARBITER_FEE_BPS,
+  DISPUTE_ARBITER_FEE_BPS,
+  DISPUTE_PARTY_SHARE_BPS,
+  TOTAL_DISPUTED_ARBITER_FEE_BPS,
+  calculateAmbientArbiterFeeMsats,
+  calculateBasisPointFeeMsats,
+  calculateDisputeArbiterFeeMsats,
+  calculateDisputePartyShareMsats,
+} from "../arbiters/fees.js";
 
 // v0.3.0 Phase 2 — atomic fund-and-lock orchestrator
 import {
@@ -4687,6 +4697,38 @@ console.log("\n── pickArbiterFromPool ──");
         "Bridge refuses duplicate-arbiter LOCK before spending Fedimint ecash");
     }
   }
+}
+
+// ── 31d-4. Arbiter fee policy constants (v0.9.2) ────────────────────────
+//
+// These constants pin the v1 social contract without changing claim
+// settlement yet. The current bearer-token escrow still needs a
+// dedicated multi-party payout path before the UI should deduct these
+// from Fedi/ecash claims.
+console.log("\n── arbiter fee policy ──");
+{
+  assert(AMBIENT_ARBITER_FEE_BPS === 50, "Ambient arbiter fee is locked at 0.5%");
+  assert(DISPUTE_ARBITER_FEE_BPS === 150, "Dispute escalation fee is locked at 1.5%");
+  assert(DISPUTE_PARTY_SHARE_BPS === 75, "Dispute fee splits 0.75% per party");
+  assert(TOTAL_DISPUTED_ARBITER_FEE_BPS === 200, "Disputed trade total arbiter take is 2%");
+
+  const oneThousandSats = 1_000_000;
+  assert(
+    calculateAmbientArbiterFeeMsats(oneThousandSats) === 5_000,
+    "0.5% of 1,000 sats is 5 sats",
+  );
+  assert(
+    calculateDisputeArbiterFeeMsats(oneThousandSats) === 15_000,
+    "1.5% of 1,000 sats is 15 sats",
+  );
+  assert(
+    calculateDisputePartyShareMsats(oneThousandSats) === 7_500,
+    "Each dispute side carries 0.75% of trade value",
+  );
+  assert(
+    calculateBasisPointFeeMsats(50_000, AMBIENT_ARBITER_FEE_BPS) === 250,
+    "Small trades keep fee precision in msats until a payout path rounds",
+  );
 }
 
 // ── 31e. shouldShowRecoveryBanner + identifyStrandedEcashSource (item 2)─

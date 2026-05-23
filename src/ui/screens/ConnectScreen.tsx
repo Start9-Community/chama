@@ -120,7 +120,7 @@ export function ConnectScreen({
         maxWidth: 330, fontSize: 14, color: T.muted, lineHeight: 1.8,
         fontFamily: T.sans, marginBottom: 26,
       }}>
-        Send money home. Earn with Bill Pay.
+        Send money home. Earn with Community Bill Pay.
         <br />
         <span style={{ color: T.text }}>Trade locally with Bitcoin rails underneath.</span>
       </div>
@@ -370,7 +370,7 @@ function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
         maxWidth: 350, color: T.muted, fontFamily: T.sans,
         fontSize: 14, lineHeight: 1.7, marginBottom: 20,
       }}>
-        Send money home. Earn with Bill Pay. Trade locally.
+        Send money home. Earn with Community Bill Pay. Trade locally.
       </div>
 
       <div style={{

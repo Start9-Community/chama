@@ -131,19 +131,26 @@ Two coordinating people with separate keys can still collude. No cryptographic p
 Arbiter key separation at the community level:
 An npub elected as arbiter for a community (e.g. tz-tzs) should be blocked from opening buyer/seller trades in that same community while holding arbiter status. They need a separate civilian key to trade; their arbiter key stays clean. This is not yet enforced at the protocol level (v1 enforces uniqueness per-trade, not per-community-tenure) but is the design target for v2 arbiter role management.
 Fee model — duty over power:
-Arbiters are paid for judgment exercised, not for being assigned. The correct structure is:
+Arbiters are paid for availability and for judgment exercised. The locked v1
+structure is:
 
-No fee (or a negligible standby fee) for peaceful trades where the arbiter is never called
-A meaningful, visible fee only when a dispute actually requires arbitration
-Public "arbiter was needed" history per npub so the community can see which arbiters are active vs. coasting
+- A 0.5% ambient arbiter fee on every completed trade.
+- A fixed 1.5% additional dispute escalation fee when buyer and seller disagree.
+- The dispute fee is split equally between buyer and seller, regardless of outcome.
+- Public "arbiter was needed" history per npub so the community can see which arbiters are active vs. coasting.
 
-Outcome-based pay (percentage of trade value on disputes) is how you incentivize manufacturing disputes. Flat dispute-triggered fees keep incentives honest. The exact amounts are a post-v1 empirical question — let real usage data from Nairobi set the price, not a conference deadline.
+Outcome-based pay is how you incentivize manufacturing disputes. Fixed,
+outcome-independent dispute fees keep incentives honest: the arbiter earns
+more only because the work became harder, never because one side won.
 The design principle, stated plainly:
 Community-elected trust + protocol-enforced key separation + random assignment from the trusted pool + full public accountability. Trust is earned from the ground up, one vote at a time.
 
 ### 2.8 Arbiter fee structure
 
-Arbiter compensation has two tiers, both non-negotiable and protocol-enforced:
+Arbiter compensation has two tiers, both non-negotiable in the Chama policy.
+The current browser/Fedi milestone publishes and validates the terms; the
+dedicated multi-party payout path is what makes the payout itself fully
+protocol-enforced.
 
 **Ambient fee — 0.5% on every trade, always.**
 Every trade that completes pays 0.5% to the assigned arbiter, regardless of

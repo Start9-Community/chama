@@ -1,17 +1,13 @@
 import { type EscrowState, EscrowStatus, Role } from "../../escrow-engine/types.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
-import { T, CAT_ICON, CAT_LABEL, TRINITY_RING_ORDER, fmtSats, refundRecipientFor } from "../theme.js";
+import { T, CAT_ICON, CAT_LABEL, fmtSats, refundRecipientFor } from "../theme.js";
 import { displayCounterpartyName } from "../decisions.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import { Badge } from "./Badge.js";
-import { Dot } from "./Dot.js";
 
-// v0.6.5: short, scannable participant summary above the Trinity Ring.
-// The dots already encode this info but are visually de-emphasized;
-// users were missing them at a glance and asking "who joined this
-// trade?" Adding a text line answers the question without requiring
-// a tap into TradeDetail. Truncated npub by default; kind:0 fetcher
-// (Me toggle) can plug in later via displayCounterpartyName.
+// Browse keeps the market terms compact. TradeDetail owns the full
+// Trinity Ring and encrypted-share detail; this card only needs a
+// short participant sentence for scannability.
 //
 // Arbiter handling mirrors TradeDetail's Trinity-Ring preview: when
 // the listing's community has a recruited arbiter pool and no JOIN
@@ -42,7 +38,7 @@ function participantSummary(
   // Arbiter copy:
   //   real JOIN  → "Arbiter: xxxx" (or "You" if it's the viewer)
   //   auto pool  → "Arbiter: Auto · xxxx" (preview from pool)
-  //   none       → null (omit from sentence; the dots still show Empty)
+  //   none       → null (omit from sentence)
   let arbiterPhrase: string | null = null;
   if (arbiter) {
     arbiterPhrase = myRole === "arbiter" ? "Arbiter: You" : `Arbiter: ${shortName(arbiter)}`;
@@ -51,8 +47,7 @@ function participantSummary(
   }
   if (state.status === "CREATED") {
     // Pre-LOCK: surface seller identity + buyer slot state + arbiter.
-    // "Open to a buyer" reads better than "Empty" in a sentence; the
-    // dot row keeps the symbolic version for users who prefer that.
+    // "Open to a buyer" reads better than "Empty" in a sentence.
     const parts: string[] = [];
     if (sellerName) parts.push(`Posted by ${sellerName}`);
     if (buyerName) parts.push(`Buyer: ${buyerName}`);
@@ -174,51 +169,20 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
         <Badge status={state.status} />
       </div>
 
-      {/* v0.6.5: text participant summary above the dots. Answers
-          "who joined?" without requiring a tap into detail. The
-          Trinity Ring below stays as the symbolic state-at-a-glance.
-          Arbiter slot shows "Auto · xxxx" when the community pool
-          pre-assigns (no real JOIN yet) — same pubkey LOCK will pick. */}
+      {/* Compact browse summary. Full Trinity Ring and encrypted-share
+          details live in TradeDetail, keeping Browse as a market surface. */}
       {(() => {
         const summary = participantSummary(state, myRole, previewArbiterPk);
         return summary ? (
           <div style={{
-            marginTop: 10,
+            marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.border}`,
             fontSize: 11, color: T.muted, fontFamily: T.mono,
-            textAlign: "center", letterSpacing: 0.2,
+            letterSpacing: 0.2, lineHeight: 1.45,
           }}>
             {summary}
           </div>
         ) : null;
       })()}
-
-      {/* v0.3.1 Phase 2: participant order sourced from
-          TRINITY_RING_ORDER (theme.ts). Phase 6 introduced the
-          constant for TradeDetail but TradeCard still had the inline
-          [B, S, A] tuple — production smoke caught the drift. The
-          §43 grep tripwire test now scans src/ui/ for any inline
-          three-element Role literal and fails if it finds one
-          outside theme.ts. Forever-asset for brand coherence.
-          v0.6.5: arbiter slot renders the pool-derived preview as
-          solid + italic "Auto · xxxx" when no real arbiter JOIN
-          has landed and a community pool is configured. */}
-      <div style={{ display: "flex", gap: 12, marginTop: 8, justifyContent: "center" }}>
-        {TRINITY_RING_ORDER.map(role => {
-          const realPk = state.participants[role];
-          const isAutoArbiter = role === Role.ARBITER && !realPk && !!previewArbiterPk;
-          return (
-            <Dot
-              key={role}
-              role={role}
-              pk={realPk ?? (isAutoArbiter ? previewArbiterPk : null)}
-              isYou={myRole === role}
-              voted={!!state.votes[role]}
-              outcome={state.votes[role]}
-              autoAssigned={isAutoArbiter}
-            />
-          );
-        })}
-      </div>
 
       {/* Expiry info — what happens when time runs out */}
       {state.status === "LOCKED" && state.expiresAt && (() => {
@@ -272,37 +236,6 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
           </div>
         );
       })()}
-
-      {/* Escrow ID — tap to copy */}
-      <div
-        onClick={(e) => {
-          e.stopPropagation();
-          const id = state.id;
-          if (navigator.clipboard?.writeText) {
-            navigator.clipboard.writeText(id).catch(() => {});
-          } else {
-            const el = document.createElement("input");
-            el.value = id;
-            document.body.appendChild(el);
-            el.select();
-            document.execCommand("copy");
-            document.body.removeChild(el);
-          }
-          const t = e.currentTarget;
-          const orig = t.textContent;
-          t.textContent = "✅ Copied!";
-          t.style.color = "#22c55e";
-          setTimeout(() => { t.textContent = orig; t.style.color = ""; }, 1200);
-        }}
-        style={{
-          fontSize: 10, color: "#6b6980", fontFamily: "'JetBrains Mono','SF Mono','Fira Code',monospace",
-          textAlign: "center", marginTop: 8, cursor: "pointer",
-          padding: "4px 8px", borderRadius: 6,
-          transition: "all 0.2s",
-        }}
-      >
-        {state.id} — tap to copy
-      </div>
     </div>
   );
 }

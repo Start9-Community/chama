@@ -1240,19 +1240,14 @@ export default function App() {
             )}
             onClaim={async () => {
               // v0.3.0 Phase 3: open ClaimPayoutModal instead of
-              // dispatching claimAndRedeem directly. The modal carries
-              // the user through DestinationPicker → claim → outbound
-              // LN payout in one motion. Pillar 2.1 Option B: no
-              // intermediate balance UI.
+              // dispatching claimAndRedeem directly. In browsers this
+              // can still route through a payout destination; inside
+              // Fedi, the modal auto-claims into the host wallet.
               if (!selected) return;
-              // Post-fee payout: state.fees deducts platformMsats +
-              // arbiterMsats from the winner's share at LOCK time.
-              // Same calculation used internally by claimAndRedeemAction
-              // for its watchdog expectedDelta.
-              const payoutMsats = Math.max(
-                0,
-                selected.amountMsats - selected.fees.platformMsats - selected.fees.arbiterMsats,
-              );
+              // Current Fedi/ecash path expects the whole reconstructed
+              // token. Fee fields stay in the protocol record, but should
+              // only affect this amount once real payout fan-out exists.
+              const payoutMsats = selected.amountMsats;
               return new Promise<void>((resolve) => {
                 setPendingClaim({
                   escrowId: selectedId!,

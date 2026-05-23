@@ -5,7 +5,7 @@
 // Three-step wizard for publishing a listing. Per the v0.2.0 brief:
 //
 //   Step 1 — Category + community context. Four large category cards
-//     (P2P / Bill Pay / Marketplace / Lending) above a read-only
+//     (Exchange / Community Bill Pay / Marketplace / Lending) above a read-only
 //     "Listing in [home community]" line. Federation is never named
 //     here — derived downstream from the community.
 //
@@ -58,8 +58,8 @@ type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
 
 const VERTICALS: { id: Vertical; label: string; icon: string; description: string }[] = [
-  { id: "p2p-trade", label: "P2P Trade", icon: "⚡", description: "Swap sats for fiat with another user." },
-  { id: "bill-pay", label: "Bill Pay", icon: "🧾", description: "Pay a bill in exchange for sats." },
+  { id: "p2p-trade", label: "Exchange", icon: "⚡", description: "Swap sats for fiat with another user." },
+  { id: "bill-pay", label: "Community Bill Pay", icon: "🧾", description: "Pay a bill in exchange for sats." },
   { id: "marketplace", label: "Marketplace", icon: "🏪", description: "Sell goods, services, or digital items." },
   { id: "lending", label: "Lending", icon: "🤝", description: "Lend sats with repayment terms." },
 ];

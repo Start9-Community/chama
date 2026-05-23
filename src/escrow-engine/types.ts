@@ -276,14 +276,12 @@ export interface HandleEnvelope {
 
 /** Content of a LOCK event.
  *
- *  v0.1.71: platformFeeMsats parked — platform fees are now collected
- *  out-of-band via Lightning at trade completion (see fee-collector.ts
- *  in v0.1.72+). The lock math is now a 2-way split: seller + arbiter
- *  must equal amountMsats. The platformFeeBps/Pubkey on CreatePayload
- *  are kept as informational so the UI can show "0.5% via Lightning at
- *  completion." If LN-only fee collection ever needs to be reverted to
- *  protocol-level enforcement, restore the platformFeeMsats field here
- *  and the matching code parked in fedimint-client.ts and state-machine.ts.
+ *  Current browser/Fedi milestone: the escrow token is one reconstructed
+ *  ecash payload, so LOCK math is a 2-way split: winner-share + optional
+ *  pre-agreed arbiter share must equal amountMsats. The fee policy in
+ *  src/arbiters/fees.ts is intentionally separate until a dedicated
+ *  multi-party payout path can enforce ambient/dispute fees without
+ *  making Fedi claims show the wrong amount.
  */
 export interface LockPayload {
   type: "escrow:lock";

@@ -1142,18 +1142,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       if (fedimint) balanceBefore = await fedimint.getBalance();
     } catch {}
 
-    // Expected amount back: state.fees.platformMsats and arbiterMsats are
-    // taken off the seller share at LOCK, so the winner actually receives
-    // the full trade minus those cuts. The state has this as sellerReceivesMsats
-    // via the LOCK event metadata — but for simplicity we estimate from the
-    // escrow amount and stored fee breakdown.
+    // Expected amount back: current Fedi/ecash claims settle the whole
+    // reconstructed token. Fee fields remain part of the protocol record,
+    // but must not reduce this expectation until actual payout fan-out can
+    // split proceeds safely.
     const state = client.getState(escrowId);
-    const expectedDeltaMsats = state
-      ? Math.max(
-          0,
-          state.amountMsats - state.fees.platformMsats - state.fees.arbiterMsats,
-        )
-      : 0;
+    const expectedDeltaMsats = state ? state.amountMsats : 0;
 
     const finishWhenBalanceConfirms = (viaWatchdog: boolean) => {
       startClaimWatchdog(escrowId, balanceBefore, expectedDeltaMsats).then(

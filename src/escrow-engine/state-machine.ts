@@ -395,9 +395,10 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
     return err("INVALID_SHARES", "LOCK must include exactly 3 SSS shares", event.raw.id);
   }
 
-  // v0.1.71: 2-way amount sum.
-  // Platform fee is no longer part of the lock — collected out-of-band
-  // via Lightning at trade completion. Lock math is seller + arbiter only.
+  // Current browser/Fedi milestone: 2-way amount sum.
+  // Platform/ambient fee policy is no longer part of LOCK math. The
+  // reconstructed ecash token settles as one payload until a dedicated
+  // multi-party payout path exists.
   // We accept old LOCKs (pre-.71) that may still carry platformFeeMsats
   // in their payload by checking for either sum shape.
   const seller = p.sellerReceivesMsats;

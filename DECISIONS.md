@@ -224,7 +224,7 @@ Create publish), not on navigation.
 
 ---
 
-## 2026-05-05 — Patcher workflow with Code Claude
+## 2026-05-05 — Patcher workflow with Claude Code
 
 **Context:** Long-running solo project, building features that touch
 many files at once. Attempts at "let CC commit and push" experiments

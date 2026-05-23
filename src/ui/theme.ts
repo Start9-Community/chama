@@ -67,8 +67,8 @@ export const TRINITY_RING_ORDER: readonly Role[] = [
 
 export const CAT_ICON = { "p2p-trade": "⚡", "bill-pay": "🧾", marketplace: "🏪", lending: "🤝" } as Record<string, string>;
 export const CAT_LABEL: Record<string, string> = {
-  "p2p-trade":   "⚡ P2P Trade",
-  "bill-pay":    "🧾 Bill Pay",
+  "p2p-trade":   "⚡ Exchange",
+  "bill-pay":    "🧾 Community Bill Pay",
   marketplace:   "🏪 Marketplace",
   lending:       "🤝 Lending",
   "raw-escrow":  "🔧 Raw Escrow",
@@ -78,8 +78,8 @@ export const CAT_LABEL: Record<string, string> = {
 // (or "all"/"subscription" as cross-cutting filters).
 export const BROWSE_CATS: { id: string; l: string; i: string }[] = [
   { id: "all",          l: "All",          i: "" },
-  { id: "p2p-trade",    l: "P2P Trade",    i: "⚡" },
-  { id: "bill-pay",     l: "Bill Pay",     i: "🧾" },
+  { id: "p2p-trade",    l: "Exchange",     i: "⚡" },
+  { id: "bill-pay",     l: "Com. Bill Pay", i: "🧾" },
   { id: "marketplace",  l: "Marketplace",  i: "🏪" },
   { id: "lending",      l: "Lending",      i: "🤝" },
   { id: "subscription", l: "Subscription", i: "🔄" },

@@ -798,17 +798,17 @@ export class FedimintClient {
   ): Promise<EscrowLockBundle> {
     const wallet = this.requireWallet();
 
-    // v0.1.71: platform fee no longer deducted from lock.
+    // Current browser/Fedi milestone: do not deduct ambient/dispute
+    // policy fees from the reconstructed ecash token.
     // ─────────────────────────────────────────────────────────────────
-    // The locker spends only what's owed to participants (seller +
-    // arbiter). The 0.5% platform fee is collected separately via
-    // Lightning at trade completion (see fee-collector.ts in v0.1.72+).
+    // The locker spends the full trade amount as one bearer ecash payload.
+    // Splitting arbiter/platform proceeds requires a dedicated multi-party
+    // payout path; subtracting here would make Fedi/ecash claims settle for
+    // less than the user actually receives and recreate the old claim-modal
+    // mismatch.
     //
-    // Parked code below — uncomment if LN-only fee collection ever needs
-    // to be reverted to protocol-level enforcement. The state machine's
-    // legacy sum check accepts either shape, so a future re-enable just
-    // means restoring this code, the LockPayload field, and the share-3
-    // encryption path in escrow-bridge.ts.
+    // Parked code below — if protocol-level fee splitting returns, restore
+    // this only alongside the LockPayload field and actual payout fan-out.
     //
     // const platformFeeMsats = Math.floor((totalMsats * fees.platformFeeBps) / 10_000);
     // const sellerReceivesMsats = totalMsats - platformFeeMsats - fees.arbiterFeeMsats;
