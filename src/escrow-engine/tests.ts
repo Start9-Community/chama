@@ -129,6 +129,7 @@ import {
 import {
   recoverSeedWordsFromEvents,
   queryUntilFound,
+  FEDI_SEED_DECRYPT_RETRY_DELAYS_MS,
   SEED_DECRYPT_RETRY_DELAYS_MS,
   SEED_RECOVERY_RETRY_DELAYS_MS,
 } from "../fedimint/seed-manager.js";
@@ -4292,6 +4293,14 @@ console.log("\n── SEED RECOVERY RETRY ──");
     && SEED_DECRYPT_RETRY_DELAYS_MS[1] === 1500
     && SEED_DECRYPT_RETRY_DELAYS_MS[2] === 3000,
     "Default seed decrypt retry schedule is 750ms / 1.5s / 3s");
+  assert(FEDI_SEED_DECRYPT_RETRY_DELAYS_MS.length === 5,
+    "Fedi seed decrypt retry schedule has 5 retries");
+  assert(FEDI_SEED_DECRYPT_RETRY_DELAYS_MS[0] === 750
+    && FEDI_SEED_DECRYPT_RETRY_DELAYS_MS[1] === 1500
+    && FEDI_SEED_DECRYPT_RETRY_DELAYS_MS[2] === 3000
+    && FEDI_SEED_DECRYPT_RETRY_DELAYS_MS[3] === 6000
+    && FEDI_SEED_DECRYPT_RETRY_DELAYS_MS[4] === 10000,
+    "Fedi seed decrypt retry schedule waits through slower mobile WebView signer readiness");
 }
 
 // ── 31c. canOfferSubscription (v0.2.0 item 7 — graduated trust gate) ────

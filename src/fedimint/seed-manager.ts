@@ -87,6 +87,17 @@ export const SEED_RECOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
  * refuse to generate a replacement seed.
  */
 export const SEED_DECRYPT_RETRY_DELAYS_MS = [750, 1_500, 3_000];
+export const FEDI_SEED_DECRYPT_RETRY_DELAYS_MS = [750, 1_500, 3_000, 6_000, 10_000];
+
+function hasFediRuntime(): boolean {
+  return typeof window !== "undefined" && !!(window as any).fediInternal;
+}
+
+function seedDecryptRetryDelaysForRuntime(): number[] {
+  return hasFediRuntime()
+    ? FEDI_SEED_DECRYPT_RETRY_DELAYS_MS
+    : SEED_DECRYPT_RETRY_DELAYS_MS;
+}
 
 /**
  * Run `queryFn` up to `delaysMs.length` times, sleeping between attempts.
@@ -173,7 +184,7 @@ export async function recoverSeedWordsFromEvents(
   } = {},
 ): Promise<{ words: string[]; event: NostrEvent } | null> {
   const sorted = [...events].sort((a, b) => b.created_at - a.created_at);
-  const delaysMs = options.delaysMs ?? SEED_DECRYPT_RETRY_DELAYS_MS;
+  const delaysMs = options.delaysMs ?? seedDecryptRetryDelaysForRuntime();
   const sleepFn = options.sleepFn ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
