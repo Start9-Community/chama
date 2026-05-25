@@ -35,6 +35,9 @@ import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 
+const samePubkey = (a?: string | null, b?: string | null): boolean =>
+  !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
 export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
   claimBlockedReason,
@@ -183,17 +186,18 @@ export function TradeDetail({
   const savedOrderFinalizedAt = state.joinHolds?.[menuSelectorRole]?.orderFinalizedAt ?? null;
   const savedOrderFinalized = !!savedOrderFinalizedAt;
   const participants = getEffectiveParticipantsAt(state, nowSec);
-  const myRole = participants.buyer === pubkey ? Role.BUYER
-    : participants.seller === pubkey ? Role.SELLER
-    : participants.arbiter === pubkey ? Role.ARBITER : null;
+  const myRole = samePubkey(participants.buyer, pubkey) ? Role.BUYER
+    : samePubkey(participants.seller, pubkey) ? Role.SELLER
+    : samePubkey(participants.arbiter, pubkey) ? Role.ARBITER : null;
   const participantPubkeys = [
     participants.buyer,
     participants.seller,
     participants.arbiter,
   ].filter((pk): pk is string => !!pk);
-  const hasDuplicateParticipant = participantPubkeys.length !== new Set(participantPubkeys).size;
+  const participantPubkeySet = new Set(participantPubkeys.map(pk => pk.toLowerCase()));
+  const hasDuplicateParticipant = participantPubkeys.length !== participantPubkeySet.size;
   const currentKeyAlreadyPresent =
-    state.initiator.pubkey === pubkey || participantPubkeys.includes(pubkey);
+    samePubkey(state.initiator.pubkey, pubkey) || participantPubkeys.some(pk => samePubkey(pk, pubkey));
   // v0.6.5: deterministic preview of which arbiter LOCK will pick from
   // the community pool, used purely for the Trinity-Ring "auto-assigned"
   // dot on CREATED listings that don't yet have a JOINed arbiter. Same
@@ -209,7 +213,7 @@ export function TradeDetail({
     : null;
   const votePrompt = decideVotePrompt(state, pubkey);
   const winner = getWinner(state);
-  const iAmWinner = winner?.pubkey === pubkey;
+  const iAmWinner = samePubkey(winner?.pubkey, pubkey);
   const claimRetryBlocked =
     state.status === EscrowStatus.CLAIMED &&
     !!claimBlockedReason &&

@@ -984,10 +984,14 @@ export type VotePrompt =
   | { kind: "waiting"; waitingOn: Role | "dispute"; message: string }
   | { kind: "buttons"; role: Role; outcomes: Outcome[] };
 
+function samePubkey(a?: string | null, b?: string | null): boolean {
+  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
+}
+
 function participantRoleForPubkey(state: EscrowState, pubkey: string): Role | null {
-  if (state.participants[Role.BUYER] === pubkey) return Role.BUYER;
-  if (state.participants[Role.SELLER] === pubkey) return Role.SELLER;
-  if (state.participants[Role.ARBITER] === pubkey) return Role.ARBITER;
+  if (samePubkey(state.participants[Role.BUYER], pubkey)) return Role.BUYER;
+  if (samePubkey(state.participants[Role.SELLER], pubkey)) return Role.SELLER;
+  if (samePubkey(state.participants[Role.ARBITER], pubkey)) return Role.ARBITER;
   return null;
 }
 

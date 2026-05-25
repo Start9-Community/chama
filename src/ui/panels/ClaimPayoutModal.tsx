@@ -44,6 +44,11 @@ import {
   claimPayoutReserveSats,
   claimPayoutSats,
 } from "../../payments/lightning-fees.js";
+import {
+  BANXAAS_SWAP_URL,
+  getBanxaasPayoutAvailability,
+  type BanxaasPayoutAvailability,
+} from "../../payments/banxaas-payout.js";
 import type {
   ClaimAndPayoutPhase,
   ClaimAndPayoutTerminal,
@@ -66,6 +71,9 @@ export interface ClaimPayoutModalProps {
   /** User's selected country/community Chama. Enables local payout rails
    *  such as Chapsmart when the user lives in Tanzania. */
   homeCommunity?: string | null;
+  /** Active trade community. Lets local payout handoffs key off the
+   *  listing country instead of only the claimant's home Chama. */
+  tradeCommunity?: string | null;
   /** Active trade fiat currency. Lets TZS trades expose Chapsmart even
    *  when an older user has no home-community selection yet. */
   fiatCurrency?: string | null;
@@ -101,6 +109,8 @@ type Stage =
   | { kind: "running"; phase: ClaimAndPayoutPhase }
   | { kind: "terminal"; terminal: ClaimAndPayoutTerminal };
 
+type PayoutMethod = "lightning" | "onchain" | "banxaas";
+
 /** Stashed dispatch arguments from the initial picker resolve. Used by
  *  retry paths to re-dispatch with the same destination after a
  *  successful re-probe. */
@@ -119,6 +129,7 @@ export function ClaimPayoutModal({
   savedDestinations,
   savedNwcConnections = [],
   homeCommunity,
+  tradeCommunity,
   fiatCurrency,
   claimAndPayout,
   claimTarget = "lightning",
@@ -128,7 +139,7 @@ export function ClaimPayoutModal({
   const payoutSats = claimPayoutSats(payoutMsats, claimTarget);
   const reserveSats = claimPayoutReserveSats(payoutMsats, claimTarget);
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
-  const [payoutMethod, setPayoutMethod] = useState<"lightning" | "onchain" | null>(null);
+  const [payoutMethod, setPayoutMethod] = useState<PayoutMethod | null>(null);
   // Retry state: when a retryable terminal is up, the "Try again"
   // button toggles this to render the inline probing spinner.
   const [retryProbing, setRetryProbing] = useState(false);
@@ -137,6 +148,11 @@ export function ClaimPayoutModal({
   // semantics as the original attempt.
   const lastDispatchRef = useRef<DispatchArgs | null>(null);
   const chapsmartEligible = isChapsmartPayoutEligible({ homeCommunity, fiatCurrency });
+  const banxaasAvailability = getBanxaasPayoutAvailability({
+    homeCommunity,
+    tradeCommunity,
+    fiatCurrency,
+  });
 
   // Common dispatch helper — used by both the picker's first resolve
   // and the terminal retry path. Updates stage transitions and
@@ -253,7 +269,21 @@ export function ClaimPayoutModal({
       return (
         <ClaimMethodChooser
           payoutSats={payoutSats}
+          banxaasAvailability={banxaasAvailability}
           onSelect={setPayoutMethod}
+          onCancel={() => onClose(undefined)}
+        />
+      );
+    }
+
+    if (payoutMethod === "banxaas" && banxaasAvailability) {
+      return (
+        <BanxaasPayoutPicker
+          availability={banxaasAvailability}
+          payoutSats={payoutSats}
+          reserveSats={reserveSats}
+          onResolve={(bolt11) => resolveDestination(bolt11, { saveAfter: false })}
+          onBack={() => setPayoutMethod(null)}
           onCancel={() => onClose(undefined)}
         />
       );
@@ -339,11 +369,12 @@ export function ClaimPayoutModal({
           )}
         </div>
 
-        {stage.kind === "running" && <RunningPanel phase={stage.phase} />}
+        {stage.kind === "running" && <RunningPanel phase={stage.phase} payoutMethod={payoutMethod} />}
 
         {stage.kind === "terminal" && (
           <TerminalPanel
             terminal={stage.terminal}
+            payoutMethod={payoutMethod}
             retryProbing={retryProbing}
             onRetry={handleClaimRetry}
             onClose={() => onClose(stage.terminal)}
@@ -356,13 +387,18 @@ export function ClaimPayoutModal({
 
 function ClaimMethodChooser({
   payoutSats,
+  banxaasAvailability,
   onSelect,
   onCancel,
 }: {
   payoutSats: number;
-  onSelect: (method: "lightning" | "onchain") => void;
+  banxaasAvailability: BanxaasPayoutAvailability | null;
+  onSelect: (method: PayoutMethod) => void;
   onCancel: () => void;
 }) {
+  const methodGridColumns = banxaasAvailability ? "1fr" : "1fr 1fr";
+  const methodMinHeight = banxaasAvailability ? 92 : 118;
+
   return (
     <div
       onClick={onCancel}
@@ -399,11 +435,11 @@ function ClaimMethodChooser({
         }}>
           Choose where Chama sends the rebuilt ecash after your claim settles.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: methodGridColumns, gap: 10 }}>
           <button
             onClick={() => onSelect("lightning")}
             style={{
-              minHeight: 118, padding: 12, borderRadius: T.r,
+              minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
               background: T.accentDim, border: `1px solid ${T.accent}66`,
               color: T.text, cursor: "pointer", textAlign: "left",
             }}
@@ -416,10 +452,40 @@ function ClaimMethodChooser({
               Best path. Send to a Lightning address, invoice, or NWC.
             </div>
           </button>
+          {banxaasAvailability && (
+            <button
+              onClick={() => onSelect("banxaas")}
+              style={{
+                minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
+                background: T.tealDim, border: `1px solid ${T.teal}66`,
+                color: T.text, cursor: "pointer", textAlign: "left",
+              }}
+            >
+              <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                gap: 10, marginBottom: 8,
+              }}>
+                <span style={{ fontSize: 20 }}>{banxaasAvailability.country.flagEmoji}</span>
+                <span style={{
+                  fontSize: 8, fontFamily: T.mono, color: T.teal,
+                  border: `1px solid ${T.teal}55`, borderRadius: 4,
+                  padding: "2px 6px", textTransform: "uppercase",
+                }}>
+                  {banxaasAvailability.status === "enabled" ? "live" : "soon"}
+                </span>
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: T.teal, fontFamily: T.mono, marginBottom: 6 }}>
+                BANXAAS · MOMO
+              </div>
+              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+                Cash out to mobile money through a Lightning invoice.
+              </div>
+            </button>
+          )}
           <button
             onClick={() => onSelect("onchain")}
             style={{
-              minHeight: 118, padding: 12, borderRadius: T.r,
+              minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
               background: T.amberDim, border: `1px solid ${T.amber}66`,
               color: T.text, cursor: "pointer", textAlign: "left",
             }}
@@ -433,6 +499,186 @@ function ClaimMethodChooser({
             </div>
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function normalizeBolt11Input(input: string): string {
+  const trimmed = input.trim();
+  return /^lightning:/i.test(trimmed)
+    ? trimmed.slice("lightning:".length).trim()
+    : trimmed;
+}
+
+function openBanxaasSwap() {
+  if (typeof window === "undefined") return;
+  window.open(BANXAAS_SWAP_URL, "_blank", "noopener,noreferrer");
+}
+
+function BanxaasPayoutPicker({
+  availability,
+  payoutSats,
+  reserveSats,
+  onResolve,
+  onBack,
+  onCancel,
+}: {
+  availability: BanxaasPayoutAvailability;
+  payoutSats: number;
+  reserveSats: number;
+  onResolve: (bolt11: string) => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
+  const [invoice, setInvoice] = useState("");
+  const normalizedInvoice = normalizeBolt11Input(invoice);
+  const looksLikeBolt11 = /^ln(bc|bcrt|tb)[a-z0-9]+$/i.test(normalizedInvoice);
+  const isLive = availability.status === "enabled";
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16, animation: "fadeIn 0.2s ease",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: T.card, border: `1px solid ${T.borderHi}`,
+          borderRadius: T.r, padding: 24, maxWidth: 420, width: "100%",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
+              BANXAAS CLAIM
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
+              <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
+            </div>
+          </div>
+          <button onClick={onCancel} style={{
+            background: "none", border: "none", color: T.muted,
+            fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
+          }}>×</button>
+        </div>
+
+        <div style={{
+          padding: "12px", borderRadius: T.r,
+          background: T.tealDim, border: `1px solid ${T.teal}44`,
+          color: T.text, marginBottom: 12,
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 10, marginBottom: 8,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <span style={{ fontSize: 20 }}>{availability.country.flagEmoji}</span>
+              <span style={{
+                color: T.teal, fontFamily: T.mono, fontSize: 11,
+                fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}>
+                {availability.country.displayName}
+              </span>
+            </div>
+            <span style={{
+              flexShrink: 0, color: isLive ? T.green : T.amber,
+              background: isLive ? T.greenDim : T.amberDim,
+              border: `1px solid ${isLive ? T.green : T.amber}55`,
+              borderRadius: 4, padding: "2px 6px",
+              fontFamily: T.mono, fontSize: 8, fontWeight: 900,
+              textTransform: "uppercase",
+            }}>
+              {isLive ? "live now" : "coming soon"}
+            </span>
+          </div>
+          <div style={{
+            color: T.muted, fontFamily: T.mono, fontSize: 10,
+            lineHeight: 1.5,
+          }}>
+            {isLive
+              ? (
+                  <>
+                    Open Banxaas, choose Bitcoin Lightning to Mobile Money,
+                    make an invoice up to <BitcoinAmount sats={payoutSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />,
+                    then paste it below.
+                    {reserveSats > 0 && (
+                      <>
+                        {" "}About <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+                      </>
+                    )}
+                  </>
+                )
+              : (
+                  <>
+                    Banxaas lists this country as coming soon. Use Lightning
+                    or onchain for this claim today.
+                  </>
+                )}
+          </div>
+        </div>
+
+        <button
+          onClick={openBanxaasSwap}
+          style={{
+            width: "100%", padding: "12px 16px", borderRadius: T.rs,
+            background: T.teal, border: `1px solid ${T.teal}`,
+            color: T.bg, fontFamily: T.mono, fontSize: 12,
+            fontWeight: 900, cursor: "pointer", marginBottom: 10,
+          }}
+        >
+          {isLive ? "Open Banxaas swap" : "Check Banxaas"}
+        </button>
+
+        {isLive && (
+          <>
+            <textarea
+              value={invoice}
+              onChange={(e) => setInvoice(e.target.value)}
+              placeholder="lnbc..."
+              rows={3}
+              style={{
+                width: "100%", boxSizing: "border-box", resize: "vertical",
+                minHeight: 74, padding: "10px 12px", borderRadius: T.rs,
+                background: T.bg, border: `1px solid ${T.border}`,
+                color: T.text, fontFamily: T.mono, fontSize: 12,
+                outline: "none", marginBottom: 10,
+              }}
+            />
+            <button
+              onClick={() => onResolve(normalizedInvoice)}
+              disabled={!looksLikeBolt11}
+              style={{
+                width: "100%", padding: "12px 16px", borderRadius: T.rs,
+                background: looksLikeBolt11 ? T.teal : T.surface,
+                border: `1px solid ${looksLikeBolt11 ? T.teal : T.border}`,
+                color: looksLikeBolt11 ? T.bg : T.muted,
+                fontFamily: T.mono, fontSize: 12, fontWeight: 900,
+                cursor: looksLikeBolt11 ? "pointer" : "default",
+                marginBottom: 8,
+              }}
+            >
+              Claim via Banxaas invoice
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onBack}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, fontSize: 11,
+            fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          Back
+        </button>
       </div>
     </div>
   );
@@ -654,11 +900,18 @@ function ChapsmartPayoutOption({
 
 // ── Sub-panels ──────────────────────────────────────────────────────────
 
-function RunningPanel({ phase }: { phase: ClaimAndPayoutPhase }) {
+function RunningPanel({
+  phase,
+  payoutMethod,
+}: {
+  phase: ClaimAndPayoutPhase;
+  payoutMethod: PayoutMethod | null;
+}) {
   const message =
     phase.kind === "claiming" ? "Recovering your share…" :
     phase.kind === "confirming" ? "Confirming with the federation…" :
     phase.kind === "paying-onchain" ? "Broadcasting onchain payout…" :
+    phase.kind === "paying-invoice" && payoutMethod === "banxaas" ? "Sending to Banxaas…" :
     phase.kind === "paying-invoice" ? "Sending to your wallet…" :
     "Working…";
   const tone =
@@ -690,9 +943,10 @@ function RunningPanel({ phase }: { phase: ClaimAndPayoutPhase }) {
 }
 
 function TerminalPanel({
-  terminal, retryProbing, onRetry, onClose,
+  terminal, payoutMethod, retryProbing, onRetry, onClose,
 }: {
   terminal: ClaimAndPayoutTerminal;
+  payoutMethod: PayoutMethod | null;
   retryProbing: boolean;
   onRetry: () => void;
   onClose: () => void;
@@ -706,7 +960,7 @@ function TerminalPanel({
       }}>
         <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
         <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
-          Sent to your wallet
+          {payoutMethod === "banxaas" ? "Sent to Banxaas" : "Sent to your wallet"}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
           Closing…

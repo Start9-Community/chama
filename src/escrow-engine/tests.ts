@@ -189,6 +189,11 @@ import {
   saveChapsmartPayoutProfile,
   toChapsmartTanzaniaPhone,
 } from "../payments/chapsmart-payout.js";
+import {
+  BANXAAS_PAYOUT_COUNTRIES,
+  BANXAAS_SWAP_URL,
+  getBanxaasPayoutAvailability,
+} from "../payments/banxaas-payout.js";
 
 // v0.3.0 Phase 1 — LNURL + DestinationPicker logic
 import {
@@ -2435,6 +2440,10 @@ console.log("\n── VOTE PROMPT TURN-GATE ──");
     && prompt.outcomes.includes(Outcome.REFUND),
     "P2P starts buyer-first with both buyer vote outcomes available",
   );
+  assert(
+    getVoteLabel("p2p-trade", defaultFulfillmentFor("p2p-trade"), Role.BUYER, Outcome.RELEASE) === "I sent the fiat",
+    "P2P buyer release copy confirms fiat was sent",
+  );
 
   prompt = decideVotePrompt(lockedP2P, SELLER_PK);
   assert(
@@ -2442,6 +2451,14 @@ console.log("\n── VOTE PROMPT TURN-GATE ──");
     && prompt.waitingOn === Role.BUYER
     && /buyer/i.test(prompt.message),
     "P2P seller waits until buyer confirms payment sent",
+  );
+  prompt = decideVotePrompt(lockedP2P, BUYER_PK.toUpperCase());
+  assert(prompt.kind === "buttons" && prompt.role === Role.BUYER, "Vote prompt matches buyer pubkey case-insensitively");
+  prompt = decideVotePrompt(lockedP2P, SELLER_PK.toUpperCase());
+  assert(
+    prompt.kind === "waiting"
+    && prompt.waitingOn === Role.BUYER,
+    "Vote prompt matches seller pubkey case-insensitively while waiting on buyer",
   );
 
   const buyerVoted = {
@@ -2455,8 +2472,42 @@ console.log("\n── VOTE PROMPT TURN-GATE ──");
     && prompt.outcomes.includes(Outcome.REFUND),
     "After buyer votes, P2P seller buttons unlock",
   );
+  assert(
+    getVoteLabel("p2p-trade", defaultFulfillmentFor("p2p-trade"), Role.SELLER, Outcome.RELEASE) === "Fiat received",
+    "P2P seller release copy confirms fiat was received",
+  );
   prompt = decideVotePrompt(buyerVoted, BUYER_PK);
   assert(prompt.kind === "none", "Buyer does not see buttons after already voting");
+
+  const billPay = {
+    ...lockedP2P,
+    category: "bill-pay",
+    fulfillment: defaultFulfillmentFor("bill-pay"),
+    votes: {},
+  } as EscrowState;
+  prompt = decideVotePrompt(billPay, BUYER_PK);
+  assert(prompt.kind === "buttons", "Bill Pay starts buyer-first");
+  prompt = decideVotePrompt(billPay, SELLER_PK);
+  assert(
+    prompt.kind === "waiting"
+    && prompt.waitingOn === Role.BUYER,
+    "Bill Pay seller waits until buyer confirms the bill was paid",
+  );
+
+  const lending = {
+    ...lockedP2P,
+    category: "lending",
+    fulfillment: defaultFulfillmentFor("lending"),
+    votes: {},
+  } as EscrowState;
+  prompt = decideVotePrompt(lending, BUYER_PK);
+  assert(prompt.kind === "buttons", "Lending starts borrower/buyer-first");
+  prompt = decideVotePrompt(lending, SELLER_PK);
+  assert(
+    prompt.kind === "waiting"
+    && prompt.waitingOn === Role.BUYER,
+    "Lending lender/seller waits until borrower confirms the loan arrived",
+  );
 
   const marketplace = {
     ...lockedP2P,
@@ -9546,6 +9597,44 @@ console.log("\n── CHAPSMART PAYOUT PROFILE + ADAPTER ──");
     });
   } catch { overBudget = true; }
   assert(overBudget, "Chapsmart adapter rejects invoices above sats budget");
+}
+
+console.log("\n── BANXAAS PAYOUT HANDOFF ──");
+{
+  assert(BANXAAS_SWAP_URL === "https://banxaas.com/swap",
+    "Banxaas handoff points at the public swap route");
+  assert(BANXAAS_PAYOUT_COUNTRIES.length === 4,
+    "Banxaas payout registry covers the four requested countries");
+
+  const senegal = getBanxaasPayoutAvailability({ homeCommunity: "sn-cfa" });
+  assert(senegal?.country.countryCode === "SN" && senegal.status === "enabled",
+    "Senegal Banxaas payout is live");
+
+  const ivoryCoast = getBanxaasPayoutAvailability({ tradeCommunity: "ci-xof" });
+  assert(ivoryCoast?.country.countryCode === "CI" && ivoryCoast.status === "coming-soon",
+    "Côte d'Ivoire Banxaas payout is marked coming soon");
+
+  const cameroon = getBanxaasPayoutAvailability({ tradeCommunity: "cm-xaf" });
+  assert(cameroon?.country.countryCode === "CM" && cameroon.status === "coming-soon",
+    "Cameroon Banxaas payout is marked coming soon");
+
+  const guinea = getBanxaasPayoutAvailability({ tradeCommunity: "gn-gnf" });
+  assert(guinea?.country.countryCode === "GN" && guinea.status === "coming-soon",
+    "Guinea Banxaas payout is marked coming soon");
+
+  const tradeBeatsHome = getBanxaasPayoutAvailability({
+    homeCommunity: "sn-cfa",
+    tradeCommunity: "ci-xof",
+  });
+  assert(tradeBeatsHome?.country.countryCode === "CI" && tradeBeatsHome.reason === "trade-community",
+    "Trade community wins over home community for Banxaas country status");
+
+  const legacyXof = getBanxaasPayoutAvailability({ fiatCurrency: "XOF" });
+  assert(legacyXof?.country.countryCode === "SN" && legacyXof.status === "enabled",
+    "Legacy XOF-only claim falls back to live Senegal");
+
+  assert(getBanxaasPayoutAvailability({ homeCommunity: "ke-kes", fiatCurrency: "KES" }) === null,
+    "Banxaas payout hidden outside supported countries");
 }
 
 // ── SIM WALLET — balance subscription end-to-end ─────────────────────────

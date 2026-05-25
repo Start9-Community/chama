@@ -232,6 +232,7 @@ export default function App() {
   const [pendingClaim, setPendingClaim] = useState<{
     escrowId: string;
     payoutMsats: number;
+    tradeCommunity?: string | null;
     fiatCurrency?: string | null;
     resolve: () => void;
   } | null>(null);
@@ -1123,6 +1124,7 @@ export default function App() {
           savedDestinations={listPayoutDestinations()}
           savedNwcConnections={listSavedNwcConnections()}
           homeCommunity={getUserCommunitySlugRaw()}
+          tradeCommunity={pendingClaim.tradeCommunity}
           fiatCurrency={pendingClaim.fiatCurrency}
           claimAndPayout={actions.claimAndPayout}
           claimTarget={hasFediInternalEcash() ? "fedi-wallet" : "lightning"}
@@ -1139,7 +1141,7 @@ export default function App() {
                 delete next[pendingClaim.escrowId];
                 return next;
               });
-              setToast({ message: "Sats sent to your wallet!", type: "success" });
+              setToast({ message: "Payout sent!", type: "success" });
             } else if (terminal.kind === "claim-failed") {
               if (/reissue|consumed|settle/i.test(terminal.error)) {
                 setBlockedClaimReasons(prev => ({
@@ -1327,6 +1329,7 @@ export default function App() {
                 setPendingClaim({
                   escrowId: selectedId!,
                   payoutMsats,
+                  tradeCommunity: selected.community,
                   fiatCurrency: selected.fiatCurrency,
                   resolve,
                 });
@@ -1485,6 +1488,7 @@ export default function App() {
           <MeScreen
             pubkey={pubkey!}
             myTrades={myTrades}
+            allTrades={visibleTrades}
             ratings={null /* v0.2.0: no rating events yet; v0.2.1 wires the aggregator */}
             balanceMsats={fedimint.balanceMsats ?? 0}
             hasActiveCommitment={hasActiveCommitment}
@@ -1673,7 +1677,7 @@ const globalCss = `
     .trade-room-card{position:sticky;top:20px}
     .trade-detail-title{font-size:26px!important}
     .trade-detail-amount .bitcoin-amount-number{font-size:56px!important}
-    .trade-detail-amount .bitcoin-amount-glyph{font-size:63px!important}
+    .trade-detail-amount .bitcoin-amount-glyph{font-size:50px!important}
     .trade-lock-ring{width:148px!important;height:148px!important}
   }
   @media (min-width: 1280px){

@@ -9,7 +9,7 @@ export function BitcoinAmount({
   color = T.accent,
   glyphColor = T.muted,
   gap = 6,
-  glyphScale = 1.1,
+  glyphScale = 1,
   className,
   style,
 }: {
@@ -27,6 +27,7 @@ export function BitcoinAmount({
   const displayLabel = label ?? (msats !== undefined
     ? fmtSats(msats)
     : Math.floor(sats ?? 0).toLocaleString());
+  const effectiveGlyphScale = Math.min(glyphScale, 1);
 
   return (
     <span
@@ -46,7 +47,7 @@ export function BitcoinAmount({
         className="bitcoin-amount-glyph"
         aria-hidden="true"
         style={{
-          fontSize: Math.ceil(size * glyphScale),
+          fontSize: Math.ceil(size * effectiveGlyphScale),
           color: glyphColor,
           lineHeight: 1,
           transform: "translateY(-1px)",

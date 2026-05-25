@@ -77,6 +77,7 @@ function writeKind0Toggle(pubkey: string, on: boolean): void {
 export function MeScreen({
   pubkey,
   myTrades,
+  allTrades,
   ratings,
   onOpenTrade,
   onSellerEditListing,
@@ -92,6 +93,7 @@ export function MeScreen({
 }: {
   pubkey: string;
   myTrades: EscrowState[];
+  allTrades?: EscrowState[];
   /** Aggregate rating data. v0.2.0 always null (no rating events yet);
    *  v0.2.1 wires the aggregator. */
   ratings: AggregateRatings | null;
@@ -119,7 +121,7 @@ export function MeScreen({
   const isClaimPayoutRecovery = !isSmallLeftover && Boolean(satsTrace?.escrowId);
   const traceCopy = describeSatsTrace(satsTrace ?? null);
   const nowSec = Math.floor(Date.now() / 1000);
-  const dashboard = buildMeDashboard(myTrades, pubkey, nowSec);
+  const dashboard = buildMeDashboard(myTrades, allTrades ?? myTrades, pubkey, nowSec);
   const tradeCounts = buildMeTradeCounts(myTrades, dashboard.needsYou);
   const visibleTrades = filterMeTrades(myTrades, dashboard.needsYou, tradeFilter);
 
@@ -1043,7 +1045,7 @@ function ArbiterQueueList({
   const emptyCopy = queue === "needs"
     ? "No disputes need your decision right now."
     : queue === "watching"
-      ? "No assigned live trades to watch right now."
+      ? "No pool trades to watch right now."
       : "No settled arbiter history yet.";
 
   if (trades.length === 0) {
@@ -1375,7 +1377,8 @@ function voteText(outcome?: Outcome): string {
 }
 
 function buildMeDashboard(
-  trades: EscrowState[],
+  myTrades: EscrowState[],
+  allTrades: EscrowState[],
   pubkey: string,
   nowSec: number,
 ): MeDashboardModel {
@@ -1391,11 +1394,32 @@ function buildMeDashboard(
   const arbiterSettled: EscrowState[] = [];
   let arbiterVisible = BLF_OFFICIAL_ARBITERS.includes(lowerPubkey);
 
-  for (const trade of trades) {
-    if (trade.communityArbiters.some((pk) => pk.toLowerCase() === lowerPubkey)) {
+  for (const trade of allTrades) {
+    const isPoolArbiter = trade.communityArbiters.some((pk) => pk.toLowerCase() === lowerPubkey);
+    if (isPoolArbiter) {
       arbiterVisible = true;
     }
+    const role = getUserRoleForTrade(trade, pubkey, nowSec);
+    const isAssignedArbiter = role === Role.ARBITER;
+    const watchesAsArbiter = isAssignedArbiter || isPoolArbiter;
 
+    if (watchesAsArbiter) {
+      if (
+        isAssignedArbiter &&
+        trade.status === EscrowStatus.LOCKED &&
+        tradeHasBuyerSellerDispute(trade) &&
+        !trade.votes[Role.ARBITER]
+      ) {
+        arbiterDisputes.push(trade);
+      } else if (isArbiterSettledTrade(trade)) {
+        arbiterSettled.push(trade);
+      } else {
+        arbiterWatching.push(trade);
+      }
+    }
+  }
+
+  for (const trade of myTrades) {
     const role = getUserRoleForTrade(trade, pubkey, nowSec);
     if (role === Role.SELLER && trade.status === EscrowStatus.CREATED) {
       sellerOpen.push(trade);
@@ -1419,16 +1443,6 @@ function buildMeDashboard(
 
     if (tradeNeedsUser(trade, pubkey, role)) {
       needsYou.push(trade);
-    }
-
-    if (role === Role.ARBITER) {
-      if (trade.status === EscrowStatus.LOCKED && tradeHasBuyerSellerDispute(trade) && !trade.votes[Role.ARBITER]) {
-        arbiterDisputes.push(trade);
-      } else if (trade.status === EscrowStatus.LOCKED) {
-        arbiterWatching.push(trade);
-      } else if (isArbiterSettledTrade(trade)) {
-        arbiterSettled.push(trade);
-      }
     }
   }
 
@@ -1486,10 +1500,11 @@ function getUserRoleForTrade(
   pubkey: string,
   nowSec: number,
 ): Role | null {
+  const lowerPubkey = pubkey.toLowerCase();
   const participants = getEffectiveParticipantsAt(trade, nowSec);
-  if (participants[Role.BUYER] === pubkey) return Role.BUYER;
-  if (participants[Role.SELLER] === pubkey) return Role.SELLER;
-  if (participants[Role.ARBITER] === pubkey) return Role.ARBITER;
+  if (participants[Role.BUYER]?.toLowerCase() === lowerPubkey) return Role.BUYER;
+  if (participants[Role.SELLER]?.toLowerCase() === lowerPubkey) return Role.SELLER;
+  if (participants[Role.ARBITER]?.toLowerCase() === lowerPubkey) return Role.ARBITER;
   return null;
 }
 

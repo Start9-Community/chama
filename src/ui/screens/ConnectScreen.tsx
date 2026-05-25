@@ -184,6 +184,7 @@ export function ConnectScreen({
                 label: loading ? "Connecting..." : "Use Fedi or browser signer",
                 onClick: onConnect,
                 disabled: loading,
+                tone: "accent",
               } : undefined}
             />
 

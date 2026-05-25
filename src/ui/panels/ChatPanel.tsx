@@ -4,6 +4,30 @@ import { T } from "../theme.js";
 
 const MAX_CHAT_IMAGE_DATA_URL_CHARS = 120_000;
 const CHAT_IMAGE_MAX_EDGE_PX = 960;
+const CHAT_IMAGE_ACCEPT = [
+  "image/*",
+  ".avif",
+  ".bmp",
+  ".gif",
+  ".heic",
+  ".heif",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".webp",
+].join(",");
+
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  avif: "image/avif",
+  bmp: "image/bmp",
+  gif: "image/gif",
+  heic: "image/heic",
+  heif: "image/heif",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+};
 
 type SendChatInput = string | { message: string; attachments?: ChatImageAttachment[] };
 
@@ -29,13 +53,47 @@ function imageId(): string {
   return `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function inferChatImageMimeType(file: File): string | null {
+  if (file.type.startsWith("image/")) return file.type;
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_MIME_BY_EXTENSION[extension] ?? null;
+}
+
+function normalizeImageDataUrl(file: File, dataUrl: string): string | null {
+  if (dataUrl.startsWith("data:image/")) return dataUrl;
+  const mimeType = inferChatImageMimeType(file);
+  const marker = ";base64,";
+  const markerIndex = dataUrl.indexOf(marker);
+  if (!mimeType || markerIndex < 0 || !dataUrl.startsWith("data:")) return null;
+  return `data:${mimeType};base64,${dataUrl.slice(markerIndex + marker.length)}`;
+}
+
 async function prepareChatImage(file: File): Promise<ChatImageAttachment> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("Choose an image file");
+  const mimeType = inferChatImageMimeType(file);
+  if (!mimeType) {
+    throw new Error("Choose a supported image file");
   }
 
-  const original = await readFileAsDataUrl(file);
-  const img = await loadImage(original);
+  const original = normalizeImageDataUrl(file, await readFileAsDataUrl(file));
+  if (!original) {
+    throw new Error("That file does not look like a supported photo");
+  }
+  let img: HTMLImageElement | null = null;
+  try {
+    img = await loadImage(original);
+  } catch {
+    if (original.length <= MAX_CHAT_IMAGE_DATA_URL_CHARS) {
+      return {
+        id: imageId(),
+        kind: "image",
+        mimeType,
+        dataUrl: original,
+        name: file.name,
+        sizeBytes: file.size,
+      };
+    }
+    throw new Error("This browser cannot preview that photo format yet. Try PNG, JPG, or WebP.");
+  }
   const width = img.naturalWidth || img.width;
   const height = img.naturalHeight || img.height;
 
@@ -43,7 +101,7 @@ async function prepareChatImage(file: File): Promise<ChatImageAttachment> {
     return {
       id: imageId(),
       kind: "image",
-      mimeType: file.type || "image/jpeg",
+      mimeType,
       dataUrl: original,
       name: file.name,
       width,
@@ -308,7 +366,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false }: {
             <input
               ref={fileRef}
               type="file"
-              accept="image/*"
+              accept={CHAT_IMAGE_ACCEPT}
               onChange={handleImagePick}
               style={{ display: "none" }}
             />

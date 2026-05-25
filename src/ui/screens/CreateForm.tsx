@@ -105,6 +105,18 @@ const DRAFT_KEY_PREFIX = "chama_create_draft_";
 const FIRST_PUBLISH_KEY_PREFIX = "chama_first_publish_done_";
 const MAX_MENU_ITEMS = 20;
 const MAX_MENU_IMAGE_DATA_URL_CHARS = 500_000;
+const MENU_IMAGE_ACCEPT = [
+  "image/*",
+  ".avif",
+  ".bmp",
+  ".gif",
+  ".heic",
+  ".heif",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".webp",
+].join(",");
 const LENDING_TIER_LIMITS = [
   { tier: 1, maxSats: 50_000, label: "Starter" },
   { tier: 2, maxSats: 200_000, label: "Proven" },
@@ -151,6 +163,30 @@ function normalizeMenuDraftItem(raw: any): MenuDraftItem | null {
     apr: typeof raw.apr === "string" || typeof raw.apr === "number" ? String(raw.apr) : "",
     trustTier: typeof raw.trustTier === "string" || typeof raw.trustTier === "number" ? String(raw.trustTier) : "",
   };
+}
+
+function inferImageMimeType(file: File): string | null {
+  if (file.type.startsWith("image/")) return file.type;
+  const ext = file.name.split(".").pop()?.toLowerCase();
+  if (!ext) return null;
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "png") return "image/png";
+  if (ext === "webp") return "image/webp";
+  if (ext === "gif") return "image/gif";
+  if (ext === "avif") return "image/avif";
+  if (ext === "heic") return "image/heic";
+  if (ext === "heif") return "image/heif";
+  if (ext === "bmp") return "image/bmp";
+  return null;
+}
+
+function normalizeImageDataUrl(file: File, dataUrl: string): string | null {
+  if (dataUrl.startsWith("data:image/")) return dataUrl;
+  const mimeType = inferImageMimeType(file);
+  if (!mimeType) return null;
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex < 0) return null;
+  return `data:${mimeType};base64,${dataUrl.slice(commaIndex + 1)}`;
 }
 
 function normalizeFormState(raw: any, currency = "USD"): FormState {
@@ -1171,11 +1207,12 @@ function Step2({
     const reader = new FileReader();
     reader.onload = () => {
       const result = typeof reader.result === "string" ? reader.result : "";
-      if (!result.startsWith("data:image/") || result.length > MAX_MENU_IMAGE_DATA_URL_CHARS) {
-        window.alert("That image is too large for this release. Try a smaller compressed photo.");
+      const imageDataUrl = normalizeImageDataUrl(file, result);
+      if (!imageDataUrl || imageDataUrl.length > MAX_MENU_IMAGE_DATA_URL_CHARS) {
+        window.alert("That file does not look like a supported photo, or it is too large for this release. Try JPG, PNG, WebP, GIF, AVIF, HEIC, HEIF, or BMP.");
         return;
       }
-      updateMenuItem(id, { imageDataUrl: result });
+      updateMenuItem(id, { imageDataUrl });
     };
     reader.readAsDataURL(file);
   };
@@ -1571,7 +1608,7 @@ function Step2({
                       {item.imageDataUrl ? "Change photo" : "+ Photo"}
                       <input
                         type="file"
-                        accept="image/*"
+                        accept={MENU_IMAGE_ACCEPT}
                         onChange={e => updateMenuImage(item.id, e.target.files?.[0] ?? null)}
                         style={{ display: "none" }}
                       />

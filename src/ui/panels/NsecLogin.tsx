@@ -16,6 +16,7 @@ export function NsecLogin({
     label: string;
     onClick: () => void;
     disabled?: boolean;
+    tone?: "accent" | "neutral";
   };
 }) {
   const isNative = Capacitor.isNativePlatform();
@@ -119,6 +120,7 @@ export function NsecLogin({
   }
 
   if (friendly && mode === "choice") {
+    const secondaryAccent = friendlySecondary?.tone === "accent";
     return (
       <div style={{ width: "100%", maxWidth: 360 }}>
         <button
@@ -146,8 +148,9 @@ export function NsecLogin({
           disabled={friendlySecondary?.disabled}
           style={{
             width: "100%", padding: "13px", borderRadius: T.r,
-            background: T.surface, border: `1px solid ${T.border}`,
-            color: friendlySecondary?.disabled ? T.muted : T.text,
+            background: secondaryAccent ? T.accentDim : T.surface,
+            border: `1px solid ${secondaryAccent ? `${T.accent}99` : T.border}`,
+            color: friendlySecondary?.disabled ? T.muted : secondaryAccent ? T.accent : T.text,
             fontFamily: T.sans, fontSize: 13,
             fontWeight: 700,
             cursor: friendlySecondary?.disabled ? "default" : "pointer",

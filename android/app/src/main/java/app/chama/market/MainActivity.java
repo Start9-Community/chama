@@ -2,7 +2,10 @@ package app.chama.market;
 
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.os.Bundle;
+import android.view.Window;
 import android.webkit.WebView;
 
 import com.getcapacitor.BridgeActivity;
@@ -13,8 +16,13 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        supportRequestWindowFeature(Window.FEATURE_NO_TITLE);
+        getWindow().setBackgroundDrawable(new ColorDrawable(Color.rgb(5, 5, 10)));
         clearWebViewCacheAfterAppUpdate();
         super.onCreate(savedInstanceState);
+        getWindow().setBackgroundDrawable(new ColorDrawable(Color.rgb(5, 5, 10)));
+        getWindow().setStatusBarColor(Color.rgb(5, 5, 10));
+        getWindow().setNavigationBarColor(Color.rgb(5, 5, 10));
         if (getSupportActionBar() != null) {
             getSupportActionBar().hide();
         }

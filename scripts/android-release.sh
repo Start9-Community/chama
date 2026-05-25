@@ -14,8 +14,9 @@ set -euo pipefail
 #
 # Default mode builds the APK and prepares release assets in /private/tmp.
 # --github-release uploads those assets to the matching GitHub tag/release.
-# Checksum signing is automatic when gpg has a secret key available. Set
-# CHAMA_RELEASE_REQUIRE_ASC=1 to fail if app-release.apk.sha256.asc is missing.
+# Checksum signing is automatic when gpg has a secret key available, or when
+# Keybase has a local PGP key available. Set CHAMA_RELEASE_REQUIRE_ASC=1 to
+# fail if app-release.apk.sha256.asc is missing.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_DIR="$ROOT_DIR/android"
@@ -85,6 +86,11 @@ has_gpg_secret_key() {
     gpg --list-secret-keys --with-colons 2>/dev/null | grep -q '^sec'
 }
 
+has_keybase_pgp_key() {
+  command -v keybase >/dev/null 2>&1 &&
+    keybase pgp list >/dev/null 2>&1
+}
+
 verify_checksum_signature() {
   if [ ! -f "$ASC_FILE" ]; then
     return 1
@@ -129,12 +135,22 @@ maybe_sign_checksum() {
   fi
 
   if ! has_gpg_secret_key; then
+    if has_keybase_pgp_key; then
+      local keybase_args=(pgp sign --detached --infile "$SHA_FILE" --outfile "$ASC_FILE")
+      if [ -n "${CHAMA_RELEASE_KEYBASE_KEY:-}" ]; then
+        keybase_args+=(--key "$CHAMA_RELEASE_KEYBASE_KEY")
+      fi
+      keybase "${keybase_args[@]}"
+      echo "✅ Checksum signature created with Keybase: $ASC_FILE"
+      return 0
+    fi
+
     if [ "$SIGN_CHECKSUM" = "yes" ] || [ "${CHAMA_RELEASE_REQUIRE_ASC:-}" = "1" ]; then
-      echo "❌ No local gpg secret key found, and checksum signature is required."
+      echo "❌ No local gpg secret key or Keybase PGP key found, and checksum signature is required."
       exit 1
     fi
-    echo "⚠️  No local gpg secret key found; checksum signature not created."
-    echo "   Add $ASC_FILE manually, or import a signing key and rerun."
+    echo "⚠️  No local gpg secret key or Keybase PGP key found; checksum signature not created."
+    echo "   Add $ASC_FILE manually, import a gpg signing key, or sign in to Keybase and rerun."
     return 0
   fi
 
