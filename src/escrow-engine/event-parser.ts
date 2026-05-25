@@ -58,6 +58,97 @@ const KIND_TO_TYPE: Record<number, string> = {
   [EscrowEventKind.PERIOD_RELEASE]: "escrow:period_release",
 };
 
+function isFulfillment(v: unknown): v is "physical" | "service" | "digital" {
+  return v === "physical" || v === "service" || v === "digital";
+}
+
+function isMenuItemKind(v: unknown): boolean {
+  return v === "exchange-bracket" || v === "bill" || v === "loan" || v === "market-item";
+}
+
+function isPositiveNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+function isOptionalPositiveNumber(v: unknown): boolean {
+  return v === undefined || isPositiveNumber(v);
+}
+
+function validateMenuItem(data: unknown): boolean {
+  const d = data as Record<string, unknown>;
+  if (!d || typeof d !== "object") return false;
+  const minAmount = d.minAmountMsats;
+  const maxAmount = d.maxAmountMsats;
+  const hasRange = minAmount !== undefined || maxAmount !== undefined;
+  if (d.kind !== undefined && !isMenuItemKind(d.kind)) return false;
+  if (!isOptionalPositiveNumber(minAmount) || !isOptionalPositiveNumber(maxAmount)) return false;
+  if (isPositiveNumber(minAmount) && isPositiveNumber(maxAmount) && minAmount > maxAmount) return false;
+  if (d.kind === "exchange-bracket" && (!isPositiveNumber(minAmount) || !isPositiveNumber(maxAmount))) return false;
+  if (hasRange && d.kind !== undefined && d.kind !== "exchange-bracket") return false;
+  if (d.imageDataUrl !== undefined) {
+    if (typeof d.imageDataUrl !== "string" || d.imageDataUrl.length > 500_000) return false;
+    if (!d.imageDataUrl.startsWith("data:image/")) return false;
+  }
+  return (
+    typeof d.id === "string" && d.id.length > 0 &&
+    typeof d.label === "string" && d.label.trim().length > 0 &&
+    isPositiveNumber(d.amountMsats) &&
+    (d.description === undefined || typeof d.description === "string") &&
+    (d.fiatAmount === undefined || typeof d.fiatAmount === "number") &&
+    (d.fiatCurrency === undefined || typeof d.fiatCurrency === "string") &&
+    (d.fulfillment === undefined || isFulfillment(d.fulfillment)) &&
+    isOptionalPositiveNumber(d.dueAt) &&
+    isOptionalPositiveNumber(d.termDays) &&
+    isOptionalPositiveNumber(d.aprBps) &&
+    isOptionalPositiveNumber(d.trustTier)
+  );
+}
+
+function validateMenuItems(data: unknown): boolean {
+  if (data === undefined) return true;
+  if (!Array.isArray(data) || data.length === 0 || data.length > 50) return false;
+  const ids = new Set<string>();
+  for (const item of data) {
+    if (!validateMenuItem(item)) return false;
+    const id = (item as Record<string, unknown>).id as string;
+    if (ids.has(id)) return false;
+    ids.add(id);
+  }
+  return true;
+}
+
+function validateSelectedMenuItem(data: unknown): boolean {
+  const d = data as Record<string, unknown>;
+  if (!d || typeof d !== "object") return false;
+  return validateMenuItem({
+    id: d.itemId,
+    label: d.label,
+    amountMsats: d.amountMsats,
+    kind: d.kind,
+    minAmountMsats: d.minAmountMsats,
+    maxAmountMsats: d.maxAmountMsats,
+    description: d.description,
+    fiatAmount: d.fiatAmount,
+    fiatCurrency: d.fiatCurrency,
+    fulfillment: d.fulfillment,
+    imageDataUrl: d.imageDataUrl,
+    dueAt: d.dueAt,
+    termDays: d.termDays,
+    aprBps: d.aprBps,
+    trustTier: d.trustTier,
+  }) &&
+    typeof d.quantity === "number" &&
+    Number.isInteger(d.quantity) &&
+    d.quantity > 0 &&
+    d.quantity <= 99;
+}
+
+function validateSelectedMenuItems(data: unknown): boolean {
+  if (data === undefined) return true;
+  if (!Array.isArray(data) || data.length === 0 || data.length > 50) return false;
+  return data.every(validateSelectedMenuItem);
+}
+
 // ── Parse result type ─────────────────────────────────────────────────────
 
 export type ParseResult =
@@ -116,6 +207,7 @@ function validateCreatePayload(data: unknown): data is CreatePayload {
       && d.fulfillment !== "digital") {
     return false;
   }
+  if (!validateMenuItems(d.items)) return false;
   return (
     d.type === "escrow:create" &&
     typeof d.description === "string" &&
@@ -131,10 +223,18 @@ function validateCreatePayload(data: unknown): data is CreatePayload {
 
 function validateJoinPayload(data: unknown): data is JoinPayload {
   const d = data as Record<string, unknown>;
+  if (!validateSelectedMenuItems(d.selectedItems)) return false;
+  if (d.amountMsats !== undefined && (typeof d.amountMsats !== "number" || d.amountMsats <= 0)) {
+    return false;
+  }
+  if (d.orderFinalizedAt !== undefined && (typeof d.orderFinalizedAt !== "number" || d.orderFinalizedAt <= 0)) {
+    return false;
+  }
   return (
     d.type === "escrow:join" &&
     typeof d.role === "string" && Object.values(Role).includes(d.role as Role) &&
-    typeof d.joinedAt === "number"
+    typeof d.joinedAt === "number" &&
+    (d.holdExpiresAt === undefined || typeof d.holdExpiresAt === "number")
   );
 }
 
@@ -174,6 +274,7 @@ function validateLockPayload(data: unknown): data is LockPayload {
       if (typeof v !== "string" || v.length === 0) return false;
     }
   }
+  if (!validateSelectedMenuItems(d.selectedItems)) return false;
   return (
     d.type === "escrow:lock" &&
     typeof d.notesHash === "string" &&

@@ -16,7 +16,12 @@
 import { useState } from "react";
 import { T } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
+import {
+  addOrTouchSavedNwcConnection,
+  type SavedNwcConnection,
+} from "../../payments/nwc-connections.js";
 import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
@@ -32,6 +37,8 @@ export interface RecoveryPayoutModalProps {
   balanceMsats: number;
   /** Saved Lightning Address payout destinations for the picker's Tier 1 list. */
   savedDestinations: PayoutDestination[];
+  /** Saved NWC payout/funding wallets for the picker. */
+  savedNwcConnections?: SavedNwcConnection[];
   /** Title shown in the modal header. Caller customizes per surface
    *  (e.g. "Recover sats", "Recover & switch Chama"). */
   title: string;
@@ -62,6 +69,7 @@ type Stage =
 export function RecoveryPayoutModal({
   balanceMsats,
   savedDestinations,
+  savedNwcConnections = [],
   title,
   subtitle,
   payInvoice,
@@ -78,16 +86,19 @@ export function RecoveryPayoutModal({
   const reserveSats = manualPayoutSats === null
     ? lightningPayoutReserveSats(balanceMsats)
     : Math.max(0, Math.ceil((Math.max(0, balanceMsats) - payoutSats * 1000) / 1000));
-  const feeReserveNote = reserveSats > 0
-    ? `About ${reserveSats.toLocaleString()} sats stays available for Lightning fees.`
-    : "";
+  const feeReserveNote = reserveSats > 0 ? (
+    <>
+      About <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+    </>
+  ) : null;
   const pickerSubtitle =
     subtitle
-      ? [subtitle, feeReserveNote].filter(Boolean).join(" ")
+      ? <>{subtitle}{feeReserveNote && <> {feeReserveNote}</>}</>
       : (
-          reserveSats > 0
-            ? `Send ${payoutSats.toLocaleString()} sats to your Lightning address. ${feeReserveNote}`
-            : `Send ${payoutSats.toLocaleString()} sats to your Lightning address`
+          <>
+            Send <BitcoinAmount sats={payoutSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> to your Lightning address
+            {feeReserveNote && <>. {feeReserveNote}</>}
+          </>
         );
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
 
@@ -96,6 +107,7 @@ export function RecoveryPayoutModal({
       <DestinationPicker
         amountSats={payoutSats}
         savedDestinations={savedDestinations}
+        savedNwcConnections={savedNwcConnections}
         title={title}
         subtitle={pickerSubtitle}
         onResolve={async (bolt11, opts) => {
@@ -115,6 +127,9 @@ export function RecoveryPayoutModal({
           });
           setStage({ kind: "terminal", terminal });
           if (terminal.kind === "done") {
+            if (opts.saveNwcAfter && opts.nwcConnectionString) {
+              try { addOrTouchSavedNwcConnection(opts.nwcConnectionString); } catch {}
+            }
             setTimeout(() => onClose(terminal), 1500);
           }
         }}
@@ -148,7 +163,7 @@ export function RecoveryPayoutModal({
               {title.toUpperCase()}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
-              {payoutSats.toLocaleString()} <span style={{ color: T.muted, fontWeight: 600, fontSize: 14 }}>sats</span>
+              <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
             </div>
           </div>
           {stage.kind === "terminal" && (
@@ -269,7 +284,7 @@ function TerminalPanel({
             cursor: "pointer", marginBottom: 8,
           }}
         >
-          Try {retrySmallerSats.toLocaleString()} sats
+          Try <BitcoinAmount sats={retrySmallerSats} size={12} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
         </button>
       )}
       <button

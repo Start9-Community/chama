@@ -21,9 +21,15 @@ import {
   Outcome,
   TERMINAL_STATES,
   TRULY_TERMINAL_STATES,
+  getEffectiveParticipantAt,
+  JOIN_HOLD_LOCK_GRACE_SECONDS,
+  joinHoldExpiresAt,
+  roleUsesJoinHold,
   type EscrowState,
   type ParsedEscrowEvent,
   type CreatePayload,
+  type MenuItem,
+  type SelectedMenuItem,
   type JoinPayload,
   type LockPayload,
   type VotePayload,
@@ -54,7 +60,23 @@ function err(code: string, message: string, eventId?: string, details?: Record<s
 function cloneState(state: EscrowState): EscrowState {
   return {
     ...state,
+    items: state.items ? state.items.map(item => ({ ...item })) : undefined,
     participants: { ...state.participants },
+    joinHolds: state.joinHolds
+      ? Object.fromEntries(
+          Object.entries(state.joinHolds).map(([role, hold]) => [
+            role,
+            hold
+              ? {
+                  ...hold,
+                  selectedItems: hold.selectedItems
+                    ? hold.selectedItems.map(item => ({ ...item }))
+                    : undefined,
+                }
+              : hold,
+          ]),
+        ) as EscrowState["joinHolds"]
+      : undefined,
     communityArbiters: [...state.communityArbiters],
     subscription: state.subscription ? {
       ...state.subscription,
@@ -67,11 +89,83 @@ function cloneState(state: EscrowState): EscrowState {
       ...state.lock,
       shares: new Map(state.lock.shares),
       handle: state.lock.handle ? { ...state.lock.handle } : null,
+      selectedItems: state.lock.selectedItems
+        ? state.lock.selectedItems.map(item => ({ ...item }))
+        : undefined,
     },
     claim: { ...state.claim },
     eventChain: [...state.eventChain],
     chatMessages: [...state.chatMessages],
   };
+}
+
+function cloneMenuItem(item: MenuItem): MenuItem {
+  return {
+    id: item.id,
+    label: item.label.trim(),
+    amountMsats: item.amountMsats,
+    ...(item.kind ? { kind: item.kind } : {}),
+    ...(item.minAmountMsats !== undefined ? { minAmountMsats: item.minAmountMsats } : {}),
+    ...(item.maxAmountMsats !== undefined ? { maxAmountMsats: item.maxAmountMsats } : {}),
+    ...(item.description ? { description: item.description } : {}),
+    ...(item.fiatAmount !== undefined ? { fiatAmount: item.fiatAmount } : {}),
+    ...(item.fiatCurrency ? { fiatCurrency: item.fiatCurrency } : {}),
+    ...(item.fulfillment ? { fulfillment: item.fulfillment } : {}),
+    ...(item.imageDataUrl ? { imageDataUrl: item.imageDataUrl } : {}),
+    ...(item.dueAt !== undefined ? { dueAt: item.dueAt } : {}),
+    ...(item.termDays !== undefined ? { termDays: item.termDays } : {}),
+    ...(item.aprBps !== undefined ? { aprBps: item.aprBps } : {}),
+    ...(item.trustTier !== undefined ? { trustTier: item.trustTier } : {}),
+  };
+}
+
+function cloneSelectedMenuItem(item: SelectedMenuItem): SelectedMenuItem {
+  return {
+    itemId: item.itemId,
+    label: item.label.trim(),
+    amountMsats: item.amountMsats,
+    quantity: item.quantity,
+    ...(item.kind ? { kind: item.kind } : {}),
+    ...(item.minAmountMsats !== undefined ? { minAmountMsats: item.minAmountMsats } : {}),
+    ...(item.maxAmountMsats !== undefined ? { maxAmountMsats: item.maxAmountMsats } : {}),
+    ...(item.description ? { description: item.description } : {}),
+    ...(item.fiatAmount !== undefined ? { fiatAmount: item.fiatAmount } : {}),
+    ...(item.fiatCurrency ? { fiatCurrency: item.fiatCurrency } : {}),
+    ...(item.fulfillment ? { fulfillment: item.fulfillment } : {}),
+    ...(item.imageDataUrl ? { imageDataUrl: item.imageDataUrl } : {}),
+    ...(item.dueAt !== undefined ? { dueAt: item.dueAt } : {}),
+    ...(item.termDays !== undefined ? { termDays: item.termDays } : {}),
+    ...(item.aprBps !== undefined ? { aprBps: item.aprBps } : {}),
+    ...(item.trustTier !== undefined ? { trustTier: item.trustTier } : {}),
+  };
+}
+
+function selectedItemsTotalMsats(items: SelectedMenuItem[]): number {
+  return items.reduce((sum, item) => sum + item.amountMsats * item.quantity, 0);
+}
+
+function selectedItemsKey(items: SelectedMenuItem[] | undefined): string {
+  return (items ?? [])
+    .map(item => [
+      item.itemId,
+      item.label,
+      item.amountMsats,
+      item.quantity,
+      item.kind ?? "",
+      item.fiatCurrency ?? "",
+    ].join(":"))
+    .sort()
+    .join("|");
+}
+
+function isAmountBracket(item: MenuItem): boolean {
+  return item.kind === "exchange-bracket"
+    || item.minAmountMsats !== undefined
+    || item.maxAmountMsats !== undefined;
+}
+
+function menuSelectorRoleFor(category: string): Role {
+  return category === "lending" ? Role.SELLER : Role.BUYER;
 }
 
 // ── Helper: check if pubkey is a known participant ────────────────────────
@@ -165,6 +259,9 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
       ? (p.fulfillment ?? "physical")
       : "service";
 
+  const listingExpiresAt = event.timestamp + p.expirySeconds;
+  const items = p.items?.map(cloneMenuItem);
+
   const state: EscrowState = {
     id: event.escrowId,
     status: EscrowStatus.CREATED,
@@ -173,10 +270,12 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
     fiatAmount: p.fiatAmount,
     fiatCurrency: p.fiatCurrency,
     category: p.category,
+    items,
     fulfillment,
     community: p.community ?? null,
     mintUrl: p.mintUrl,
     participants,
+    joinHolds: {},
     initiator: { pubkey: event.pubkey, role: initiatorRole },
     communityArbiters: p.communityArbiters || [],
     subscription: null,
@@ -194,13 +293,16 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
       lockedAt: null,
       shares: new Map(),
       handle: null,
+      selectedItems: undefined,
     },
     claim: {
       claimerRole: null,
       claimedAt: null,
     },
     createdAt: event.timestamp,
-    expiresAt: event.timestamp + p.expirySeconds,
+    listingExpiresAt,
+    tradeTimeoutSeconds: p.expirySeconds,
+    expiresAt: listingExpiresAt,
     resolvedAt: null,
     completedAt: null,
     cancelledAt: null,
@@ -226,6 +328,42 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
 //     (legacy / pre-community trades).
 //   - Cannot JOIN as the initiator's role.
 
+function getActiveRole(state: EscrowState, pubkey: string, atSec: number): Role | null {
+  if (getEffectiveParticipantAt(state, Role.BUYER, atSec) === pubkey) return Role.BUYER;
+  if (getEffectiveParticipantAt(state, Role.SELLER, atSec) === pubkey) return Role.SELLER;
+  if (getEffectiveParticipantAt(state, Role.ARBITER, atSec) === pubkey) return Role.ARBITER;
+  return null;
+}
+
+function tradeTimeoutSecondsFor(state: EscrowState): number {
+  return state.tradeTimeoutSeconds ?? Math.max(1, state.expiresAt - state.createdAt);
+}
+
+function hasJoinOrderPayload(payload: JoinPayload): boolean {
+  return !!(
+    (payload.selectedItems && payload.selectedItems.length > 0)
+    || (payload.amountMsats !== undefined && payload.amountMsats > 0)
+    || payload.orderFinalizedAt !== undefined
+  );
+}
+
+function inferLegacyInitialOrderFinalizedAt(payload: JoinPayload, existingHold: unknown): number | undefined {
+  if (payload.orderFinalizedAt !== undefined) return payload.orderFinalizedAt;
+  if (existingHold) return undefined;
+
+  const selectedItems = payload.selectedItems;
+  if (!selectedItems || selectedItems.length === 0) return undefined;
+
+  const selectedTotal = selectedItemsTotalMsats(selectedItems);
+  if (selectedTotal <= 0 || payload.amountMsats !== selectedTotal) return undefined;
+
+  // Historical menu/order trades briefly wrote the selected cart on the
+  // first JOIN before the explicit orderFinalizedAt field existed. Newer
+  // draft carts are follow-up JOINs on an existing hold, so they do not
+  // hit this path.
+  return payload.joinedAt;
+}
+
 function handleJoin(state: EscrowState, event: ParsedEscrowEvent<JoinPayload>): TransitionResult {
   const p = event.payload;
 
@@ -238,20 +376,56 @@ function handleJoin(state: EscrowState, event: ParsedEscrowEvent<JoinPayload>): 
     return err("ROLE_CONFLICT", `Cannot join as ${p.role} — that's the initiator's role`, event.raw.id);
   }
 
-  // Idempotent: same pubkey re-joining the same role is a benign relay echo
-  if (state.participants[p.role] === event.pubkey) {
+  const activeRolePubkey = getEffectiveParticipantAt(state, p.role, event.timestamp);
+
+  // Idempotent while the hold is live: same pubkey re-joining the same
+  // role is a benign relay echo. Once the timed hold expires, a new JOIN
+  // from the same pubkey refreshes the reservation.
+  if (activeRolePubkey === event.pubkey) {
+    if (roleUsesJoinHold(p.role, state.initiator.role) && hasJoinOrderPayload(p)) {
+      const next = cloneState(state);
+      next.joinHolds = { ...(next.joinHolds ?? {}) };
+      const existingHold = next.joinHolds[p.role];
+      if (existingHold?.orderFinalizedAt) {
+        return err(
+          "ORDER_ALREADY_FINALIZED",
+          "This order has already been finalized and can no longer be changed",
+          event.raw.id,
+        );
+      }
+      const orderFinalizedAt = inferLegacyInitialOrderFinalizedAt(p, existingHold);
+      next.joinHolds[p.role] = {
+        role: p.role,
+        pubkey: event.pubkey,
+        joinedAt: existingHold?.joinedAt ?? p.joinedAt,
+        expiresAt: existingHold?.expiresAt ?? p.holdExpiresAt ?? joinHoldExpiresAt(p.joinedAt),
+        eventId: event.raw.id,
+        ...(p.selectedItems && p.selectedItems.length > 0
+          ? { selectedItems: p.selectedItems.map(cloneSelectedMenuItem) }
+          : {}),
+        ...(p.amountMsats !== undefined && p.amountMsats > 0
+          ? { amountMsats: p.amountMsats }
+          : {}),
+        ...(orderFinalizedAt !== undefined
+          ? { orderFinalizedAt }
+          : {}),
+      };
+      next.eventChain.push(event);
+      return { ok: true, state: next };
+    }
     return err("ALREADY_JOINED", "Pubkey is already a participant in this role", event.raw.id);
   }
 
-  // Slot already filled by a different pubkey — reject
-  if (state.participants[p.role] !== null) {
+  // Slot already filled by a different active pubkey — reject. If the
+  // only occupant is an expired buyer/seller hold, the new JOIN replaces it.
+  if (activeRolePubkey !== null) {
     return err("ROLE_TAKEN", `Role ${p.role} is already filled`, event.raw.id);
   }
 
   // Same npub cannot sit on both sides of a trade. This is distinct from
   // ROLE_TAKEN: the requested slot may be empty, but the signer already
   // owns another role in the same escrow.
-  const existingRole = getRole(state, event.pubkey);
+  const existingRole = getActiveRole(state, event.pubkey, event.timestamp);
   if (existingRole !== null) {
     return err("ALREADY_JOINED",
       `Pubkey is already the ${existingRole}; cannot join as ${p.role}`,
@@ -280,6 +454,29 @@ function handleJoin(state: EscrowState, event: ParsedEscrowEvent<JoinPayload>): 
 
   const next = cloneState(state);
   next.participants[p.role] = event.pubkey;
+  next.joinHolds = { ...(next.joinHolds ?? {}) };
+
+  if (roleUsesJoinHold(p.role, state.initiator.role)) {
+    const orderFinalizedAt = inferLegacyInitialOrderFinalizedAt(p, undefined);
+    next.joinHolds[p.role] = {
+      role: p.role,
+      pubkey: event.pubkey,
+      joinedAt: p.joinedAt,
+      expiresAt: p.holdExpiresAt ?? joinHoldExpiresAt(p.joinedAt),
+      eventId: event.raw.id,
+      ...(p.selectedItems && p.selectedItems.length > 0
+        ? { selectedItems: p.selectedItems.map(cloneSelectedMenuItem) }
+        : {}),
+      ...(p.amountMsats !== undefined && p.amountMsats > 0
+        ? { amountMsats: p.amountMsats }
+        : {}),
+      ...(orderFinalizedAt !== undefined
+        ? { orderFinalizedAt }
+        : {}),
+    };
+  } else {
+    delete next.joinHolds[p.role];
+  }
 
   // If arbiter is joining with fee terms, record them
   if (p.role === Role.ARBITER && p.arbiterFeeMsats !== undefined) {
@@ -317,7 +514,7 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   // The locker must be the seller's pubkey (or buyer for marketplace) —
   // they're a participant from the moment CREATE published, so getRole
   // works without any prior JOIN.
-  const lockerRole = getRole(state, event.pubkey);
+  const lockerRole = getActiveRole(state, event.pubkey, event.timestamp);
   if (!lockerRole) {
     return err("NOT_PARTICIPANT", "Locker is not a participant", event.raw.id);
   }
@@ -354,7 +551,7 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   }
 
   // If buyer JOINed earlier as ACK, LOCK's buyerPubkey must agree.
-  const joinedBuyer = state.participants[Role.BUYER];
+  const joinedBuyer = getEffectiveParticipantAt(state, Role.BUYER, event.timestamp, { includeLockGrace: true });
   if (joinedBuyer && joinedBuyer !== p.buyerPubkey) {
     return err("BUYER_PUBKEY_MISMATCH",
       `LOCK buyerPubkey ${p.buyerPubkey.slice(0, 8)}… disagrees with prior JOIN ${joinedBuyer.slice(0, 8)}…`,
@@ -363,7 +560,7 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   }
 
   // Same for arbiter.
-  const joinedArbiter = state.participants[Role.ARBITER];
+  const joinedArbiter = getEffectiveParticipantAt(state, Role.ARBITER, event.timestamp, { includeLockGrace: true });
   if (joinedArbiter && joinedArbiter !== p.arbiterPubkey) {
     return err("ARBITER_PUBKEY_MISMATCH",
       `LOCK arbiterPubkey ${p.arbiterPubkey.slice(0, 8)}… disagrees with prior JOIN ${joinedArbiter.slice(0, 8)}…`,
@@ -395,6 +592,115 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
     return err("INVALID_SHARES", "LOCK must include exactly 3 SSS shares", event.raw.id);
   }
 
+  const selectedItems = p.selectedItems?.map(cloneSelectedMenuItem);
+  let expectedLockAmountMsats = state.amountMsats;
+
+  if (state.items && state.items.length > 0) {
+    if (!selectedItems || selectedItems.length === 0) {
+      return err(
+        "MISSING_SELECTED_ITEMS",
+        "LOCK on a menu listing must include selectedItems",
+        event.raw.id,
+      );
+    }
+
+    const menuById = new Map(state.items.map(item => [item.id, item]));
+    const seen = new Set<string>();
+    for (const selected of selectedItems) {
+      const menuItem = menuById.get(selected.itemId);
+      if (!menuItem) {
+        return err(
+          "UNKNOWN_MENU_ITEM",
+          `LOCK selected menu item ${selected.itemId} is not on this listing`,
+          event.raw.id,
+        );
+      }
+      if (seen.has(selected.itemId)) {
+        return err("DUPLICATE_MENU_ITEM", "LOCK selectedItems must merge quantities per item", event.raw.id);
+      }
+      seen.add(selected.itemId);
+      if (menuItem.label !== selected.label) {
+        return err(
+          "MENU_ITEM_MISMATCH",
+          "LOCK selectedItems must snapshot the listing menu item label",
+          event.raw.id,
+        );
+      }
+      if (isAmountBracket(menuItem)) {
+        const minAmount = menuItem.minAmountMsats ?? menuItem.amountMsats;
+        const maxAmount = menuItem.maxAmountMsats ?? menuItem.amountMsats;
+        if (selected.quantity !== 1) {
+          return err(
+            "MENU_ITEM_MISMATCH",
+            "LOCK selected bracket items must use quantity 1",
+            event.raw.id,
+          );
+        }
+        if (selected.amountMsats < minAmount || selected.amountMsats > maxAmount) {
+          return err(
+            "MENU_ITEM_MISMATCH",
+            "LOCK selected bracket amount must be within the listing min/max",
+            event.raw.id,
+          );
+        }
+        if (selected.kind !== undefined && selected.kind !== menuItem.kind) {
+          return err(
+            "MENU_ITEM_MISMATCH",
+            "LOCK selectedItems must snapshot the listing menu item kind",
+            event.raw.id,
+          );
+        }
+        if (selected.fiatCurrency !== undefined && selected.fiatCurrency !== menuItem.fiatCurrency) {
+          return err(
+            "MENU_ITEM_MISMATCH",
+            "LOCK selectedItems must keep the listing fiat currency",
+            event.raw.id,
+          );
+        }
+      } else if (menuItem.amountMsats !== selected.amountMsats) {
+        return err(
+          "MENU_ITEM_MISMATCH",
+          "LOCK selectedItems must snapshot the listing menu item amount",
+          event.raw.id,
+        );
+      }
+    }
+
+    const selectorRole = menuSelectorRoleFor(state.category);
+    if (expectedLocker && expectedLocker !== selectorRole) {
+      const finalizedHold = state.joinHolds?.[selectorRole];
+      if (
+        !finalizedHold ||
+        finalizedHold.expiresAt + JOIN_HOLD_LOCK_GRACE_SECONDS <= event.timestamp ||
+        !finalizedHold.orderFinalizedAt
+      ) {
+        return err(
+          "ORDER_NOT_FINALIZED",
+          `LOCK must wait for the ${selectorRole} to finalize the order`,
+          event.raw.id,
+        );
+      }
+      if (selectedItemsKey(finalizedHold.selectedItems) !== selectedItemsKey(selectedItems)) {
+        return err(
+          "ORDER_MISMATCH",
+          "LOCK selectedItems must match the finalized order",
+          event.raw.id,
+        );
+      }
+    }
+
+    expectedLockAmountMsats = selectedItemsTotalMsats(selectedItems);
+    if (expectedLockAmountMsats <= 0) {
+      return err("INVALID_MENU_TOTAL", "LOCK selectedItems must total a positive amount", event.raw.id);
+    }
+  } else if (selectedItems && selectedItems.length > 0) {
+    return err(
+      "UNEXPECTED_SELECTED_ITEMS",
+      "LOCK selectedItems can only be used on menu listings",
+      event.raw.id,
+    );
+  }
+
   // Current browser/Fedi milestone: 2-way amount sum.
   // Platform/ambient fee policy is no longer part of LOCK math. The
   // reconstructed ecash token settles as one payload until a dedicated
@@ -406,19 +712,24 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   const legacyPlatform = (p as unknown as { platformFeeMsats?: number }).platformFeeMsats;
   const newSum = seller + arbiter;
   const legacySum = newSum + (typeof legacyPlatform === "number" ? legacyPlatform : 0);
-  const ok = newSum === state.amountMsats || legacySum === state.amountMsats;
+  const ok = newSum === expectedLockAmountMsats || legacySum === expectedLockAmountMsats;
   if (!ok) {
     return err("AMOUNT_MISMATCH",
-      `Fee split (${newSum}) doesn't match escrow amount (${state.amountMsats})`,
+      `Fee split (${newSum}) doesn't match escrow amount (${expectedLockAmountMsats})`,
       event.raw.id,
-      { total: newSum, expected: state.amountMsats }
+      { total: newSum, expected: expectedLockAmountMsats }
     );
   }
 
   const next = cloneState(state);
   next.status = EscrowStatus.LOCKED;
+  next.amountMsats = expectedLockAmountMsats;
   next.lock.notesHash = p.notesHash;
   next.lock.lockedAt = p.lockedAt;
+  next.lock.selectedItems = selectedItems;
+  next.listingExpiresAt = state.listingExpiresAt ?? state.expiresAt;
+  next.tradeTimeoutSeconds = tradeTimeoutSecondsFor(state);
+  next.expiresAt = p.lockedAt + next.tradeTimeoutSeconds;
 
   // Atomic-funding: LOCK populates buyer + arbiter slots. If they were
   // already set by prior JOIN ACKs, this is a no-op (consistency was

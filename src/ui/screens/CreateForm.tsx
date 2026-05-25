@@ -35,13 +35,14 @@
 //     publish). Save-draft button + Publish button.
 
 import { useState, useEffect, type WheelEvent } from "react";
+import { type MenuItem } from "../../escrow-engine/types.js";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
 import { getUserCommunitySlug } from "../../communities/storage.js";
 import { defaultCurrencyForCommunity } from "../../communities/currency.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
 import { type ArbiterWarning, displayCounterpartyName, resolveCreateMintUrl } from "../decisions.js";
-import { T, inputStyle } from "../theme.js";
+import { T, inputStyle, fmtSats } from "../theme.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_SATS,
   minimumAtomicFundingMessage,
@@ -53,9 +54,11 @@ import {
   removeScopedStorageItem,
   setScopedStorageItem,
 } from "../../storage/user-scope.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 
 type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
+type ListingMode = "single" | "menu";
 
 const VERTICALS: { id: Vertical; label: string; icon: string; description: string }[] = [
   { id: "p2p-trade", label: "Exchange", icon: "⚡", description: "Swap sats for fiat with another user." },
@@ -65,6 +68,7 @@ const VERTICALS: { id: Vertical; label: string; icon: string; description: strin
 ];
 
 interface FormState {
+  listingMode: ListingMode;
   desc: string;
   sats: string;
   fiat: string;
@@ -73,6 +77,7 @@ interface FormState {
   isSubscription: boolean;
   periods: string;
   intervalDays: string;
+  menuItems: MenuDraftItem[];
 }
 
 interface SavedDraft {
@@ -81,8 +86,268 @@ interface SavedDraft {
   savedAt: number;
 }
 
+interface MenuDraftItem {
+  id: string;
+  label: string;
+  sats: string;
+  maxSats: string;
+  fiat: string;
+  description: string;
+  fulfillment: Fulfillment;
+  imageDataUrl: string;
+  dueDate: string;
+  termDays: string;
+  apr: string;
+  trustTier: string;
+}
+
 const DRAFT_KEY_PREFIX = "chama_create_draft_";
 const FIRST_PUBLISH_KEY_PREFIX = "chama_first_publish_done_";
+const MAX_MENU_ITEMS = 20;
+const MAX_MENU_IMAGE_DATA_URL_CHARS = 500_000;
+const LENDING_TIER_LIMITS = [
+  { tier: 1, maxSats: 50_000, label: "Starter" },
+  { tier: 2, maxSats: 200_000, label: "Proven" },
+  { tier: 3, maxSats: 500_000, label: "Trusted" },
+  { tier: 4, maxSats: 1_000_000, label: "Prime" },
+  { tier: 5, maxSats: 2_000_000, label: "OG" },
+] as const;
+const MAX_FEDIMINT_LENDING_SATS = LENDING_TIER_LIMITS[LENDING_TIER_LIMITS.length - 1].maxSats;
+
+function newMenuDraftItem(): MenuDraftItem {
+  return {
+    id: `mi_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    label: "",
+    sats: "",
+    maxSats: "",
+    fiat: "",
+    description: "",
+    fulfillment: "service",
+    imageDataUrl: "",
+    dueDate: "",
+    termDays: "",
+    apr: "",
+    trustTier: "",
+  };
+}
+
+function normalizeMenuDraftItem(raw: any): MenuDraftItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    id: typeof raw.id === "string" && raw.id.trim()
+      ? raw.id
+      : newMenuDraftItem().id,
+    label: typeof raw.label === "string" ? raw.label : "",
+    sats: typeof raw.sats === "string" || typeof raw.sats === "number" ? String(raw.sats) : "",
+    maxSats: typeof raw.maxSats === "string" || typeof raw.maxSats === "number" ? String(raw.maxSats) : "",
+    fiat: typeof raw.fiat === "string" || typeof raw.fiat === "number" ? String(raw.fiat) : "",
+    description: typeof raw.description === "string" ? raw.description : "",
+    fulfillment: raw.fulfillment === "physical" || raw.fulfillment === "digital" || raw.fulfillment === "service"
+      ? raw.fulfillment
+      : "service",
+    imageDataUrl: typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "",
+    dueDate: typeof raw.dueDate === "string" ? raw.dueDate : "",
+    termDays: typeof raw.termDays === "string" || typeof raw.termDays === "number" ? String(raw.termDays) : "",
+    apr: typeof raw.apr === "string" || typeof raw.apr === "number" ? String(raw.apr) : "",
+    trustTier: typeof raw.trustTier === "string" || typeof raw.trustTier === "number" ? String(raw.trustTier) : "",
+  };
+}
+
+function normalizeFormState(raw: any, currency = "USD"): FormState {
+  const fallback = emptyCreateFormState(currency);
+  if (!raw || typeof raw !== "object") return fallback;
+  const menuItems = Array.isArray(raw.menuItems)
+    ? (raw.menuItems as unknown[])
+        .map(normalizeMenuDraftItem)
+        .filter((item): item is MenuDraftItem => item !== null)
+        .slice(0, MAX_MENU_ITEMS)
+    : [];
+  const listingMode: ListingMode = raw.listingMode === "menu"
+    ? "menu"
+    : raw.listingMode === "single"
+      ? "single"
+      : menuItems.length > 0
+        ? "menu"
+        : fallback.listingMode;
+  return {
+    ...fallback,
+    ...raw,
+    listingMode,
+    cur: fallback.cur,
+    fulfillment: raw.fulfillment === "physical" || raw.fulfillment === "digital" || raw.fulfillment === "service"
+      ? raw.fulfillment
+      : fallback.fulfillment,
+    menuItems,
+  };
+}
+
+function parseWholeSats(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function parseOptionalPositiveNumber(value: string): number | undefined {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function parseOptionalPositiveInt(value: string): number | undefined {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function lendingTierForSats(sats: number): number | undefined {
+  if (!Number.isFinite(sats) || sats <= 0) return undefined;
+  return LENDING_TIER_LIMITS.find(limit => sats <= limit.maxSats)?.tier;
+}
+
+function lendingTierLimitForTier(tier: number | undefined): typeof LENDING_TIER_LIMITS[number] | undefined {
+  return LENDING_TIER_LIMITS.find(limit => limit.tier === tier);
+}
+
+function lendingTierSummary(value: string) {
+  const sats = parseWholeSats(value);
+  const tier = lendingTierForSats(sats);
+  const limit = lendingTierLimitForTier(tier);
+  if (!sats) return "Enter principal to assign borrower tier.";
+  if (!tier || !limit) {
+    return (
+      <>
+        Above current Fedimint lending cap of <BitcoinAmount sats={MAX_FEDIMINT_LENDING_SATS} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />.
+      </>
+    );
+  }
+  return (
+    <>
+      Tier {tier} · {limit.label} · up to <BitcoinAmount sats={limit.maxSats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+    </>
+  );
+}
+
+function lendingAmountAboveCurrentCap(value: string): boolean {
+  const sats = parseWholeSats(value);
+  return sats > MAX_FEDIMINT_LENDING_SATS;
+}
+
+function parseDueDate(value: string): number | undefined {
+  if (!value) return undefined;
+  const ms = Date.parse(value + "T23:59:59");
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+}
+
+function menuKindForVertical(vertical: Vertical): NonNullable<MenuItem["kind"]> {
+  if (vertical === "p2p-trade") return "exchange-bracket";
+  if (vertical === "bill-pay") return "bill";
+  if (vertical === "lending") return "loan";
+  return "market-item";
+}
+
+function normalizeMenuItems(form: FormState, vertical: Vertical): MenuItem[] {
+  if (form.listingMode !== "menu") return [];
+  return form.menuItems.flatMap((item, index) => {
+    const label = item.label.trim();
+    const minSats = parseWholeSats(item.sats);
+    const maxSats = vertical === "p2p-trade"
+      ? (parseWholeSats(item.maxSats) || minSats)
+      : minSats;
+    if (!label || minSats <= 0) return [];
+    if (vertical === "p2p-trade" && maxSats < minSats) return [];
+    const fiatAmount = vertical === "lending"
+      ? undefined
+      : item.fiat.trim()
+        ? Number.parseFloat(item.fiat)
+        : undefined;
+    const kind = menuKindForVertical(vertical);
+    return [{
+      id: item.id || `item_${index + 1}`,
+      label,
+      kind,
+      amountMsats: minSats * 1000,
+      minAmountMsats: vertical === "p2p-trade" ? minSats * 1000 : undefined,
+      maxAmountMsats: vertical === "p2p-trade" ? maxSats * 1000 : undefined,
+      description: item.description.trim() || undefined,
+      fiatAmount: Number.isFinite(fiatAmount) ? fiatAmount : undefined,
+      fiatCurrency: Number.isFinite(fiatAmount) ? form.cur : undefined,
+      fulfillment: vertical === "marketplace" ? item.fulfillment : undefined,
+      imageDataUrl: vertical === "marketplace" && item.imageDataUrl ? item.imageDataUrl : undefined,
+      dueAt: vertical === "bill-pay" ? parseDueDate(item.dueDate) : undefined,
+      termDays: vertical === "lending" ? parseOptionalPositiveInt(item.termDays) : undefined,
+      aprBps: vertical === "lending"
+        ? (() => {
+            const apr = parseOptionalPositiveNumber(item.apr);
+            return apr === undefined ? undefined : Math.round(apr * 100);
+          })()
+        : undefined,
+      trustTier: vertical === "lending" ? lendingTierForSats(minSats) : undefined,
+    }];
+  });
+}
+
+function hasLendingAmountAboveCurrentCap(form: FormState, vertical: Vertical): boolean {
+  if (vertical !== "lending") return false;
+  if (form.listingMode === "menu") {
+    return form.menuItems.some(item => lendingAmountAboveCurrentCap(item.sats));
+  }
+  return lendingAmountAboveCurrentCap(form.sats);
+}
+
+function hasPartialMenuRows(form: FormState, vertical: Vertical): boolean {
+  if (form.listingMode !== "menu") return false;
+  return form.menuItems.some(item => {
+    const touched = item.label.trim()
+      || item.sats.trim()
+      || item.maxSats.trim()
+      || item.fiat.trim()
+      || item.description.trim()
+      || item.imageDataUrl
+      || item.dueDate.trim()
+      || item.termDays.trim()
+      || item.apr.trim()
+      || item.trustTier.trim();
+    if (!touched) return false;
+    if (!item.label.trim() || parseWholeSats(item.sats) <= 0) return true;
+    if (vertical === "p2p-trade") {
+      const maxSats = parseWholeSats(item.maxSats);
+      if (item.maxSats.trim() && maxSats <= 0) return true;
+      return maxSats > 0 && maxSats < parseWholeSats(item.sats);
+    }
+    return false;
+  });
+}
+
+function minimumMenuSats(items: MenuItem[]): number {
+  if (items.length === 0) return 0;
+  return Math.min(...items.map(item => Math.floor(item.amountMsats / 1000)));
+}
+
+function effectiveListingSats(form: FormState, vertical: Vertical): number {
+  const menuItems = normalizeMenuItems(form, vertical);
+  if (menuItems.length > 0) return minimumMenuSats(menuItems);
+  const baseSats = parseWholeSats(form.sats);
+  return form.isSubscription
+    ? baseSats * parseWholeSats(form.periods)
+    : baseSats;
+}
+
+function hasDraftContent(form: FormState): boolean {
+  return !!(
+    form.desc.trim()
+    || form.sats.trim()
+    || form.fiat.trim()
+    || form.menuItems.some(item =>
+      item.label.trim()
+      || item.sats.trim()
+      || item.maxSats.trim()
+      || item.fiat.trim()
+      || item.description.trim()
+      || item.imageDataUrl
+      || item.dueDate.trim()
+      || item.termDays.trim()
+      || item.apr.trim()
+      || item.trustTier.trim()
+    )
+  );
+}
 
 function readDraft(vertical: Vertical): SavedDraft | null {
   try {
@@ -90,7 +355,11 @@ function readDraft(vertical: Vertical): SavedDraft | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed?.vertical || !parsed?.formState) return null;
-    return parsed;
+    return {
+      vertical: parsed.vertical,
+      formState: normalizeFormState(parsed.formState),
+      savedAt: Number.isFinite(parsed.savedAt) ? parsed.savedAt : Date.now(),
+    };
   } catch { return null; }
 }
 
@@ -134,8 +403,149 @@ function blurNumberInputOnWheel(e: WheelEvent<HTMLInputElement>) {
   e.currentTarget.blur();
 }
 
+function menuTitleForVertical(vertical: Vertical): string {
+  if (vertical === "p2p-trade") return "SAT OPTIONS";
+  if (vertical === "bill-pay") return "BILLS";
+  if (vertical === "lending") return "LOAN OFFERS";
+  return "STORE ITEMS";
+}
+
+function menuAddLabelForVertical(vertical: Vertical): string {
+  if (vertical === "p2p-trade") return "+ Option";
+  if (vertical === "bill-pay") return "+ Bill";
+  if (vertical === "lending") return "+ Loan";
+  return "+ Item";
+}
+
+function menuPlaceholderForVertical(vertical: Vertical, index: number): string {
+  if (vertical === "p2p-trade") return `Option ${index + 1}`;
+  if (vertical === "bill-pay") return `Bill ${index + 1}`;
+  if (vertical === "lending") return `Loan offer ${index + 1}`;
+  return `Item ${index + 1}`;
+}
+
+function menuHintForVertical(vertical: Vertical): string {
+  if (vertical === "p2p-trade") return "Buyers choose an exact sats amount inside an option.";
+  if (vertical === "bill-pay") return "Volunteers can bundle one or more bills before locking.";
+  if (vertical === "lending") return "Lenders choose one or more loan requests to fund.";
+  return "Products and services can carry images and fiat anchors.";
+}
+
+function menuCurrencyHint(vertical: Vertical, currency: string): string {
+  if (vertical === "p2p-trade") return `Every option uses ${currency}; no mixed-currency checkout.`;
+  if (vertical === "bill-pay") return `All bill estimates use ${currency}; volunteers can bundle them safely.`;
+  if (vertical === "lending") return `Loan tiers are sats-based; ${currency} stays as the community fiat context for repayment display.`;
+  return `All item fiat anchors display in ${currency}.`;
+}
+
+function singleModeLabel(vertical: Vertical): string {
+  if (vertical === "bill-pay") return "Single bill";
+  if (vertical === "marketplace") return "Single item";
+  if (vertical === "lending") return "Single loan";
+  return "Single sale";
+}
+
+function menuModeLabel(vertical: Vertical): string {
+  if (vertical === "p2p-trade") return "Amount menu";
+  if (vertical === "bill-pay") return "Bill bundle";
+  if (vertical === "lending") return "Loan book";
+  return "Store";
+}
+
+function singleModeDescription(vertical: Vertical): string {
+  if (vertical === "bill-pay") return "One bill, one checkout.";
+  if (vertical === "marketplace") return "One product or service.";
+  if (vertical === "lending") return "One principal amount.";
+  return "One exact sats amount.";
+}
+
+function menuModeDescription(vertical: Vertical): string {
+  if (vertical === "p2p-trade") return "Let buyers choose from options.";
+  if (vertical === "bill-pay") return "Let volunteers bundle bills.";
+  if (vertical === "lending") return "Multiple loan requests in one place.";
+  return "A seller page with multiple items.";
+}
+
+function descriptionLabel(vertical: Vertical, usingMenu: boolean): string {
+  if (usingMenu) {
+    if (vertical === "bill-pay") return "BUNDLE NAME";
+    if (vertical === "marketplace") return "STORE NAME";
+    if (vertical === "lending") return "LOAN BOOK NAME";
+    return "NAME";
+  }
+  return "DESCRIPTION";
+}
+
+function descriptionPlaceholder(vertical: Vertical, usingMenu: boolean): string {
+  if (usingMenu) {
+    if (vertical === "bill-pay") return "My bills for the month";
+    if (vertical === "marketplace") return "Your store name";
+    if (vertical === "lending") return "Your lending desk";
+    return "Your exchange name";
+  }
+  if (vertical === "bill-pay") return "Pay my electricity bill";
+  if (vertical === "marketplace") return "What are you selling?";
+  if (vertical === "lending") return "Loan terms in a sentence";
+  return "What are you trading?";
+}
+
+function descriptionRequired(vertical: Vertical, usingMenu: boolean): boolean {
+  return usingMenu || vertical !== "p2p-trade";
+}
+
+function fallbackMenuDescription(vertical: Vertical, menuItems: MenuItem[]): string {
+  if (menuItems.length === 1) return menuItems[0]?.label ?? "";
+  if (vertical === "p2p-trade") return `${menuItems.length} sats options`;
+  if (vertical === "bill-pay") return `${menuItems.length}-bill bundle`;
+  if (vertical === "lending") return `${menuItems.length} loan offers`;
+  return `${menuItems.length}-item store`;
+}
+
+function buildListingDescription(form: FormState, vertical: Vertical, menuItems: MenuItem[]): string {
+  const desc = form.desc.trim();
+  if (desc) return desc;
+  if (menuItems.length > 0) return fallbackMenuDescription(vertical, menuItems);
+  if (vertical === "p2p-trade") return "Sats for sale";
+  return "";
+}
+
+function menuPartialMessage(vertical: Vertical): string {
+  if (vertical === "p2p-trade") return "Complete option names and valid min/max sats before review.";
+  if (vertical === "bill-pay") return "Complete bill names and sats before review.";
+  if (vertical === "lending") return "Complete loan names and sats before review.";
+  return "Complete item names and sats before review.";
+}
+
+function menuCountLabel(vertical: Vertical, count: number): string {
+  const noun = vertical === "p2p-trade"
+    ? "option"
+    : vertical === "bill-pay"
+      ? "bill"
+      : vertical === "lending"
+        ? "offer"
+        : "item";
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function formatMenuAmount(item: MenuItem) {
+  if (item.minAmountMsats !== undefined && item.maxAmountMsats !== undefined) {
+    const min = fmtSats(item.minAmountMsats);
+    const max = fmtSats(item.maxAmountMsats);
+    return (
+      <BitcoinAmount
+        label={min === max ? min : `${min}-${max}`}
+        size={12}
+        gap={4}
+        glyphScale={1.18}
+      />
+    );
+  }
+  return <BitcoinAmount msats={item.amountMsats} size={12} gap={4} glyphScale={1.18} />;
+}
+
 export function emptyCreateFormState(currency = "USD"): FormState {
   return {
+    listingMode: "single",
     desc: "",
     sats: "",
     fiat: "",
@@ -144,6 +554,7 @@ export function emptyCreateFormState(currency = "USD"): FormState {
     isSubscription: false,
     periods: "3",
     intervalDays: "30",
+    menuItems: [],
   };
 }
 
@@ -167,37 +578,48 @@ export function CreateForm({
     return getCommunityBySlug(slug) ? slug : DEFAULT_COMMUNITY_SLUG;
   })();
   const homeCommunity = getCommunityBySlug(community);
+  const communityCurrency = defaultCurrencyForCommunity(community);
   const [step, setStep] = useState<Step>(1);
   const [vertical, setVertical] = useState<Vertical>("p2p-trade");
   const [form, setForm] = useState<FormState>(() =>
-    emptyCreateFormState(defaultCurrencyForCommunity(community)),
+    emptyCreateFormState(communityCurrency),
   );
   const [submitting, setSubmitting] = useState(false);
   const [arbiterDismissed, setArbiterDismissed] = useState(false);
   const [drafts, setDrafts] = useState<SavedDraft[]>(() => readAllDrafts());
   const [showAllDrafts, setShowAllDrafts] = useState(false);
 
+  useEffect(() => {
+    setForm(prev => prev.cur === communityCurrency ? prev : { ...prev, cur: communityCurrency });
+  }, [communityCurrency]);
+
   // Auto-save draft on field change (silent, debounced via the form
   // state's natural batching). Cleared on successful publish.
   useEffect(() => {
     // Don't save empty drafts.
-    if (!form.desc.trim() && !form.sats.trim() && !form.fiat.trim()) return;
+    if (!hasDraftContent(form)) return;
     writeDraft({ vertical, formState: form, savedAt: Date.now() });
     setDrafts(readAllDrafts());
   }, [form, vertical]);
 
   const continueDraft = (draft: SavedDraft) => {
     setVertical(draft.vertical);
-    setForm(draft.formState);
+    setForm(normalizeFormState(draft.formState, communityCurrency));
     setStep(2);
   };
 
   const handlePublish = async () => {
-    if (!form.desc || !form.sats) return;
-    const baseSats = parseInt(form.sats || "0", 10) || 0;
-    const totalSats = form.isSubscription
-      ? (parseInt(form.periods || "0", 10) || 0) * baseSats
-      : baseSats;
+    const menuItems = normalizeMenuItems(form, vertical);
+    const hasMenu = menuItems.length > 0;
+    const description = buildListingDescription(form, vertical, menuItems);
+    const baseSats = hasMenu ? minimumMenuSats(menuItems) : parseWholeSats(form.sats);
+    const totalSats = effectiveListingSats(form, vertical);
+    if (
+      (!description && descriptionRequired(vertical, hasMenu)) ||
+      (!hasMenu && !form.sats.trim()) ||
+      hasPartialMenuRows(form, vertical) ||
+      hasLendingAmountAboveCurrentCap(form, vertical)
+    ) return;
     if (
       !isSimModeOn() &&
       !isTestnetMode() &&
@@ -212,23 +634,26 @@ export function CreateForm({
         excludePubkeys: [userPubkey],
       });
       const params: any = {
-        description: form.desc,
-        amountMsats: form.isSubscription
-          ? parseInt(form.periods) * amountMsats
-          : amountMsats,
-        fiatAmount: form.fiat ? parseFloat(form.fiat) : undefined,
-        fiatCurrency: form.fiat ? form.cur : undefined,
+        description,
+        amountMsats: hasMenu
+          ? amountMsats
+          : form.isSubscription
+            ? parseWholeSats(form.periods) * amountMsats
+            : amountMsats,
+        fiatAmount: !hasMenu && form.fiat ? parseFloat(form.fiat) : undefined,
+        fiatCurrency: !hasMenu && form.fiat ? form.cur : undefined,
         category: vertical,
         community,
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
         communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,
+        items: hasMenu ? menuItems : undefined,
       };
-      if (form.isSubscription) {
+      if (!hasMenu && form.isSubscription) {
         params.subscription = {
-          totalPeriods: parseInt(form.periods),
+          totalPeriods: parseWholeSats(form.periods),
           periodAmountMsats: amountMsats,
-          periodDurationSeconds: parseInt(form.intervalDays) * 86400,
+          periodDurationSeconds: parseWholeSats(form.intervalDays) * 86400,
         };
       }
       await onCreate(params);
@@ -289,6 +714,7 @@ export function CreateForm({
           vertical={vertical}
           form={form}
           setForm={setForm}
+          homeCommunity={homeCommunity}
           canOfferSubscription={canOfferSubscription}
           onBack={() => setStep(1)}
           onNext={() => setStep(3)}
@@ -666,32 +1092,131 @@ function Step1({
 
 function Step2({
   vertical, form, setForm,
+  homeCommunity,
   canOfferSubscription,
   onBack, onNext,
 }: {
   vertical: Vertical;
   form: FormState;
   setForm: (updater: (f: FormState) => FormState) => void;
+  homeCommunity: ReturnType<typeof getCommunityBySlug>;
   canOfferSubscription: boolean;
   onBack: () => void;
   onNext: () => void;
 }) {
-  const totalSats = (parseInt(form.sats || "0", 10) || 0) *
-    (form.isSubscription ? (parseInt(form.periods || "0", 10) || 0) : 1);
+  const menuItems = normalizeMenuItems(form, vertical);
+  const hasMenu = menuItems.length > 0;
+  const usingMenu = form.listingMode === "menu";
+  const partialMenuRows = hasPartialMenuRows(form, vertical);
+  const totalSats = effectiveListingSats(form, vertical);
   const amountTooSmall =
     !isSimModeOn() &&
     !isTestnetMode() &&
     totalSats > 0 &&
     totalSats < MIN_REAL_ATOMIC_FUNDING_SATS;
+  const lendingCapExceeded = hasLendingAmountAboveCurrentCap(form, vertical);
+  const showSubscriptionMode = false && canOfferSubscription;
+  const descriptionOk = !descriptionRequired(vertical, usingMenu) || form.desc.trim().length > 0 || hasMenu;
   const ready =
-    form.desc.trim().length > 0 &&
-    form.sats.trim().length > 0 &&
-    !amountTooSmall;
+    descriptionOk &&
+    (usingMenu ? hasMenu : form.sats.trim().length > 0) &&
+    !partialMenuRows &&
+    !amountTooSmall &&
+    !lendingCapExceeded;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
+  const setListingMode = (listingMode: ListingMode) => {
+    setForm(prev => {
+      const nextItems = listingMode === "menu" && prev.menuItems.length === 0
+        ? [newMenuDraftItem()]
+        : prev.menuItems;
+      return {
+        ...prev,
+        listingMode,
+        isSubscription: listingMode === "menu" ? false : prev.isSubscription,
+        menuItems: nextItems,
+      };
+    });
+  };
+  const menuTitle = menuTitleForVertical(vertical);
+  const menuHint = menuHintForVertical(vertical);
+  const addMenuItem = () => {
+    setForm(prev => ({
+      ...prev,
+      listingMode: "menu",
+      isSubscription: false,
+      menuItems: prev.menuItems.length >= MAX_MENU_ITEMS
+        ? prev.menuItems
+        : [...prev.menuItems, newMenuDraftItem()],
+    }));
+  };
+  const updateMenuItem = (id: string, patch: Partial<MenuDraftItem>) => {
+    setForm(prev => ({
+      ...prev,
+      isSubscription: patch.sats || patch.label ? false : prev.isSubscription,
+      menuItems: prev.menuItems.map(item => item.id === id ? { ...item, ...patch } : item),
+    }));
+  };
+  const removeMenuItem = (id: string) => {
+    setForm(prev => ({
+      ...prev,
+      menuItems: prev.menuItems.filter(item => item.id !== id),
+    }));
+  };
+  const updateMenuImage = (id: string, file: File | null) => {
+    if (!file) {
+      updateMenuItem(id, { imageDataUrl: "" });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      if (!result.startsWith("data:image/") || result.length > MAX_MENU_IMAGE_DATA_URL_CHARS) {
+        window.alert("That image is too large for this release. Try a smaller compressed photo.");
+        return;
+      }
+      updateMenuItem(id, { imageDataUrl: result });
+    };
+    reader.readAsDataURL(file);
+  };
 
   return (
     <>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+          LISTING STYLE
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          {(["single", "menu"] as ListingMode[]).map(mode => {
+            const active = form.listingMode === mode;
+            const label = mode === "single" ? singleModeLabel(vertical) : menuModeLabel(vertical);
+            const copy = mode === "single" ? singleModeDescription(vertical) : menuModeDescription(vertical);
+            return (
+              <button
+                key={mode}
+                onClick={() => setListingMode(mode)}
+                style={{
+                  padding: "12px",
+                  borderRadius: T.rs,
+                  border: `1px solid ${active ? T.accent + "66" : T.border}`,
+                  background: active ? T.accentDim : T.surface,
+                  color: active ? T.accent : T.text,
+                  cursor: "pointer",
+                  textAlign: "left",
+                }}
+              >
+                <div style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 900, marginBottom: 5 }}>
+                  {label}
+                </div>
+                <div style={{ fontFamily: T.sans, fontSize: 11, lineHeight: 1.35, color: active ? T.text : T.muted }}>
+                  {copy}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {categoryAllowsFulfillmentChoice(vertical) && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FULFILLMENT</div>
@@ -704,36 +1229,110 @@ function Step2({
         </div>
       )}
 
+      {descriptionRequired(vertical, usingMenu) && (
       <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>DESCRIPTION</div>
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+          {descriptionLabel(vertical, usingMenu)}
+        </div>
         <input value={form.desc} onChange={e => set("desc", e.target.value)}
-          placeholder={vertical === "bill-pay" ? "Pay my electricity bill" : "What are you trading?"}
+          placeholder={descriptionPlaceholder(vertical, usingMenu)}
           style={inputStyle} />
       </div>
+      )}
 
-      <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>AMOUNT (SATS)</div>
-          <input
-            type="number"
-            value={form.sats}
-            onChange={e => set("sats", e.target.value)}
-            onWheel={blurNumberInputOnWheel}
-            placeholder="100000"
-            style={inputStyle}
-          />
+      {!usingMenu ? (
+        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+          <div style={{ flex: vertical === "lending" ? 1.15 : 1 }}>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+              {vertical === "lending" ? "LOAN PRINCIPAL (SATS)" : "AMOUNT (SATS)"}
+            </div>
+            <input
+              type="number"
+              value={form.sats}
+              onChange={e => set("sats", e.target.value)}
+              onWheel={blurNumberInputOnWheel}
+              placeholder="100000"
+              style={inputStyle}
+            />
+          </div>
+          {vertical === "lending" ? (
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>BORROWER TIER</div>
+              <div style={{
+                minHeight: 44,
+                padding: "10px 12px",
+                borderRadius: T.rs,
+                border: `1px solid ${lendingCapExceeded ? T.red + "66" : T.border}`,
+                background: lendingCapExceeded ? T.redDim : T.surface,
+                color: lendingCapExceeded ? T.red : T.text,
+                fontFamily: T.mono,
+                fontSize: 11,
+                lineHeight: 1.35,
+                display: "flex",
+                alignItems: "center",
+              }}>
+                {lendingTierSummary(form.sats)}
+              </div>
+            </div>
+          ) : (
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FIAT</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <div style={{
+                width: 72,
+                padding: "12px 6px",
+                borderRadius: T.rs,
+                border: `1px solid ${T.border}`,
+                background: T.surface,
+                color: T.text,
+                fontFamily: T.mono,
+                fontSize: 12,
+                fontWeight: 900,
+                textAlign: "center",
+              }}>
+                {form.cur}
+              </div>
+              <input type="number" value={form.fiat} onChange={e => set("fiat", e.target.value)} placeholder="50" style={{ ...inputStyle, flex: 1 }} />
+            </div>
+            <div style={{ marginTop: 5, fontSize: 9, color: T.muted, fontFamily: T.mono }}>
+              auto from {homeCommunity?.flagEmoji ?? "🌐"} Chama
+            </div>
+          </div>
+          )}
         </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FIAT</div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <select value={form.cur} onChange={e => set("cur", e.target.value)}
-              style={{ ...inputStyle, width: 70, padding: "12px 6px", fontSize: 12, color: T.text, background: T.surface }}>
-              {["USD","EUR","GBP","NGN","KES","TZS","XOF","BRL"].map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <input type="number" value={form.fiat} onChange={e => set("fiat", e.target.value)} placeholder="50" style={{ ...inputStyle, flex: 1 }} />
+      ) : (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+            MENU CURRENCY
+          </div>
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: 10,
+            borderRadius: T.rs,
+            border: `1px solid ${T.border}`,
+            background: T.surface,
+          }}>
+            <div style={{
+              padding: "10px 12px",
+              borderRadius: T.rs,
+              border: `1px solid ${T.border}`,
+              background: T.card,
+              color: T.text,
+              fontFamily: T.mono,
+              fontSize: 12,
+              fontWeight: 900,
+            }}>
+              {form.cur}
+            </div>
+            <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.45 }}>
+              {menuCurrencyHint(vertical, form.cur)}
+              {" "}Auto from {homeCommunity?.flagEmoji ?? "🌐"} Chama.
+            </div>
           </div>
         </div>
-      </div>
+      )}
       {amountTooSmall && (
         <div style={{
           marginTop: -8, marginBottom: 16, padding: "8px 10px",
@@ -744,10 +1343,290 @@ function Step2({
           {minimumAtomicFundingMessage()}
         </div>
       )}
+      {lendingCapExceeded && (
+        <div style={{
+          marginTop: -8, marginBottom: 16, padding: "8px 10px",
+          borderRadius: T.rs, background: T.redDim,
+          border: `1px solid ${T.red}44`,
+          color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.45,
+        }}>
+          Fedimint lending tiers currently top out at{" "}
+          <BitcoinAmount
+            sats={MAX_FEDIMINT_LENDING_SATS}
+            size={10}
+            gap={3}
+            glyphScale={1.2}
+            color="inherit"
+            glyphColor="inherit"
+          />.
+          Higher on-chain tiers come later.
+        </div>
+      )}
+      {usingMenu && (
+      <div style={{
+        marginBottom: 20,
+        padding: 14,
+        background: usingMenu
+          ? `linear-gradient(180deg, ${T.accentDim}, ${T.card} 62%)`
+          : T.card,
+        border: `1px solid ${usingMenu ? T.accent + "88" : T.border}`,
+        borderRadius: T.r,
+        boxShadow: usingMenu ? `0 0 0 1px ${T.accent}11, 0 18px 44px ${T.accent}12` : "none",
+      }}>
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+          marginBottom: form.menuItems.length > 0 ? 12 : 0,
+        }}>
+          <div>
+            <div style={{
+              fontSize: 11,
+              color: usingMenu ? T.accent : T.muted,
+              fontFamily: T.mono,
+              fontWeight: 900,
+              letterSpacing: 1,
+            }}>
+              {menuTitle}
+            </div>
+            <div style={{ marginTop: 3, fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+              {menuHint}
+            </div>
+            {hasMenu && (
+              <div style={{
+                marginTop: 3,
+                fontSize: 10,
+                color: T.muted,
+                fontFamily: T.mono,
+                display: "inline-flex",
+                alignItems: "baseline",
+                gap: 4,
+              }}>
+                from <BitcoinAmount msats={Math.min(...menuItems.map(item => item.amountMsats))} size={10} gap={3} glyphScale={1.2} color={T.muted} glyphColor={T.muted} />
+              </div>
+            )}
+          </div>
+          <button
+            onClick={addMenuItem}
+            disabled={form.menuItems.length >= MAX_MENU_ITEMS}
+            style={{
+              padding: "8px 10px",
+              borderRadius: T.rs,
+              border: `1px solid ${T.border}`,
+              background: T.surface,
+              color: form.menuItems.length >= MAX_MENU_ITEMS ? T.muted : T.accent,
+              fontFamily: T.mono,
+              fontSize: 11,
+              fontWeight: 800,
+              cursor: form.menuItems.length >= MAX_MENU_ITEMS ? "default" : "pointer",
+            }}
+          >
+            {menuAddLabelForVertical(vertical)}
+          </button>
+        </div>
+        {form.menuItems.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {form.menuItems.map((item, index) => (
+              <div key={item.id} style={{
+                padding: 12,
+                borderRadius: T.rs,
+                border: `1px solid ${usingMenu ? T.accent + "33" : T.border}`,
+                background: usingMenu ? T.bg : T.surface,
+              }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <input
+                    value={item.label}
+                    onChange={e => updateMenuItem(item.id, { label: e.target.value })}
+                    placeholder={menuPlaceholderForVertical(vertical, index)}
+                    style={{ ...inputStyle, flex: 1, minWidth: 0 }}
+                  />
+                  <input
+                    type="number"
+                    value={item.sats}
+                    onChange={e => updateMenuItem(item.id, { sats: e.target.value })}
+                    onWheel={blurNumberInputOnWheel}
+                    placeholder={vertical === "p2p-trade" ? "min sats" : vertical === "lending" ? "principal" : "sats"}
+                    style={{ ...inputStyle, width: 92 }}
+                  />
+                  {vertical === "p2p-trade" && (
+                    <input
+                      type="number"
+                      value={item.maxSats}
+                      onChange={e => updateMenuItem(item.id, { maxSats: e.target.value })}
+                      onWheel={blurNumberInputOnWheel}
+                      placeholder="max"
+                      style={{ ...inputStyle, width: 92 }}
+                    />
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <input
+                    value={item.description}
+                    onChange={e => updateMenuItem(item.id, { description: e.target.value })}
+                    placeholder="Note"
+                    style={{ ...inputStyle, flex: "1 1 140px", minWidth: 0, fontSize: 12 }}
+                  />
+                  {vertical !== "lending" && (
+                    <input
+                      type="number"
+                      value={item.fiat}
+                      onChange={e => updateMenuItem(item.id, { fiat: e.target.value })}
+                      onWheel={blurNumberInputOnWheel}
+                      placeholder={form.cur}
+                      style={{ ...inputStyle, width: 84, fontSize: 12 }}
+                    />
+                  )}
+                  {vertical === "bill-pay" && (
+                    <input
+                      type="date"
+                      value={item.dueDate}
+                      onChange={e => updateMenuItem(item.id, { dueDate: e.target.value })}
+                      style={{ ...inputStyle, width: 128, fontSize: 11 }}
+                    />
+                  )}
+                  {vertical === "lending" && (
+                    <>
+                      <input
+                        type="number"
+                        value={item.termDays}
+                        onChange={e => updateMenuItem(item.id, { termDays: e.target.value })}
+                        onWheel={blurNumberInputOnWheel}
+                        placeholder="days"
+                        style={{ ...inputStyle, width: 72, fontSize: 12 }}
+                      />
+                      <input
+                        type="number"
+                        value={item.apr}
+                        onChange={e => updateMenuItem(item.id, { apr: e.target.value })}
+                        onWheel={blurNumberInputOnWheel}
+                        placeholder="APR"
+                        style={{ ...inputStyle, width: 72, fontSize: 12 }}
+                      />
+                      <div style={{
+                        minWidth: 110,
+                        padding: "11px 10px",
+                        borderRadius: T.rs,
+                        border: `1px solid ${lendingAmountAboveCurrentCap(item.sats) ? T.red + "66" : T.border}`,
+                        background: lendingAmountAboveCurrentCap(item.sats) ? T.redDim : T.card,
+                        color: lendingAmountAboveCurrentCap(item.sats) ? T.red : T.accent,
+                        fontFamily: T.mono,
+                        fontSize: 10,
+                        fontWeight: 800,
+                        lineHeight: 1.35,
+                      }}>
+                        {lendingTierSummary(item.sats)}
+                      </div>
+                    </>
+                  )}
+                  {vertical === "marketplace" && (
+                    <select
+                      value={item.fulfillment}
+                      onChange={e => updateMenuItem(item.id, { fulfillment: e.target.value as Fulfillment })}
+                      style={{ ...inputStyle, width: 108, padding: "12px 6px", fontSize: 11, color: T.text, background: T.card }}
+                    >
+                      <option value="physical">Physical</option>
+                      <option value="service">Service</option>
+                      <option value="digital">Digital</option>
+                    </select>
+                  )}
+                  <button
+                    onClick={() => removeMenuItem(item.id)}
+                    style={{
+                      width: 42,
+                      borderRadius: T.rs,
+                      border: `1px solid ${T.border}`,
+                      background: T.card,
+                      color: T.muted,
+                      fontFamily: T.mono,
+                      fontSize: 14,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+                {vertical === "marketplace" && (
+                  <div style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginTop: 8,
+                  }}>
+                    <label style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: "9px 10px",
+                      borderRadius: T.rs,
+                      border: `1px solid ${T.border}`,
+                      background: T.card,
+                      color: item.imageDataUrl ? T.accent : T.muted,
+                      fontFamily: T.mono,
+                      fontSize: 10,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                    }}>
+                      {item.imageDataUrl ? "Change photo" : "+ Photo"}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={e => updateMenuImage(item.id, e.target.files?.[0] ?? null)}
+                        style={{ display: "none" }}
+                      />
+                    </label>
+                    {item.imageDataUrl && (
+                      <>
+                        <img
+                          src={item.imageDataUrl}
+                          alt=""
+                          style={{
+                            width: 54,
+                            height: 42,
+                            objectFit: "cover",
+                            borderRadius: 8,
+                            border: `1px solid ${T.border}`,
+                          }}
+                        />
+                        <button
+                          onClick={() => updateMenuItem(item.id, { imageDataUrl: "" })}
+                          style={{
+                            border: "none",
+                            background: "none",
+                            color: T.muted,
+                            fontFamily: T.mono,
+                            fontSize: 10,
+                            fontWeight: 800,
+                            cursor: "pointer",
+                          }}
+                        >
+                          remove
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+            {partialMenuRows && (
+              <div style={{
+                color: T.amber,
+                fontFamily: T.mono,
+                fontSize: 10,
+                lineHeight: 1.45,
+              }}>
+                {menuPartialMessage(vertical)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      )}
 
       {/* Subscription toggle — invisible unless graduated (item 7).
           v0.2.0 universally false (no rating events yet). */}
-      {canOfferSubscription && (
+      {showSubscriptionMode && !usingMenu && (
         <div style={{
           marginBottom: 20, padding: 16,
           background: form.isSubscription ? T.purpleDim : T.surface,
@@ -858,17 +1737,23 @@ function Step3({
   onSaveDraft: () => void;
 }) {
   const v = VERTICALS.find(vert => vert.id === vertical)!;
-  const totalSats = (parseInt(form.sats || "0", 10) || 0) *
-    (form.isSubscription ? (parseInt(form.periods || "0", 10) || 0) : 1);
+  const menuItems = normalizeMenuItems(form, vertical);
+  const hasMenu = menuItems.length > 0;
+  const listingDescription = buildListingDescription(form, vertical, menuItems);
+  const totalSats = effectiveListingSats(form, vertical);
+  const partialMenuRows = hasPartialMenuRows(form, vertical);
   const amountTooSmall =
     !isSimModeOn() &&
     !isTestnetMode() &&
     totalSats > 0 &&
     totalSats < MIN_REAL_ATOMIC_FUNDING_SATS;
+  const lendingCapExceeded = hasLendingAmountAboveCurrentCap(form, vertical);
   const ready =
-    form.desc.trim().length > 0 &&
-    form.sats.trim().length > 0 &&
-    !amountTooSmall;
+    listingDescription.length > 0 &&
+    (form.sats.trim().length > 0 || hasMenu) &&
+    !partialMenuRows &&
+    !amountTooSmall &&
+    !lendingCapExceeded;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
 
@@ -900,14 +1785,16 @@ function Step3({
       )}
 
       {/* Editable bits — small subset for the review screen */}
+      {descriptionRequired(vertical, hasMenu) && (
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-          DESCRIPTION
+          {descriptionLabel(vertical, hasMenu)}
         </div>
         <input value={form.desc} onChange={e => set("desc", e.target.value)}
-          placeholder="What are you trading?"
+          placeholder={descriptionPlaceholder(vertical, hasMenu)}
           style={inputStyle} />
       </div>
+      )}
 
       {/* Preview card */}
       <div style={{
@@ -937,18 +1824,118 @@ function Step3({
           )}
         </div>
         <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, marginBottom: 8 }}>
-          {form.desc || <span style={{ color: T.muted, fontStyle: "italic" }}>(no description)</span>}
+          {listingDescription || <span style={{ color: T.muted, fontStyle: "italic" }}>(no description)</span>}
         </div>
-        <div style={{ fontSize: 14, fontWeight: 700, color: T.accent, fontFamily: T.mono }}>
-          {form.isSubscription
-            ? `${parseInt(form.periods || "0") * parseInt(form.sats || "0")} sats total`
-            : `${form.sats || 0} sats`}
-          {form.fiat && (
-            <span style={{ color: T.muted, marginLeft: 8, fontWeight: 400 }}>
-              {form.cur} {form.fiat}
-            </span>
+        {hasMenu ? (
+          <>
+            <div style={{
+              fontSize: 14,
+              fontWeight: 800,
+              color: T.accent,
+              fontFamily: T.mono,
+              marginBottom: 10,
+              display: "flex",
+              alignItems: "baseline",
+              gap: 6,
+            }}>
+              <span style={{ color: T.muted, fontWeight: 700 }}>from</span>
+              <BitcoinAmount msats={Math.min(...menuItems.map(item => item.amountMsats))} size={14} gap={4} glyphScale={1.18} />
+              <span style={{ color: T.muted, marginLeft: 8, fontWeight: 500 }}>
+                {menuCountLabel(vertical, menuItems.length)}
+              </span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {menuItems.map(item => (
+                <div key={item.id} style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  padding: "8px 10px",
+                  borderRadius: T.rs,
+                  background: T.surface,
+                  border: `1px solid ${T.border}`,
+                }}>
+                  <span style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                    {item.imageDataUrl && (
+                      <img
+                        src={item.imageDataUrl}
+                        alt=""
+                        style={{ width: 34, height: 28, objectFit: "cover", borderRadius: 6, flexShrink: 0 }}
+                      />
+                    )}
+                    <span style={{ minWidth: 0 }}>
+                      <span style={{
+                        display: "block",
+                        color: T.text,
+                        fontFamily: T.sans,
+                        fontSize: 12,
+                        fontWeight: 700,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap" as const,
+                      }}>
+                        {item.label}
+                      </span>
+                      {(item.dueAt || item.termDays || item.trustTier) && (
+                        <span style={{
+                          display: "block",
+                          marginTop: 2,
+                          color: T.muted,
+                          fontFamily: T.mono,
+                          fontSize: 9,
+                          whiteSpace: "nowrap" as const,
+                        }}>
+                          {item.dueAt ? `due ${new Date(item.dueAt * 1000).toLocaleDateString()}` : ""}
+                          {item.termDays ? `${item.termDays}d` : ""}
+                          {item.trustTier ? ` · tier ${item.trustTier}` : ""}
+                        </span>
+                      )}
+                    </span>
+                  </span>
+                  <span style={{
+                    color: T.accent,
+                    fontFamily: T.mono,
+                    fontSize: 12,
+                    fontWeight: 800,
+                    whiteSpace: "nowrap" as const,
+                  }}>
+                    {formatMenuAmount(item)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div style={{
+            fontSize: 14,
+            fontWeight: 700,
+            color: T.accent,
+            fontFamily: T.mono,
+            display: "flex",
+            alignItems: "baseline",
+            gap: 8,
+          }}>
+            <BitcoinAmount
+              sats={form.isSubscription
+                ? parseWholeSats(form.periods) * parseWholeSats(form.sats)
+                : parseWholeSats(form.sats)}
+              size={14}
+              gap={4}
+              glyphScale={1.18}
+            />
+            {form.isSubscription && <span style={{ color: T.muted, fontWeight: 500 }}>total</span>}
+            {form.fiat && (
+              <span style={{ color: T.muted, marginLeft: 8, fontWeight: 400 }}>
+                {form.cur} {form.fiat}
+              </span>
+            )}
+          </div>
+        )}
+        {partialMenuRows && (
+          <div style={{ marginTop: 8, fontSize: 10, color: T.amber, fontFamily: T.mono }}>
+            {menuPartialMessage(vertical).replace("review", "publishing")}
+          </div>
           )}
-        </div>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -991,6 +1978,22 @@ function Step3({
           color: T.amber, fontFamily: T.mono, lineHeight: 1.45,
         }}>
           {minimumAtomicFundingMessage()}
+        </div>
+      )}
+      {lendingCapExceeded && (
+        <div style={{
+          textAlign: "center", marginTop: 6, fontSize: 10,
+          color: T.red, fontFamily: T.mono, lineHeight: 1.45,
+        }}>
+          Fedimint lending tiers currently top out at{" "}
+          <BitcoinAmount
+            sats={MAX_FEDIMINT_LENDING_SATS}
+            size={10}
+            gap={3}
+            glyphScale={1.2}
+            color="inherit"
+            glyphColor="inherit"
+          />.
         </div>
       )}
       <div style={{ textAlign: "center", marginTop: 6, fontSize: 10, color: T.muted, fontFamily: T.mono }}>

@@ -44,6 +44,7 @@
 // claim-watchdog pattern.
 
 import { recordSatsTrace } from "./sats-trace.js";
+import type { SelectedMenuItem } from "../escrow-engine/types.js";
 
 // ── Phase types ──────────────────────────────────────────────────────────
 
@@ -75,10 +76,31 @@ export type FundingPhase =
 export type FundAndLockPhase =
   | { kind: "creating-invoice" }
   | { kind: "creating-invoice-slow" }
+  | { kind: "creating-onchain-address" }
+  | {
+      kind: "onchain-address-created";
+      address: string;
+      operationId: string;
+      finalityDelay: number;
+      pegInFeeSats: number;
+      depositAmountSats: number;
+      minimumDepositSats: number;
+    }
+  | {
+      kind: "awaiting-onchain-confirmations";
+      address: string;
+      operationId: string;
+      finalityDelay: number;
+      pegInFeeSats: number;
+      depositAmountSats: number;
+      minimumDepositSats: number;
+    }
+  | { kind: "onchain-deposit-confirmed" }
   | { kind: "requesting-fedi-ecash" }
   | { kind: "fedi-ecash-created" }
   | { kind: "receive-watch-ready" }
   | { kind: "invoice-created"; bolt11: string; expiresAt: number }
+  | { kind: "paying-with-nwc" }
   | { kind: "receive-rejected"; reason: string }
   | FundingPhase
   | { kind: "locking" }
@@ -356,8 +378,16 @@ export interface RunFundAndLockDeps {
     description: string,
     onReceiveState?: (kind: LnReceiveWatchKind) => void,
   ) => Promise<string>;
+  /** Optional auto-payer for generated funding invoices, e.g. NWC
+   *  pay_invoice. When set, runFundAndLock still creates the Fedimint
+   *  receive invoice, then asks the external wallet to pay it before
+   *  entering the balance poll. */
+  autoPayInvoice?: (bolt11: string) => Promise<void>;
   /** Bound to actions.lockAndPublish in the hook. */
-  lockAndPublish: (escrowId: string, opts: { savedHandleId?: string }) => Promise<unknown>;
+  lockAndPublish: (escrowId: string, opts: {
+    savedHandleId?: string;
+    selectedItems?: SelectedMenuItem[];
+  }) => Promise<unknown>;
 }
 
 export interface RunFundAndLockOpts extends RunFundAndLockDeps {
@@ -370,6 +400,8 @@ export interface RunFundAndLockOpts extends RunFundAndLockDeps {
   description: string;
   /** Optional handle to reveal in the LOCK payload. */
   savedHandleId?: string;
+  /** Optional menu basket snapshot to attach to LOCK. */
+  selectedItems?: SelectedMenuItem[];
   /** Phase callback. */
   onPhase: (phase: FundAndLockPhase) => void;
   /** Caller-controlled abort. */
@@ -561,6 +593,17 @@ export async function runFundAndLock(
     (opts.paymentDeadlineMs ?? DEFAULT_PAYMENT_DEADLINE_MS);
   emit({ kind: "invoice-created", bolt11, expiresAt });
 
+  if (opts.autoPayInvoice) {
+    emit({ kind: "paying-with-nwc" });
+    try {
+      await opts.autoPayInvoice(bolt11);
+    } catch (e: any) {
+      const err = e?.message || "NWC wallet could not pay the funding invoice";
+      emit({ kind: "lock-failed", error: err });
+      return { kind: "lock-failed", error: err };
+    }
+  }
+
   // v0.6.5: pollForFunding's signal is the OR of the caller's signal
   // and watchAbort (set when the receive watch reports a pre-funded
   // terminal cancellation).
@@ -639,7 +682,10 @@ export async function runFundAndLock(
   }
 
   try {
-    await opts.lockAndPublish(opts.escrowId, { savedHandleId: opts.savedHandleId });
+    await opts.lockAndPublish(opts.escrowId, {
+      savedHandleId: opts.savedHandleId,
+      selectedItems: opts.selectedItems,
+    });
     emit({ kind: "locked" });
     return { kind: "locked" };
   } catch (e: any) {

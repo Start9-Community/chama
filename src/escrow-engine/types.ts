@@ -74,6 +74,9 @@ export enum Role {
   ARBITER = "arbiter",
 }
 
+export const JOIN_HOLD_SECONDS = 15 * 60;
+export const JOIN_HOLD_LOCK_GRACE_SECONDS = 2 * 60;
+
 // ── Vote Outcomes ─────────────────────────────────────────────────────────
 
 export enum Outcome {
@@ -224,6 +227,10 @@ export interface CreatePayload {
   arbiterFeeMsats?: number;
   /** Payment methods accepted (for P2P) */
   paymentMethods?: string[];
+  /** Optional menu/listing items. Absent means the legacy single-offer
+   *  listing shape; present means LOCK must snapshot the selected basket
+   *  into selectedItems so the trade amount is fixed by the order. */
+  items?: MenuItem[];
   /** Expiry duration in seconds */
   expirySeconds: number;
   /** Community arbiter pool — all pubkeys that receive the arbiter SSS share */
@@ -252,6 +259,20 @@ export interface JoinPayload {
   /** Optional: arbiter's fee terms */
   arbiterFeeMsats?: number;
   joinedAt: number;
+  /** Buyer/seller slot hold deadline. New clients set this to
+   *  joinedAt + JOIN_HOLD_SECONDS; legacy JOINs omit it and remain
+   *  first-writer-wins for backwards compatibility. */
+  holdExpiresAt?: number;
+  /** Optional menu/order selection. For menu listings the buyer can
+   *  publish a follow-up JOIN with selectedItems after joining; the
+   *  locker snapshots the same basket into LOCK. */
+  selectedItems?: SelectedMenuItem[];
+  /** Cached selected total for browse/detail UI. LOCK still recomputes
+   *  from selectedItems so this is display metadata, not accounting. */
+  amountMsats?: number;
+  /** Optional final acknowledgement that freezes the menu/order cart.
+   *  Cross-role lockers must wait for this before publishing LOCK. */
+  orderFinalizedAt?: number;
 }
 
 /** Single share in a LOCK event's shares[] array.
@@ -259,6 +280,45 @@ export interface JoinPayload {
 export interface LockShareEntry {
   shareIndex: number;
   encryptedFor: Record<string, string>;
+}
+
+export type MenuItemKind = "exchange-bracket" | "bill" | "loan" | "market-item";
+
+export interface MenuItem {
+  id: string;
+  label: string;
+  amountMsats: number;
+  kind?: MenuItemKind;
+  minAmountMsats?: number;
+  maxAmountMsats?: number;
+  description?: string;
+  fiatAmount?: number;
+  fiatCurrency?: string;
+  fulfillment?: "physical" | "service" | "digital";
+  imageDataUrl?: string;
+  dueAt?: number;
+  termDays?: number;
+  aprBps?: number;
+  trustTier?: number;
+}
+
+export interface SelectedMenuItem {
+  itemId: string;
+  label: string;
+  amountMsats: number;
+  quantity: number;
+  kind?: MenuItemKind;
+  minAmountMsats?: number;
+  maxAmountMsats?: number;
+  description?: string;
+  fiatAmount?: number;
+  fiatCurrency?: string;
+  fulfillment?: "physical" | "service" | "digital";
+  imageDataUrl?: string;
+  dueAt?: number;
+  termDays?: number;
+  aprBps?: number;
+  trustTier?: number;
 }
 
 /** PR 4: 3-recipient envelope structure for LOCK-time data that needs
@@ -294,6 +354,9 @@ export interface LockPayload {
   /** Breakdown of amounts (2-way split since v0.1.71) */
   sellerReceivesMsats: number;
   arbiterFeeMsats: number;
+  /** Snapshot of the buyer-selected menu basket. For menu listings,
+   *  this is required at LOCK and its sum becomes the escrow amount. */
+  selectedItems?: SelectedMenuItem[];
   /** Atomic-funding fields (PR 1): LOCK is self-describing about who
    *  the buyer and arbiter are. The chain no longer relies on prior
    *  JOIN events to populate the participant slots — JOINs are ACKs.
@@ -536,6 +599,9 @@ export interface EscrowState {
   fiatCurrency?: string;
   /** Category */
   category: string;
+  /** Optional menu/listing items. Undefined keeps legacy single-offer
+   *  listings small on replay. */
+  items?: MenuItem[];
   /** Fulfillment type: "physical" | "service" | "digital". Always set
    *  after handleCreate runs — defaults to "service" for non-marketplace
    *  categories, "physical" for marketplace when not specified. */
@@ -552,6 +618,19 @@ export interface EscrowState {
     [Role.SELLER]: string | null;
     [Role.ARBITER]: string | null;
   };
+
+  /** Timed buyer/seller reservations created by JOIN ACKs. The
+   *  initiator role and arbiter auto-assignment do not use timed holds. */
+  joinHolds?: Partial<Record<Role, {
+    role: Role;
+    pubkey: string;
+    joinedAt: number;
+    expiresAt: number;
+    eventId: string;
+    selectedItems?: SelectedMenuItem[];
+    amountMsats?: number;
+    orderFinalizedAt?: number;
+  }>>;
 
   /** Who initiated the trade (and their role) */
   initiator: { pubkey: string; role: Role };
@@ -608,6 +687,9 @@ export interface EscrowState {
       rail: string | null;
       networks: string[];
     } | null;
+    /** Menu basket captured by LOCK. Null/undefined means legacy
+     *  single-offer escrow. */
+    selectedItems?: SelectedMenuItem[];
   };
 
   /** Claim details */
@@ -618,6 +700,14 @@ export interface EscrowState {
 
   /** Timestamps */
   createdAt: number;
+  /** Deadline for the unlocked Browse listing. Once LOCK lands, the
+   *  active trade deadline moves to lock.lockedAt + tradeTimeoutSeconds. */
+  listingExpiresAt?: number;
+  /** Duration applied to the locked trade after LOCK. Defaults to the
+   *  CREATE expirySeconds for backwards-compatible replays. */
+  tradeTimeoutSeconds?: number;
+  /** Active deadline for the current state: listing deadline while
+   *  CREATED, locked trade deadline after LOCK. */
   expiresAt: number;
   resolvedAt: number | null;
   completedAt: number | null;
@@ -628,6 +718,57 @@ export interface EscrowState {
 
   /** Chat messages (separate from state transitions) */
   chatMessages: ParsedEscrowEvent<ChatPayload>[];
+}
+
+export function roleUsesJoinHold(role: Role, initiatorRole: Role): boolean {
+  return (role === Role.BUYER || role === Role.SELLER) && role !== initiatorRole;
+}
+
+export function joinHoldExpiresAt(joinedAt: number): number {
+  return joinedAt + JOIN_HOLD_SECONDS;
+}
+
+export function getEffectiveParticipantAt(
+  state: EscrowState,
+  role: Role,
+  atSec = Math.floor(Date.now() / 1000),
+  opts: { includeLockGrace?: boolean } = {},
+): string | null {
+  const pubkey = state.participants[role];
+  if (!pubkey) return null;
+  if (state.status !== EscrowStatus.CREATED) return pubkey;
+
+  const hold = state.joinHolds?.[role];
+  if (!hold || hold.pubkey !== pubkey) return pubkey;
+
+  const graceSeconds = opts.includeLockGrace ? JOIN_HOLD_LOCK_GRACE_SECONDS : 0;
+  return hold.expiresAt + graceSeconds > atSec ? pubkey : null;
+}
+
+export function getEffectiveParticipantsAt(
+  state: EscrowState,
+  atSec = Math.floor(Date.now() / 1000),
+): EscrowState["participants"] {
+  return {
+    [Role.BUYER]: getEffectiveParticipantAt(state, Role.BUYER, atSec),
+    [Role.SELLER]: getEffectiveParticipantAt(state, Role.SELLER, atSec),
+    [Role.ARBITER]: getEffectiveParticipantAt(state, Role.ARBITER, atSec),
+  };
+}
+
+export function getJoinHoldRemainingSeconds(
+  state: EscrowState,
+  role: Role,
+  atSec = Math.floor(Date.now() / 1000),
+): number | null {
+  const hold = state.joinHolds?.[role];
+  if (!hold || state.participants[role] !== hold.pubkey) return null;
+  return Math.max(0, hold.expiresAt - atSec);
+}
+
+export function selectedMenuItemsTotalMsats(items: SelectedMenuItem[] | undefined): number {
+  if (!items || items.length === 0) return 0;
+  return items.reduce((sum, item) => sum + item.amountMsats * item.quantity, 0);
 }
 
 // ── Validation Error ──────────────────────────────────────────────────────

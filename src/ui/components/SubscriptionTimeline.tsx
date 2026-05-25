@@ -1,4 +1,5 @@
 import { T } from "../theme.js";
+import { BitcoinAmount } from "./BitcoinAmount.js";
 
 export function SubscriptionTimeline({ subscription, onRelease }: {
   subscription: any;
@@ -91,7 +92,7 @@ export function SubscriptionTimeline({ subscription, onRelease }: {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
                 <div style={{ fontSize: 11, color: T.purple, fontFamily: T.mono, fontWeight: 600 }}>
-                  Period {i + 1} · {Math.floor(sub.periodAmountMsats / 1000).toLocaleString()} sats
+                  Period {i + 1} · <BitcoinAmount msats={sub.periodAmountMsats} size={11} gap={3} glyphScale={1.18} color={T.purple} glyphColor={T.purple} />
                 </div>
                 {remaining > 0 && (
                   <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
@@ -114,7 +115,8 @@ export function SubscriptionTimeline({ subscription, onRelease }: {
 
       {/* Summary */}
       <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, textAlign: "center" }}>
-        {Math.floor(sub.totalReleasedMsats / 1000).toLocaleString()} / {Math.floor(sub.totalPeriods * sub.periodAmountMsats / 1000).toLocaleString()} sats released
+        <BitcoinAmount msats={sub.totalReleasedMsats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> /{" "}
+        <BitcoinAmount msats={sub.totalPeriods * sub.periodAmountMsats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> released
       </div>
     </div>
   );

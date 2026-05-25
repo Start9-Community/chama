@@ -1,0 +1,675 @@
+// Fedimint native sidecar adapter.
+//
+// This keeps Chama's existing IFedimintWallet boundary intact while routing
+// wallet operations through the local Rust Fedimint bridge. It is opt-in only:
+// the default browser WASM SDK path remains unchanged unless nativeFedimint is
+// enabled in the URL, localStorage, or Vite env.
+
+import type {
+  IFedimintWallet,
+  LnReceiveStateKind,
+  OnchainDepositAddress,
+  OnchainDepositSettled,
+  OnchainInfo,
+  OnchainWithdrawFees,
+  OnchainWithdrawResult,
+} from "./fedimint-client.js";
+import { hasBolt11Amount } from "../payments/bolt11.js";
+import type { ChamaOperationMeta } from "../payments/sats-trace.js";
+
+export const NATIVE_BRIDGE_MODE_KEY = "chama_native_fedimint";
+export const NATIVE_BRIDGE_URL_KEY = "chama_native_fedimint_url";
+export const NATIVE_BRIDGE_INVITE_KEY = "chama_native_fedimint_invite";
+export const NATIVE_BRIDGE_COMMUNITY_KEY = "chama_native_fedimint_community";
+export const DEFAULT_NATIVE_BRIDGE_URL = "http://127.0.0.1:8787";
+export const DEFAULT_NATIVE_BRIDGE_COMMUNITY = "us-gbf";
+
+const TRUE_SETTING_VALUES = new Set(["1", "true", "yes", "on"]);
+
+interface NativeBridgeFetchInit extends Omit<RequestInit, "body"> {
+  body?: unknown;
+}
+
+interface NativeInfoResponse {
+  federation_id: string;
+  network: string;
+  total_amount_msat: number;
+  meta: unknown;
+}
+
+interface NativeJoinResponse {
+  joined: string;
+  federation_id: string;
+}
+
+interface NativeInvoiceResponse {
+  operation_id?: string;
+  operationId?: string;
+  invoice: string;
+}
+
+interface NativeSpendNotesResponse {
+  operation_id?: string;
+  operationId?: string;
+  requested_amount_msat?: number;
+  total_amount_msat: number;
+  notes: string;
+}
+
+interface NativeReissueNotesResponse {
+  operation_id?: string;
+  operationId?: string;
+  total_amount_msat: number;
+  status: string;
+}
+
+interface NativeParseNotesResponse {
+  total_amount_msat: number;
+  federation_id_prefix: string;
+  notes_json: unknown;
+}
+
+interface NativeAwaitInvoiceResponse {
+  status?: string;
+  operation_id?: string;
+  operationId?: string;
+  info?: NativeInfoResponse;
+}
+
+interface NativePayResponse {
+  operation_id?: string;
+  operationId?: string;
+  fee_msat?: number;
+}
+
+interface NativeOnchainInfoResponse {
+  network: string;
+  finality_delay?: number;
+  finalityDelay?: number;
+  peg_in_fee_sats?: number;
+  pegInFeeSats?: number;
+  peg_out_fee_sats?: number;
+  pegOutFeeSats?: number;
+  minimum_deposit_sats?: number;
+  minimumDepositSats?: number;
+}
+
+interface NativeOnchainDepositAddressResponse {
+  operation_id?: string;
+  operationId?: string;
+  address: string;
+  tweak_idx?: unknown;
+  tweakIdx?: unknown;
+  finality_delay?: number;
+  finalityDelay?: number;
+}
+
+interface NativeOnchainDepositSettledResponse {
+  status: string;
+  operation_id?: string;
+  operationId?: string;
+  amount_sats?: number;
+  amountSats?: number;
+  outpoint?: string;
+  info?: NativeInfoResponse;
+}
+
+interface NativeOnchainWithdrawFeesResponse {
+  amount_sats?: number;
+  amountSats?: number;
+  fees_sats?: number;
+  feesSats?: number;
+  total_sats?: number;
+  totalSats?: number;
+}
+
+interface NativeOnchainWithdrawResponse {
+  operation_id?: string;
+  operationId?: string;
+  status: string;
+  txid?: string | null;
+  fees_sats?: number;
+  feesSats?: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function asErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getImportEnv(key: string): string | null {
+  const env = (import.meta as unknown as { env?: Record<string, unknown> }).env;
+  const value = env?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function getBrowserSearchParams(): URLSearchParams | null {
+  try {
+    if (typeof window === "undefined") return null;
+    return new URL(window.location.href).searchParams;
+  } catch {
+    return null;
+  }
+}
+
+function getLocalStorageValue(key: string): string | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const value = localStorage.getItem(key);
+    return value !== null && value.trim() ? value.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function setLocalStorageValue(key: string, value: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(key, value);
+  } catch {
+    // Storage is a convenience cache only; wallet operations do not rely on it.
+  }
+}
+
+function isEnabledSetting(value: string | null): boolean {
+  if (value === null) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "" || TRUE_SETTING_VALUES.has(normalized);
+}
+
+function normalizeBaseUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
+function readOperationId(
+  value:
+    | NativeInvoiceResponse
+    | NativeReissueNotesResponse
+    | NativePayResponse
+    | NativeOnchainDepositAddressResponse
+    | NativeOnchainDepositSettledResponse
+    | NativeOnchainWithdrawResponse,
+): string {
+  const operationId = value.operation_id ?? value.operationId;
+  return operationId ? String(operationId) : `native-${Date.now()}`;
+}
+
+function readRequiredNumber(
+  value: number | undefined,
+  field: string,
+  path: string,
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`Native Fedimint bridge ${path} omitted numeric ${field}`);
+  }
+  return value;
+}
+
+function inviteStorageKey(baseUrl: string, federationId: string): string {
+  return `${NATIVE_BRIDGE_INVITE_KEY}:${baseUrl}:${federationId}`;
+}
+
+export function isNativeBridgeModeOn(): boolean {
+  const params = getBrowserSearchParams();
+  const urlFlag =
+    params?.get("nativeFedimint") ??
+    params?.get("native-fedimint") ??
+    null;
+  if (urlFlag !== null) return isEnabledSetting(urlFlag);
+
+  const storedFlag = getLocalStorageValue(NATIVE_BRIDGE_MODE_KEY);
+  if (storedFlag !== null) return isEnabledSetting(storedFlag);
+
+  return isEnabledSetting(getImportEnv("VITE_CHAMA_NATIVE_FEDIMINT"));
+}
+
+export function getNativeBridgeUrl(): string {
+  const params = getBrowserSearchParams();
+  const url =
+    params?.get("nativeFedimintUrl") ??
+    params?.get("native-fedimint-url") ??
+    getLocalStorageValue(NATIVE_BRIDGE_URL_KEY) ??
+    getImportEnv("VITE_CHAMA_NATIVE_BRIDGE_URL") ??
+    DEFAULT_NATIVE_BRIDGE_URL;
+  return normalizeBaseUrl(url);
+}
+
+export function getNativeBridgeCommunitySlug(): string {
+  const params = getBrowserSearchParams();
+  const slug =
+    params?.get("nativeFedimintCommunity") ??
+    params?.get("native-fedimint-community") ??
+    getLocalStorageValue(NATIVE_BRIDGE_COMMUNITY_KEY) ??
+    getImportEnv("VITE_CHAMA_NATIVE_COMMUNITY") ??
+    DEFAULT_NATIVE_BRIDGE_COMMUNITY;
+  return slug.trim();
+}
+
+async function nativeBridgeFetch<T>(
+  baseUrl: string,
+  path: string,
+  init: NativeBridgeFetchInit = {},
+): Promise<T> {
+  const { body: jsonBody, headers: rawHeaders, ...rest } = init;
+  const headers = new Headers(rawHeaders);
+  const requestInit: RequestInit = { ...rest, headers };
+
+  if (jsonBody !== undefined) {
+    headers.set("content-type", "application/json");
+    requestInit.body = JSON.stringify(jsonBody);
+  }
+
+  const response = await fetch(`${baseUrl}${path}`, requestInit);
+  const text = await response.text();
+  let json: unknown = null;
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error(
+        `Native Fedimint bridge ${path} returned non-JSON response: ${text.slice(0, 160)}`,
+      );
+    }
+  }
+
+  if (!response.ok) {
+    const bridgeMessage =
+      isRecord(json) && typeof json.error === "string"
+        ? json.error
+        : text || response.statusText;
+    throw new Error(
+      `Native Fedimint bridge ${path} failed (${response.status}): ${bridgeMessage}`,
+    );
+  }
+
+  return json as T;
+}
+
+export class NativeBridgeWallet implements IFedimintWallet {
+  private readonly baseUrl: string;
+  private openState = false;
+  private federationId: string | null = null;
+  private inviteCode: string | null = null;
+  private lastBalanceMsats = 0;
+  private balanceSubscribers = new Set<(balance: number) => void>();
+  private balancePoll: ReturnType<typeof setInterval> | null = null;
+
+  constructor(baseUrl = getNativeBridgeUrl()) {
+    this.baseUrl = normalizeBaseUrl(baseUrl);
+  }
+
+  async open(): Promise<void> {
+    const info = await this.request<NativeInfoResponse>("/info");
+    this.applyInfo(info);
+    this.loadCachedInvite();
+  }
+
+  isOpen(): boolean {
+    return this.openState;
+  }
+
+  async joinFederation(inviteCode: string): Promise<void> {
+    const joined = await this.request<NativeJoinResponse>("/join", {
+      method: "POST",
+      body: { inviteCode },
+    });
+    this.openState = true;
+    this.federationId = joined.federation_id;
+    this.rememberInviteCode(joined.joined || inviteCode);
+    await this.refreshBalance();
+  }
+
+  rememberInviteCode(inviteCode: string): void {
+    const trimmed = inviteCode.trim();
+    if (!trimmed) return;
+    this.inviteCode = trimmed;
+    if (this.federationId) {
+      setLocalStorageValue(inviteStorageKey(this.baseUrl, this.federationId), trimmed);
+    }
+  }
+
+  recovery = {
+    hasPendingRecoveries: async (): Promise<boolean> => false,
+    waitForAllRecoveries: async (): Promise<void> => {},
+  };
+
+  balance = {
+    getBalance: async (): Promise<number> => this.refreshBalance(),
+    subscribeBalance: (callback: (balance: number) => void): (() => void) =>
+      this.subscribeBalance(callback),
+  };
+
+  mint = {
+    spendNotes: async (
+      amountMsats: number,
+      _meta?: ChamaOperationMeta,
+    ): Promise<string> => {
+      const result = await this.request<NativeSpendNotesResponse>("/spend-notes", {
+        method: "POST",
+        body: {
+          amountMsats,
+          allowOverpay: false,
+        },
+      });
+      await this.refreshBalance().catch((error) => {
+        console.warn("[chama] native bridge balance refresh after spend failed:", error);
+      });
+      return result.notes;
+    },
+
+    redeemEcash: async (
+      oobNotes: string,
+      _meta?: ChamaOperationMeta,
+    ): Promise<string> => {
+      const result = await this.request<NativeReissueNotesResponse>("/reissue-notes", {
+        method: "POST",
+        body: {
+          notes: oobNotes,
+          wait: true,
+        },
+      });
+      await this.refreshBalance().catch((error) => {
+        console.warn("[chama] native bridge balance refresh after reissue failed:", error);
+      });
+      return readOperationId(result);
+    },
+
+    parseNotes: async (oobNotes: string): Promise<{ total_amount: number }> => {
+      const result = await this.request<NativeParseNotesResponse>("/parse-notes", {
+        method: "POST",
+        body: { notes: oobNotes },
+      });
+      return { total_amount: result.total_amount_msat };
+    },
+  };
+
+  lightning = {
+    createInvoice: async (
+      amountMsats: number,
+      description: string,
+      onReceiveState?: (kind: LnReceiveStateKind) => void,
+      _meta?: ChamaOperationMeta,
+    ): Promise<{ invoice: string; operationId: string }> => {
+      onReceiveState?.("created");
+      const result = await this.request<NativeInvoiceResponse>("/invoice", {
+        method: "POST",
+        body: {
+          amountMsats,
+          description,
+        },
+      });
+      const operationId = readOperationId(result);
+      onReceiveState?.("waiting_for_payment");
+      void this.awaitInvoice(operationId, onReceiveState);
+      return {
+        invoice: result.invoice,
+        operationId,
+      };
+    },
+
+    payInvoice: async (
+      bolt11: string,
+      meta?: ChamaOperationMeta,
+    ): Promise<{ operationId: string }> => {
+      const amountMsats = typeof meta?.chama_amount_msats === "number"
+        ? Math.floor(meta.chama_amount_msats)
+        : undefined;
+      const shouldSendAmount = !!amountMsats && amountMsats > 0 && !hasBolt11Amount(bolt11);
+      const result = await this.request<NativePayResponse>("/pay", {
+        method: "POST",
+        body: {
+          paymentInfo: bolt11,
+          ...(shouldSendAmount ? { amountMsats } : {}),
+          noWait: false,
+        },
+      });
+      await this.refreshBalance().catch((error) => {
+        console.warn("[chama] native bridge balance refresh after LN pay failed:", error);
+      });
+      return { operationId: readOperationId(result) };
+    },
+  };
+
+  onchain = {
+    getInfo: async (): Promise<OnchainInfo> => {
+      const result = await this.request<NativeOnchainInfoResponse>("/onchain/info");
+      return {
+        network: result.network,
+        finalityDelay: readRequiredNumber(
+          result.finality_delay ?? result.finalityDelay,
+          "finalityDelay",
+          "/onchain/info",
+        ),
+        pegInFeeSats: readRequiredNumber(
+          result.peg_in_fee_sats ?? result.pegInFeeSats,
+          "pegInFeeSats",
+          "/onchain/info",
+        ),
+        pegOutFeeSats: readRequiredNumber(
+          result.peg_out_fee_sats ?? result.pegOutFeeSats,
+          "pegOutFeeSats",
+          "/onchain/info",
+        ),
+        minimumDepositSats: readRequiredNumber(
+          result.minimum_deposit_sats ?? result.minimumDepositSats,
+          "minimumDepositSats",
+          "/onchain/info",
+        ),
+      };
+    },
+
+    createDepositAddress: async (
+      _meta?: ChamaOperationMeta,
+    ): Promise<OnchainDepositAddress> => {
+      const result = await this.request<NativeOnchainDepositAddressResponse>(
+        "/onchain/deposit-address",
+        { method: "POST" },
+      );
+      return {
+        operationId: readOperationId(result),
+        address: result.address,
+        tweakIdx: result.tweak_idx ?? result.tweakIdx,
+        finalityDelay: readRequiredNumber(
+          result.finality_delay ?? result.finalityDelay,
+          "finalityDelay",
+          "/onchain/deposit-address",
+        ),
+      };
+    },
+
+    awaitDeposit: async (operationId: string): Promise<OnchainDepositSettled> => {
+      const result = await this.request<NativeOnchainDepositSettledResponse>(
+        "/onchain/await-deposit",
+        {
+          method: "POST",
+          body: { operationId },
+        },
+      );
+      if (result.info) this.applyInfo(result.info);
+      else await this.refreshBalance();
+      return {
+        status: result.status,
+        operationId: readOperationId(result),
+        amountSats: result.amount_sats ?? result.amountSats,
+        outpoint: result.outpoint,
+      };
+    },
+
+    getWithdrawFees: async (
+      address: string,
+      amountSats: number,
+    ): Promise<OnchainWithdrawFees> => {
+      const result = await this.request<NativeOnchainWithdrawFeesResponse>(
+        "/onchain/withdraw-fees",
+        {
+          method: "POST",
+          body: { address, amountSats },
+        },
+      );
+      return {
+        amountSats: readRequiredNumber(
+          result.amount_sats ?? result.amountSats,
+          "amountSats",
+          "/onchain/withdraw-fees",
+        ),
+        feesSats: readRequiredNumber(
+          result.fees_sats ?? result.feesSats,
+          "feesSats",
+          "/onchain/withdraw-fees",
+        ),
+        totalSats: readRequiredNumber(
+          result.total_sats ?? result.totalSats,
+          "totalSats",
+          "/onchain/withdraw-fees",
+        ),
+      };
+    },
+
+    withdraw: async (
+      address: string,
+      amountSats: number,
+      options?: { wait?: boolean; meta?: ChamaOperationMeta },
+    ): Promise<OnchainWithdrawResult> => {
+      const result = await this.request<NativeOnchainWithdrawResponse>(
+        "/onchain/withdraw",
+        {
+          method: "POST",
+          body: {
+            address,
+            amountSats,
+            noWait: options?.wait === false,
+          },
+        },
+      );
+      await this.refreshBalance().catch((error) => {
+        console.warn("[chama] native bridge balance refresh after onchain withdraw failed:", error);
+      });
+      return {
+        operationId: readOperationId(result),
+        status: result.status,
+        txid: result.txid || undefined,
+        feesSats: readRequiredNumber(
+          result.fees_sats ?? result.feesSats,
+          "feesSats",
+          "/onchain/withdraw",
+        ),
+      };
+    },
+  };
+
+  federation = {
+    getFederationId: async (): Promise<string> => {
+      if (this.federationId) return this.federationId;
+      const info = await this.request<NativeInfoResponse>("/info");
+      this.applyInfo(info);
+      return info.federation_id;
+    },
+
+    getInviteCode: async (): Promise<string> => {
+      if (this.inviteCode) return this.inviteCode;
+      this.loadCachedInvite();
+      if (this.inviteCode) return this.inviteCode;
+      throw new Error(
+        "Native Fedimint bridge has no cached invite code for this federation yet",
+      );
+    },
+  };
+
+  async cleanup(): Promise<void> {
+    if (this.balancePoll !== null) {
+      clearInterval(this.balancePoll);
+      this.balancePoll = null;
+    }
+    this.balanceSubscribers.clear();
+    this.openState = false;
+  }
+
+  private request<T>(path: string, init: NativeBridgeFetchInit = {}): Promise<T> {
+    return nativeBridgeFetch<T>(this.baseUrl, path, init);
+  }
+
+  private applyInfo(info: NativeInfoResponse): void {
+    this.openState = true;
+    this.federationId = info.federation_id;
+    this.setBalance(info.total_amount_msat);
+  }
+
+  private loadCachedInvite(): void {
+    if (!this.federationId) return;
+    const cached = getLocalStorageValue(inviteStorageKey(this.baseUrl, this.federationId));
+    if (cached) this.inviteCode = cached;
+  }
+
+  private async refreshBalance(): Promise<number> {
+    const info = await this.request<NativeInfoResponse>("/info");
+    this.applyInfo(info);
+    return info.total_amount_msat;
+  }
+
+  private subscribeBalance(callback: (balance: number) => void): () => void {
+    this.balanceSubscribers.add(callback);
+    callback(this.lastBalanceMsats);
+    void this.refreshBalance()
+      .then((balance) => callback(balance))
+      .catch((error) => {
+        console.warn("[chama] native bridge initial balance refresh failed:", error);
+      });
+    this.ensureBalancePolling();
+
+    return () => {
+      this.balanceSubscribers.delete(callback);
+      if (this.balanceSubscribers.size === 0 && this.balancePoll !== null) {
+        clearInterval(this.balancePoll);
+        this.balancePoll = null;
+      }
+    };
+  }
+
+  private ensureBalancePolling(): void {
+    if (this.balancePoll !== null) return;
+    this.balancePoll = setInterval(() => {
+      void this.refreshBalance().catch((error) => {
+        console.warn("[chama] native bridge balance poll failed:", error);
+      });
+    }, 3000);
+  }
+
+  private setBalance(balance: number): void {
+    const changed = balance !== this.lastBalanceMsats;
+    this.lastBalanceMsats = balance;
+    if (!changed) return;
+    for (const callback of [...this.balanceSubscribers]) {
+      try {
+        callback(balance);
+      } catch (error) {
+        console.warn("[chama] native bridge balance subscriber failed:", error);
+      }
+    }
+  }
+
+  private async awaitInvoice(
+    operationId: string,
+    onReceiveState?: (kind: LnReceiveStateKind) => void,
+  ): Promise<void> {
+    try {
+      const result = await this.request<NativeAwaitInvoiceResponse>("/await-invoice", {
+        method: "POST",
+        body: { operationId },
+      });
+      if (result.info) this.applyInfo(result.info);
+      else await this.refreshBalance();
+      onReceiveState?.("claimed");
+    } catch (error) {
+      const reason = asErrorMessage(error);
+      onReceiveState?.({ canceled: { reason } });
+      console.warn(`[chama] native bridge invoice ${operationId} watcher failed:`, error);
+    }
+  }
+}
+
+export function createNativeBridgeWallet(baseUrl = getNativeBridgeUrl()): IFedimintWallet {
+  return new NativeBridgeWallet(baseUrl);
+}

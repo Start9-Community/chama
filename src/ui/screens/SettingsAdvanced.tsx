@@ -1,9 +1,17 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { type FedimintState } from "../../hooks/useEscrow.js";
-import { T } from "../theme.js";
+import { T, inputStyle } from "../theme.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { isPowerUserModeOn, setPowerUserMode } from "../powerUserMode.js";
 import { SwitchFederationPanel } from "../panels/SwitchFederationPanel.js";
 import { isSimModeOn } from "../../sim/simMode.js";
+import { isNwcConnectionString } from "../../payments/nwc.js";
+import {
+  addOrTouchSavedNwcConnection,
+  deleteSavedNwcConnection,
+  listSavedNwcConnections,
+  type SavedNwcConnection,
+} from "../../payments/nwc-connections.js";
 import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
@@ -58,6 +66,29 @@ export function SettingsAdvanced({
   const recoverableSats = maxLightningPayoutSats(balanceMsats);
   const reserveSats = lightningPayoutReserveSats(balanceMsats);
   const routeLabel = fedimint.federationName || (fedimint.joined ? "Joined route" : "No Chama");
+  const [nwcManagerOpen, setNwcManagerOpen] = useState(false);
+  const [savedNwcConnections, setSavedNwcConnections] = useState<SavedNwcConnection[]>(
+    () => listSavedNwcConnections(),
+  );
+  const [nwcInput, setNwcInput] = useState("");
+  const [nwcError, setNwcError] = useState<string | null>(null);
+  const nwcInputReady = isNwcConnectionString(nwcInput);
+
+  const refreshNwcConnections = () => setSavedNwcConnections(listSavedNwcConnections());
+  const handleSaveNwc = () => {
+    setNwcError(null);
+    try {
+      addOrTouchSavedNwcConnection(nwcInput);
+      setNwcInput("");
+      refreshNwcConnections();
+    } catch (e: any) {
+      setNwcError(e?.message || "NWC connection could not be saved");
+    }
+  };
+  const handleDeleteNwc = (id: string) => {
+    deleteSavedNwcConnection(id);
+    refreshNwcConnections();
+  };
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -94,8 +125,8 @@ export function SettingsAdvanced({
           marginBottom: 12,
         }}>
           <BalanceMetric label="Raw" value={balanceMsats.toLocaleString()} suffix="msats" />
-          <BalanceMetric label="Whole" value={wholeSats.toLocaleString()} suffix="sats" />
-          <BalanceMetric label="Recoverable" value={recoverableSats.toLocaleString()} suffix="sats" tone={recoverableSats > 0 ? T.amber : T.muted} />
+          <BalanceMetric label="Whole" value={<BitcoinAmount sats={wholeSats} size={13} gap={3} glyphScale={1.18} color={T.text} glyphColor={T.muted} />} />
+          <BalanceMetric label="Recoverable" value={<BitcoinAmount sats={recoverableSats} size={13} gap={3} glyphScale={1.18} color={recoverableSats > 0 ? T.amber : T.muted} glyphColor={recoverableSats > 0 ? T.amber : T.muted} />} tone={recoverableSats > 0 ? T.amber : T.muted} />
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.6 }}>
           Route: <span style={{ color: T.text }}>{routeLabel}</span>
@@ -105,7 +136,7 @@ export function SettingsAdvanced({
           </span>
           {" · "}
           Lightning reserve: <span style={{ color: reserveSats > 0 ? T.amber : T.muted }}>
-            {reserveSats.toLocaleString()} sats
+            <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={reserveSats > 0 ? T.amber : T.muted} glyphColor={reserveSats > 0 ? T.amber : T.muted} />
           </span>
         </div>
         {fedimint.federationId && (
@@ -115,6 +146,47 @@ export function SettingsAdvanced({
           }}>
             fed {fedimint.federationId}
           </div>
+        )}
+      </div>
+
+      <div style={{
+        background: T.card, border: `1px solid ${T.border}`,
+        borderRadius: T.r, padding: 16, marginBottom: 16,
+      }}>
+        <div
+          onClick={() => setNwcManagerOpen(!nwcManagerOpen)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            cursor: "pointer", gap: 12,
+          }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.sans }}>
+              NWC wallets
+            </div>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 4, lineHeight: 1.5 }}>
+              Advanced wallet links for fast payouts and auto-funding.
+            </div>
+          </div>
+          <div style={{
+            color: T.muted, fontFamily: T.mono, fontSize: 12,
+            transform: nwcManagerOpen ? "rotate(90deg)" : "rotate(0)",
+            transition: "transform 0.16s ease",
+          }}>
+            ▸
+          </div>
+        </div>
+
+        {nwcManagerOpen && (
+          <NwcManager
+            saved={savedNwcConnections}
+            input={nwcInput}
+            error={nwcError}
+            inputReady={nwcInputReady}
+            onInput={setNwcInput}
+            onSave={handleSaveNwc}
+            onDelete={handleDeleteNwc}
+          />
         )}
       </div>
 
@@ -277,8 +349,8 @@ function BalanceMetric({
   tone = T.text,
 }: {
   label: string;
-  value: string;
-  suffix: string;
+  value: ReactNode;
+  suffix?: string;
   tone?: string;
 }) {
   return (
@@ -309,8 +381,253 @@ function BalanceMetric({
       }}>
         {value}
       </div>
-      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 3 }}>
-        {suffix}
+      {suffix && (
+        <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 3 }}>
+          {suffix}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NwcManager({
+  saved,
+  input,
+  error,
+  inputReady,
+  onInput,
+  onSave,
+  onDelete,
+}: {
+  saved: SavedNwcConnection[];
+  input: string;
+  error: string | null;
+  inputReady: boolean;
+  onInput: (value: string) => void;
+  onSave: () => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <div style={{
+      marginTop: 14,
+      paddingTop: 14,
+      borderTop: `1px solid ${T.border}`,
+    }}>
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+        gap: 8,
+        marginBottom: 12,
+      }}>
+        <NwcPermissionCard
+          title="Payouts"
+          value="Create invoices"
+          hint="Needed for Claim and Recover to send sats to this wallet."
+        />
+        <NwcPermissionCard
+          title="Auto-fund"
+          value="Send payments"
+          hint="Needed only when you want Chama to lock trades from this wallet."
+        />
+      </div>
+
+      <div style={{
+        padding: "10px 12px",
+        background: T.surface,
+        border: `1px solid ${T.border}`,
+        borderRadius: T.rs,
+        marginBottom: 12,
+      }}>
+        <div style={{
+          fontSize: 10,
+          color: T.text,
+          fontFamily: T.mono,
+          fontWeight: 800,
+          letterSpacing: 0.4,
+          marginBottom: 6,
+        }}>
+          SETUP
+        </div>
+        <ol style={{
+          margin: 0,
+          paddingLeft: 18,
+          color: T.muted,
+          fontFamily: T.mono,
+          fontSize: 10,
+          lineHeight: 1.65,
+        }}>
+          <li>Name it Chama.</li>
+          <li>Use Custom permissions.</li>
+          <li>Enable Create invoices.</li>
+          <li>Enable Send payments for auto-funding.</li>
+          <li>Set a budget at least as large as your expected trades.</li>
+          <li>Use an expiration you are comfortable revoking later.</li>
+        </ol>
+      </div>
+
+      {saved.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{
+            fontSize: 9,
+            color: T.muted,
+            fontFamily: T.mono,
+            letterSpacing: 1,
+            marginBottom: 6,
+          }}>
+            SAVED
+          </div>
+          {saved.map((connection) => (
+            <div
+              key={connection.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+                padding: "10px 12px",
+                background: T.surface,
+                border: `1px solid ${T.border}`,
+                borderRadius: T.rs,
+                marginBottom: 6,
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{
+                  color: T.text,
+                  fontFamily: T.mono,
+                  fontSize: 11,
+                  fontWeight: 800,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}>
+                  {connection.label}
+                </div>
+                <div style={{
+                  color: T.muted,
+                  fontFamily: T.mono,
+                  fontSize: 9,
+                  marginTop: 3,
+                }}>
+                  {connection.relayCount} relay{connection.relayCount === 1 ? "" : "s"} · {connection.walletPubkey.slice(0, 8)}
+                </div>
+              </div>
+              <button
+                onClick={() => onDelete(connection.id)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: T.red,
+                  fontFamily: T.mono,
+                  fontSize: 10,
+                  cursor: "pointer",
+                  padding: "4px 0",
+                  flexShrink: 0,
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{
+        fontSize: 9,
+        color: T.muted,
+        fontFamily: T.mono,
+        letterSpacing: 1,
+        marginBottom: 6,
+      }}>
+        PASTE CONNECTION
+      </div>
+      <textarea
+        value={input}
+        onChange={(e) => onInput(e.target.value)}
+        placeholder="nostr+walletconnect://..."
+        rows={3}
+        style={{ ...inputStyle, resize: "vertical" as const, minHeight: 62, marginBottom: 8 }}
+      />
+      {error && (
+        <div style={{
+          padding: "8px 10px",
+          background: T.redDim,
+          border: `1px solid ${T.red}44`,
+          color: T.red,
+          borderRadius: T.rs,
+          fontFamily: T.mono,
+          fontSize: 10,
+          marginBottom: 8,
+        }}>
+          {error}
+        </div>
+      )}
+      <button
+        onClick={onSave}
+        disabled={!inputReady}
+        style={{
+          width: "100%",
+          padding: "11px 12px",
+          borderRadius: T.rs,
+          background: inputReady ? T.accent : T.surface,
+          border: `1px solid ${inputReady ? T.accent : T.border}`,
+          color: inputReady ? "#000" : T.muted,
+          fontFamily: T.mono,
+          fontSize: 11,
+          fontWeight: 800,
+          cursor: inputReady ? "pointer" : "not-allowed",
+        }}
+      >
+        Save NWC wallet
+      </button>
+    </div>
+  );
+}
+
+function NwcPermissionCard({
+  title,
+  value,
+  hint,
+}: {
+  title: string;
+  value: string;
+  hint: string;
+}) {
+  return (
+    <div style={{
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: T.rs,
+      padding: 10,
+      minWidth: 0,
+    }}>
+      <div style={{
+        fontSize: 9,
+        color: T.muted,
+        fontFamily: T.mono,
+        textTransform: "uppercase",
+        letterSpacing: 0.8,
+        marginBottom: 5,
+      }}>
+        {title}
+      </div>
+      <div style={{
+        fontSize: 12,
+        color: T.accent,
+        fontFamily: T.mono,
+        fontWeight: 900,
+        lineHeight: 1.25,
+        marginBottom: 5,
+      }}>
+        {value}
+      </div>
+      <div style={{
+        color: T.muted,
+        fontFamily: T.mono,
+        fontSize: 9,
+        lineHeight: 1.45,
+      }}>
+        {hint}
       </div>
     </div>
   );

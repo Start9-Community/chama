@@ -27,6 +27,7 @@
 import {
   BP_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
+  GBF_FEDERATION_INVITE,
 } from "../fedimint/federation-invites.js";
 
 export interface Community {
@@ -215,6 +216,20 @@ export const COMMUNITY_REGISTRY: Community[] = [
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "BLF",
+    hiddenFromPicker: false,
+  },
+  {
+    slug: "us-gbf",
+    displayName: "USA - USD",
+    currency: "USD",
+    countries: ["US"],
+    languages: ["en"],
+    federationInvite: GBF_FEDERATION_INVITE,
+    flagEmoji: "🇺🇸",
+    country: "US",
+    browserReliable: true,
+    notes: "Native Fedimint sidecar route verified end-to-end against GBF.",
+    disambiguator: "GBF",
     hiddenFromPicker: false,
   },
   {

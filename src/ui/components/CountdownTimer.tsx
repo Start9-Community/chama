@@ -1,7 +1,13 @@
 import { useState, useEffect } from "react";
 import { T } from "../theme.js";
 
-export function CountdownTimer({ expiresAt }: { expiresAt: number }) {
+export function CountdownTimer({
+  expiresAt,
+  label = "EXPIRES IN",
+}: {
+  expiresAt: number;
+  label?: string;
+}) {
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
 
   useEffect(() => {
@@ -51,7 +57,7 @@ export function CountdownTimer({ expiresAt }: { expiresAt: number }) {
       fontFamily: T.mono, fontSize: 11,
       animation: urgent ? "pulse 1s ease-in-out infinite" : "none",
     }}>
-      <span style={{ color: T.muted, fontSize: 9, letterSpacing: 1 }}>EXPIRES IN</span>
+      <span style={{ color: T.muted, fontSize: 9, letterSpacing: 1 }}>{label}</span>
       <span style={{ color, fontWeight: 700, fontSize: 13 }}>{timeStr}</span>
     </div>
   );

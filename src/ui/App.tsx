@@ -1,15 +1,27 @@
-import { useState, useEffect, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 
 import { useEscrow } from "../hooks/useEscrow.js";
-import { type EscrowState, EscrowStatus, TRULY_TERMINAL_STATES } from "../escrow-engine/types.js";
+import {
+  type EscrowState,
+  type SelectedMenuItem,
+  EscrowStatus,
+  TRULY_TERMINAL_STATES,
+  getEffectiveParticipantsAt,
+} from "../escrow-engine/types.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
-import { getActiveInvite, hasFediInternalEcash, isTestnetMode } from "../fedimint/index.js";
+import {
+  getActiveInvite,
+  getNativeBridgeCommunitySlug,
+  hasFediInternalEcash,
+  isNativeBridgeModeOn,
+  isTestnetMode,
+} from "../fedimint/index.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
 
-import { T } from "./theme.js";
+import { BROWSE_CATS, T } from "./theme.js";
 import {
   decideAutoInitTarget,
   decideListingTapEffect,
@@ -29,6 +41,7 @@ import {
   listingMatchesActiveRoute,
 } from "./decisions.js";
 import { Toast } from "./components/Toast.js";
+import { BitcoinAmount } from "./components/BitcoinAmount.js";
 import { BottomNav, BOTTOM_NAV_HEIGHT, type Tab } from "./components/BottomNav.js";
 import { BrowserSupportBanner } from "./components/BrowserSupportBanner.js";
 import { ActiveTradePill } from "./components/ActiveTradePill.js";
@@ -51,6 +64,7 @@ import { AtomicFundingModal } from "./panels/AtomicFundingModal.js";
 import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
 import { addOrTouchPayoutDestination, listPayoutDestinations } from "../payments/payout-destinations.js";
+import { listSavedNwcConnections } from "../payments/nwc-connections.js";
 import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
 import {
   buildChamaOperationMeta,
@@ -112,7 +126,7 @@ export default function App() {
   // Toast state needs to be declared before the hook since we pass
   // onClaimProgress which dispatches toasts. useRef holds the callback
   // so the hook gets a stable reference and doesn't re-wire on every render.
-  const toastRef = useRef<((t: { message: string; type: "success" | "error" | "info" }) => void) | null>(null);
+  const toastRef = useRef<((t: { message: ReactNode; type: "success" | "error" | "info" }) => void) | null>(null);
 
   const [{
     connected,
@@ -139,10 +153,10 @@ export default function App() {
           type: "info",
         });
       } else if (p.phase === "success") {
-        const sats = Math.floor(p.deltaMsats / 1000).toLocaleString();
+        const sats = Math.floor(p.deltaMsats / 1000);
         t({
           message: p.viaWatchdog
-            ? "Claimed! " + sats + " sats arrived."
+            ? <>Claimed! <BitcoinAmount sats={sats} size={12} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> arrived.</>
             : "Claimed! Ecash redeemed to your Lightning wallet.",
           type: "success",
         });
@@ -160,6 +174,8 @@ export default function App() {
 
   const [view, setView] = useState<View>("browse");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const urlEscrowOpenAttemptedRef = useRef(false);
+  const [detailBackView, setDetailBackView] = useState<View>("browse");
   const [browseCategory, setBrowseCategory] = useState<string>("all");
   // Per the "every user has a home" doctrine (§2.1, locked for v0.2.0):
   // every user — first-time or returning — gets a community from the
@@ -174,7 +190,7 @@ export default function App() {
   const [nip46Uri, setNip46Uri] = useState<string | null>(null);
   const [loginSuccess, setLoginSuccess] = useState(false);
   const [nip46Waiting, setNip46Waiting] = useState(false);
-  const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
+  const [toast, setToast] = useState<{ message: ReactNode; type: "success" | "error" | "info" } | null>(null);
   toastRef.current = setToast;
   const [showFundModal, setShowFundModal] = useState(false);
   const [autoLoginChecked, setAutoLoginChecked] = useState(false);
@@ -207,6 +223,7 @@ export default function App() {
     amountMsats: number;
     ctaLabel: string;
     savedHandleId?: string;
+    selectedItems?: SelectedMenuItem[];
     resolve: () => void;
   } | null>(null);
   // v0.3.0 Phase 3: ClaimPayoutModal mount state. Same shape as
@@ -335,7 +352,16 @@ export default function App() {
     if (fedimint.joined || fedimint.busy || fedimint.initialized) return;
 
     const activeInvite = getActiveInvite();
-    const homeCommunity = getUserCommunitySlugRaw();
+    const storedHomeCommunity = getUserCommunitySlugRaw();
+    const nativeCommunity = isNativeBridgeModeOn()
+      ? getNativeBridgeCommunitySlug()
+      : null;
+    const nativeCommunityIsValid = nativeCommunity
+      ? getCommunityBySlug(nativeCommunity) !== null
+      : false;
+    const homeCommunity = nativeCommunityIsValid
+      ? nativeCommunity
+      : storedHomeCommunity;
     const target = decideAutoInitTarget({
       activeInvite,
       homeCommunity,
@@ -347,6 +373,8 @@ export default function App() {
       const targetInvite = "invite" in target ? target.invite : null;
       console.info("[chama] auto-init target", {
         homeCommunity,
+        storedHomeCommunity,
+        nativeCommunity: nativeCommunityIsValid ? nativeCommunity : null,
         activeInvite: activeInvite ? activeInvite.slice(0, 24) + "…" : null,
         targetKind: target.kind,
         targetCommunity: target.kind === "use-home"
@@ -360,6 +388,15 @@ export default function App() {
 
     if (target.kind === "skip") return;
     setAutoInitDone(true);
+
+    // Native sidecar mode is currently the GBF proof path. Persist the
+    // native community before initFedimint reads community storage so
+    // create/list/lock flows tag new trades with the GBF route instead
+    // of the user's previous BLF home.
+    if (nativeCommunityIsValid && homeCommunity && storedHomeCommunity !== homeCommunity) {
+      actions.setCommunity(homeCommunity);
+      setBrowseCommunity(homeCommunity);
+    }
 
     // v0.2.0 item 6: when target.kind === "use-default" we also persist
     // the assigned community to localStorage so subsequent reloads land
@@ -410,10 +447,10 @@ export default function App() {
     })
     .sort((a, b) => b.createdAt - a.createdAt);
 
-  const isParticipant = (s: EscrowState) =>
-    s.participants.buyer === pubkey ||
-    s.participants.seller === pubkey ||
-    s.participants.arbiter === pubkey;
+  const isParticipant = (s: EscrowState) => {
+    const p = getEffectiveParticipantsAt(s, now);
+    return p.buyer === pubkey || p.seller === pubkey || p.arbiter === pubkey;
+  };
 
   const myTrades = visibleTrades.filter(isParticipant);
 
@@ -536,9 +573,18 @@ export default function App() {
   // load-bearing money-route fact; mintUrl can be stale if a power user
   // switched routes without changing their home community.
   const myActiveInvite = fedimint.joined ? getActiveInvite() : null;
-  const visibleListings = visibleTrades.filter(s =>
+  const allVisibleListings = visibleTrades.filter(s =>
+    shouldShowOnBrowse({ escrow: s, browseCategory: "all", nowSec: now })
+  );
+  const visibleListings = allVisibleListings.filter(s =>
     shouldShowOnBrowse({ escrow: s, browseCategory, nowSec: now })
   );
+  const browseCategoryCounts = BROWSE_CATS.reduce((acc, cat) => {
+    acc[cat.id] = cat.id === "all"
+      ? allVisibleListings.length
+      : allVisibleListings.filter(listing => listing.category === cat.id).length;
+    return acc;
+  }, {} as Record<string, number>);
   const listingMatchesRoute = (s: EscrowState) => listingMatchesActiveRoute({
     listingMintUrl: s.mintUrl,
     listingFedId: (s.eventChain[0]?.payload as { fed?: string } | undefined)?.fed ?? null,
@@ -653,14 +699,17 @@ export default function App() {
   // decideTradeDetailFraming — always-true post-switch is fine because
   // the framing compares listing.fed against home.fed, not against
   // active.fed.
-  const openEscrow = (id: string) => {
+  const openEscrow = (id: string, returnTo?: View) => {
     const local = escrows.get(id);
+    const nextBackView = returnTo ?? (view === "detail" ? detailBackView : view);
+    const safeBackView = nextBackView === "detail" ? "browse" : nextBackView;
 
     // No local copy yet — the listing may have come from a relay
     // refetch race. Fall through to the legacy refetch path; the
     // post-fetch render will see the local copy and the user can
     // re-tap if a switch is needed. Edge case; rare in practice.
     if (!local) {
+      setDetailBackView(safeBackView);
       setSelectedId(id);
       setView("detail");
       actions.loadEscrow(id).catch((e: any) => {
@@ -690,6 +739,7 @@ export default function App() {
     }
 
     if (effect.kind === "matching") {
+      setDetailBackView(safeBackView);
       setSelectedId(id);
       setView("detail");
       return;
@@ -704,6 +754,7 @@ export default function App() {
           } else {
             await actions.initFedimint(effect.targetInvite);
           }
+          setDetailBackView(safeBackView);
           setSelectedId(id);
           setView("detail");
         } catch (e: any) {
@@ -745,11 +796,31 @@ export default function App() {
     });
   };
 
+  useEffect(() => {
+    if (urlEscrowOpenAttemptedRef.current || !connected) return;
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("escrowId") || params.get("trade");
+    if (!id || !/^sm_[a-z0-9_]+$/i.test(id)) return;
+
+    urlEscrowOpenAttemptedRef.current = true;
+    setDetailBackView("browse");
+    setSelectedId(id);
+    setView("detail");
+    actions.loadEscrow(id).then((state) => {
+      if (!state) {
+        setToast({ message: `Couldn't find trade ${id} on relays yet.`, type: "error" });
+      }
+    }).catch((e: any) => {
+      setToast({ message: e?.message || `Couldn't load trade ${id}.`, type: "error" });
+    });
+  }, [connected, actions]);
+
   const handleCreate = async (params: any) => {
     try {
       setToast({ message: "Signing event with NIP-07...", type: "info" });
       const { escrowId } = await actions.createEscrow(params);
       setToast({ message: `Trade published! ${escrowId}`, type: "success" });
+      setDetailBackView("create");
       setView("detail");
       setSelectedId(escrowId);
     } catch (e: any) {
@@ -874,13 +945,15 @@ export default function App() {
   }
 
   // ── Connected → main app ──
-  const activeTab = TAB_FOR_VIEW[view];
+  const detailMode = view === "detail" && !!selected;
+  const activeTab = detailMode ? TAB_FOR_VIEW[detailBackView] : TAB_FOR_VIEW[view];
+  const effectiveShellPaddingBottom = detailMode ? 0 : shellPaddingBottom;
 
   return (
     <div style={{
       background: T.bg, color: T.text, minHeight: "100dvh",
-      fontFamily: T.sans, maxWidth: 520, margin: "0 auto",
-      paddingBottom: shellPaddingBottom,
+      fontFamily: T.sans, maxWidth: detailMode ? 720 : 520, margin: "0 auto",
+      paddingBottom: effectiveShellPaddingBottom,
       paddingTop: shellPaddingTop,
     }}>
       <style>{globalCss}</style>
@@ -889,39 +962,41 @@ export default function App() {
 
       {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
 
-      {/* Header */}
-      <div style={{
-        padding: "16px 16px 12px", borderBottom: `1px solid ${T.border}`,
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <img
-            src="/icons/chama-c-glyph.svg"
-            alt="Chama"
-            width={28}
-            height={28}
-            style={{ display: "block", flexShrink: 0 }}
-          />
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 700, fontFamily: T.mono, letterSpacing: -0.5 }}>Chama</div>
-            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1.5, textTransform: "uppercase" }}>
-              Nostr · Fedimint · SSS
+      {!detailMode && (
+        <>
+          {/* Header */}
+          <div style={{
+            padding: "16px 16px 12px", borderBottom: `1px solid ${T.border}`,
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <img
+                src="/icons/chama-woven-trust-mark-transparent-64.png"
+                alt="Chama"
+                width={32}
+                height={32}
+                style={{ display: "block", flexShrink: 0 }}
+              />
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, fontFamily: T.mono, letterSpacing: -0.5 }}>Chama</div>
+                <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1.5, textTransform: "uppercase" }}>
+                  Nostr · Fedimint · SSS
+                </div>
+              </div>
+            </div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, padding: "4px 10px", borderRadius: 6, background: T.surface, border: `1px solid ${T.border}` }}>
+              v{__APP_VERSION__}
             </div>
           </div>
-        </div>
-        <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, padding: "4px 10px", borderRadius: 6, background: T.surface, border: `1px solid ${T.border}` }}>
-          v{__APP_VERSION__}
-        </div>
-      </div>
 
-      {/* Identity bar (relays + npub). Sign out lives in Me → Settings. */}
-      <WalletBar
-        pubkey={pubkey!}
-        connectedRelays={connectedRelays}
-        relayStatuses={relayStatuses}
-      />
+          {/* Identity bar (relays + npub). Sign out lives in Me → Settings. */}
+          <WalletBar
+            pubkey={pubkey!}
+            connectedRelays={connectedRelays}
+            relayStatuses={relayStatuses}
+          />
 
-      {/* Chama bar (renamed from FedimintBar in v0.3.0 Phase 5).
+          {/* Chama bar (renamed from FedimintBar in v0.3.0 Phase 5).
           showReconnect is true for users who have a reconnect target
           (picked community or active invite) so the Reconnect CTA
           appears after a failed switch+revert; first-time users (no
@@ -933,36 +1008,38 @@ export default function App() {
           rather than a permanent funding entry point. The stranded
           tap reuses the same RecoveryPayoutModal as the banner, so
           the failure-mode escape hatch is reachable from anywhere. */}
-      <ChamaBar
-        fedimint={fedimint}
-        chamaLabel={decideChamaBarLabel({
-          balanceMsats: fedimint.balanceMsats ?? 0,
-          hasActiveBuyerSellerCommitment: hasActiveCommitment,
-          activeCommittedMsats: committedMsats,
-          activeTradeCount: activeCommitmentCount,
-          // v0.3.1 Phase 3: bootProbeState routes the "unreachable"
-          // ChamaBar variant. Failed → "⚠ Chama unreachable ·
-          // Reconnect →"; pending/ok pass through to the existing
-          // three-state decision. Same source of truth gates
-          // TradeDetail's Fund + Claim buttons (see TradeDetail
-          // mount below).
-          bootProbeState: fedimint.bootProbeState,
-        })}
-        onTapStranded={() => setPendingRecovery({
-          title: "Recover sats",
-          traceContext: recoveryTraceContext,
-        })}
-        showReconnect={getUserCommunitySlugRaw() !== null || getActiveInvite() !== null}
-        onInit={() => actions.initFedimint().catch(
-          (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
-        )}
-      />
+          <ChamaBar
+            fedimint={fedimint}
+            chamaLabel={decideChamaBarLabel({
+              balanceMsats: fedimint.balanceMsats ?? 0,
+              hasActiveBuyerSellerCommitment: hasActiveCommitment,
+              activeCommittedMsats: committedMsats,
+              activeTradeCount: activeCommitmentCount,
+              // v0.3.1 Phase 3: bootProbeState routes the "unreachable"
+              // ChamaBar variant. Failed → "⚠ Chama unreachable ·
+              // Reconnect →"; pending/ok pass through to the existing
+              // three-state decision. Same source of truth gates
+              // TradeDetail's Fund + Claim buttons (see TradeDetail
+              // mount below).
+              bootProbeState: fedimint.bootProbeState,
+            })}
+            onTapStranded={() => setPendingRecovery({
+              title: "Recover sats",
+              traceContext: recoveryTraceContext,
+            })}
+            showReconnect={getUserCommunitySlugRaw() !== null || getActiveInvite() !== null}
+            onInit={() => actions.initFedimint().catch(
+              (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
+            )}
+          />
+        </>
+      )}
 
       {/* Honest browser-support disclosure — one-time-per-account. Fires
           for ALL browser users regardless of join state, so first-time
           users encounter it before committing to a federation (the right
           educational moment per Pillar 2.7). */}
-      {shouldShowBrowserSupportBanner({
+      {!detailMode && shouldShowBrowserSupportBanner({
         isBrowser: !Capacitor.isNativePlatform(),
         dismissed: browserBannerDismissed,
         simModeOn: simOn,
@@ -1008,7 +1085,9 @@ export default function App() {
           amountMsats={pendingFundAndLock.amountMsats}
           ctaLabel={pendingFundAndLock.ctaLabel}
           savedHandleId={pendingFundAndLock.savedHandleId}
+          selectedItems={pendingFundAndLock.selectedItems}
           fundAndLock={actions.fundAndLock}
+          getOnchainInfo={actions.getOnchainInfo}
           lockAndPublish={actions.lockAndPublish}
           onClose={(terminal) => {
             const { resolve } = pendingFundAndLock;
@@ -1042,6 +1121,7 @@ export default function App() {
           escrowId={pendingClaim.escrowId}
           payoutMsats={pendingClaim.payoutMsats}
           savedDestinations={listPayoutDestinations()}
+          savedNwcConnections={listSavedNwcConnections()}
           homeCommunity={getUserCommunitySlugRaw()}
           fiatCurrency={pendingClaim.fiatCurrency}
           claimAndPayout={actions.claimAndPayout}
@@ -1080,8 +1160,9 @@ export default function App() {
                 type: "info",
               });
             } else if (terminal.kind === "payout-failed") {
+              setView("me");
               setToast({
-                message: "Payout failed. Recover from the banner on Browse.",
+                message: "Payout failed. Your sats are safe — recover them from Me.",
                 type: "error",
               });
             }
@@ -1146,6 +1227,7 @@ export default function App() {
         <RecoveryPayoutModal
           balanceMsats={fedimint.balanceMsats ?? 0}
           savedDestinations={listPayoutDestinations()}
+          savedNwcConnections={listSavedNwcConnections()}
           title={pendingRecovery.title}
           subtitle={pendingRecovery.subtitle}
           payInvoice={(bolt11) => actions.payInvoice(
@@ -1226,7 +1308,7 @@ export default function App() {
             receiveUnavailable={fedimint.lastHealthOk === false}
             fundingInProgress={midFunding}
             claimBlockedReason={selectedClaimBlockedReason}
-            onBack={() => { setView("browse"); setSelectedId(null); }}
+            onBack={() => { setView(detailBackView); setSelectedId(null); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
               (e: any) => setToast({ message: e.message, type: "error" })
@@ -1250,11 +1332,25 @@ export default function App() {
                 });
               });
             }}
-            onJoin={async (role) => {
+            onJoin={async (role, joinOpts) => {
               try {
-                setToast({ message: `Joining as ${role}...`, type: "info" });
-                await actions.joinEscrow(selectedId!, role);
-                setToast({ message: `Joined as ${role}!`, type: "success" });
+                setToast({
+                  message: joinOpts?.orderFinalized
+                    ? "Confirming order..."
+                    : joinOpts?.selectedItems?.length
+                      ? "Saving cart..."
+                      : `Joining as ${role}...`,
+                  type: "info",
+                });
+                await actions.joinEscrow(selectedId!, role, joinOpts);
+                setToast({
+                  message: joinOpts?.orderFinalized
+                    ? "Order ready!"
+                    : joinOpts?.selectedItems?.length
+                      ? "Cart saved!"
+                      : `Joined as ${role}!`,
+                  type: "success",
+                });
               } catch (e: any) {
                 setToast({ message: e.message || "Failed to join", type: "error" });
               }
@@ -1272,7 +1368,9 @@ export default function App() {
                 setToast({ message: e.message || "Failed to send", type: "error" })
               );
             }}
-            onLock={async (savedHandleId?: string) => {
+            onLock={async (lockOpts = {}) => {
+              const savedHandleId = lockOpts.savedHandleId;
+              const selectedItems = lockOpts.selectedItems;
               if (!fedimint.joined) {
                 setToast({ message: "Join a Chama first — tap a community pill.", type: "error" });
                 return;
@@ -1288,10 +1386,11 @@ export default function App() {
                 return;
               }
               if (!selected) return;
+              const lockAmountMsats = lockOpts.amountMsats ?? selected.amountMsats;
               if (
                 !simOn &&
                 !isTestnetMode() &&
-                selected.amountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
+                lockAmountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
               ) {
                 setToast({
                   message: `${minimumAtomicFundingMessage()} Enter a positive amount for a real Lightning escrow.`,
@@ -1319,9 +1418,10 @@ export default function App() {
               return new Promise<void>((resolve) => {
                 setPendingFundAndLock({
                   escrowId: selectedId!,
-                  amountMsats: selected.amountMsats,
+                  amountMsats: lockAmountMsats,
                   ctaLabel: lockLabel,
                   savedHandleId,
+                  selectedItems,
                   resolve,
                 });
               });
@@ -1393,7 +1493,27 @@ export default function App() {
               title: "Recover sats",
               traceContext: recoveryTraceContext,
             })}
-            onOpenTrade={openEscrow}
+            onOpenTrade={(id) => openEscrow(id, "me")}
+            onSellerEditListing={(id) => {
+              setToast({
+                message: "Edit will clone, cancel, and republish soon. Opening listing for now.",
+                type: "info",
+              });
+              openEscrow(id, "me");
+            }}
+            onSellerDeleteListing={async (id) => {
+              const ok = window.confirm("Delete this open listing? This publishes a cancel event and removes it from Browse.");
+              if (!ok) return;
+              try {
+                await actions.cancel(id, "seller_deleted_listing");
+                setToast({ message: "Listing deleted.", type: "success" });
+              } catch (e: any) {
+                setToast({
+                  message: e?.message || "Couldn't delete listing.",
+                  type: "error",
+                });
+              }
+            }}
             onOpenSavedHandles={() => setView("saved-handles")}
             onOpenPayoutDestinations={() => setView("payout-destinations")}
             onOpenAdvanced={() => setView("advanced")}
@@ -1473,14 +1593,6 @@ export default function App() {
         </div>
       ) : (
         <>
-          {activeTrade && (
-            <ActiveTradePill
-              trade={activeTrade}
-              activeTradeCount={activeCommitmentCount}
-              activeTradeMsats={activeTradeMsats}
-              onTap={() => openEscrow(activeTrade.id)}
-            />
-          )}
           {showRecoveryBanner ? (
             <RecoveryBanner
               balanceMsats={fedimint.balanceMsats ?? 0}
@@ -1504,6 +1616,7 @@ export default function App() {
               onSelectCommunity={handleSelectCommunity}
               matchingListings={matchingListings}
               nonMatchingListings={nonMatchingListings}
+              categoryCounts={browseCategoryCounts}
               fedimintJoined={fedimint.joined}
               isFirstTime={getUserCommunitySlugRaw() === null}
               onPasteCustomInvite={handlePasteCustomInvite}
@@ -1515,6 +1628,7 @@ export default function App() {
                   const state = await actions.loadEscrow(id);
                   if (state) {
                     setToast({ message: "Trade loaded!", type: "success" });
+                    setDetailBackView("browse");
                     setSelectedId(id);
                     setView("detail");
                   } else {
@@ -1529,7 +1643,7 @@ export default function App() {
         </>
       )}
 
-      <BottomNav active={activeTab} onSelect={switchTab} />
+      {!detailMode && <BottomNav active={activeTab} onSelect={switchTab} />}
     </div>
   );
 }
@@ -1549,6 +1663,23 @@ const globalCss = `
   ::-webkit-scrollbar{width:4px}
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:${T.border};border-radius:4px}
+  .trade-detail-shell{padding:16px;max-width:520px;margin:0 auto}
+  .trade-detail-layout{display:block}
+  .trade-detail-listing-pane,.trade-room-card{min-width:0}
+  .trade-detail-title{max-width:100%}
+  @media (min-width: 980px){
+    .trade-detail-shell{max-width:1040px;padding:28px 20px 48px}
+    .trade-detail-layout{display:grid;grid-template-columns:minmax(0,.92fr) minmax(420px,1.08fr);gap:18px;align-items:start}
+    .trade-room-card{position:sticky;top:20px}
+    .trade-detail-title{font-size:26px!important}
+    .trade-detail-amount .bitcoin-amount-number{font-size:56px!important}
+    .trade-detail-amount .bitcoin-amount-glyph{font-size:63px!important}
+    .trade-lock-ring{width:148px!important;height:148px!important}
+  }
+  @media (min-width: 1280px){
+    .trade-detail-shell{max-width:1120px}
+    .trade-detail-layout{grid-template-columns:minmax(0,480px) minmax(460px,1fr)}
+  }
 `;
 
 function LoginSuccessSplash() {

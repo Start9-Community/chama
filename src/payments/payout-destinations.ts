@@ -9,13 +9,19 @@
 // Storage format (localStorage["chama_payout_destinations[:pubkey]"] is JSON):
 //   [{ id, address, createdAt, lastUsedAt }, ...]
 
-import { SAVED_HANDLES_STORAGE_KEY, LIGHTNING_RAIL, type SavedHandle } from "./saved-handles.js";
+import {
+  SAVED_HANDLES_STORAGE_KEY,
+  SAVED_HANDLES_BACKUP_STORAGE_KEY,
+  LIGHTNING_RAIL,
+  type SavedHandle,
+} from "./saved-handles.js";
 import {
   getScopedStorageItem,
   setScopedStorageItem,
 } from "../storage/user-scope.js";
 
 export const PAYOUT_DESTINATIONS_STORAGE_KEY = "chama_payout_destinations";
+export const PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY = "chama_payout_destinations_backup";
 
 export interface PayoutDestination {
   id: string;
@@ -50,21 +56,68 @@ function generateId(): string {
   return `pd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function readRaw(): PayoutDestination[] {
+function normalizeDestination(destination: PayoutDestination): PayoutDestination {
+  return {
+    ...destination,
+    address: normalizeAddress(destination.address),
+  };
+}
+
+function dedupeDestinations(destinations: PayoutDestination[]): PayoutDestination[] {
+  const seen = new Set<string>();
+  const out: PayoutDestination[] = [];
+  for (const destination of destinations) {
+    const normalized = normalizeDestination(destination);
+    const key = normalized.address.toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function readStored(key: string): PayoutDestination[] {
   try {
-    const raw = getScopedStorageItem(PAYOUT_DESTINATIONS_STORAGE_KEY);
+    const raw = getScopedStorageItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isPayoutDestination);
+    return dedupeDestinations(parsed.filter(isPayoutDestination));
   } catch {
     return [];
   }
 }
 
-function writeRaw(destinations: PayoutDestination[]): void {
+function readRaw(): PayoutDestination[] {
+  const primary = readStored(PAYOUT_DESTINATIONS_STORAGE_KEY);
+  if (primary.length > 0) return primary;
+
+  const backup = readStored(PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY);
+  if (backup.length > 0) {
+    writeRaw(backup, { allowEmptyOverwrite: true });
+    return backup;
+  }
+
+  return [];
+}
+
+function writeRaw(
+  destinations: PayoutDestination[],
+  opts: { allowEmptyOverwrite?: boolean } = {},
+): void {
+  const normalized = dedupeDestinations(destinations);
   try {
-    setScopedStorageItem(PAYOUT_DESTINATIONS_STORAGE_KEY, JSON.stringify(destinations));
+    if (normalized.length === 0 && !opts.allowEmptyOverwrite) {
+      const existing = readStored(PAYOUT_DESTINATIONS_STORAGE_KEY);
+      const backup = readStored(PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY);
+      if (existing.length > 0 || backup.length > 0) {
+        console.warn("[chama] Refusing to overwrite payout destinations with an empty list");
+        return;
+      }
+    }
+    const serialized = JSON.stringify(normalized);
+    setScopedStorageItem(PAYOUT_DESTINATIONS_STORAGE_KEY, serialized);
+    setScopedStorageItem(PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY, serialized);
   } catch {
     // localStorage unavailable / quota exceeded — cosmetic persistence
     // failure. The payout itself has already happened.
@@ -110,7 +163,9 @@ export function migrateLegacyLightningHandles(): number {
 
     if (migrated.length === 0 && keptHandles.length === parsed.length) return 0;
     writeRaw([...migrated, ...existing]);
-    setScopedStorageItem(SAVED_HANDLES_STORAGE_KEY, JSON.stringify(keptHandles));
+    const keptSerialized = JSON.stringify(keptHandles);
+    setScopedStorageItem(SAVED_HANDLES_STORAGE_KEY, keptSerialized);
+    setScopedStorageItem(SAVED_HANDLES_BACKUP_STORAGE_KEY, keptSerialized);
     return migrated.length;
   } catch {
     return 0;
@@ -128,7 +183,7 @@ export function listPayoutDestinations(): PayoutDestination[] {
 
 export function deletePayoutDestination(id: string): void {
   migrateLegacyLightningHandles();
-  writeRaw(readRaw().filter(d => d.id !== id));
+  writeRaw(readRaw().filter(d => d.id !== id), { allowEmptyOverwrite: true });
 }
 
 /** Idempotent save/touch for a Lightning Address used as a payout

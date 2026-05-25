@@ -50,3 +50,17 @@ export const BLF_FEDERATION_INVITE =
 
 export const BLF_FEDERATION_ID =
   "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
+
+/**
+ * GBF / Global Bitcoin Federation — public observer-listed federation used
+ * to prove Chama's native Rust Fedimint path. This federation exposes
+ * reachable public gateways from the native client even though they are
+ * announced as `vetted=false` to the SDK.
+ */
+export const GBF_FEDERATION_NAME = "Global Bitcoin Federation";
+
+export const GBF_FEDERATION_INVITE =
+  "fed11qgqyj3mfwfhksw309uergwf3vvuxyefcvgcrwcmyxaskvvnzxs6nzdrxv3jnxwrz8pjrgdesv5crwve5xv6xyvtyv56nqcfevsmrwv3kx5erwv3n8qcrvde5qyqjqx7tvnngau9nmcadjm9e3dp69lvh920l5rak7r3x4thxn5w5vwuhsc2yh9";
+
+export const GBF_FEDERATION_ID =
+  "1bcb64e68ef0b3de3ad96cb98b43a2fd972a9ffa0fb6f0e26aaee69d1d463b97";

@@ -83,10 +83,11 @@ async function prepareChatImage(file: File): Promise<ChatImageAttachment> {
   throw new Error("That image is too large for encrypted chat. Try a tighter screenshot.");
 }
 
-export function ChatPanel({ state, myRole, onSend }: {
+export function ChatPanel({ state, myRole, onSend, embedded = false }: {
   state: EscrowState;
   myRole: Role | null;
   onSend: (message: SendChatInput) => void;
+  embedded?: boolean;
 }) {
   const [msg, setMsg] = useState("");
   const [attachment, setAttachment] = useState<ChatImageAttachment | null>(null);
@@ -144,17 +145,21 @@ export function ChatPanel({ state, myRole, onSend }: {
 
   return (
     <div style={{
-      background: T.card, border: `1px solid ${T.border}`,
-      borderRadius: T.r, marginBottom: 16, overflow: "hidden",
+      background: embedded ? "transparent" : T.card,
+      border: embedded ? "none" : `1px solid ${T.border}`,
+      borderRadius: embedded ? 0 : T.r,
+      marginBottom: embedded ? 0 : 16,
+      overflow: "hidden",
     }}>
       {/* Header */}
       <div style={{
-        padding: "12px 16px",
+        padding: embedded ? "16px 0 10px" : "12px 16px",
         borderBottom: `1px solid ${T.border}`,
+        borderTop: embedded ? `1px solid ${T.border}` : "none",
         display: "flex", justifyContent: "space-between", alignItems: "center",
       }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>
-          TRADE CHAT
+          CHAT
         </div>
         <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>
           {state.chatMessages.length} message{state.chatMessages.length !== 1 ? "s" : ""}
@@ -164,7 +169,9 @@ export function ChatPanel({ state, myRole, onSend }: {
 
       {/* Messages */}
       <div style={{
-        maxHeight: 280, overflowY: "auto", padding: "12px 16px",
+        maxHeight: embedded ? 340 : 280,
+        overflowY: "auto",
+        padding: embedded ? "14px 0" : "12px 16px",
         display: "flex", flexDirection: "column", gap: 10,
       }}>
         {state.chatMessages.length === 0 ? (
@@ -246,7 +253,7 @@ export function ChatPanel({ state, myRole, onSend }: {
       {/* Input bar */}
       {myRole && (
         <div style={{
-          padding: "10px 12px",
+          padding: embedded ? "10px 0 0" : "10px 12px",
           borderTop: `1px solid ${T.border}`,
           display: "grid", gap: 8,
         }}>

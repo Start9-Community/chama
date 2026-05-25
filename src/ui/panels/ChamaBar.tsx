@@ -28,6 +28,7 @@ import {
 } from "../../fedimint/federation-config.js";
 import type { ChamaBarLabel } from "../decisions.js";
 import { T } from "../theme.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 
 export function ChamaBar({
   fedimint,
@@ -194,7 +195,7 @@ function ChamaBarLabelPill({
         color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
         letterSpacing: 0.3, whiteSpace: "nowrap",
       }}>
-        ⚡ {tradeCopy} · {label.sats.toLocaleString()} sats in escrow
+        ⚡ {tradeCopy} · <BitcoinAmount sats={label.sats} size={10} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> in escrow
       </span>
     );
   }
@@ -209,7 +210,7 @@ function ChamaBarLabelPill({
         letterSpacing: 0.3, whiteSpace: "nowrap", cursor: "pointer",
       }}
     >
-      ⚠ Recover {label.sats.toLocaleString()} sats →
+      ⚠ Recover <BitcoinAmount sats={label.sats} size={10} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> →
     </button>
   );
 }

@@ -24,6 +24,7 @@ import {
   Role,
   Outcome,
   TERMINAL_STATES,
+  getEffectiveParticipantsAt,
 } from "../escrow-engine/types.js";
 
 export const MAIN_SURFACE_RECOVERY_MIN_SATS = 2_000;
@@ -404,8 +405,9 @@ export function canOfferSubscription(inputs: {
 //
 // hasActiveBuyerSellerCommitment + findActiveTrade survive as display
 // helpers: ChamaBar's "X sats in escrow" pill and the ActiveTradePill
-// strip both need to know about live commitments. They just no longer
-// gate Create or Fund.
+// strip both need to know about live money-moving commitments. CREATED
+// listings stay in Browse/Me as inventory; they should not light up the
+// global purple attention banner until LOCK moves sats into escrow.
 
 function isPastEscrowDeadline(e: EscrowState, nowSec: number): boolean {
   return typeof e.expiresAt === "number" && e.expiresAt > 0 && nowSec > e.expiresAt;
@@ -418,21 +420,21 @@ function isLiveBuyerSellerCommitment(e: EscrowState, nowSec: number): boolean {
   // the detail screen as "Claim failed", but should not keep the global
   // ActiveTradePill alive.
   if (e.status === EscrowStatus.CLAIMED) return false;
-  // v0.6.5 update: prior versions excluded CREATE-only public listings
-  // (no JOIN ACK yet) so a seller could keep listing without the old
-  // one-trade-at-a-time gate blocking them. With that gate retired,
-  // the exclusion now mismatches the user's mental model — their own
-  // unmatched listing IS a live commitment ("I have a 2k listing
-  // open"). Me · History counts it; the ChamaBar pill and active-trade
-  // pill must match. The only filter that survives is the deadline
-  // sweep so cleanup-pending trades don't strand the pill counter.
-  if (
-    (e.status === EscrowStatus.CREATED || e.status === EscrowStatus.LOCKED)
-    && isPastEscrowDeadline(e, nowSec)
-  ) {
+  // Open listings are public inventory, not active money movement. They
+  // remain browsable and visible in Me, including JOINed-but-not-LOCKED
+  // holds, but the global active-trade pill is reserved for LOCKED and
+  // APPROVED flows where sats are already in escrow or ready to claim.
+  if (e.status === EscrowStatus.CREATED) return false;
+  if (e.status !== EscrowStatus.LOCKED && e.status !== EscrowStatus.APPROVED) return false;
+  if (isPastEscrowDeadline(e, nowSec)) {
     return false;
   }
   return true;
+}
+
+function isEffectiveBuyerOrSeller(e: EscrowState, userPubkey: string, nowSec: number): boolean {
+  const p = getEffectiveParticipantsAt(e, nowSec);
+  return p.buyer === userPubkey || p.seller === userPubkey;
 }
 
 export function hasActiveBuyerSellerCommitment(inputs: {
@@ -442,9 +444,7 @@ export function hasActiveBuyerSellerCommitment(inputs: {
 }): boolean {
   const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
   for (const e of inputs.escrows) {
-    const isBuyerOrSeller =
-      e.participants.buyer === inputs.userPubkey
-      || e.participants.seller === inputs.userPubkey;
+    const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
     if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
     return true;
@@ -465,9 +465,7 @@ export function countActiveBuyerSellerCommitments(inputs: {
   const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
   let n = 0;
   for (const e of inputs.escrows) {
-    const isBuyerOrSeller =
-      e.participants.buyer === inputs.userPubkey
-      || e.participants.seller === inputs.userPubkey;
+    const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
     if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
     n += 1;
@@ -481,10 +479,9 @@ export function countActiveBuyerSellerCommitments(inputs: {
  *
  * Distinct from `activeCommittedMsats` (which sums only LOCKED +
  * APPROVED - money *actually* in escrow). This sums every live
- * trade's amountMsats regardless of live stage (CREATED + LOCKED +
- * APPROVED), because the pill says "3 active trades · X
- * sats" - the implied reading is total trade value, not just sats
- * currently locked. Two surfaces, two truthful readings:
+ * trade's amountMsats for LOCKED + APPROVED flows only. Open listings
+ * are inventory and stay off the attention banner. Two surfaces, two
+ * truthful readings:
  *   ActiveTradePill   → "what's the gravitational weight of my live
  *                        trade activity right now?"     (this helper)
  *   ChamaBar in-trade → "how many sats are actually locked in
@@ -498,9 +495,7 @@ export function sumActiveBuyerSellerTradeMsats(inputs: {
   const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
   let sum = 0;
   for (const e of inputs.escrows) {
-    const isBuyerOrSeller =
-      e.participants.buyer === inputs.userPubkey
-      || e.participants.seller === inputs.userPubkey;
+    const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
     if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
     sum += e.amountMsats;
@@ -586,9 +581,7 @@ export function activeCommittedMsats(inputs: {
   const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
   let sum = 0;
   for (const e of inputs.escrows) {
-    const isBuyerOrSeller =
-      e.participants.buyer === inputs.userPubkey
-      || e.participants.seller === inputs.userPubkey;
+    const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
     if (e.status !== EscrowStatus.LOCKED && e.status !== EscrowStatus.APPROVED) continue;
     if (e.status === EscrowStatus.LOCKED && isPastEscrowDeadline(e, nowSec)) continue;
@@ -678,9 +671,7 @@ export function findActiveTrade(inputs: {
   const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
   let best: EscrowState | null = null;
   for (const e of inputs.escrows) {
-    const isBuyerOrSeller =
-      e.participants.buyer === inputs.userPubkey
-      || e.participants.seller === inputs.userPubkey;
+    const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
     if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
     if (!best || e.createdAt > best.createdAt) best = e;

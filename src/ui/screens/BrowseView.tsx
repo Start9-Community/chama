@@ -21,6 +21,7 @@ export function BrowseView({
   browseCategory, setBrowseCategory,
   browseCommunity, onSelectCommunity,
   matchingListings, nonMatchingListings,
+  categoryCounts,
   fedimintJoined, pubkey,
   isFirstTime, onPasteCustomInvite,
   onOpenEscrow, onLoadById,
@@ -31,6 +32,7 @@ export function BrowseView({
   onSelectCommunity: (slug: string) => void;
   matchingListings: EscrowState[];
   nonMatchingListings: EscrowState[];
+  categoryCounts?: Record<string, number>;
   fedimintJoined: boolean;
   pubkey: string;
   isFirstTime: boolean;
@@ -44,17 +46,32 @@ export function BrowseView({
   );
   const [showCommunityPicker, setShowCommunityPicker] = useState(false);
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [customInviteInput, setCustomInviteInput] = useState("");
 
   const totalListings = matchingListings.length + nonMatchingListings.length;
   const homeCommunity = getCommunityBySlug(browseCommunity);
+  const search = searchQuery.trim().toLowerCase();
+  const filteredMatchingListings = useMemo(
+    () => matchingListings.filter((listing) => listingMatchesSearch(listing, search)),
+    [matchingListings, search],
+  );
+  const filteredNonMatchingListings = useMemo(
+    () => nonMatchingListings.filter((listing) => listingMatchesSearch(listing, search)),
+    [nonMatchingListings, search],
+  );
+  const matchingSections = useMemo(
+    () => groupListingsByVertical(filteredMatchingListings),
+    [filteredMatchingListings],
+  );
+  const nonMatchingSections = useMemo(
+    () => groupListingsByVertical(filteredNonMatchingListings),
+    [filteredNonMatchingListings],
+  );
+  const filteredTotal = filteredMatchingListings.length + filteredNonMatchingListings.length;
   const browseSummary = totalListings === 0
-    ? "No listings yet"
-    : `${totalListings} ${totalListings === 1 ? "listing" : "listings"}${
-      matchingListings.length > 0
-        ? ` · ${matchingListings.length} on your Chama`
-        : ""
-    }`;
+    ? "No open offers yet"
+    : `${filteredTotal.toLocaleString()} of ${totalListings.toLocaleString()} open offer${totalListings === 1 ? "" : "s"}`;
 
   return (
     <div style={{ padding: 16 }}>
@@ -68,7 +85,7 @@ export function BrowseView({
             margin: 0, color: T.text, fontFamily: T.sans,
             fontSize: 30, lineHeight: 1.05, fontWeight: 800,
           }}>
-            Browse
+            Listings
           </h1>
           <div style={{
             marginTop: 6, fontSize: 12, color: T.muted,
@@ -106,7 +123,31 @@ export function BrowseView({
         )}
       </div>
 
-      {/* Category filter pills */}
+      <div style={{
+        display: "flex", gap: 8, alignItems: "center",
+        marginBottom: 10,
+      }}>
+        <label style={{
+          flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8,
+          padding: "10px 12px", borderRadius: T.rs, background: T.surface,
+          border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono,
+        }}>
+          <span style={{ fontSize: 16, lineHeight: 1 }}>⌕</span>
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search listings..."
+            style={{
+              flex: 1, minWidth: 0, background: "transparent", border: "none",
+              outline: "none", color: T.text, fontFamily: T.sans,
+              fontSize: 14, letterSpacing: 0,
+            }}
+          />
+        </label>
+      </div>
+
       <div style={{
         display: "flex", gap: 6, marginBottom: 12,
         overflowX: "auto",
@@ -116,23 +157,38 @@ export function BrowseView({
       }}>
         {BROWSE_CATS.map(c => {
           const active = browseCategory === c.id;
+          const count = categoryCounts?.[c.id]
+            ?? (c.id === "all" ? totalListings : countListingsByCategory(matchingListings, nonMatchingListings, c.id));
           return (
             <button
               key={c.id}
               onClick={() => setBrowseCategory(c.id)}
               style={{
                 flexShrink: 0,
-                padding: "7px 13px", borderRadius: 18,
+                padding: "7px 11px", borderRadius: 18,
                 background: active ? T.accentDim : T.surface,
                 border: `1px solid ${active ? T.accent + "66" : T.border}`,
                 color: active ? T.accent : T.muted,
-                fontFamily: T.mono, fontSize: 11, fontWeight: 600,
+                fontFamily: T.mono, fontSize: 11, fontWeight: 700,
                 cursor: "pointer", transition: "all 0.15s",
                 whiteSpace: "nowrap" as const,
                 letterSpacing: 0,
+                display: "inline-flex", alignItems: "center", gap: 6,
               }}
             >
-              {c.i ? c.i + " " : ""}{c.l}
+              {c.i && <span>{c.i}</span>}
+              <span>{c.l}</span>
+              <span style={{
+                color: active ? T.bg : T.muted,
+                background: active ? T.accent : T.card,
+                border: `1px solid ${active ? T.accent : T.border}`,
+                borderRadius: 999,
+                padding: "1px 5px",
+                fontSize: 9,
+                lineHeight: 1.2,
+              }}>
+                {count}
+              </span>
             </button>
           );
         })}
@@ -174,6 +230,17 @@ export function BrowseView({
         </div>
       )}
 
+      {search && totalListings > 0 && filteredTotal === 0 && (
+        <div style={{
+          textAlign: "center", padding: "24px 16px",
+          color: T.muted, fontFamily: T.mono, fontSize: 12, lineHeight: 1.6,
+          background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs,
+          marginBottom: 14,
+        }}>
+          No listings match "{searchQuery.trim()}".
+        </div>
+      )}
+
       {totalListings === 0 ? (
         <div style={{
           textAlign: "center", padding: "48px 16px",
@@ -186,24 +253,37 @@ export function BrowseView({
       ) : (
         <>
           {/* Matching listings — normal styling */}
-          {matchingListings.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
-              {matchingListings.map((s, i) => (
-                <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
-                  <TradeCard
-                    state={s}
+          {filteredMatchingListings.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              {browseCategory === "all" ? (
+                matchingSections.map(section => (
+                  <BrowseSection
+                    key={section.id}
+                    section={section}
                     pubkey={pubkey}
-                    onSelect={() => onOpenEscrow(s.id)}
+                    onOpenEscrow={onOpenEscrow}
                   />
+                ))
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {filteredMatchingListings.map((s, i) => (
+                    <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
+                      <TradeCard
+                        state={s}
+                        pubkey={pubkey}
+                        onSelect={() => onOpenEscrow(s.id)}
+                      />
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
           )}
 
           {/* "N LISTINGS ON OTHER FEDERATIONS" divider + amber-tinted
               non-matching cards. Tap → listing-tap dispatch handles
               the silent switch (or destroy-confirm modal). */}
-          {nonMatchingListings.length > 0 && (
+          {filteredNonMatchingListings.length > 0 && (
             <>
               <div style={{
                 display: "flex", alignItems: "center", gap: 10,
@@ -215,22 +295,34 @@ export function BrowseView({
                   letterSpacing: 0, textTransform: "uppercase",
                   whiteSpace: "nowrap" as const,
                 }}>
-                  {nonMatchingListings.length} listing{nonMatchingListings.length !== 1 ? "s" : ""} on other routes
+                  {filteredNonMatchingListings.length} listing{filteredNonMatchingListings.length !== 1 ? "s" : ""} on other routes
                 </div>
                 <div style={{ flex: 1, height: 1, background: T.border }} />
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {nonMatchingListings.map((s, i) => (
-                  <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
-                    <TradeCard
-                      state={s}
-                      pubkey={pubkey}
-                      onSelect={() => onOpenEscrow(s.id)}
-                      variant="non-matching"
-                    />
-                  </div>
-                ))}
-              </div>
+              {browseCategory === "all" ? (
+                nonMatchingSections.map(section => (
+                  <BrowseSection
+                    key={section.id}
+                    section={section}
+                    pubkey={pubkey}
+                    onOpenEscrow={onOpenEscrow}
+                    variant="non-matching"
+                  />
+                ))
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {filteredNonMatchingListings.map((s, i) => (
+                    <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
+                      <TradeCard
+                        state={s}
+                        pubkey={pubkey}
+                        onSelect={() => onOpenEscrow(s.id)}
+                        variant="non-matching"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           )}
         </>
@@ -312,4 +404,125 @@ function browseCommunitySortLabel(community: Community): string {
   return community.displayName
     .replace(/\s·\s[A-Z]{3}$/, "")
     .replace(/\s·\s/g, " ");
+}
+
+function listingMatchesSearch(listing: EscrowState, query: string): boolean {
+  if (!query) return true;
+  const community = listing.community ? getCommunityBySlug(listing.community) : null;
+  const haystack = [
+    listing.description,
+    listing.category,
+    listing.fulfillment,
+    listing.fiatCurrency,
+    listing.fiatAmount?.toString(),
+    community?.displayName,
+    community?.disambiguator,
+    community?.currency,
+    Math.floor(listing.amountMsats / 1000).toString(),
+    ...(listing.items ?? []).flatMap(item => [
+      item.label,
+      item.description,
+      item.fiatCurrency,
+      item.fiatAmount?.toString(),
+      item.kind,
+      item.fulfillment,
+      item.minAmountMsats ? Math.floor(item.minAmountMsats / 1000).toString() : undefined,
+      item.maxAmountMsats ? Math.floor(item.maxAmountMsats / 1000).toString() : undefined,
+      item.dueAt ? new Date(item.dueAt * 1000).toLocaleDateString() : undefined,
+      item.termDays?.toString(),
+      item.trustTier?.toString(),
+      Math.floor(item.amountMsats / 1000).toString(),
+    ]),
+  ]
+    .filter((part): part is string => !!part)
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(query);
+}
+
+interface BrowseListingSection {
+  id: string;
+  label: string;
+  icon: string;
+  listings: EscrowState[];
+}
+
+function groupListingsByVertical(listings: EscrowState[]): BrowseListingSection[] {
+  return BROWSE_CATS
+    .filter(c => c.id !== "all")
+    .map(c => ({
+      id: c.id,
+      label: c.l,
+      icon: c.i,
+      listings: listings.filter(listing => listing.category === c.id),
+    }))
+    .filter(section => section.listings.length > 0);
+}
+
+function countListingsByCategory(
+  matchingListings: EscrowState[],
+  nonMatchingListings: EscrowState[],
+  category: string,
+): number {
+  return [...matchingListings, ...nonMatchingListings]
+    .filter(listing => listing.category === category)
+    .length;
+}
+
+function BrowseSection({
+  section,
+  pubkey,
+  onOpenEscrow,
+  variant = "matching",
+}: {
+  section: BrowseListingSection;
+  pubkey: string;
+  onOpenEscrow: (id: string) => void;
+  variant?: "matching" | "non-matching";
+}) {
+  return (
+    <section style={{ marginBottom: 16 }}>
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 10,
+        marginBottom: 8,
+      }}>
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          color: T.text,
+          fontFamily: T.mono,
+          fontSize: 11,
+          fontWeight: 800,
+          letterSpacing: 0.8,
+          textTransform: "uppercase",
+        }}>
+          <span style={{ fontSize: 13 }}>{section.icon}</span>
+          {section.label}
+        </div>
+        <div style={{
+          color: T.muted,
+          fontFamily: T.mono,
+          fontSize: 10,
+        }}>
+          {section.listings.length} open
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {section.listings.map((s, i) => (
+          <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.08}s both` }}>
+            <TradeCard
+              state={s}
+              pubkey={pubkey}
+              onSelect={() => onOpenEscrow(s.id)}
+              variant={variant}
+            />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
 }

@@ -29,6 +29,9 @@ import {
   BLF_FEDERATION_NAME,
   BLF_FEDERATION_INVITE,
   BLF_FEDERATION_ID,
+  GBF_FEDERATION_NAME,
+  GBF_FEDERATION_INVITE,
+  GBF_FEDERATION_ID,
 } from "./federation-invites.js";
 import {
   getScopedStorageItem,
@@ -46,6 +49,9 @@ export {
   BLF_FEDERATION_NAME,
   BLF_FEDERATION_INVITE,
   BLF_FEDERATION_ID,
+  GBF_FEDERATION_NAME,
+  GBF_FEDERATION_INVITE,
+  GBF_FEDERATION_ID,
 };
 
 /**
@@ -155,6 +161,7 @@ export function expectedFederationIdForInvite(invite: string | null | undefined)
   if (trimmed === BP_FEDERATION_INVITE) return BP_FEDERATION_ID;
   if (trimmed === AFRIBIT_KIBERA_FEDERATION_INVITE) return AFRIBIT_KIBERA_FEDERATION_ID;
   if (trimmed === BLF_FEDERATION_INVITE) return BLF_FEDERATION_ID;
+  if (trimmed === GBF_FEDERATION_INVITE) return GBF_FEDERATION_ID;
   return null;
 }
 
@@ -313,6 +320,13 @@ export const CURATED_PRESETS: FederationPreset[] = [
     federationId: BLF_FEDERATION_ID,
     inviteCode: BLF_FEDERATION_INVITE,
     description: "Best on the mobile app — limited browser support today.",
+    source: "curated",
+  },
+  {
+    name: GBF_FEDERATION_NAME,
+    federationId: GBF_FEDERATION_ID,
+    inviteCode: GBF_FEDERATION_INVITE,
+    description: "Native Rust sidecar test route. Public gateways reachable.",
     source: "curated",
   },
 ];

@@ -296,14 +296,14 @@ function BrandHeader() {
   return (
     <div style={{ marginBottom: 24 }}>
       <img
-        src="/icons/chama-wordmark.svg"
+        src="/icons/chama-woven-trust-lockup-horizontal.svg?v=0.9.4"
         alt="Chama"
         style={{
           display: "block",
-          margin: "0 auto 14px",
-          height: 76,
-          width: "auto",
-          maxWidth: "90%",
+          margin: "0 auto 18px",
+          width: "min(78vw, 300px)",
+          height: "auto",
+          maxWidth: "100%",
           filter: "drop-shadow(0 0 32px #f7931a22)",
         }}
       />
@@ -646,7 +646,7 @@ function countryLabel(community: Community): string {
   if (community.country === "TZ") return "Tanzania";
   if (community.country === "KE") return "Kenya";
   if (community.country === "SN") return "Senegal";
-  return community.displayName.replace(/\s·\s[A-Z]{3}$/, "");
+  return community.displayName.replace(/\s(?:·|-)\s[A-Z]{3}$/, "");
 }
 
 function regionForCommunity(community: Community): RegionFilter {

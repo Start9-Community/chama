@@ -42,11 +42,16 @@ import {
   EscrowEventKind,
   Role,
   Outcome,
+  JOIN_HOLD_SECONDS,
+  JOIN_HOLD_LOCK_GRACE_SECONDS,
+  joinHoldExpiresAt,
+  getEffectiveParticipantAt,
   type EscrowState,
   type ParsedEscrowEvent,
   type CreatePayload,
   type JoinPayload,
   type LockPayload,
+  type MenuItem,
   type VotePayload,
   type ResolvePayload,
   type ClaimPayload,
@@ -150,6 +155,7 @@ import {
 } from "../payments/rail-registry.js";
 import {
   SAVED_HANDLES_STORAGE_KEY,
+  SAVED_HANDLES_BACKUP_STORAGE_KEY,
   listSavedHandles,
   getSavedHandle,
   getSavedHandlesByRail,
@@ -168,6 +174,7 @@ import {
 } from "../payments/saved-handles.js";
 import {
   PAYOUT_DESTINATIONS_STORAGE_KEY,
+  PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY,
   addOrTouchPayoutDestination,
   listPayoutDestinations,
   deletePayoutDestination,
@@ -187,12 +194,31 @@ import {
 import {
   parseLightningAddress,
   isLightningAddress,
+  parseRawLnurl,
+  isRawLnurl,
   fetchLnurlPayMetadata,
   requestLnurlInvoice,
   resolveLightningAddressToInvoice,
+  resolveRawLnurlToInvoice,
   LnurlError,
   type LnurlPayMetadata,
 } from "../payments/lnurl.js";
+import {
+  parseNwcConnectionString,
+  isNwcConnectionString,
+  buildNwcMakeInvoiceRequest,
+  buildNwcPayInvoiceRequest,
+  extractInvoiceFromNwcResponse,
+  extractPreimageFromNwcPayResponse,
+  NwcError,
+} from "../payments/nwc.js";
+import {
+  NWC_CONNECTIONS_STORAGE_KEY,
+  NWC_CONNECTIONS_BACKUP_STORAGE_KEY,
+  addOrTouchSavedNwcConnection,
+  listSavedNwcConnections,
+  deleteSavedNwcConnection,
+} from "../payments/nwc-connections.js";
 import {
   decoratePayoutDestinationsForPicker,
   classifyDestinationInput,
@@ -253,6 +279,9 @@ import {
   minimumAtomicFundingMessage,
 } from "../payments/funding-limits.js";
 import {
+  parseBolt11Msats as parsePaymentBolt11Msats,
+} from "../payments/bolt11.js";
+import {
   buildChamaOperationMeta,
   describeSatsTrace,
   getBestSatsTrace,
@@ -263,6 +292,7 @@ import {
 } from "../payments/sats-trace.js";
 import { makeLightningInvoiceQrPayload } from "../payments/lightning-qr.js";
 import { EscrowFedimintBridge } from "../fedimint/escrow-bridge.js";
+import { NativeBridgeWallet } from "../fedimint/native-bridge-adapter.js";
 
 // v0.3.0 Phase 5 — ChamaBar label decision
 import {
@@ -375,11 +405,16 @@ function makeParsedEvent<T extends EscrowPayload>(
 
 // ── Standard event builders ───────────────────────────────────────────────
 
-function createEvent(opts: { community?: string; communityArbiters?: string[] } = {}): ParsedEscrowEvent<CreatePayload> {
+function createEvent(opts: {
+  community?: string;
+  communityArbiters?: string[];
+  amountMsats?: number;
+  items?: MenuItem[];
+} = {}): ParsedEscrowEvent<CreatePayload> {
   return makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
     type: "escrow:create",
     description: "Sell 100k sats for $50 USD via Zelle",
-    amountMsats: 100_000_000,
+    amountMsats: opts.amountMsats ?? 100_000_000,
     fiatAmount: 50,
     fiatCurrency: "USD",
     category: "p2p-trade",
@@ -391,17 +426,45 @@ function createEvent(opts: { community?: string; communityArbiters?: string[] } 
     paymentMethods: ["Zelle", "CashApp"],
     expirySeconds: 86400,
     communityArbiters: opts.communityArbiters,
+    items: opts.items,
     createdAt: NOW,
   });
 }
 
-function joinEvent(role: Role, pubkey: string, prevId: string): ParsedEscrowEvent<JoinPayload> {
+function joinEvent(
+  role: Role,
+  pubkey: string,
+  prevId: string,
+  opts: { selectedItems?: JoinPayload["selectedItems"]; amountMsats?: number; orderFinalized?: boolean } = {},
+): ParsedEscrowEvent<JoinPayload> {
+  const joinedAt = NOW + eventCounter;
   return makeParsedEvent(EscrowEventKind.JOIN, pubkey, {
     type: "escrow:join",
     role,
-    joinedAt: NOW + eventCounter,
+    joinedAt,
+    ...(role === Role.BUYER || role === Role.SELLER
+      ? { holdExpiresAt: joinHoldExpiresAt(joinedAt) }
+      : {}),
     ...(role === Role.ARBITER ? { arbiterFeeMsats: 1_000_000 } : {}),
+    ...(opts.selectedItems && opts.selectedItems.length > 0 ? { selectedItems: opts.selectedItems } : {}),
+    ...(opts.amountMsats !== undefined ? { amountMsats: opts.amountMsats } : {}),
+    ...(opts.orderFinalized ? { orderFinalizedAt: joinedAt } : {}),
   }, prevId);
+}
+
+function retimeEvent<T extends EscrowPayload>(event: ParsedEscrowEvent<T>, timestamp: number): ParsedEscrowEvent<T> {
+  event.raw.created_at = timestamp;
+  event.timestamp = timestamp;
+  if ("joinedAt" in event.payload && typeof event.payload.joinedAt === "number") {
+    event.payload.joinedAt = timestamp;
+    if ("holdExpiresAt" in event.payload && typeof event.payload.holdExpiresAt === "number") {
+      event.payload.holdExpiresAt = joinHoldExpiresAt(timestamp);
+    }
+  }
+  if ("lockedAt" in event.payload && typeof event.payload.lockedAt === "number") {
+    event.payload.lockedAt = timestamp;
+  }
+  return event;
 }
 
 function lockEvent(prevId: string, opts: {
@@ -410,6 +473,7 @@ function lockEvent(prevId: string, opts: {
   sellerReceivesMsats?: number;
   arbiterFeeMsats?: number;
   locker?: string;
+  selectedItems?: LockPayload["selectedItems"];
 } = {}): ParsedEscrowEvent<LockPayload> {
   const buyerPk   = opts.buyerPubkey   ?? BUYER_PK;
   const arbiterPk = opts.arbiterPubkey ?? ARBITER_PK;
@@ -425,6 +489,7 @@ function lockEvent(prevId: string, opts: {
     arbiterFeeMsats:     opts.arbiterFeeMsats     ?? 1_000_000,
     buyerPubkey:   buyerPk,
     arbiterPubkey: arbiterPk,
+    selectedItems: opts.selectedItems,
     lockedAt: NOW + eventCounter,
   }, prevId);
 }
@@ -547,6 +612,12 @@ console.log("── CREATE ──");
     assert(s.fees.platformBps === 50, "Platform fee BPS set");
     assert(s.fees.platformMsats === 500_000, "Platform fee calculated");
     assert(s.eventChain.length === 1, "Event chain has 1 event");
+    assert(s.listingExpiresAt === create.timestamp + create.payload.expirySeconds,
+      "CREATE sets unlocked listing deadline");
+    assert(s.tradeTimeoutSeconds === create.payload.expirySeconds,
+      "CREATE stores trade timeout duration for LOCK");
+    assert(s.expiresAt === s.listingExpiresAt,
+      "CREATED active deadline is the listing deadline");
   }
 }
 
@@ -570,6 +641,8 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
     const r2 = applyEvent(r1.state, join1);
     if (assertOk(r2, "Buyer JOIN accepted as ACK")) {
       assert(r2.state.participants[Role.BUYER] === BUYER_PK, "Buyer pubkey recorded");
+      assert(r2.state.joinHolds?.[Role.BUYER]?.expiresAt === join1.payload.holdExpiresAt,
+        "Buyer JOIN hold expires in 15 minutes");
       assert(r2.state.status === EscrowStatus.CREATED, "Status STAYS CREATED after buyer JOIN");
 
       const join2 = joinEvent(Role.ARBITER, ARBITER_PK, join1.raw.id);
@@ -606,6 +679,72 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
   state = (applyEvent(state, join1) as any).state;
   const join1dup = joinEvent(Role.BUYER, BUYER_PK, join1.raw.id);
   assertErr(applyEvent(state, join1dup), "ALREADY_JOINED", "Same pubkey re-JOIN is benign duplicate");
+}
+
+// Buyer/seller JOIN holds expire after 15 minutes and release the slot
+{
+  const create = createEvent();
+  let state = (applyEvent(null, create) as any).state;
+  const joinedAt = NOW + 10_000;
+  const join1 = retimeEvent(joinEvent(Role.BUYER, BUYER_PK, create.raw.id), joinedAt);
+  state = (applyEvent(state, join1) as any).state;
+
+  assert(
+    getEffectiveParticipantAt(state, Role.BUYER, joinedAt + JOIN_HOLD_SECONDS - 1) === BUYER_PK,
+    "Buyer JOIN hold is active before the 15-minute deadline",
+  );
+  assert(
+    getEffectiveParticipantAt(state, Role.BUYER, joinedAt + JOIN_HOLD_SECONDS + 1) === null,
+    "Buyer JOIN hold expires after 15 minutes",
+  );
+  assert(
+    getEffectiveParticipantAt(
+      state,
+      Role.BUYER,
+      joinedAt + JOIN_HOLD_SECONDS + 1,
+      { includeLockGrace: true },
+    ) === BUYER_PK,
+    "Buyer JOIN hold has a hidden lock grace after the visible 15-minute deadline",
+  );
+  assert(
+    getEffectiveParticipantAt(
+      state,
+      Role.BUYER,
+      joinedAt + JOIN_HOLD_SECONDS + JOIN_HOLD_LOCK_GRACE_SECONDS + 1,
+      { includeLockGrace: true },
+    ) === null,
+    "Hidden lock grace expires after the extra background window",
+  );
+
+  const nextBuyer = "ef".repeat(32);
+  const replacement = retimeEvent(
+    joinEvent(Role.BUYER, nextBuyer, join1.raw.id),
+    joinedAt + JOIN_HOLD_SECONDS + 1,
+  );
+  const replaced = applyEvent(state, replacement);
+  if (assertOk(replaced, "Expired buyer JOIN hold can be replaced")) {
+    assert(replaced.state.participants[Role.BUYER] === nextBuyer, "Replacement buyer occupies the slot");
+    assert(replaced.state.joinHolds?.[Role.BUYER]?.pubkey === nextBuyer, "Replacement buyer gets a fresh hold");
+  }
+}
+
+// Same buyer can refresh their own slot after the hold expires
+{
+  const create = createEvent();
+  let state = (applyEvent(null, create) as any).state;
+  const joinedAt = NOW + 20_000;
+  const join1 = retimeEvent(joinEvent(Role.BUYER, BUYER_PK, create.raw.id), joinedAt);
+  state = (applyEvent(state, join1) as any).state;
+
+  const refreshedJoin = retimeEvent(
+    joinEvent(Role.BUYER, BUYER_PK, join1.raw.id),
+    joinedAt + JOIN_HOLD_SECONDS + 1,
+  );
+  const refreshed = applyEvent(state, refreshedJoin);
+  if (assertOk(refreshed, "Expired buyer can refresh their JOIN hold")) {
+    assert(refreshed.state.joinHolds?.[Role.BUYER]?.expiresAt === refreshedJoin.payload.holdExpiresAt,
+      "Refreshed JOIN writes a new hold deadline");
+  }
 }
 
 // Same pubkey cannot become both buyer and seller
@@ -753,6 +892,25 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
   }
 }
 
+// 3a.1. LOCK starts the trade deadline from lockedAt, not CREATE time
+{
+  const create = createEvent();
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const lockAt = create.timestamp + 3600;
+    const lock = retimeEvent(lockEvent(create.raw.id), lockAt);
+    const r = applyEvent(r1.state, lock);
+    if (assertOk(r, "LOCK starts active trade deadline from lockedAt")) {
+      assert(r.state.listingExpiresAt === create.timestamp + create.payload.expirySeconds,
+        "LOCK preserves original listing deadline for audit/display");
+      assert(r.state.tradeTimeoutSeconds === create.payload.expirySeconds,
+        "LOCK keeps CREATE timeout duration");
+      assert(r.state.expiresAt === lockAt + create.payload.expirySeconds,
+        "LOCK retimes active deadline to lockedAt + timeout");
+    }
+  }
+}
+
 // 3b. LOCK fires from CREATED after JOIN ACKs (consistent pubkeys)
 {
   const create = createEvent();
@@ -777,6 +935,30 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
   const lock = lockEvent(j1.raw.id, { buyerPubkey: "ff".repeat(32) });
   assertErr(applyEvent(state, lock), "BUYER_PUBKEY_MISMATCH",
     "LOCK buyerPubkey must match prior buyer JOIN");
+}
+
+// Expired buyer JOIN keeps protecting the original buyer during lock grace,
+// then releases the slot after the grace truly expires.
+{
+  const create = createEvent();
+  let state = (applyEvent(null, create) as any).state;
+  const joinedAt = NOW + 30_000;
+  const j1 = retimeEvent(joinEvent(Role.BUYER, BUYER_PK, create.raw.id), joinedAt);
+  state = (applyEvent(state, j1) as any).state;
+
+  const withinGraceLock = retimeEvent(
+    lockEvent(j1.raw.id, { buyerPubkey: "f1".repeat(32) }),
+    joinedAt + JOIN_HOLD_SECONDS + 1,
+  );
+  assertErr(applyEvent(state, withinGraceLock), "BUYER_PUBKEY_MISMATCH",
+    "Hidden lock grace still rejects a different buyer immediately after visible expiry");
+
+  const lateLock = retimeEvent(
+    lockEvent(j1.raw.id, { buyerPubkey: "f1".repeat(32) }),
+    joinedAt + JOIN_HOLD_SECONDS + JOIN_HOLD_LOCK_GRACE_SECONDS + 1,
+  );
+  assertOk(applyEvent(state, lateLock),
+    "Buyer JOIN no longer causes BUYER_PUBKEY_MISMATCH after the hidden grace expires");
 }
 
 // 3d. LOCK with arbiter pubkey not in community pool → ARBITER_NOT_IN_POOL
@@ -850,6 +1032,283 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
   const badLock = lockEvent(create.raw.id, { arbiterPubkey: SELLER_PK });
   assertErr(applyEvent(state, badLock), "DUPLICATE_PARTICIPANT",
     "LOCK can't assign seller pubkey as arbiter");
+}
+
+// 3j. Menu CREATE stores listing items without changing escrow envelope shape
+{
+  const items: MenuItem[] = [
+    { id: "usd-25", label: "$25 bill pay", amountMsats: 25_000, fiatAmount: 25, fiatCurrency: "USD" },
+    { id: "usd-50", label: "$50 bill pay", amountMsats: 50_000, fiatAmount: 50, fiatCurrency: "USD" },
+  ];
+  const create = createEvent({ amountMsats: 25_000, items });
+  const r = applyEvent(null, create);
+  if (assertOk(r, "CREATE accepts optional menu items")) {
+    assert(r.state.items?.length === 2, "Menu items are stored on listing state");
+    assert(r.state.amountMsats === 25_000, "Listing amount remains the display floor");
+    assert(r.state.lock.selectedItems === undefined, "No selected menu items before LOCK");
+  }
+}
+
+// 3k. Menu LOCK snapshots only a finalized buyer basket
+{
+  const items: MenuItem[] = [
+    { id: "small", label: "Small order", amountMsats: 25_000 },
+    { id: "large", label: "Large order", amountMsats: 75_000 },
+  ];
+  const create = createEvent({ amountMsats: 25_000, items });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const noSelection = lockEvent(create.raw.id, { sellerReceivesMsats: 24_000, arbiterFeeMsats: 1_000 });
+    assertErr(applyEvent(r1.state, noSelection), "MISSING_SELECTED_ITEMS",
+      "Menu LOCK without selectedItems is rejected");
+
+    const selectedItems: LockPayload["selectedItems"] = [
+      { itemId: "small", label: "Small order", amountMsats: 25_000, quantity: 2 },
+    ];
+    const draftLock = lockEvent(create.raw.id, {
+      selectedItems,
+      sellerReceivesMsats: 49_000,
+      arbiterFeeMsats: 1_000,
+    });
+    assertErr(applyEvent(r1.state, draftLock), "ORDER_NOT_FINALIZED",
+      "Seller cannot lock a menu basket before the buyer has finalized it");
+
+    const join = joinEvent(Role.BUYER, BUYER_PK, create.raw.id, {
+      selectedItems,
+      amountMsats: 50_000,
+      orderFinalized: true,
+    });
+    const joined = applyEvent(r1.state, join);
+    if (assertOk(joined, "Buyer can finalize a menu basket before seller locks")) {
+      const lock = lockEvent(join.raw.id, {
+        selectedItems,
+        sellerReceivesMsats: 49_000,
+        arbiterFeeMsats: 1_000,
+      });
+      const r2 = applyEvent(joined.state, lock);
+      if (assertOk(r2, "Menu LOCK accepts finalized selectedItems snapshot")) {
+        assert(r2.state.amountMsats === 50_000, "LOCK updates escrow amount to selected basket total");
+        assert(r2.state.lock.selectedItems?.[0]?.quantity === 2, "Selected item quantity is stored");
+        assert(r2.state.lock.selectedItems?.[0]?.label === "Small order", "Selected item label is snapshotted");
+      }
+    }
+  }
+}
+
+// 3k.0. Legacy menu JOINs that carried a cart before orderFinalizedAt replay as final
+{
+  const items: MenuItem[] = [
+    { id: "shirt", label: "Tshirt", amountMsats: 150_000 },
+  ];
+  const create = createEvent({ amountMsats: 150_000, items });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const selectedItems: JoinPayload["selectedItems"] = [
+      { itemId: "shirt", label: "Tshirt", amountMsats: 150_000, quantity: 7 },
+    ];
+    const legacyJoin = joinEvent(Role.BUYER, BUYER_PK, create.raw.id, {
+      selectedItems,
+      amountMsats: 1_050_000,
+    });
+    const joined = applyEvent(r1.state, legacyJoin);
+    if (assertOk(joined, "Legacy first JOIN with a complete menu cart is treated as finalized")) {
+      assert(joined.state.joinHolds?.[Role.BUYER]?.orderFinalizedAt === legacyJoin.payload.joinedAt,
+        "Legacy finalized timestamp is inferred from joinedAt");
+      const lock = lockEvent(legacyJoin.raw.id, {
+        selectedItems,
+        sellerReceivesMsats: 1_049_000,
+        arbiterFeeMsats: 1_000,
+      });
+      assertOk(applyEvent(joined.state, lock),
+        "Legacy menu LOCK replays without requiring a missing orderFinalizedAt field");
+    }
+  }
+}
+
+// 3k.1. Menu buyer can save an order after JOIN without resetting their hold
+{
+  const items: MenuItem[] = [
+    { id: "small", label: "Small order", amountMsats: 25_000 },
+    { id: "large", label: "Large order", amountMsats: 75_000 },
+  ];
+  const create = createEvent({ amountMsats: 25_000, items });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const join = joinEvent(Role.BUYER, BUYER_PK, create.raw.id);
+    const joined = applyEvent(r1.state, join);
+    if (assertOk(joined, "Menu buyer JOIN starts the lock window before order selection")) {
+      const originalExpiresAt = joined.state.joinHolds?.[Role.BUYER]?.expiresAt;
+      const selectedItems: JoinPayload["selectedItems"] = [
+        { itemId: "large", label: "Large order", amountMsats: 75_000, quantity: 1 },
+      ];
+      const saveOrder = joinEvent(Role.BUYER, BUYER_PK, join.raw.id, {
+        selectedItems,
+        amountMsats: 75_000,
+      });
+      const saved = applyEvent(joined.state, saveOrder);
+      if (assertOk(saved, "Buyer can publish a follow-up JOIN to save menu order")) {
+        const hold = saved.state.joinHolds?.[Role.BUYER];
+        assert(hold?.expiresAt === originalExpiresAt, "Saving menu order keeps the original 15-minute lock window");
+        assert(hold?.selectedItems?.[0]?.itemId === "large", "Saved menu order is stored on the buyer hold");
+        assert(hold?.amountMsats === 75_000, "Saved menu order amount is stored on the buyer hold");
+
+        const draftLock = lockEvent(saveOrder.raw.id, {
+          selectedItems,
+          sellerReceivesMsats: 74_000,
+          arbiterFeeMsats: 1_000,
+        });
+        assertErr(applyEvent(saved.state, draftLock), "ORDER_NOT_FINALIZED",
+          "Seller cannot lock a draft menu order before buyer presses ready");
+
+        const readyOrder = joinEvent(Role.BUYER, BUYER_PK, saveOrder.raw.id, {
+          selectedItems,
+          amountMsats: 75_000,
+          orderFinalized: true,
+        });
+        const ready = applyEvent(saved.state, readyOrder);
+        if (assertOk(ready, "Buyer can finalize the saved menu order")) {
+          const readyHold = ready.state.joinHolds?.[Role.BUYER];
+          assert(readyHold?.expiresAt === originalExpiresAt, "Finalizing menu order keeps the original 15-minute lock window");
+          assert(readyHold?.orderFinalizedAt === readyOrder.payload.orderFinalizedAt,
+            "Finalized timestamp is stored on the buyer hold");
+
+          const visibleDeadline = readyHold?.expiresAt ?? 0;
+          assert(visibleDeadline > 0, "Finalized menu order keeps a visible lock deadline");
+
+          const lock = retimeEvent(lockEvent(readyOrder.raw.id, {
+            selectedItems,
+            sellerReceivesMsats: 74_000,
+            arbiterFeeMsats: 1_000,
+          }), visibleDeadline + JOIN_HOLD_LOCK_GRACE_SECONDS - 5);
+          assertOk(applyEvent(ready.state, lock), "Seller can lock a finalized menu order inside the hidden grace window");
+
+          const lateLock = retimeEvent(lockEvent(readyOrder.raw.id, {
+            selectedItems,
+            sellerReceivesMsats: 74_000,
+            arbiterFeeMsats: 1_000,
+          }), visibleDeadline + JOIN_HOLD_LOCK_GRACE_SECONDS + 1);
+          assertErr(applyEvent(ready.state, lateLock), "ORDER_NOT_FINALIZED",
+            "Seller cannot lock a finalized menu order after the hidden grace window expires");
+
+          const changedOrder = joinEvent(Role.BUYER, BUYER_PK, readyOrder.raw.id, {
+            selectedItems: [
+              { itemId: "small", label: "Small order", amountMsats: 25_000, quantity: 1 },
+            ],
+            amountMsats: 25_000,
+          });
+          assertErr(applyEvent(ready.state, changedOrder), "ORDER_ALREADY_FINALIZED",
+            "Finalized menu orders cannot be edited");
+        }
+      }
+    }
+  }
+}
+
+// 3l. Menu LOCK refuses tampered selected item snapshots
+{
+  const items: MenuItem[] = [
+    { id: "small", label: "Small order", amountMsats: 25_000 },
+  ];
+  const create = createEvent({ amountMsats: 25_000, items });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const badSnapshot = lockEvent(create.raw.id, {
+      selectedItems: [
+        { itemId: "small", label: "Small order", amountMsats: 24_000, quantity: 1 },
+      ],
+      sellerReceivesMsats: 23_000,
+      arbiterFeeMsats: 1_000,
+    });
+    assertErr(applyEvent(r1.state, badSnapshot), "MENU_ITEM_MISMATCH",
+      "Selected item amount must match the original menu item");
+  }
+}
+
+// 3l.1. Exchange bracket LOCK accepts an exact amount inside min/max only
+{
+  const items: MenuItem[] = [
+    {
+      id: "bracket-a",
+      label: "Cash range",
+      kind: "exchange-bracket",
+      amountMsats: 25_000,
+      minAmountMsats: 25_000,
+      maxAmountMsats: 75_000,
+      fiatCurrency: "USD",
+    },
+  ];
+  const create = createEvent({ amountMsats: 25_000, items });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const goodSelection: LockPayload["selectedItems"] = [
+      {
+        itemId: "bracket-a",
+        label: "Cash range",
+        kind: "exchange-bracket",
+        amountMsats: 50_000,
+        quantity: 1,
+        minAmountMsats: 25_000,
+        maxAmountMsats: 75_000,
+        fiatCurrency: "USD",
+      },
+    ];
+    const buyerJoin = joinEvent(Role.BUYER, BUYER_PK, create.raw.id);
+    const joined = applyEvent(r1.state, buyerJoin);
+    if (assertOk(joined, "Exchange bracket buyer can join before choosing amount")) {
+      const readyOrder = joinEvent(Role.BUYER, BUYER_PK, buyerJoin.raw.id, {
+        selectedItems: goodSelection,
+        amountMsats: 50_000,
+        orderFinalized: true,
+      });
+      const ready = applyEvent(joined.state, readyOrder);
+      if (assertOk(ready, "Exchange bracket buyer can finalize an exact amount within range")) {
+        const goodLock = lockEvent(readyOrder.raw.id, {
+          selectedItems: goodSelection,
+          sellerReceivesMsats: 49_000,
+          arbiterFeeMsats: 1_000,
+        });
+        const good = applyEvent(ready.state, goodLock);
+        if (assertOk(good, "Exchange bracket LOCK accepts finalized exact amount within range")) {
+          assert(good.state.amountMsats === 50_000, "Bracket exact amount becomes escrow amount");
+        }
+      }
+    }
+
+    const badSelection: LockPayload["selectedItems"] = [
+      {
+        itemId: "bracket-a",
+        label: "Cash range",
+        kind: "exchange-bracket",
+        amountMsats: 80_000,
+        quantity: 1,
+        minAmountMsats: 25_000,
+        maxAmountMsats: 75_000,
+        fiatCurrency: "USD",
+      },
+    ];
+    const badLock = lockEvent(create.raw.id, {
+      selectedItems: badSelection,
+      sellerReceivesMsats: 79_000,
+      arbiterFeeMsats: 1_000,
+    });
+    assertErr(applyEvent(r1.state, badLock), "MENU_ITEM_MISMATCH",
+      "Exchange bracket amount outside range is rejected");
+  }
+}
+
+// 3m. Non-menu LOCK rejects selectedItems to keep legacy listings simple
+{
+  const create = createEvent();
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    const lock = lockEvent(create.raw.id, {
+      selectedItems: [
+        { itemId: "ghost", label: "Ghost item", amountMsats: 100_000_000, quantity: 1 },
+      ],
+    });
+    assertErr(applyEvent(r1.state, lock), "UNEXPECTED_SELECTED_ITEMS",
+      "Non-menu listings cannot carry selectedItems");
+  }
 }
 
 // ── 4. VOTE — Happy Path ─────────────────────────────────────────────────
@@ -1302,8 +1761,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   // v0.7.0: the visible USD default keeps the stable us-blf slug but
   // presents as Global · USD; legacy global-usd is hidden with BP.
   // Permissionless additions live in localStorage and are not counted here.
-  assert(COMMUNITY_REGISTRY.length === 46,
-    "Registry has 46 pre-seeds: Global, East/West/Central Africa, plus hidden legacy entries");
+  assert(COMMUNITY_REGISTRY.length === 47,
+    "Registry has 47 pre-seeds: Global, GBF, East/West/Central Africa, plus hidden legacy entries");
   assert(getCommunityBySlug("sn-cfa")?.currency === "XOF", "sn-cfa is XOF");
   assert(getCommunityBySlug("ke-kes")?.currency === "KES", "ke-kes is KES");
   assert(getCommunityBySlug("tz-tzs")?.currency === "TZS", "tz-tzs is TZS");
@@ -1403,8 +1862,11 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   for (const c of COMMUNITY_REGISTRY) {
     assert(c.browserReliable === true,
       `${c.slug} browserReliable=true (canary iroh bump cleared the gate)`);
-    assert(typeof c.notes === "string" && c.notes.includes("canary iroh"),
-      `${c.slug} carries the shared browser-reliable note`);
+    assert(
+      typeof c.notes === "string" &&
+      (c.notes.includes("canary iroh") || c.notes.includes("Native Fedimint sidecar")),
+      `${c.slug} carries a transport reliability note`
+    );
   }
   assert(getCommunityBySlug("ke-kes")?.displayName === "Kenya · KES",
     "ke-kes displayName names Kenya KES without a disabled federation brand");
@@ -1413,8 +1875,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
-  assert(picker.length === 44,
-    "Picker shows Global plus every East/West/Central Africa country Chama");
+  assert(picker.length === 45,
+    "Picker shows Global, GBF, plus every East/West/Central Africa country Chama");
   assert(picker[0]?.slug === DEFAULT_COMMUNITY_SLUG,
     "Picker starts with Global USD on BLF (active pill visible first)");
   assert(!picker.some(c => c.slug === "sv-usd"),
@@ -2219,6 +2681,16 @@ console.log("\n── SAVED HANDLES (CRUD + visibility) ──");
   assert(list1.length === 1, "List shows 1 entry after add");
   assert(list1[0].id === a.id, "Round-trip ID matches");
 
+  const handleBackupRaw = (globalThis as any).localStorage.getItem(SAVED_HANDLES_BACKUP_STORAGE_KEY);
+  assert(!!handleBackupRaw && JSON.parse(handleBackupRaw).length === 1,
+    "Saved payment handles are mirrored into a backup row");
+  (globalThis as any).localStorage.removeItem(SAVED_HANDLES_STORAGE_KEY);
+  const restoredHandles = listSavedHandles();
+  assert(restoredHandles.length === 1 && restoredHandles[0].id === a.id,
+    "Missing primary saved-handles row restores from backup instead of appearing cleared");
+  assert((globalThis as any).localStorage.getItem(SAVED_HANDLES_STORAGE_KEY) !== null,
+    "Saved-handle backup restore rewrites the primary row");
+
   // Whitespace trimmed
   const trimmed = addSavedHandle("revtag", "  @bob  ");
   assert(trimmed.handle === "@bob", "addSavedHandle trims whitespace");
@@ -2298,6 +2770,30 @@ console.log("\n── SAVED HANDLES (CRUD + visibility) ──");
   deleteSavedHandle(a.id);
   assert(getSavedHandle(a.id) === null, "deleteSavedHandle removes the entry");
   assert(listSavedHandles().length === 3, "Other entries unaffected by delete");
+}
+
+{
+  (globalThis as any).localStorage.clear();
+  addSavedHandle("revtag", "@primary");
+  const staleLegacyLightning: SavedHandle = {
+    id: "h_stale_legacy_lightning",
+    rail: LIGHTNING_RAIL,
+    handle: "old@example.com",
+    visibility: "private",
+    createdAt: 1,
+  };
+  (globalThis as any).localStorage.setItem(
+    SAVED_HANDLES_BACKUP_STORAGE_KEY,
+    JSON.stringify([staleLegacyLightning]),
+  );
+  addSavedHandle("wave", "+221 77 555 0000");
+  const primaryAfterHealthyWrite = JSON.parse(
+    (globalThis as any).localStorage.getItem(SAVED_HANDLES_STORAGE_KEY) ?? "[]",
+  ) as SavedHandle[];
+  assert(
+    primaryAfterHealthyWrite.every(h => h.rail !== LIGHTNING_RAIL),
+    "Healthy primary saved handles do not resurrect stale legacy Lightning rows from backup",
+  );
 }
 
 // ── 19b. SAVED HANDLES — v0.6.5 phone-network tagging ────────────────────
@@ -4402,18 +4898,15 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     participants: { buyer: null, seller: me, arbiter: arb },
     eventChain: [{ kind: EscrowEventKind.CREATE } as any],
   });
-  // v0.6.5 semantics flip: the user's own unmatched listing IS a live
-  // commitment from their perspective ("I have a 2k listing open"), so
-  // it counts toward the ChamaBar pill and active-trade surfaces. The
-  // pre-v0.6.5 exclusion existed only to keep the Create gate from
-  // self-blocking; that gate is gone, so the exclusion is gone.
+  // Open listings are inventory, not money movement. They stay in
+  // Browse/Me, but do not trigger the global active-trade attention pill.
   assert(
-    hasActiveBuyerSellerCommitment({ escrows: [listingOnly], userPubkey: me }) === true,
-    "v0.6.5: CREATE-only public listing now counts as a live commitment",
+    hasActiveBuyerSellerCommitment({ escrows: [listingOnly], userPubkey: me }) === false,
+    "CREATE-only public listing does not count as a live money-moving commitment",
   );
   assert(
-    findActiveTrade({ escrows: [listingOnly], userPubkey: me })?.id === "listing-only",
-    "findActiveTrade now surfaces CREATE-only listings the user posted",
+    findActiveTrade({ escrows: [listingOnly], userPubkey: me }) === null,
+    "findActiveTrade skips CREATE-only listings",
   );
   assert(
     shouldShowOnBrowse({ escrow: listingOnly, browseCategory: "all" }) === true,
@@ -4430,8 +4923,8 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     ],
   });
   assert(
-    hasActiveBuyerSellerCommitment({ escrows: [joinedCreated], userPubkey: me }) === true,
-    "CREATED trade with a JOIN event counts as active",
+    hasActiveBuyerSellerCommitment({ escrows: [joinedCreated], userPubkey: me }) === false,
+    "CREATED trade with a JOIN hold stays off the active-trade pill until LOCK",
   );
   assert(
     shouldShowOnBrowse({ escrow: joinedCreated, browseCategory: "all" }) === true,
@@ -4591,8 +5084,8 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     "Empty escrows → 0 active commitments",
   );
   assert(
-    countActiveBuyerSellerCommitments({ escrows: [listingOnly], userPubkey: me }) === 1,
-    "v0.6.5: CREATE-only listing now counts toward active commitments",
+    countActiveBuyerSellerCommitments({ escrows: [listingOnly], userPubkey: me }) === 0,
+    "CREATE-only listing does not count toward active commitments",
   );
   assert(
     countActiveBuyerSellerCommitments({ escrows: [asBuyer], userPubkey: me }) === 1,
@@ -4609,7 +5102,7 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
 
   // v0.6.5: sumActiveBuyerSellerTradeMsats — the honest total behind
   // the ActiveTradePill headline. Sums amountMsats across every live
-  // trade (CREATED + LOCKED + APPROVED), distinct from
+  // money-moving trade (LOCKED + APPROVED), distinct from
   // activeCommittedMsats which only counts LOCKED+APPROVED.
   assert(
     sumActiveBuyerSellerTradeMsats({ escrows: [], userPubkey: me }) === 0,
@@ -4620,8 +5113,8 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
     "Single LOCKED trade contributes its full amountMsats",
   );
   assert(
-    sumActiveBuyerSellerTradeMsats({ escrows: [listingOnly, asBuyer], userPubkey: me }) === 2_000_000,
-    "CREATE-only listing + LOCKED trade sum together (1M + 1M)",
+    sumActiveBuyerSellerTradeMsats({ escrows: [listingOnly, asBuyer], userPubkey: me }) === 1_000_000,
+    "CREATE-only listing stays off the active-trade sum",
   );
   assert(
     sumActiveBuyerSellerTradeMsats({ escrows: [asArbiter, completed, cancelled, claimed, expired], userPubkey: me }) === 0,
@@ -5340,6 +5833,20 @@ console.log("\n── LNURL PARSER ──");
     "isLightningAddress false for invalid input");
   assert(isLightningAddress("") === false,
     "isLightningAddress false for empty");
+
+  const rawLnurl = "lnurl1dp68gurn8ghj7urgdajku6tc9eshqup0d3h82unvwqhkzmrfvdjsr5eqhc";
+  assert(isRawLnurl(rawLnurl) === true,
+    "Raw bech32 LNURL recognized");
+  assert(isRawLnurl(`lightning:${rawLnurl}`) === true,
+    "lightning:LNURL URI recognized");
+  assert(parseRawLnurl(rawLnurl) === "https://phoenix.app/lnurlp/alice",
+    "Raw bech32 LNURL decodes to metadata URL");
+
+  let rawCode = "";
+  try { parseRawLnurl("lnurl1bad"); }
+  catch (e) { if (e instanceof LnurlError) rawCode = e.code; }
+  assert(rawCode === "LnurlParseError",
+    "Malformed raw LNURL rejects as LnurlParseError");
 }
 
 // ── 34. LNURL RESOLVER (mocked fetch) ────────────────────────────────────
@@ -5407,6 +5914,26 @@ console.log("\n── LNURL RESOLVER ──");
     );
     assert(bolt11 === "lnbc1000n1pchainedok",
       "resolveLightningAddressToInvoice chains metadata + callback");
+  }
+
+  // Raw bech32 LNURL one-shot — decode metadata URL + callback
+  {
+    const rawLnurl = "lnurl1dp68gurn8ghj7urgdajku6tc9eshqup0d3h82unvwqhkzmrfvdjsr5eqhc";
+    const calls: string[] = [];
+    const mockFetch: typeof fetch = (async (url: any) => {
+      calls.push(String(url));
+      if (String(url) === "https://phoenix.app/lnurlp/alice") {
+        return jsonResponse(okMetadata({ callback: "https://phoenix.app/lnurlp/alice/callback" }));
+      }
+      return jsonResponse({ pr: "lnbc2500n1prawlnurl" });
+    }) as any;
+    const bolt11 = await resolveRawLnurlToInvoice(rawLnurl, 2500, mockFetch);
+    assert(bolt11 === "lnbc2500n1prawlnurl",
+      "resolveRawLnurlToInvoice decodes raw LNURL and requests amount");
+    assert(calls[0] === "https://phoenix.app/lnurlp/alice",
+      "Raw LNURL metadata URL was fetched");
+    assert(calls[1].includes("amount=2500000"),
+      "Raw LNURL callback carries amount in msats");
   }
 
   // DNS / network error
@@ -5544,6 +6071,192 @@ console.log("\n── LNURL RESOLVER ──");
   }
 }
 
+// ── 34b. NWC MAKE_INVOICE HELPER ────────────────────────────────────────
+//
+// More Options uses NWC as a receive-invoice source: the user pastes a
+// NIP-47 connection string, Chama asks that wallet to make an invoice,
+// then Fedimint pays the resulting BOLT11.
+console.log("\n── NWC MAKE_INVOICE HELPER ──");
+{
+  const walletPubkey = "b".repeat(64);
+  const secret = "1".repeat(64);
+  const nwc = `nostr+walletconnect://${walletPubkey}?relay=wss%3A%2F%2Frelay.example.com&relay=wss%3A%2F%2Frelay2.example.com&secret=${secret}&lud16=alice%40wallet.example`;
+
+  const parsed = parseNwcConnectionString(nwc);
+  assert(parsed.walletPubkey === walletPubkey,
+    "NWC parser extracts wallet service pubkey");
+  assert(parsed.secret === secret,
+    "NWC parser extracts client secret");
+  assert(parsed.relays.length === 2 && parsed.relays[0] === "wss://relay.example.com",
+    "NWC parser extracts relay URLs");
+  assert(parsed.lud16 === "alice@wallet.example",
+    "NWC parser preserves optional lud16");
+  assert(isNwcConnectionString(nwc) === true,
+    "isNwcConnectionString accepts valid NIP-47 URI");
+  assert(isNwcConnectionString("lnbc500n1pfake") === false,
+    "isNwcConnectionString rejects non-NWC input");
+
+  const request = buildNwcMakeInvoiceRequest(2485, "Chama payout");
+  assert(request.method === "make_invoice",
+    "NWC request uses make_invoice, not pay_invoice");
+  assert(request.params.amount === 2_485_000,
+    "NWC make_invoice amount is encoded in millisats");
+  assert(request.params.description === "Chama payout",
+    "NWC make_invoice carries description");
+
+  const response = JSON.stringify({
+    result_type: "make_invoice",
+    error: null,
+    result: {
+      type: "incoming",
+      invoice: "lnbc2485n1pnwcmade",
+      amount: 2_485_000,
+    },
+  });
+  assert(extractInvoiceFromNwcResponse(response) === "lnbc2485n1pnwcmade",
+    "NWC response extracts returned BOLT11 invoice");
+
+  const payRequest = buildNwcPayInvoiceRequest("lnbc2485n1pnwcpay");
+  assert(payRequest.method === "pay_invoice",
+    "NWC funding request uses pay_invoice");
+  assert(payRequest.params.invoice === "lnbc2485n1pnwcpay",
+    "NWC pay_invoice carries the Chama funding invoice");
+
+  const payResponse = JSON.stringify({
+    result_type: "pay_invoice",
+    error: null,
+    result: {
+      preimage: "f".repeat(64),
+    },
+  });
+  assert(extractPreimageFromNwcPayResponse(payResponse) === "f".repeat(64),
+    "NWC pay_invoice response extracts optional preimage");
+
+  let unsupportedCode = "";
+  try { parseNwcConnectionString(`nostr+walletconnect://${walletPubkey}?secret=${secret}`); }
+  catch (e) { if (e instanceof NwcError) unsupportedCode = e.code; }
+  assert(unsupportedCode === "NwcParseError",
+    "NWC parser rejects missing relay");
+
+  let walletError = "";
+  try {
+    extractInvoiceFromNwcResponse(JSON.stringify({
+      result_type: "make_invoice",
+      error: { code: "RESTRICTED", message: "budget exhausted" },
+      result: null,
+    }));
+  } catch (e) {
+    if (e instanceof NwcError) walletError = e.code;
+  }
+  assert(walletError === "NwcWalletError",
+    "NWC wallet errors are typed distinctly");
+}
+
+// ── 34b2. BOLT11 PAYOUT AMOUNT ROUTING ──────────────────────────────────
+console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
+{
+  assert(parsePaymentBolt11Msats("lnbc24850n1pnwcpayout") === 2_485_000,
+    "BOLT11 helper parses amountful invoices into msats");
+  assert(parsePaymentBolt11Msats("lightning:lnbc24850n1pnwcpayout") === 2_485_000,
+    "BOLT11 helper strips lightning: URI wrapper");
+  assert(parsePaymentBolt11Msats("lnbc1pamountless") === null,
+    "BOLT11 helper treats lnbc1... invoices as amountless");
+
+  const originalFetch = (globalThis as any).fetch;
+  const calls: Array<{ url: string; body: any }> = [];
+  (globalThis as any).fetch = async (url: unknown, init?: { body?: unknown }) => {
+    const path = String(url);
+    calls.push({
+      url: path,
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    if (path.endsWith("/pay")) {
+      return new Response(JSON.stringify({ operation_id: "op_pay" }), { status: 200 });
+    }
+    if (path.endsWith("/info")) {
+      return new Response(JSON.stringify({
+        federation_id: "fed_native_test",
+        network: "bitcoin",
+        total_amount_msat: 0,
+        meta: {},
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: "unexpected path" }), { status: 404 });
+  };
+
+  try {
+    const wallet = new NativeBridgeWallet("http://bridge.test");
+    await wallet.lightning.payInvoice(
+      "lnbc24850n1pnwcpayout",
+      { chama_amount_msats: 2_485_000 } as any,
+    );
+    await wallet.lightning.payInvoice(
+      "lnbc1pamountless",
+      { chama_amount_msats: 2_485_000 } as any,
+    );
+
+    const payBodies = calls
+      .filter((call) => call.url.endsWith("/pay"))
+      .map((call) => call.body);
+    assert(payBodies.length === 2,
+      "Native bridge test captured both pay calls");
+    assert(!("amountMsats" in payBodies[0]),
+      "Native bridge omits explicit amount for amountful BOLT11 invoices");
+    assert(payBodies[1].amountMsats === 2_485_000,
+      "Native bridge still sends explicit amount for amountless BOLT11 invoices");
+  } finally {
+    (globalThis as any).fetch = originalFetch;
+  }
+}
+
+// ── 34c. SAVED NWC CONNECTIONS ──────────────────────────────────────────
+//
+// Saved NWC wallets are reusable local bearer credentials. They are not
+// payment handles and never flow into listing/LOCK reveal payloads.
+console.log("\n── SAVED NWC CONNECTIONS ──");
+{
+  (globalThis as any).localStorage.clear();
+  const walletPubkey = "c".repeat(64);
+  const secret = "2".repeat(64);
+  const nwc = `nostr+walletconnect://${walletPubkey}?relay=wss%3A%2F%2Frelay.example.com&secret=${secret}&lud16=cypher%40wallet.example`;
+
+  const saved = addOrTouchSavedNwcConnection(nwc);
+  assert(saved.id.startsWith("nwc_"),
+    "Saved NWC connection uses nwc_ ID prefix");
+  assert(saved.label === "cypher@wallet.example",
+    "Saved NWC label prefers lud16");
+  assert(saved.walletPubkey === walletPubkey,
+    "Saved NWC stores wallet service pubkey for display/dedupe");
+  assert(saved.relayCount === 1,
+    "Saved NWC stores relay count");
+  assert(listSavedNwcConnections().length === 1,
+    "Saved NWC list returns one connection");
+  assert(listSavedHandles().length === 0,
+    "Saved NWC connection is not a trade payment handle");
+  assert(listPayoutDestinations().length === 0,
+    "Saved NWC connection is not a Lightning Address destination");
+
+  await new Promise(r => setTimeout(r, 1100));
+  const touched = addOrTouchSavedNwcConnection(nwc);
+  assert(touched.id === saved.id,
+    "Re-saving same NWC connection touches existing row");
+  assert((touched.lastUsedAt ?? 0) > (saved.lastUsedAt ?? 0),
+    "Re-saving same NWC connection bumps lastUsedAt");
+  assert(listSavedNwcConnections().length === 1,
+    "NWC store dedupes by wallet pubkey + secret");
+
+  const backupRaw = (globalThis as any).localStorage.getItem(NWC_CONNECTIONS_BACKUP_STORAGE_KEY);
+  assert(!!backupRaw && JSON.parse(backupRaw).length === 1,
+    "Saved NWC connections are mirrored into a backup row");
+  (globalThis as any).localStorage.removeItem(NWC_CONNECTIONS_STORAGE_KEY);
+  assert(listSavedNwcConnections().length === 1,
+    "Missing primary NWC row restores from backup");
+
+  deleteSavedNwcConnection(saved.id);
+  assert(listSavedNwcConnections().length === 0,
+    "deleteSavedNwcConnection removes the saved NWC wallet");
+}
+
 // ── 35. PAYOUT DESTINATIONS — Lightning Address store ───────────────────
 //
 // addOrTouchPayoutDestination is idempotent: re-saving the same address
@@ -5602,6 +6315,17 @@ console.log("\n── PAYOUT DESTINATIONS — Lightning Address store ──");
     "Most-recently-used destination (alice) sorts first");
   assert(sorted[1].address === "bob@strike.me",
     "Older destination (bob) sorts second");
+
+  // ── Backup restore guard ─────────────────────────────────────────────
+  const backupRaw = (globalThis as any).localStorage.getItem(PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY);
+  assert(!!backupRaw && JSON.parse(backupRaw).length === 2,
+    "Payout destinations are mirrored into a backup row");
+  (globalThis as any).localStorage.removeItem(PAYOUT_DESTINATIONS_STORAGE_KEY);
+  const restored = listPayoutDestinations();
+  assert(restored.length === 2 && restored.some(d => d.address === "alice@phoenix.app"),
+    "Missing primary payout-destinations row restores from backup instead of appearing cleared");
+  assert((globalThis as any).localStorage.getItem(PAYOUT_DESTINATIONS_STORAGE_KEY) !== null,
+    "Backup restore rewrites the primary payout-destinations row");
 
   // ── Other rails unaffected ───────────────────────────────────────────
   addSavedHandle("revtag", "@charlie");
@@ -5724,6 +6448,21 @@ console.log("\n── DESTINATION PICKER — logic ──");
   assert(boltTrim.kind === "bolt11",
     "BOLT11 with surrounding whitespace recognized after trim");
 
+  const rawLnurl = "lnurl1dp68gurn8ghj7urgdajku6tc9eshqup0d3h82unvwqhkzmrfvdjsr5eqhc";
+  const lnurlClass = classifyDestinationInput(rawLnurl);
+  assert(lnurlClass.kind === "invalid" && /Raw LNURL/.test(lnurlClass.reason),
+    "Raw LNURL paste is rejected from the payout picker");
+  const lnurlUriClass = classifyDestinationInput(`lightning:${rawLnurl}`);
+  assert(lnurlUriClass.kind === "invalid",
+    "lightning:LNURL URI is rejected from the payout picker");
+  const nwcString = `nostr+walletconnect://${"b".repeat(64)}?relay=wss%3A%2F%2Frelay.example.com&secret=${"1".repeat(64)}`;
+  const nwcClass = classifyDestinationInput(nwcString);
+  assert(nwcClass.kind === "nwc" && nwcClass.connectionString === nwcString,
+    "NWC connection string recognized as advanced invoice source");
+  const boltUri = classifyDestinationInput("lightning:lnbc500n1pfake");
+  assert(boltUri.kind === "bolt11" && boltUri.bolt11 === "lnbc500n1pfake",
+    "lightning:BOLT11 URI recognized and stripped");
+
   assert(makeLightningInvoiceQrPayload("  lnbc500n1pfake  ") === "LIGHTNING:LNBC500N1PFAKE",
     "Lightning QR payload trims and prefixes BOLT11 invoices");
   assert(makeLightningInvoiceQrPayload("lightning:lnbc500n1pfake") === "LIGHTNING:LNBC500N1PFAKE",
@@ -5770,6 +6509,19 @@ console.log("\n── DESTINATION PICKER — logic ──");
       "Advanced BOLT11 paste → addressUsed undefined");
   }
 
+  // Tier 3 NWC paste also wins and must be resolved before payout.
+  {
+    const r = decideDispatch({
+      typedInput: classifyDestinationInput("alice@phoenix.app"),
+      bolt11PasteInput: classifyDestinationInput(nwcString),
+      saveToggleOn: true,
+    });
+    assert(r.ok && r.decision.tier === "pasted-nwc",
+      "Advanced NWC paste preempts typed address");
+    assert(r.ok && r.decision.saveAfter === false,
+      "Advanced NWC paste → Lightning-address saveAfter false");
+  }
+
   // Tier 2 typed Lightning Address — saveAfter follows toggle
   {
     const rOn = decideDispatch({
@@ -5796,6 +6548,18 @@ console.log("\n── DESTINATION PICKER — logic ──");
       "BOLT11 typed into LN field accepted as pasted-bolt11");
     assert(r.ok && r.decision.saveAfter === false,
       "Cross-tier paste forces saveAfter=false (no address to save)");
+  }
+
+  // Tier 2 cross-tier paste — user pasted NWC into the LN field.
+  {
+    const r = decideDispatch({
+      typedInput: classifyDestinationInput(nwcString),
+      saveToggleOn: true,
+    });
+    assert(r.ok && r.decision.tier === "pasted-nwc",
+      "NWC typed into LN field accepted as pasted-nwc");
+    assert(r.ok && r.decision.saveAfter === false,
+      "NWC cross-tier paste forces Lightning-address saveAfter=false");
   }
 
   // Invalid typed input → ok:false with reason
@@ -6215,6 +6979,40 @@ console.log("\n── RUN FUND AND LOCK ──");
       "createFundingInvoice called exactly once");
     assert(wallet.calls.lockAndPublish === 1,
       "lockAndPublish called exactly once after payment");
+  }
+
+  // ── NWC auto-pay: invoice → pay_invoice → balance lands → lock ─────
+  {
+    const wallet = makeMockWallet({ balances: [0, 0, 100_000] });
+    const phases: FundAndLockPhase[] = [];
+    let nowMs = 0;
+    let paidInvoice = "";
+    const terminal = await runFundAndLock({
+      escrowId: "esc_test_nwc",
+      amountMsats: 100_000,
+      description: "test nwc fund",
+      getBalance: wallet.getBalance,
+      createFundingInvoice: wallet.createFundingInvoice,
+      autoPayInvoice: async (bolt11) => { paidInvoice = bolt11; },
+      lockAndPublish: wallet.lockAndPublish,
+      onPhase: p => phases.push(p),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      paymentDeadlineMs: 60_000,
+      mintConfirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    const order = phases.map(p => p.kind);
+    assert(terminal.kind === "locked",
+      "NWC auto-pay funding → terminal kind=locked");
+    assert(paidInvoice === "lnbc100n1pfakefundingok",
+      "NWC auto-pay receives the generated Chama funding invoice");
+    assert(order.indexOf("invoice-created") < order.indexOf("paying-with-nwc"),
+      "NWC auto-pay starts after invoice-created");
+    assert(order.indexOf("paying-with-nwc") < order.indexOf("payment-confirmed"),
+      "NWC auto-pay happens before balance-confirmed");
+    assert(wallet.calls.lockAndPublish === 1,
+      "NWC auto-pay locks after payment confirmation");
   }
 
   // ── Sequencing assertion: lockAndPublish never called before payment-confirmed

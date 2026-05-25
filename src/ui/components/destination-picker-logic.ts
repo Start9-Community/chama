@@ -14,11 +14,12 @@
 //
 // Three input tiers, in priority order:
 //   Tier 1 — saved payout destination rows (one-tap)
-//   Tier 2 — Lightning Address text input + "Save for next time" toggle
-//   Tier 3 — BOLT11 paste (under "More options")
+//   Tier 2 — Lightning Address text input
+//   Tier 3 — BOLT11 or NWC paste (under "More options")
 
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import { isLightningAddress } from "../../payments/lnurl.js";
+import { isNwcConnectionString } from "../../payments/nwc.js";
 
 /** A saved payout destination row decorated with the "default" badge flag.
  *  The first entry (most-recent-used) is the default, rendered with a
@@ -56,6 +57,7 @@ export function decoratePayoutDestinationsForPicker(
 export type InputClassification =
   | { kind: "lightning-address"; address: string }
   | { kind: "bolt11"; bolt11: string }
+  | { kind: "nwc"; connectionString: string }
   | { kind: "empty" }
   | { kind: "invalid"; reason: string };
 
@@ -72,19 +74,31 @@ export function classifyDestinationInput(raw: string): InputClassification {
   }
   const trimmed = raw.trim();
   if (!trimmed) return { kind: "empty" };
+  const payment = /^lightning:/i.test(trimmed)
+    ? trimmed.slice("lightning:".length).trim()
+    : trimmed;
+  if (isNwcConnectionString(payment)) {
+    return { kind: "nwc", connectionString: payment };
+  }
+  if (/^lnurl/i.test(payment)) {
+    return {
+      kind: "invalid",
+      reason: "Raw LNURL isn't supported here. Use a Lightning Address, BOLT11 invoice, or NWC connection.",
+    };
+  }
   // BOLT11 starts with "ln" + bech32 hrp prefix (lnbc, lntb, lnbcrt, etc.)
   // The leading prefix is enough to disambiguate from an email-style
   // Lightning Address; full BOLT11 validation is the responsibility of
   // the Lightning sender downstream.
-  if (/^ln[a-z0-9]/i.test(trimmed) && !trimmed.includes("@")) {
-    return { kind: "bolt11", bolt11: trimmed };
+  if (/^ln(?!url)[a-z0-9]/i.test(payment) && !payment.includes("@")) {
+    return { kind: "bolt11", bolt11: payment };
   }
   if (isLightningAddress(trimmed)) {
     return { kind: "lightning-address", address: trimmed.toLowerCase() };
   }
   return {
     kind: "invalid",
-    reason: "Enter a Lightning Address (you@wallet.app) or paste a BOLT11 invoice",
+    reason: "Enter a Lightning Address (you@wallet.app) or paste a BOLT11 invoice or NWC connection",
   };
 }
 
@@ -94,7 +108,8 @@ export function classifyDestinationInput(raw: string): InputClassification {
 export type DispatchTier =
   | "saved-row"          // Tier 1: tapped a saved row
   | "typed-address"      // Tier 2: typed an address into the picker
-  | "pasted-bolt11";     // Tier 3: pasted a BOLT11 in More Options
+  | "pasted-bolt11"      // Tier 3: pasted a BOLT11 in More Options
+  | "pasted-nwc";        // Tier 3/cross-tier: pasted a NWC connection
 
 /** What the picker will pass to onResolve once the BOLT11 has been
  *  obtained (either resolved from an address or pasted directly).
@@ -117,7 +132,7 @@ export interface DispatchDecision {
 
 /** Decide what the picker will dispatch when the user commits. Pure
  *  logic — no side effects, no resolution. The component does the
- *  LNURL resolution separately, then calls onResolve with the BOLT11
+ *  invoice/NWC resolution separately, then calls onResolve with the BOLT11
  *  plus the data this function returned.
  *
  *  Inputs:
@@ -162,6 +177,15 @@ export function decideDispatch(inputs: DispatchInputs): DispatchResult {
       },
     };
   }
+  if (inputs.bolt11PasteInput?.kind === "nwc") {
+    return {
+      ok: true,
+      decision: {
+        tier: "pasted-nwc",
+        saveAfter: false,
+      },
+    };
+  }
   // Tier 2: typed input. Accept either kind detected.
   if (inputs.typedInput) {
     if (inputs.typedInput.kind === "lightning-address") {
@@ -181,6 +205,15 @@ export function decideDispatch(inputs: DispatchInputs): DispatchResult {
         ok: true,
         decision: {
           tier: "pasted-bolt11",
+          saveAfter: false,
+        },
+      };
+    }
+    if (inputs.typedInput.kind === "nwc") {
+      return {
+        ok: true,
+        decision: {
+          tier: "pasted-nwc",
           saveAfter: false,
         },
       };

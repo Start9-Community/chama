@@ -75,14 +75,13 @@ export const CAT_LABEL: Record<string, string> = {
 };
 
 // Browse tab category filter pills. `id` matches state.category values
-// (or "all"/"subscription" as cross-cutting filters).
+// (or "all" as a cross-cutting filter).
 export const BROWSE_CATS: { id: string; l: string; i: string }[] = [
   { id: "all",          l: "All",          i: "" },
   { id: "p2p-trade",    l: "Exchange",     i: "⚡" },
   { id: "bill-pay",     l: "Com. Bill Pay", i: "🧾" },
   { id: "marketplace",  l: "Market",       i: "🏪" },
   { id: "lending",      l: "Lending",      i: "🤝" },
-  { id: "subscription", l: "Repeats",      i: "🔄" },
 ];
 
 export const fmtSats = (ms: number) => Math.floor(ms / 1000).toLocaleString();

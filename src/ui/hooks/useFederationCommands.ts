@@ -23,6 +23,7 @@
 // two handlers. Pure plumbing — all decisions live in the pure helpers
 // in src/ui/decisions.ts.
 
+import type { ReactNode } from "react";
 import type { FedimintState, UseEscrowActions } from "../../hooks/useEscrow.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../../communities/storage.js";
@@ -32,7 +33,7 @@ import { decideCommunityTapEffect } from "../decisions.js";
 export interface FederationCommandsDeps {
   fedimint: FedimintState;
   actions: UseEscrowActions;
-  setToast: (t: { message: string; type: "success" | "error" | "info" }) => void;
+  setToast: (t: { message: ReactNode; type: "success" | "error" | "info" }) => void;
   setBrowseCommunity: (slug: string) => void;
   setPendingDestroyConfirm: (
     p: {

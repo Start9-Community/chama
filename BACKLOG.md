@@ -59,7 +59,7 @@ candidate list with the older roadmap.
       full chain catches up. Browse should render only open listings by
       other users; terminal user trades belong in Me/history.
 
-- [ ] **15-minute join reservation before lock.** When a buyer or seller
+- [x] **15-minute join reservation before lock.** When a buyer or seller
       joins a CREATED trade, reserve that role for 15 minutes while they
       lock/fund. If no LOCK lands before the reservation expires, free the
       role again so another user can join. Auto-assigned arbiters are not
@@ -67,6 +67,11 @@ candidate list with the older roadmap.
       convergence, not just local Browse filtering: clients must agree on
       join time, stale role handling, and the event shape for cleanup or
       replacement.
+
+      Landed after the Fedi milestone: buyer/seller JOINs now carry
+      `holdExpiresAt`, replay treats expired holds as replaceable, cards
+      show the compact lock window, and TradeDetail surfaces the live
+      lock-window countdown.
 
 - [ ] **Sim manual-fund + Recovery Banner collision.** In sim mode, manual
       fund can create a recoverable balance with no active trade, triggering
@@ -215,11 +220,26 @@ codebase. Keep these here briefly so the consolidation has memory.
 
 ## Product Expansion
 
-- [ ] **Menu primitive.** Add optional menu items to listings, snapshot
+- [x] **Menu primitive.** Add optional menu items to listings, snapshot
       selected items into trades, build buyer basket UI, and add seller
       menu-builder controls in Create. This unlocks marketplace menus,
       Bill Pay fee menus, lending terms, and raw escrow fee tiers without
       changing the escrow envelope.
+
+- [ ] **Me dashboard for sellers and arbiters.** Split Me into operational
+      queues instead of treating Browse banners as a dashboard. Sellers get
+      menu/listing inventory, incoming orders, lock-window holds, locked
+      trades, votes, claims, and history. Official community arbiters see
+      an arbiter-only dashboard when their npub appears in a configured
+      arbiter pool: assigned disputes, vote-needed trades, inactivity
+      signals, and settlement history. Hidden for non-arbiters.
+
+- [ ] **Persistent storefront listings with child orders.** Menu listings
+      should stay open until the seller edits or deletes them, across
+      Exchange, Community Bill Pay, Marketplace, and Lending. Buyer checkout
+      should create a child order/escrow snapshot so sold inventory settles
+      without consuming or hiding the parent storefront. Seller dashboards
+      manage quantities, availability, and paused/deleted state.
 
 - [ ] **`user@chama.community` Lightning Address service.** Optional,
       self-hostable LNURL-pay resolver backed by the user's own Chama

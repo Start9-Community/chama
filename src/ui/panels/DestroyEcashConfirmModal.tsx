@@ -1,4 +1,5 @@
 import { T } from "../theme.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
@@ -56,7 +57,7 @@ export function DestroyEcashConfirmModal({
   const recoverableSats = maxLightningPayoutSats(balanceMsats);
   const reserveSats = lightningPayoutReserveSats(balanceMsats);
   const recoveryLabel = recoverableSats > 0
-    ? `${recoverableSats.toLocaleString()} sats`
+    ? <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
     : "your recoverable balance";
   return (
     <div style={{
@@ -80,7 +81,7 @@ export function DestroyEcashConfirmModal({
         }}>
           Switching to <strong>{targetLabel}</strong> will move you to a
           different Chama. Your local wallet has{" "}
-          <strong>{totalSats > 0 ? `${totalSats.toLocaleString()} sats` : "a balance"}</strong>{" "}
+          <strong>{totalSats > 0 ? <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> : "a balance"}</strong>{" "}
           on this Chama; <strong>{recoveryLabel}</strong> can be recovered to
           your Lightning wallet first.
         </div>
@@ -89,7 +90,11 @@ export function DestroyEcashConfirmModal({
           marginBottom: 16,
         }}>
           This guard is based on local wallet balance, not trade history.
-          {reserveSats > 0 ? ` About ${reserveSats.toLocaleString()} sats are reserved for Lightning fees.` : ""}
+          {reserveSats > 0 && (
+            <>
+              {" "}About <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> are reserved for Lightning fees.
+            </>
+          )}
           {" "}Fedimint ecash is bearer cash — once your local Chama is wiped,
           those sats cannot be recovered from this device.
         </div>
@@ -106,7 +111,7 @@ export function DestroyEcashConfirmModal({
               cursor: "pointer", letterSpacing: 0.3,
             }}
           >
-            ⚡ Recover{recoverableSats > 0 ? ` ${recoverableSats.toLocaleString()} sats` : ""} and switch →
+            ⚡ Recover{recoverableSats > 0 ? <> <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /></> : ""} and switch →
           </button>
           {/* Secondary: keep current Chama, abandon the switch. */}
           <button

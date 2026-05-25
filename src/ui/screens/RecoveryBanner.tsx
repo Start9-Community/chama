@@ -21,8 +21,9 @@
 // replay to find the most recent CLAIM event the user signed. Generic
 // fallback when no CLAIM is found.
 
-import { T, fmtSats } from "../theme.js";
+import { T } from "../theme.js";
 import { displayCounterpartyName, type StrandedEcashSource } from "../decisions.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { Role } from "../../escrow-engine/types.js";
 import {
   lightningPayoutReserveSats,
@@ -57,10 +58,6 @@ export function RecoveryBanner({
   const headline = source
     ? `Your trade with ${counterpartyName} didn't finish cleanly`
     : "Your last trade didn't finish cleanly";
-
-  const explanation = source
-    ? `${totalSats.toLocaleString()} sats are still in your local Chama. ${recoverableSats.toLocaleString()} sats can be sent to your Lightning address now${reserveSats > 0 ? `, with about ${reserveSats.toLocaleString()} sats kept for Lightning fees` : ""}.`
-    : `${totalSats.toLocaleString()} sats are still in your local Chama. ${recoverableSats.toLocaleString()} sats can be sent to your Lightning address now${reserveSats > 0 ? `, with about ${reserveSats.toLocaleString()} sats kept for Lightning fees` : ""}.`;
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -97,7 +94,18 @@ export function RecoveryBanner({
           fontSize: 13, color: T.text, fontFamily: T.sans,
           lineHeight: 1.55, marginBottom: 16,
         }}>
-          {explanation}
+          <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+          are still in your local Chama.{" "}
+          <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+          can be sent to your Lightning address now
+          {reserveSats > 0 && (
+            <>
+              , with about{" "}
+              <BitcoinAmount sats={reserveSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+              kept for Lightning fees
+            </>
+          )}
+          .
         </div>
 
         {/* Trade identity card — when we have source. Generic copy
@@ -134,7 +142,7 @@ export function RecoveryBanner({
               </span>
               {" · "}
               <span style={{ color: T.accent, fontWeight: 700 }}>
-                {fmtSats(source.amountMsats)} sats
+                <BitcoinAmount msats={source.amountMsats} size={12} gap={4} glyphScale={1.18} />
               </span>
             </div>
           </div>
@@ -150,7 +158,7 @@ export function RecoveryBanner({
             cursor: "pointer", letterSpacing: 0.5,
           }}
         >
-          ⚡ Recover {recoverableSats.toLocaleString()} sats →
+          ⚡ Recover <BitcoinAmount sats={recoverableSats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /> →
         </button>
 
         <div style={{

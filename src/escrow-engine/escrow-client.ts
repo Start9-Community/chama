@@ -25,6 +25,8 @@ import {
   Role,
   Outcome,
   TAGS,
+  getEffectiveParticipantAt,
+  joinHoldExpiresAt,
   type NostrEvent,
   type EscrowState,
   type ParsedEscrowEvent,
@@ -32,6 +34,7 @@ import {
   type JoinPayload,
   type LockPayload,
   type LockShareEntry,
+  type SelectedMenuItem,
   type HandleEnvelope,
   type VotePayload,
   type ResolvePayload,
@@ -110,6 +113,29 @@ export interface EscrowClientCallbacks {
   onValidationError?: (escrowId: string, error: string, eventId?: string) => void;
   /** Called when relay connectivity changes */
   onRelayStatus?: (relayUrl: string, status: string) => void;
+}
+
+function statusProgressRank(status: EscrowStatus): number {
+  switch (status) {
+    case EscrowStatus.CREATED: return 0;
+    case EscrowStatus.LOCKED: return 1;
+    case EscrowStatus.APPROVED: return 2;
+    case EscrowStatus.CLAIMED: return 3;
+    case EscrowStatus.COMPLETED: return 4;
+    default: return 4;
+  }
+}
+
+function isTerminalStatus(status: EscrowStatus): boolean {
+  return status === EscrowStatus.COMPLETED
+    || status === EscrowStatus.CANCELLED
+    || status === EscrowStatus.EXPIRED;
+}
+
+function isPartialReplayDowngrade(current: EscrowState | undefined, incoming: EscrowState): boolean {
+  if (!current) return false;
+  if (isTerminalStatus(incoming.status)) return false;
+  return statusProgressRank(incoming.status) < statusProgressRank(current.status);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -275,6 +301,7 @@ export class EscrowClient {
     community?: string;
     mintUrl: string;
     paymentMethods?: string[];
+    items?: CreatePayload["items"];
     arbiterFeeMsats?: number;
     expirySeconds?: number;
     communityArbiters?: string[];
@@ -316,6 +343,7 @@ export class EscrowClient {
       platformFeePubkey: this.config.platformFeePubkey || pubkey,
       arbiterFeeMsats: params.arbiterFeeMsats,
       paymentMethods: params.paymentMethods,
+      items: params.items,
       expirySeconds: params.expirySeconds || this.config.defaultExpirySeconds!,
       communityArbiters: params.communityArbiters,
       // v0.1.72 federation gates: optional locker-fed identity
@@ -406,13 +434,23 @@ export class EscrowClient {
 
   // ── Join an existing escrow ─────────────────────────────────────────────
 
-  async joinEscrow(escrowId: string, role: Role): Promise<EscrowState> {
+  async joinEscrow(
+    escrowId: string,
+    role: Role,
+    opts: { selectedItems?: SelectedMenuItem[]; amountMsats?: number; orderFinalized?: boolean } = {},
+  ): Promise<EscrowState> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
 
     const pubkey = await this.getPubkey();
     const existingRole = this.getMyRole(state, pubkey);
-    if (existingRole) {
+    const isOrderUpdate =
+      existingRole === role &&
+      (
+        (!!opts.selectedItems && opts.selectedItems.length > 0) ||
+        opts.orderFinalized === true
+      );
+    if (existingRole && !isOrderUpdate) {
       const err: any = new Error(
         existingRole === role
           ? `You are already the ${existingRole} on this trade.`
@@ -423,7 +461,7 @@ export class EscrowClient {
       err.requestedRole = role;
       throw err;
     }
-    if (state.initiator.pubkey === pubkey) {
+    if (state.initiator.pubkey === pubkey && !isOrderUpdate) {
       const err: any = new Error(
         `You created this trade as ${state.initiator.role}, so you can't join it as ${role}.`
       );
@@ -452,6 +490,18 @@ export class EscrowClient {
       type: "escrow:join",
       role,
       joinedAt: now,
+      ...(role === Role.BUYER || role === Role.SELLER
+        ? { holdExpiresAt: joinHoldExpiresAt(now) }
+        : {}),
+      ...(opts.selectedItems && opts.selectedItems.length > 0
+        ? { selectedItems: opts.selectedItems }
+        : {}),
+      ...(opts.amountMsats !== undefined && opts.amountMsats > 0
+        ? { amountMsats: opts.amountMsats }
+        : {}),
+      ...(opts.orderFinalized
+        ? { orderFinalizedAt: now }
+        : {}),
     };
 
     // JOIN content is PLAINTEXT — who joined is public info.
@@ -509,6 +559,7 @@ export class EscrowClient {
     /** v0.6.5: mobile-money networks the seller accepts on this handle
      *  ("m-pesa", "wave", etc.). Bridge pulls from saved handle. */
     handleNetworks?: string[];
+    selectedItems?: LockPayload["selectedItems"];
   }): Promise<EscrowState> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
@@ -550,6 +601,7 @@ export class EscrowClient {
       shares: params.shares,
       sellerReceivesMsats: params.sellerReceivesMsats,
       arbiterFeeMsats: params.arbiterFeeMsats,
+      selectedItems: params.selectedItems,
       buyerPubkey: params.buyerPubkey,
       arbiterPubkey: params.arbiterPubkey,
       handleEnvelope,
@@ -905,9 +957,10 @@ export class EscrowClient {
   getMyRole(state: EscrowState, pubkey?: string): Role | null {
     const pk = pubkey || this._pubkey;
     if (!pk) return null;
-    if (state.participants[Role.BUYER] === pk) return Role.BUYER;
-    if (state.participants[Role.SELLER] === pk) return Role.SELLER;
-    if (state.participants[Role.ARBITER] === pk) return Role.ARBITER;
+    const now = Math.floor(Date.now() / 1000);
+    if (getEffectiveParticipantAt(state, Role.BUYER, now) === pk) return Role.BUYER;
+    if (getEffectiveParticipantAt(state, Role.SELLER, now) === pk) return Role.SELLER;
+    if (getEffectiveParticipantAt(state, Role.ARBITER, now) === pk) return Role.ARBITER;
     return null;
   }
 
@@ -1055,6 +1108,18 @@ export class EscrowClient {
       return null;
     }
     console.debug(`[escrow] loadEscrow ${escrowId}: replay OK — state is ${result.state.status}`);
+
+    const current = this.states.get(escrowId);
+    if (isPartialReplayDowngrade(current, result.state)) {
+      const known = new Map((this.rawEvents.get(escrowId) ?? []).map(event => [event.id, event]));
+      for (const event of rawEvents) known.set(event.id, event);
+      this.rawEvents.set(escrowId, [...known.values()]);
+      console.warn(
+        `[escrow] loadEscrow ${escrowId}: ignoring partial relay downgrade ${current!.status} → ${result.state.status}`,
+      );
+      this.watchEscrow(escrowId);
+      return current!;
+    }
 
     this.states.set(escrowId, result.state);
     this.rawEvents.set(escrowId, rawEvents);

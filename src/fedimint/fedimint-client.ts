@@ -31,6 +31,41 @@ import type { LnReceiveStateKind } from "./sdk-adapter.js";
 export type { LnReceiveStateKind };
 import type { ChamaOperationMeta } from "../payments/sats-trace.js";
 
+export interface OnchainInfo {
+  network: string;
+  finalityDelay: number;
+  pegInFeeSats: number;
+  pegOutFeeSats: number;
+  minimumDepositSats: number;
+}
+
+export interface OnchainDepositAddress {
+  operationId: string;
+  address: string;
+  tweakIdx?: unknown;
+  finalityDelay: number;
+}
+
+export interface OnchainDepositSettled {
+  status: string;
+  operationId: string;
+  amountSats?: number;
+  outpoint?: string;
+}
+
+export interface OnchainWithdrawFees {
+  amountSats: number;
+  feesSats: number;
+  totalSats: number;
+}
+
+export interface OnchainWithdrawResult {
+  operationId: string;
+  status: string;
+  txid?: string;
+  feesSats: number;
+}
+
 /**
  * Fedimint wallet instance — mirrors @fedimint/core FedimintWallet API.
  * We define our own interface to decouple from the SDK version and
@@ -40,6 +75,10 @@ export interface IFedimintWallet {
   open(): Promise<void>;
   isOpen(): boolean;
   joinFederation(inviteCode: string): Promise<void>;
+  /** Optional sidecar hook for adapters that cannot recover an invite from
+   *  the native client DB after an already-open wallet is re-associated with
+   *  Chama's configured invite. */
+  rememberInviteCode?(inviteCode: string): void;
   recovery: {
     hasPendingRecoveries(): Promise<boolean>;
     waitForAllRecoveries(): Promise<void>;
@@ -74,6 +113,20 @@ export interface IFedimintWallet {
     ): Promise<{ invoice: string; operationId: string }>;
     /** Pay a Lightning invoice from federation balance */
     payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<{ operationId: string }>;
+  };
+
+  /** Optional native wallet-module on-chain peg-in/peg-out support.
+   * Browser WASM adapters may omit this until the SDK path is validated. */
+  onchain?: {
+    getInfo(): Promise<OnchainInfo>;
+    createDepositAddress(meta?: ChamaOperationMeta): Promise<OnchainDepositAddress>;
+    awaitDeposit(operationId: string): Promise<OnchainDepositSettled>;
+    getWithdrawFees(address: string, amountSats: number): Promise<OnchainWithdrawFees>;
+    withdraw(
+      address: string,
+      amountSats: number,
+      options?: { wait?: boolean; meta?: ChamaOperationMeta },
+    ): Promise<OnchainWithdrawResult>;
   };
 
   federation: {
@@ -248,6 +301,17 @@ export class FedimintClient {
       return createMockWallet();
     }
 
+    // ?nativeFedimint=1 → route wallet calls to the local Rust sidecar.
+    // This is an opt-in escape hatch for public federations that need native
+    // Fedimint transport behavior while the browser SDK path remains default.
+    const { isNativeBridgeModeOn, createNativeBridgeWallet, getNativeBridgeUrl } =
+      await import("./native-bridge-adapter.js");
+    if (isNativeBridgeModeOn()) {
+      const bridgeUrl = getNativeBridgeUrl();
+      console.info(`[chama] nativeFedimint=1 — using native Fedimint bridge at ${bridgeUrl}`);
+      return createNativeBridgeWallet(bridgeUrl);
+    }
+
     // Dynamic import of the adapter keeps WASM out of the initial bundle.
     // The adapter maps @fedimint/core 0.1.x onto our IFedimintWallet shape.
     const { createRealWallet } = await import("./sdk-adapter.js");
@@ -361,6 +425,17 @@ export class FedimintClient {
     return this.wallet;
   }
 
+  private requireOnchainWallet(): NonNullable<IFedimintWallet["onchain"]> {
+    const wallet = this.requireWallet();
+    if (!wallet.onchain) {
+      throw new Error(
+        "On-chain Fedimint wallet support is not available in this wallet adapter. " +
+        "Start Chama with nativeFedimint=1 and the Rust bridge.",
+      );
+    }
+    return wallet.onchain;
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // FEDERATION MANAGEMENT
   // ══════════════════════════════════════════════════════════════════════════
@@ -411,6 +486,7 @@ export class FedimintClient {
       // the same federation their OPFS already holds.
       if (this._joinedInvite === null) {
         this._joinedInvite = inviteCode.trim();
+        wallet.rememberInviteCode?.(this._joinedInvite);
         return currentId;
       }
 
@@ -418,6 +494,7 @@ export class FedimintClient {
       // defensive about whitespace that sometimes sneaks in from
       // clipboard paste.
       if (this._joinedInvite.trim() === inviteCode.trim()) {
+        wallet.rememberInviteCode?.(this._joinedInvite);
         return currentId;
       }
 
@@ -768,6 +845,35 @@ export class FedimintClient {
       });
       throw e;
     }
+  }
+
+  async getOnchainInfo(): Promise<OnchainInfo> {
+    return this.requireOnchainWallet().getInfo();
+  }
+
+  async createOnchainDepositAddress(
+    meta?: ChamaOperationMeta,
+  ): Promise<OnchainDepositAddress> {
+    return this.requireOnchainWallet().createDepositAddress(meta);
+  }
+
+  async awaitOnchainDeposit(operationId: string): Promise<OnchainDepositSettled> {
+    return this.requireOnchainWallet().awaitDeposit(operationId);
+  }
+
+  async getOnchainWithdrawFees(
+    address: string,
+    amountSats: number,
+  ): Promise<OnchainWithdrawFees> {
+    return this.requireOnchainWallet().getWithdrawFees(address, amountSats);
+  }
+
+  async withdrawOnchain(
+    address: string,
+    amountSats: number,
+    options?: { wait?: boolean; meta?: ChamaOperationMeta },
+  ): Promise<OnchainWithdrawResult> {
+    return this.requireOnchainWallet().withdraw(address, amountSats, options);
   }
 
   // ══════════════════════════════════════════════════════════════════════════

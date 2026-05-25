@@ -1,7 +1,15 @@
-import { type EscrowState, EscrowStatus, Role } from "../../escrow-engine/types.js";
+import {
+  type EscrowState,
+  EscrowStatus,
+  Role,
+  getEffectiveParticipantAt,
+  getEffectiveParticipantsAt,
+  getJoinHoldRemainingSeconds,
+} from "../../escrow-engine/types.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
-import { T, CAT_ICON, fmtSats, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER } from "../theme.js";
+import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER } from "../theme.js";
+import { BitcoinAmount } from "./BitcoinAmount.js";
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
 // chama_browse_amber_tint_sorted. Quiet, not alarmist — it's a
@@ -16,9 +24,8 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
   onSelect: () => void;
   variant?: "matching" | "non-matching";
 }) {
-  const myRole = state.participants.buyer === pubkey ? "Buyer"
-    : state.participants.seller === pubkey ? "Seller"
-    : state.participants.arbiter === pubkey ? "Arbiter" : null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const participants = getEffectiveParticipantsAt(state, nowSec);
   const isAmber = variant === "non-matching";
   const cardBg = isAmber ? T.amberDim : T.card;
   const cardBorder = isAmber ? T.amber + "44" : T.border;
@@ -26,17 +33,27 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
     ? getCommunityBySlug(state.community)
     : null;
   const status = STATUS[state.status] ?? STATUS.CREATED;
-  const timeLine = compactTimeRemaining(state);
+  const timeLine = compactJoinHoldRemaining(state, nowSec) ?? compactTimeRemaining(state, nowSec);
   const fiatLine = state.fiatAmount != null && state.fiatCurrency
     ? `${state.fiatAmount.toLocaleString()} ${state.fiatCurrency}`
     : null;
-  const secondaryLine = fiatLine ?? fulfillmentLabel(state.fulfillment);
+  const menuItems = state.items ?? [];
+  const hasMenu = menuItems.length > 0;
+  const marketplaceImages = state.category === "marketplace"
+    ? menuItems.map(item => item.imageDataUrl).filter((src): src is string => !!src)
+    : [];
+  const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, menuFiatFloor(menuItems)) : null;
+  const secondaryLine = fiatLine ?? (
+    hasMenu
+      ? menuLine
+      : state.category === "marketplace" ? fulfillmentLabel(state.fulfillment) : null
+  );
   const previewArbiterPk = state.status === EscrowStatus.CREATED
-    && !state.participants[Role.ARBITER]
+    && !participants[Role.ARBITER]
     && state.communityArbiters.length > 0
     ? (pickArbiterFromPool(state.communityArbiters, state.id, [
-        state.participants[Role.BUYER],
-        state.participants[Role.SELLER],
+        participants[Role.BUYER],
+        participants[Role.SELLER],
       ]) ?? null)
     : null;
 
@@ -45,7 +62,32 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
       background: cardBg, border: `1px solid ${cardBorder}`,
       borderRadius: T.r, padding: 14, cursor: "pointer",
       transition: "border-color 0.2s",
+      overflow: "hidden",
     }}>
+      {marketplaceImages.length > 0 && (
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: marketplaceImages.length > 1 ? "1fr 1fr" : "1fr",
+          gap: 2,
+          margin: "-14px -14px 12px",
+          height: 156,
+          background: T.surface,
+        }}>
+          {marketplaceImages.slice(0, 2).map((src, index) => (
+            <img
+              key={`${src.slice(0, 32)}_${index}`}
+              src={src}
+              alt=""
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                display: "block",
+              }}
+            />
+          ))}
+        </div>
+      )}
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "stretch",
         gap: 12,
@@ -76,6 +118,16 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
                 🔄 {state.subscription.releasedCount}/{state.subscription.totalPeriods}
               </span>
             )}
+            {hasMenu && (
+              <span style={{
+                fontSize: 10, padding: "3px 8px", borderRadius: 999,
+                background: T.accentDim, color: T.accent,
+                border: `1px solid ${T.accent}33`,
+                fontFamily: T.mono, fontWeight: 800,
+              }}>
+                {menuBadgeLabel(state.category)}
+              </span>
+            )}
             {isAmber && listingCommunity && (
               <span style={{
                 fontSize: 10, padding: "3px 8px", borderRadius: 999,
@@ -104,12 +156,27 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
             minWidth: 0, flexWrap: "wrap",
             marginBottom: 12,
           }}>
-            <span style={{ fontSize: 23, fontWeight: 800, color: T.accent, fontFamily: T.mono, lineHeight: 1 }}>
-              {fmtSats(state.amountMsats)} sats
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              color: T.accent, fontFamily: T.mono, lineHeight: 1,
+            }}>
+              {hasMenu && (
+                <span style={{ fontSize: 10, color: T.muted, fontWeight: 800, lineHeight: 1 }}>
+                  from
+                </span>
+              )}
+              <BitcoinAmount msats={state.amountMsats} size={24} />
             </span>
-            <span style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.4 }}>
-              {secondaryLine}
-            </span>
+            {secondaryLine && (
+              <span style={{
+                fontSize: 11,
+                color: T.muted,
+                fontFamily: T.mono,
+                lineHeight: 1.4,
+              }}>
+                · {secondaryLine}
+              </span>
+            )}
           </div>
           <MiniTrinityRing
             state={state}
@@ -137,26 +204,16 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
               width: 6, height: 6, borderRadius: "50%",
               background: status.c, boxShadow: `0 0 8px ${status.c}66`,
             }} />
-            {compactStatusLabel(state)}
+            {compactStatusLabel(state, nowSec)}
           </span>
-          <div>
-            {myRole && (
-              <div style={{
-                fontSize: 10, color: T.muted, fontFamily: T.mono,
-                marginBottom: timeLine ? 4 : 0,
-              }}>
-                {myRole === "Buyer" || myRole === "Seller" ? "You" : myRole}
-              </div>
-            )}
-            {timeLine && (
-              <div style={{
-                fontSize: 10, color: timeLine.tone, fontFamily: T.mono,
-                lineHeight: 1.35,
-              }}>
-                {timeLine.label}
-              </div>
-            )}
-          </div>
+          {timeLine && (
+            <div style={{
+              fontSize: 10, color: timeLine.tone, fontFamily: T.mono,
+              lineHeight: 1.35,
+            }}>
+              {timeLine.label}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -178,11 +235,46 @@ function fulfillmentLabel(fulfillment: EscrowState["fulfillment"]): string {
   return "Service";
 }
 
-function compactStatusLabel(state: EscrowState): string {
+function menuBadgeLabel(category: string): string {
+  if (category === "p2p-trade") return "☰ Options";
+  if (category === "bill-pay") return "☰ Bills";
+  if (category === "lending") return "☰ Loans";
+  return "☰ Store";
+}
+
+function menuSummary(
+  category: string,
+  count: number,
+  fiatFloor: { amount: number; currency: string } | null,
+): string {
+  const noun = category === "p2p-trade" ? "option"
+    : category === "bill-pay" ? "bill"
+    : category === "lending" ? "loan"
+    : "item";
+  const base = `${count} ${noun}${count === 1 ? "" : "s"}`;
+  return fiatFloor
+    ? `${base} · from ${fiatFloor.currency} ${fiatFloor.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+    : base;
+}
+
+function menuFiatFloor(items: NonNullable<EscrowState["items"]>): { amount: number; currency: string } | null {
+  const fiatItems = items.filter((item) => item.fiatAmount !== undefined && item.fiatCurrency);
+  if (fiatItems.length === 0) return null;
+  const currencies = new Set(fiatItems.map((item) => item.fiatCurrency));
+  if (currencies.size !== 1) return null;
+  const amount = Math.min(...fiatItems.map((item) => item.fiatAmount ?? Number.POSITIVE_INFINITY));
+  const currency = fiatItems[0]?.fiatCurrency;
+  return Number.isFinite(amount) && currency ? { amount, currency } : null;
+}
+
+function compactStatusLabel(state: EscrowState, nowSec: number): string {
   const { status } = state;
   if (
     status === EscrowStatus.CREATED &&
-    (!!state.participants[Role.BUYER] || !!state.participants[Role.ARBITER])
+    TRINITY_RING_ORDER.some(role =>
+      role !== state.initiator.role &&
+      !!getEffectiveParticipantAt(state, role, nowSec)
+    )
   ) {
     return "Joined";
   }
@@ -212,7 +304,7 @@ function MiniTrinityRing({
     }}>
       {TRINITY_RING_ORDER.map((role, index) => {
         const previousRole = TRINITY_RING_ORDER[index - 1];
-        const realPk = state.participants[role];
+        const realPk = getEffectiveParticipantAt(state, role);
         const autoAssigned = role === Role.ARBITER && !realPk && !!previewArbiterPk;
         const pk = realPk ?? (autoAssigned ? previewArbiterPk : null);
         const filled = !!pk;
@@ -223,7 +315,7 @@ function MiniTrinityRing({
           : role;
         const connectorColor = ROLE_COLOR[connectorRole] ?? T.muted;
         const connectorFilled = connectorRole === Role.ARBITER
-          ? !!(state.participants[Role.ARBITER] ?? previewArbiterPk)
+          ? !!(getEffectiveParticipantAt(state, Role.ARBITER) ?? previewArbiterPk)
           : filled;
         return (
           <div key={role} style={{ display: "flex", alignItems: "center", gap: 5 }}>
@@ -256,7 +348,21 @@ function MiniTrinityRing({
   );
 }
 
-function compactTimeRemaining(state: EscrowState): { label: string; tone: string } | null {
+function compactJoinHoldRemaining(state: EscrowState, nowSec: number): { label: string; tone: string } | null {
+  if (state.status !== EscrowStatus.CREATED) return null;
+  const activeHoldRoles = TRINITY_RING_ORDER
+    .filter(role => role !== state.initiator.role)
+    .map(role => [role, getJoinHoldRemainingSeconds(state, role, nowSec)] as const)
+    .filter(([, remaining]) => remaining !== null && remaining > 0);
+  if (!activeHoldRoles.length) return null;
+
+  const remaining = Math.min(...activeHoldRoles.map(([, r]) => r ?? Infinity));
+  const minutes = Math.max(1, Math.ceil(remaining / 60));
+  const tone = remaining < 120 ? T.red : remaining < 300 ? T.amber : T.muted;
+  return { label: `lock ${minutes}m`, tone };
+}
+
+function compactTimeRemaining(state: EscrowState, nowSec = Math.floor(Date.now() / 1000)): { label: string; tone: string } | null {
   if (!state.expiresAt) return null;
   if (
     state.status === EscrowStatus.COMPLETED
@@ -265,11 +371,14 @@ function compactTimeRemaining(state: EscrowState): { label: string; tone: string
   ) {
     return null;
   }
-  const remaining = state.expiresAt - Math.floor(Date.now() / 1000);
+  const remaining = state.expiresAt - nowSec;
   if (remaining <= 0) return { label: "Expired", tone: T.red };
   const hours = Math.floor(remaining / 3600);
   const minutes = Math.floor((remaining % 3600) / 60);
   const tone = remaining < 600 ? T.red : remaining < 3600 ? T.amber : T.muted;
-  if (hours > 0) return { label: `${hours}h ${minutes}m`, tone };
-  return { label: `${minutes}m`, tone };
+  const label = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+  return {
+    label: state.status === EscrowStatus.CREATED ? `listing ${label}` : label,
+    tone,
+  };
 }

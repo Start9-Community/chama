@@ -15,13 +15,22 @@
 // is the React shell that renders phase transitions.
 
 import { useEffect, useRef, useState, lazy, Suspense } from "react";
-import { T } from "../theme.js";
+import { T, inputStyle } from "../theme.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { isSimModeOn, setSimMode } from "../../sim/simMode.js";
 import { makeLightningInvoiceQrPayload } from "../../payments/lightning-qr.js";
+import { isNwcConnectionString } from "../../payments/nwc.js";
+import {
+  addOrTouchSavedNwcConnection,
+  listSavedNwcConnections,
+  type SavedNwcConnection,
+} from "../../payments/nwc-connections.js";
 import type {
   FundAndLockPhase,
   FundAndLockTerminal,
 } from "../../payments/fund-and-lock.js";
+import type { OnchainInfo } from "../../fedimint/fedimint-client.js";
+import type { SelectedMenuItem } from "../../escrow-engine/types.js";
 
 const QRCode = lazy(() => import("../QRCode.js"));
 
@@ -34,21 +43,32 @@ export interface AtomicFundingModalProps {
   ctaLabel: string;
   /** Optional handle to reveal in the LOCK payload. */
   savedHandleId?: string;
+  /** Optional menu basket snapshot to attach to LOCK. */
+  selectedItems?: SelectedMenuItem[];
   /** Bound to actions.fundAndLock from useEscrow. */
   fundAndLock: (
     escrowId: string,
     opts: {
       amountMsats: number;
       description: string;
+      fundingMethod?: "lightning" | "onchain" | "nwc";
+      nwcConnectionString?: string;
+      rememberNwc?: boolean;
       savedHandleId?: string;
+      selectedItems?: SelectedMenuItem[];
       onPhase: (phase: FundAndLockPhase) => void;
       signal?: AbortSignal;
     },
   ) => Promise<FundAndLockTerminal>;
+  /** Reads federation wallet-module onchain fees before showing the slow path. */
+  getOnchainInfo: () => Promise<OnchainInfo>;
   /** Bound to actions.lockAndPublish — used for the "Try LOCK now"
    *  retry path on mint-timeout (balance landed, but watchdog gave up
    *  on the mint settling within 60s). */
-  lockAndPublish: (escrowId: string, opts: { savedHandleId?: string }) => Promise<unknown>;
+  lockAndPublish: (escrowId: string, opts: {
+    savedHandleId?: string;
+    selectedItems?: SelectedMenuItem[];
+  }) => Promise<unknown>;
   /** Closed when the modal terminates (success or user cancel). The
    *  consumer can read the terminal kind to decide post-modal navigation
    *  (e.g. show success toast on locked, error toast on lock-failed). */
@@ -56,11 +76,23 @@ export interface AtomicFundingModalProps {
 }
 
 type ModalPhase =
+  | { kind: "choose-method" }
   | { kind: "creating-invoice" }
   | { kind: "creating-invoice-slow" }
+  | { kind: "creating-onchain-address" }
+  | {
+      kind: "awaiting-onchain-confirmations";
+      address: string;
+      operationId: string;
+      finalityDelay: number;
+      pegInFeeSats: number;
+      depositAmountSats: number;
+      minimumDepositSats: number;
+    }
   | { kind: "requesting-fedi-ecash" }
   | { kind: "fedi-ecash-created" }
   | { kind: "awaiting-payment"; bolt11: string; expiresAt: number }
+  | { kind: "paying-with-nwc" }
   | { kind: "mint-confirming"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming-slow"; bolt11: string; expiresAt: number }
   | { kind: "receive-rejected"; reason: string }
@@ -77,21 +109,59 @@ export function AtomicFundingModal({
   amountMsats,
   ctaLabel,
   savedHandleId,
+  selectedItems,
   fundAndLock,
+  getOnchainInfo,
   lockAndPublish,
   onClose,
 }: AtomicFundingModalProps) {
   const amountSats = Math.floor(amountMsats / 1000);
-  const [phase, setPhase] = useState<ModalPhase>({ kind: "creating-invoice" });
+  const [phase, setPhase] = useState<ModalPhase>({ kind: "choose-method" });
+  const [fundingMethod, setFundingMethod] = useState<"lightning" | "onchain" | "nwc" | null>(null);
+  const [savedNwcConnections, setSavedNwcConnections] = useState<SavedNwcConnection[]>(
+    () => listSavedNwcConnections(),
+  );
+  const [nwcInput, setNwcInput] = useState("");
+  const [rememberNwc, setRememberNwc] = useState(true);
+  const [selectedNwcConnection, setSelectedNwcConnection] = useState<string | null>(null);
+  const [onchainInfoState, setOnchainInfoState] = useState<
+    | { kind: "loading" }
+    | { kind: "ready"; info: OnchainInfo }
+    | { kind: "error"; error: string }
+  >({ kind: "loading" });
   const [retryToken, setRetryToken] = useState(0);
   const [tryLockBusy, setTryLockBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const abortRef = useRef<AbortController | null>(null);
   const settledRef = useRef(false);
 
+  useEffect(() => {
+    let cancelled = false;
+    setOnchainInfoState({ kind: "loading" });
+    getOnchainInfo()
+      .then((info) => {
+        if (!cancelled) setOnchainInfoState({ kind: "ready", info });
+      })
+      .catch((e: any) => {
+        if (!cancelled) {
+          setOnchainInfoState({
+            kind: "error",
+            error: e?.message || "Onchain funding unavailable",
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Read once per modal open. The funding action re-checks this before
+    // allocating an address, so this surface is only the UX gate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Phase-driven main loop. Re-runs when the user taps "Generate new
   // invoice" (retryToken increments). Aborts on unmount.
   useEffect(() => {
+    if (!fundingMethod) return;
     settledRef.current = false;
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -103,7 +173,11 @@ export function AtomicFundingModal({
       const terminal = await fundAndLock(escrowId, {
         amountMsats,
         description: `Chama trade · ${ctaLabel}`,
+        fundingMethod,
+        nwcConnectionString: selectedNwcConnection ?? undefined,
+        rememberNwc,
         savedHandleId,
+        selectedItems,
         signal: ctrl.signal,
         onPhase: (p) => {
           // v0.6.5: drop emits from an aborted run. React StrictMode
@@ -136,6 +210,26 @@ export function AtomicFundingModal({
             // createFundingInvoice call against the hard timeout
             // underneath; this just keeps the user informed.
             setPhase({ kind: "creating-invoice-slow" });
+            return;
+          }
+          if (p.kind === "creating-onchain-address") {
+            setPhase({ kind: "creating-onchain-address" });
+            return;
+          }
+          if (p.kind === "onchain-address-created" || p.kind === "awaiting-onchain-confirmations") {
+            setPhase({
+              kind: "awaiting-onchain-confirmations",
+              address: p.address,
+              operationId: p.operationId,
+              finalityDelay: p.finalityDelay,
+              pegInFeeSats: p.pegInFeeSats,
+              depositAmountSats: p.depositAmountSats,
+              minimumDepositSats: p.minimumDepositSats,
+            });
+            return;
+          }
+          if (p.kind === "onchain-deposit-confirmed") {
+            setPhase({ kind: "payment-confirmed" });
             return;
           }
           if (p.kind === "requesting-fedi-ecash" || p.kind === "fedi-ecash-created") {
@@ -194,6 +288,12 @@ export function AtomicFundingModal({
       // a brief delay so the user sees the success state.
       if (settledRef.current) return; // Try-LOCK retry path took over
       if (terminal.kind === "locked") {
+        if (fundingMethod === "nwc" && rememberNwc && selectedNwcConnection) {
+          try {
+            addOrTouchSavedNwcConnection(selectedNwcConnection);
+            setSavedNwcConnections(listSavedNwcConnections());
+          } catch {}
+        }
         setTimeout(() => onClose(terminal), 1200);
       } else if (terminal.kind === "aborted") {
         // No callback — user already triggered close.
@@ -211,7 +311,7 @@ export function AtomicFundingModal({
       ctrl.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [retryToken]);
+  }, [retryToken, fundingMethod]);
 
   // 1Hz tick for the countdown timer when an invoice is live.
   useEffect(() => {
@@ -233,7 +333,35 @@ export function AtomicFundingModal({
   };
 
   const handleRegenerate = () => {
+    setFundingMethod(null);
+    setSelectedNwcConnection(null);
+    setPhase({ kind: "choose-method" });
     setRetryToken((t) => t + 1);
+  };
+
+  const handleSelectMethod = (method: "lightning" | "onchain") => {
+    if (method === "onchain" && onchainInfoState.kind !== "ready") return;
+    if (method === "onchain" && onchainInfoState.kind === "ready") {
+      const minimumDepositSats = Math.max(
+        1,
+        Math.trunc(onchainInfoState.info.minimumDepositSats || onchainInfoState.info.pegInFeeSats + 1),
+      );
+      if (amountSats < minimumDepositSats) return;
+    }
+    setFundingMethod(method);
+    setPhase(
+      method === "lightning"
+        ? { kind: "creating-invoice" }
+        : { kind: "creating-onchain-address" },
+    );
+  };
+
+  const handleSelectNwc = (connectionString: string, remember: boolean) => {
+    if (!isNwcConnectionString(connectionString)) return;
+    setSelectedNwcConnection(connectionString.trim());
+    setRememberNwc(remember);
+    setFundingMethod("nwc");
+    setPhase({ kind: "creating-invoice" });
   };
 
   const handleTryLockNow = async () => {
@@ -241,7 +369,7 @@ export function AtomicFundingModal({
     abortRef.current?.abort();
     setTryLockBusy(true);
     try {
-      await lockAndPublish(escrowId, { savedHandleId });
+      await lockAndPublish(escrowId, { savedHandleId, selectedItems });
       setPhase({ kind: "locked" });
       setTimeout(() => onClose({ kind: "locked" }), 1200);
     } catch (e: any) {
@@ -278,7 +406,7 @@ export function AtomicFundingModal({
               {ctaLabel.toUpperCase()}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
-              {amountSats.toLocaleString()} <span style={{ color: T.muted, fontWeight: 600, fontSize: 14 }}>sats</span>
+              <BitcoinAmount sats={amountSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
             </div>
           </div>
           <button onClick={handleCancel} style={{
@@ -286,6 +414,20 @@ export function AtomicFundingModal({
             fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
           }}>×</button>
         </div>
+
+        {phase.kind === "choose-method" && (
+          <FundingMethodChooser
+            amountSats={amountSats}
+            onchainInfoState={onchainInfoState}
+            onSelect={handleSelectMethod}
+            savedNwcConnections={savedNwcConnections}
+            nwcInput={nwcInput}
+            rememberNwc={rememberNwc}
+            onNwcInputChange={setNwcInput}
+            onRememberNwcChange={setRememberNwc}
+            onSelectNwc={handleSelectNwc}
+          />
+        )}
 
         {phase.kind === "creating-invoice" && <CreatingInvoice slow={false} />}
 
@@ -297,7 +439,22 @@ export function AtomicFundingModal({
           <RequestingFediEcash amountSats={amountSats} onCancel={handleCancel} />
         )}
 
+        {phase.kind === "creating-onchain-address" && <CreatingOnchainAddress />}
+
+        {phase.kind === "awaiting-onchain-confirmations" && (
+          <OnchainAddressDisplay
+            address={phase.address}
+            amountSats={amountSats}
+            depositAmountSats={phase.depositAmountSats}
+            pegInFeeSats={phase.pegInFeeSats}
+            finalityDelay={phase.finalityDelay}
+            onCopy={copyText}
+          />
+        )}
+
         {phase.kind === "fedi-ecash-created" && <PaymentConfirmed amountSats={amountSats} />}
+
+        {phase.kind === "paying-with-nwc" && <PayingWithNwc amountSats={amountSats} />}
 
         {(phase.kind === "awaiting-payment" || phase.kind === "mint-confirming") && (
           <InvoiceDisplay
@@ -383,6 +540,338 @@ export function AtomicFundingModal({
 
 // ── Sub-components ──────────────────────────────────────────────────────
 
+function FundingMethodChooser({
+  amountSats,
+  onchainInfoState,
+  onSelect,
+  savedNwcConnections,
+  nwcInput,
+  rememberNwc,
+  onNwcInputChange,
+  onRememberNwcChange,
+  onSelectNwc,
+}: {
+  amountSats: number;
+  onchainInfoState:
+    | { kind: "loading" }
+    | { kind: "ready"; info: OnchainInfo }
+    | { kind: "error"; error: string };
+  onSelect: (method: "lightning" | "onchain") => void;
+  savedNwcConnections: SavedNwcConnection[];
+  nwcInput: string;
+  rememberNwc: boolean;
+  onNwcInputChange: (value: string) => void;
+  onRememberNwcChange: (value: boolean) => void;
+  onSelectNwc: (connectionString: string, remember: boolean) => void;
+}) {
+  const onchainGate = (() => {
+    if (onchainInfoState.kind === "loading") {
+      return {
+        disabled: true,
+        detail: "Checking federation onchain fee...",
+        pegInFeeSats: undefined,
+        depositAmountSats: undefined,
+      };
+    }
+    if (onchainInfoState.kind === "error") {
+      return {
+        disabled: true,
+        detail: "Onchain unavailable until federation fees load.",
+        pegInFeeSats: undefined,
+        depositAmountSats: undefined,
+      };
+    }
+
+    const pegInFeeSats = Math.max(0, Math.trunc(onchainInfoState.info.pegInFeeSats));
+    const minimumDepositSats = Math.max(
+      1,
+      Math.trunc(onchainInfoState.info.minimumDepositSats || pegInFeeSats + 1),
+    );
+    if (amountSats < minimumDepositSats) {
+      return {
+        disabled: true,
+        detail: <>Minimum <BitcoinAmount sats={minimumDepositSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />. Use LN for this trade.</>,
+        pegInFeeSats,
+        depositAmountSats: undefined,
+      };
+    }
+    return {
+      disabled: false,
+      detail: <>Send <BitcoinAmount sats={amountSats + pegInFeeSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> total; wallet adds miner fee.</>,
+      pegInFeeSats,
+      depositAmountSats: amountSats + pegInFeeSats,
+    };
+  })();
+  const nwcReady = isNwcConnectionString(nwcInput);
+
+  return (
+    <div>
+      <div style={{
+        fontSize: 11, color: T.muted, fontFamily: T.mono,
+        lineHeight: 1.5, marginBottom: 12,
+      }}>
+        Choose how the external wallet funds this trade. Chama locks the
+        credited ecash into SSS automatically after funding lands.
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <button
+          onClick={() => onSelect("lightning")}
+          style={{
+            minHeight: 118, padding: 12, borderRadius: T.r,
+            background: T.accentDim, border: `1px solid ${T.accent}66`,
+            color: T.text, cursor: "pointer", textAlign: "left",
+          }}
+        >
+          <div style={{ fontSize: 20, marginBottom: 8 }}>⚡</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.accent, fontFamily: T.mono, marginBottom: 6 }}>
+            LN · FAST
+          </div>
+          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+            Best for almost everyone. Usually settles in seconds.
+          </div>
+        </button>
+        <button
+          onClick={() => onSelect("onchain")}
+          disabled={onchainGate.disabled}
+          style={{
+            minHeight: 118, padding: 12, borderRadius: T.r,
+            background: T.amberDim, border: `1px solid ${T.amber}66`,
+            color: T.text,
+            cursor: onchainGate.disabled ? "not-allowed" : "pointer",
+            opacity: onchainGate.disabled ? 0.55 : 1,
+            textAlign: "left",
+          }}
+        >
+          <div style={{ fontSize: 20, marginBottom: 8 }}>₿</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.amber, fontFamily: T.mono, marginBottom: 6 }}>
+            ONCHAIN · SLOW
+          </div>
+          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+            {onchainGate.detail}
+          </div>
+          {typeof onchainGate.pegInFeeSats === "number" && (
+            <div style={{
+              marginTop: 8, fontSize: 9, color: T.amber,
+              fontFamily: T.mono, lineHeight: 1.35,
+            }}>
+              Federation deposit fee: <BitcoinAmount sats={onchainGate.pegInFeeSats} size={9} gap={3} glyphScale={1.18} color={T.amber} glyphColor={T.amber} />
+            </div>
+          )}
+        </button>
+      </div>
+      <div style={{
+        marginTop: 12, padding: "8px 10px", borderRadius: T.rs,
+        background: T.surface, border: `1px solid ${T.border}`,
+        fontSize: 10, color: T.muted, fontFamily: T.mono,
+        lineHeight: 1.45, textAlign: "center",
+      }}>
+        Trade amount: <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />
+      </div>
+
+      <details style={{ marginTop: 12 }}>
+        <summary style={{
+          color: T.muted, fontFamily: T.mono, fontSize: 10,
+          cursor: "pointer", listStyle: "none",
+        }}>
+          More options · NWC auto-pay
+        </summary>
+        <div style={{
+          marginTop: 10, padding: 12, borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+        }}>
+          {savedNwcConnections.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{
+                fontSize: 9, color: T.muted, fontFamily: T.mono,
+                letterSpacing: 1, marginBottom: 6,
+              }}>
+                SAVED NWC WALLETS
+              </div>
+              {savedNwcConnections.map((connection) => (
+                <button
+                  key={connection.id}
+                  onClick={() => onSelectNwc(connection.connectionString, true)}
+                  style={{
+                    width: "100%", padding: "10px 12px", marginBottom: 6,
+                    borderRadius: T.rs, background: T.card,
+                    border: `1px solid ${T.border}`, color: T.text,
+                    fontFamily: T.mono, fontSize: 11, cursor: "pointer",
+                    display: "flex", justifyContent: "space-between", gap: 10,
+                  }}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {connection.label}
+                  </span>
+                  <span style={{ color: T.accent, flexShrink: 0 }}>AUTO</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{
+            fontSize: 9, color: T.muted, fontFamily: T.mono,
+            letterSpacing: 1, marginBottom: 6,
+          }}>
+            PASTE NWC CONNECTION
+          </div>
+          <textarea
+            value={nwcInput}
+            onChange={(e) => onNwcInputChange(e.target.value)}
+            placeholder="nostr+walletconnect://..."
+            rows={3}
+            style={{ ...inputStyle, resize: "vertical" as const, minHeight: 60, marginBottom: 8 }}
+          />
+          <label style={{
+            display: "flex", alignItems: "center", gap: 8,
+            marginBottom: 10, color: T.muted, fontFamily: T.mono,
+            fontSize: 10, cursor: "pointer",
+          }}>
+            <input
+              type="checkbox"
+              checked={rememberNwc}
+              onChange={(e) => onRememberNwcChange(e.target.checked)}
+            />
+            Remember this NWC wallet
+          </label>
+          <button
+            disabled={!nwcReady}
+            onClick={() => onSelectNwc(nwcInput, rememberNwc)}
+            style={{
+              width: "100%", padding: "11px 12px", borderRadius: T.rs,
+              background: nwcReady ? T.accent : T.card,
+              border: `1px solid ${nwcReady ? T.accent : T.border}`,
+              color: nwcReady ? "#000" : T.muted,
+              fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+              cursor: nwcReady ? "pointer" : "not-allowed",
+            }}
+          >
+            Auto-pay with NWC
+          </button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function CreatingOnchainAddress() {
+  return (
+    <div style={{
+      padding: "32px 16px", textAlign: "center",
+      background: T.amberDim,
+      border: `1px solid ${T.amber}44`,
+      borderRadius: T.r,
+    }}>
+      <div style={{
+        width: 28, height: 28, borderRadius: "50%",
+        border: `3px solid ${T.amber}`,
+        borderTopColor: "transparent",
+        animation: "spin 1s linear infinite",
+        margin: "0 auto 14px",
+      }} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{
+        fontSize: 12, fontWeight: 700, color: T.amber,
+        fontFamily: T.mono, letterSpacing: 0,
+      }}>
+        CREATING ONCHAIN ADDRESS…
+      </div>
+    </div>
+  );
+}
+
+function makeBitcoinUri(address: string, amountSats: number): string {
+  const btcAmount = (amountSats / 100_000_000)
+    .toFixed(8)
+    .replace(/0+$/, "")
+    .replace(/\.$/, "");
+  return btcAmount ? `bitcoin:${address}?amount=${btcAmount}` : `bitcoin:${address}`;
+}
+
+function OnchainAddressDisplay({
+  address,
+  amountSats,
+  depositAmountSats,
+  pegInFeeSats,
+  finalityDelay,
+  onCopy,
+}: {
+  address: string;
+  amountSats: number;
+  depositAmountSats: number;
+  pegInFeeSats: number;
+  finalityDelay: number;
+  onCopy: (s: string) => void;
+}) {
+  const qrPayload = makeBitcoinUri(address, depositAmountSats);
+  return (
+    <>
+      <div style={{
+        fontSize: 9, color: T.amber, fontFamily: T.mono,
+        letterSpacing: 0, marginBottom: 8, textAlign: "center",
+      }}>
+        ONCHAIN FUNDING · SLOW PATH
+      </div>
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+        <Suspense fallback={<div style={{ width: 280, height: 280, background: "#fff", borderRadius: T.rs }} />}>
+          <QRCode
+            data={qrPayload}
+            size={280}
+            fgColor="#050505"
+            bgColor="#ffffff"
+            margin={4}
+            alt="Bitcoin onchain address QR code"
+          />
+        </Suspense>
+      </div>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        gap: 8, marginBottom: 12, padding: "6px 12px",
+        borderRadius: T.rs,
+        background: T.amberDim,
+        border: `1px solid ${T.amber}44`,
+      }}>
+        <div style={{
+          width: 8, height: 8, borderRadius: "50%",
+          background: T.amber,
+          animation: "pulse 1.4s ease-in-out infinite",
+        }} />
+        <span style={{ fontSize: 10, fontFamily: T.mono, color: T.amber, letterSpacing: 0 }}>
+          Waiting for {finalityDelay} confirmations before LOCK
+        </span>
+      </div>
+      <div style={{
+        padding: 8, marginBottom: 12, borderRadius: T.rs,
+        background: T.surface, border: `1px solid ${T.border}`,
+        fontFamily: T.mono, fontSize: 9, color: T.muted,
+        wordBreak: "break-all", maxHeight: 72, overflowY: "auto", textAlign: "center",
+      }}>
+        {address}
+      </div>
+      <div style={{
+        padding: "8px 10px", marginBottom: 12, borderRadius: T.rs,
+        background: T.amberDim, border: `1px solid ${T.amber}44`,
+        fontFamily: T.mono, fontSize: 10, color: T.amber,
+        lineHeight: 1.45, textAlign: "center",
+      }}>
+        Send <BitcoinAmount sats={depositAmountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> total:{" "}
+        <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> trade +{" "}
+        <BitcoinAmount sats={pegInFeeSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> federation deposit fee.
+        Your wallet shows and pays the Bitcoin miner fee separately.
+      </div>
+      <button
+        onClick={() => onCopy(address)}
+        style={{
+          width: "100%", padding: "10px 16px", borderRadius: T.rs,
+          background: T.amberDim, border: `1px solid ${T.amber}55`,
+          color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+          cursor: "pointer",
+        }}
+      >
+        Copy address
+      </button>
+    </>
+  );
+}
+
 function RequestingFediEcash({
   amountSats,
   onCancel,
@@ -414,7 +903,7 @@ function RequestingFediEcash({
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         lineHeight: 1.5, marginBottom: 12,
       }}>
-        Approve {amountSats.toLocaleString()} sats in Fedi. Chama will
+        Approve <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> in Fedi. Chama will
         lock the ecash notes directly, without a Lightning receive QR.
       </div>
       <button
@@ -493,6 +982,37 @@ function CreatingInvoice({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function PayingWithNwc({ amountSats }: { amountSats: number }) {
+  return (
+    <div style={{
+      padding: "32px 16px", textAlign: "center",
+      background: T.surface, border: `1px solid ${T.border}`,
+      borderRadius: T.r,
+    }}>
+      <div style={{
+        width: 28, height: 28, borderRadius: "50%",
+        border: `3px solid ${T.accent}`,
+        borderTopColor: "transparent",
+        animation: "spin 1s linear infinite",
+        margin: "0 auto 14px",
+      }} />
+      <div style={{
+        fontSize: 12, fontWeight: 800, color: T.accent,
+        fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
+      }}>
+        REQUESTING NWC PAYMENT…
+      </div>
+      <div style={{
+        fontSize: 11, color: T.muted, fontFamily: T.mono,
+        lineHeight: 1.5,
+      }}>
+        Asking your wallet to pay <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />.
+        Your NWC budget and wallet approval rules still apply.
+      </div>
     </div>
   );
 }
@@ -611,7 +1131,7 @@ function MintConfirmingSlowState({
           Federation is taking its time
         </div>
         <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, marginBottom: 6 }}>
-          +{amountSats.toLocaleString()} sats inbound
+          +<BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> inbound
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, wordBreak: "break-word" }}>
           Your payment was received. The federation's mint protocol can
@@ -663,7 +1183,7 @@ function ReceiveRejectedState({
           Federation rejected the payment
         </div>
         <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, marginBottom: 6 }}>
-          {amountSats.toLocaleString()} sats not credited
+          <BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> not credited
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, wordBreak: "break-word" }}>
           Gateway status is canceled:{reason}. Chama is checking briefly
@@ -711,7 +1231,7 @@ function PaymentConfirmed({ amountSats }: { amountSats: number }) {
         Payment received
       </div>
       <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
-        +{amountSats.toLocaleString()} sats
+        +<BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
       </div>
       <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 10, letterSpacing: 1 }}>
         SEALING THE TRADE…
@@ -750,7 +1270,7 @@ function LockedSuccess({ amountSats }: { amountSats: number }) {
         Locked in escrow
       </div>
       <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
-        {amountSats.toLocaleString()} sats
+        <BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
       </div>
       <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
         Trade is live · closing…

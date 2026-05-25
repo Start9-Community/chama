@@ -51,6 +51,113 @@ export interface LightningAddressParts {
   domain: string;
 }
 
+const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const BECH32_GENERATORS = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+
+function stripLightningUri(raw: string): string {
+  const trimmed = raw.trim();
+  return /^lightning:/i.test(trimmed) ? trimmed.slice("lightning:".length).trim() : trimmed;
+}
+
+function bech32Polymod(values: number[]): number {
+  let chk = 1;
+  for (const value of values) {
+    const top = chk >> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ value;
+    for (let i = 0; i < 5; i++) {
+      if ((top >> i) & 1) chk ^= BECH32_GENERATORS[i];
+    }
+  }
+  return chk;
+}
+
+function bech32HrpExpand(hrp: string): number[] {
+  const expanded: number[] = [];
+  for (let i = 0; i < hrp.length; i++) expanded.push(hrp.charCodeAt(i) >> 5);
+  expanded.push(0);
+  for (let i = 0; i < hrp.length; i++) expanded.push(hrp.charCodeAt(i) & 31);
+  return expanded;
+}
+
+function bech32VerifyChecksum(hrp: string, data: number[]): boolean {
+  return bech32Polymod([...bech32HrpExpand(hrp), ...data]) === 1;
+}
+
+function convertBits(data: number[], fromBits: number, toBits: number, pad: boolean): number[] {
+  let acc = 0;
+  let bits = 0;
+  const ret: number[] = [];
+  const maxv = (1 << toBits) - 1;
+  const maxAcc = (1 << (fromBits + toBits - 1)) - 1;
+  for (const value of data) {
+    if (value < 0 || (value >> fromBits) !== 0) {
+      throw new LnurlError("LnurlParseError", "LNURL contains invalid bech32 data");
+    }
+    acc = ((acc << fromBits) | value) & maxAcc;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      ret.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad) {
+    if (bits > 0) ret.push((acc << (toBits - bits)) & maxv);
+  } else if (bits >= fromBits || ((acc << (toBits - bits)) & maxv) !== 0) {
+    throw new LnurlError("LnurlParseError", "LNURL has invalid bech32 padding");
+  }
+  return ret;
+}
+
+/** True iff `raw` looks like a raw bech32 LNURL or lightning:LNURL URI. */
+export function isRawLnurl(raw: string): boolean {
+  if (typeof raw !== "string") return false;
+  return /^lnurl1[02-9ac-hj-np-z]+$/i.test(stripLightningUri(raw));
+}
+
+/** Decode a raw bech32 LNURL into its metadata URL. */
+export function parseRawLnurl(raw: string): string {
+  if (typeof raw !== "string") {
+    throw new LnurlError("LnurlParseError", "LNURL must be text");
+  }
+  const input = stripLightningUri(raw);
+  if (!input) {
+    throw new LnurlError("LnurlParseError", "LNURL cannot be empty");
+  }
+  if (input !== input.toLowerCase() && input !== input.toUpperCase()) {
+    throw new LnurlError("LnurlParseError", "LNURL cannot mix upper and lower case");
+  }
+  const normalized = input.toLowerCase();
+  const sep = normalized.lastIndexOf("1");
+  if (sep < 1 || sep + 7 > normalized.length) {
+    throw new LnurlError("LnurlParseError", "Malformed LNURL bech32 payload");
+  }
+  const hrp = normalized.slice(0, sep);
+  if (hrp !== "lnurl") {
+    throw new LnurlError("LnurlParseError", "LNURL must start with lnurl1");
+  }
+  const dataChars = normalized.slice(sep + 1);
+  const data = [...dataChars].map((char) => BECH32_CHARSET.indexOf(char));
+  if (data.some((value) => value < 0)) {
+    throw new LnurlError("LnurlParseError", "LNURL contains invalid bech32 characters");
+  }
+  if (!bech32VerifyChecksum(hrp, data)) {
+    throw new LnurlError("LnurlParseError", "LNURL checksum is invalid");
+  }
+  const payload = data.slice(0, -6);
+  const bytes = convertBits(payload, 5, 8, false);
+  const url = new TextDecoder().decode(new Uint8Array(bytes)).trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new LnurlError("LnurlParseError", "LNURL did not decode to a valid URL");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new LnurlError("LnurlParseError", "LNURL decoded to an unsupported URL scheme");
+  }
+  return parsed.toString();
+}
+
 /** Parse a Lightning Address (LUD-16) — `user@domain.tld`. Synchronous;
  *  throws LnurlError("LnurlParseError") for malformed input.
  *
@@ -132,19 +239,33 @@ export async function fetchLnurlPayMetadata(
 ): Promise<LnurlPayMetadata> {
   const { user, domain } = parseLightningAddress(address);
   const url = `https://${domain}/.well-known/lnurlp/${user}`;
+  return fetchLnurlPayMetadataUrl(url, domain, fetchImpl);
+}
+
+/** Fetch LNURL-pay metadata from a decoded raw LNURL URL. */
+export async function fetchLnurlPayMetadataUrl(
+  url: string,
+  label = (() => {
+    try { return new URL(url).host; }
+    catch { return "LNURL server"; }
+  })(),
+  fetchImpl: typeof fetch = (typeof fetch !== "undefined" ? fetch : (() => {
+    throw new Error("fetch is not available in this environment");
+  }) as any),
+): Promise<LnurlPayMetadata> {
   let res: Response;
   try {
     res = await fetchImpl(url);
   } catch (e: any) {
     throw new LnurlError(
       "LnurlDnsError",
-      `Couldn't reach ${domain}: ${e?.message || "network error"}`,
+      `Couldn't reach ${label}: ${e?.message || "network error"}`,
     );
   }
   if (!res.ok) {
     throw new LnurlError(
       "LnurlServerError",
-      `${domain} returned HTTP ${res.status}`,
+      `${label} returned HTTP ${res.status}`,
     );
   }
   let body: any;
@@ -153,7 +274,7 @@ export async function fetchLnurlPayMetadata(
   } catch {
     throw new LnurlError(
       "LnurlMalformedError",
-      `${domain} returned non-JSON metadata`,
+      `${label} returned non-JSON metadata`,
     );
   }
   // LNURL convention: `status: "ERROR"` with a `reason` field.
@@ -162,7 +283,7 @@ export async function fetchLnurlPayMetadata(
       "LnurlServerError",
       typeof body.reason === "string" && body.reason
         ? body.reason
-        : `${domain} returned an LNURL error`,
+        : `${label} returned an LNURL error`,
     );
   }
   if (
@@ -174,7 +295,7 @@ export async function fetchLnurlPayMetadata(
   ) {
     throw new LnurlError(
       "LnurlMalformedError",
-      `${domain} returned malformed LNURL-pay metadata`,
+      `${label} returned malformed LNURL-pay metadata`,
     );
   }
   return {
@@ -258,5 +379,16 @@ export async function resolveLightningAddressToInvoice(
   fetchImpl?: typeof fetch,
 ): Promise<string> {
   const meta = await fetchLnurlPayMetadata(address, fetchImpl);
+  return requestLnurlInvoice(meta, amountSats, fetchImpl);
+}
+
+/** One-shot helper: raw bech32 LNURL + amount → BOLT11. */
+export async function resolveRawLnurlToInvoice(
+  rawLnurl: string,
+  amountSats: number,
+  fetchImpl?: typeof fetch,
+): Promise<string> {
+  const url = parseRawLnurl(rawLnurl);
+  const meta = await fetchLnurlPayMetadataUrl(url, undefined, fetchImpl);
   return requestLnurlInvoice(meta, amountSats, fetchImpl);
 }

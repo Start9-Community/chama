@@ -11,6 +11,12 @@ export {
   createRealWallet,
   resetLocalFedimintWallet,
 } from "./sdk-adapter.js";
+export {
+  createNativeBridgeWallet,
+  getNativeBridgeCommunitySlug,
+  getNativeBridgeUrl,
+  isNativeBridgeModeOn,
+} from "./native-bridge-adapter.js";
 export { isTestnetMode, createMockWallet } from "./mock-wallet.js";
 export { drainPendingRedemptions } from "./pending-redemptions.js";
 export { deriveCreateFedTags } from "./create-fed-tags.js";

@@ -1,10 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import { T } from "../theme.js";
 import { isSimModeOn } from "../../sim/simMode.js";
 import { SIM_PILL_HEIGHT } from "../../sim/SimModeBanner.js";
 
 export function Toast({ message, type, onDone }: {
-  message: string; type: "success" | "error" | "info"; onDone: () => void;
+  message: ReactNode; type: "success" | "error" | "info"; onDone: () => void;
 }) {
   useEffect(() => { const t = setTimeout(onDone, 4000); return () => clearTimeout(t); }, [onDone]);
   const colors = { success: T.green, error: T.red, info: T.accent };
@@ -23,7 +23,10 @@ export function Toast({ message, type, onDone }: {
       zIndex: 9999, animation: "fadeIn 0.3s ease",
       maxWidth: "90vw", textAlign: "center", wordBreak: "break-word",
     }}>
-      {type === "success" ? "✓ " : type === "error" ? "✗ " : "⚡ "}{message}
+      <span style={{ display: "inline-flex", alignItems: "baseline", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
+        <span>{type === "success" ? "✓" : type === "error" ? "✗" : "⚡"}</span>
+        <span>{message}</span>
+      </span>
     </div>
   );
 }

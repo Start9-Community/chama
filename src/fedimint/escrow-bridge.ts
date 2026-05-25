@@ -14,7 +14,16 @@
 import { type EscrowClient, type Signer } from "../escrow-engine/escrow-client.js";
 import { type EscrowLockBundle, type FedimintClient, type SSSShare } from "./fedimint-client.js";
 import { stashPendingRedemption, clearPendingRedemption } from "./pending-redemptions.js";
-import { type EscrowState, type LockShareEntry, EscrowEventKind, Role, Outcome } from "../escrow-engine/types.js";
+import {
+  type EscrowState,
+  type SelectedMenuItem,
+  type LockShareEntry,
+  EscrowEventKind,
+  Role,
+  Outcome,
+  getEffectiveParticipantAt,
+  selectedMenuItemsTotalMsats,
+} from "../escrow-engine/types.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
@@ -44,6 +53,26 @@ function claimTrace(checkpoint: string, fields: Record<string, unknown>): void {
   }
   // eslint-disable-next-line no-console
   console.info(parts.join(" "));
+}
+
+interface LockOptions {
+  /** PR 3: ID of a saved handle in the seller's localStorage. The
+   *  bridge resolves it to cleartext at lock time and includes both
+   *  the cleartext + audit ID in the (encrypted) LockPayload so the
+   *  buyer and arbiter can read where to send fiat. Optional —
+   *  marketplace digital trades and raw escrows don't need it. */
+  savedHandleId?: string;
+  /** Menu basket snapshot. Required when locking a menu listing. */
+  selectedItems?: SelectedMenuItem[];
+}
+
+function amountMsatsForLock(state: EscrowState, selectedItems?: SelectedMenuItem[]): number {
+  if (!state.items || state.items.length === 0) return state.amountMsats;
+  const total = selectedMenuItemsTotalMsats(selectedItems);
+  if (!selectedItems || selectedItems.length === 0 || total <= 0) {
+    throw new Error("Select at least one menu item before locking this trade.");
+  }
+  return total;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -104,7 +133,8 @@ export class EscrowFedimintBridge {
       }
     }
 
-    const buyerPubkey = state.participants[Role.BUYER];
+    const nowSec = Math.floor(Date.now() / 1000);
+    const buyerPubkey = getEffectiveParticipantAt(state, Role.BUYER, nowSec, { includeLockGrace: true });
     if (!buyerPubkey) {
       throw new Error(
         "Cannot lock — no buyer pubkey known. The buyer must publish a JOIN " +
@@ -112,11 +142,11 @@ export class EscrowFedimintBridge {
         "pubkey) before LOCK can fire."
       );
     }
-    const sellerPk = state.participants[Role.SELLER];
+    const sellerPk = getEffectiveParticipantAt(state, Role.SELLER, nowSec, { includeLockGrace: true });
     if (!sellerPk) {
       throw new Error("Cannot lock — no seller pubkey known for this trade.");
     }
-    const arbiterPubkey = state.participants[Role.ARBITER]
+    const arbiterPubkey = getEffectiveParticipantAt(state, Role.ARBITER, nowSec, { includeLockGrace: true })
       ?? pickArbiterFromPool(state.communityArbiters, state.id, [buyerPubkey, sellerPk]);
     if (!arbiterPubkey) {
       throw new Error(
@@ -144,7 +174,7 @@ export class EscrowFedimintBridge {
       sellerPk: string;
       arbiterPubkey: string;
     },
-    opts: { savedHandleId?: string } = {},
+    opts: LockOptions = {},
   ): Promise<EscrowState> {
     const { buyerPubkey, sellerPk, arbiterPubkey } = participants;
     const allPks = [buyerPubkey, sellerPk, arbiterPubkey];
@@ -190,6 +220,7 @@ export class EscrowFedimintBridge {
       arbiterFeeMsats: lockBundle.arbiterFeeMsats,
       buyerPubkey,
       arbiterPubkey,
+      selectedItems: opts.selectedItems,
       handleId,
       handle,
       rail,
@@ -209,24 +240,18 @@ export class EscrowFedimintBridge {
    *
    * After this, the money is in escrow — no one can move it alone.
    */
-  async lockAndPublish(escrowId: string, opts: {
-    /** PR 3: ID of a saved handle in the seller's localStorage. The
-     *  bridge resolves it to cleartext at lock time and includes both
-     *  the cleartext + audit ID in the (encrypted) LockPayload so the
-     *  buyer and arbiter can read where to send fiat. Optional —
-     *  marketplace digital trades and raw escrows don't need it. */
-    savedHandleId?: string;
-  } = {}): Promise<EscrowState> {
+  async lockAndPublish(escrowId: string, opts: LockOptions = {}): Promise<EscrowState> {
     const context = await this.prepareLockContext(escrowId);
+    const amountMsats = amountMsatsForLock(context.state, opts.selectedItems);
     const lockBundle = await this.fedimint.createEscrowLock(
-      context.state.amountMsats,
+      amountMsats,
       {
         arbiterFeeMsats: context.state.fees.arbiterMsats,
       },
       buildChamaOperationMeta({
         flow: "lock_spend",
         escrowId,
-        amountMsats: context.state.amountMsats,
+        amountMsats,
       }),
     );
     return this.publishLockBundle(escrowId, context.state, lockBundle, context, opts);
@@ -236,20 +261,19 @@ export class EscrowFedimintBridge {
     await this.prepareLockContext(escrowId);
   }
 
-  async lockAndPublishWithEcash(escrowId: string, oobNotes: string, opts: {
-    savedHandleId?: string;
-  } = {}): Promise<EscrowState> {
+  async lockAndPublishWithEcash(escrowId: string, oobNotes: string, opts: LockOptions = {}): Promise<EscrowState> {
     const context = await this.prepareLockContext(escrowId);
+    const amountMsats = amountMsatsForLock(context.state, opts.selectedItems);
     const lockBundle = await this.fedimint.createEscrowLockFromNotes(
       oobNotes,
-      context.state.amountMsats,
+      amountMsats,
       {
         arbiterFeeMsats: context.state.fees.arbiterMsats,
       },
       buildChamaOperationMeta({
         flow: "lock_external_ecash",
         escrowId,
-        amountMsats: context.state.amountMsats,
+        amountMsats,
       }),
     );
     return this.publishLockBundle(escrowId, context.state, lockBundle, context, opts);
@@ -723,5 +747,16 @@ export class EscrowFedimintBridge {
 
   async redeemEcash(oobNotes: string, meta?: ChamaOperationMeta): Promise<void> {
     await this.fedimint.redeemEcash(oobNotes, meta);
+  }
+
+  async getOnchainWithdrawFees(address: string, amountSats: number) {
+    return await this.fedimint.getOnchainWithdrawFees(address, amountSats);
+  }
+
+  async withdrawOnchain(address: string, amountSats: number, meta?: ChamaOperationMeta) {
+    return await this.fedimint.withdrawOnchain(address, amountSats, {
+      wait: true,
+      meta,
+    });
   }
 }

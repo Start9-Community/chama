@@ -33,6 +33,7 @@ import {
 } from "../storage/user-scope.js";
 
 export const SAVED_HANDLES_STORAGE_KEY = "chama_saved_handles";
+export const SAVED_HANDLES_BACKUP_STORAGE_KEY = "chama_saved_handles_backup";
 
 /** Legacy rail key for pre-v0.6.3 Lightning Address rows. New payout
  *  destinations live in payments/payout-destinations.ts under
@@ -73,33 +74,78 @@ export interface SavedHandle {
 
 // ── Storage I/O ───────────────────────────────────────────────────────────
 
-function readStoredAll(): SavedHandle[] {
+function dedupeHandles(handles: SavedHandle[]): SavedHandle[] {
+  const seen = new Set<string>();
+  const out: SavedHandle[] = [];
+  for (const handle of handles) {
+    const key = handle.id || `${handle.rail}:${handle.handle}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(handle);
+  }
+  return out;
+}
+
+function readStoredFromKey(key: string): SavedHandle[] {
   try {
-    const raw = getScopedStorageItem(SAVED_HANDLES_STORAGE_KEY);
+    const raw = getScopedStorageItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     // Light validation — drop entries that don't look right rather than
     // crashing the whole page on a corrupt key.
-    return parsed.filter(isSavedHandle);
+    return dedupeHandles(parsed.filter(isSavedHandle));
   } catch {
     return [];
   }
+}
+
+function readStoredAll(): SavedHandle[] {
+  const primary = readStoredFromKey(SAVED_HANDLES_STORAGE_KEY);
+  if (primary.length > 0) return primary;
+
+  const backup = readStoredFromKey(SAVED_HANDLES_BACKUP_STORAGE_KEY);
+  if (backup.length > 0) {
+    writeAll(backup, { allowEmptyOverwrite: true });
+    return backup;
+  }
+
+  return [];
 }
 
 function readAll(): SavedHandle[] {
   return readStoredAll().filter(h => h.rail !== LIGHTNING_RAIL);
 }
 
-function writeAll(handles: SavedHandle[]): void {
+function writeAll(
+  handles: SavedHandle[],
+  opts: { allowEmptyOverwrite?: boolean } = {},
+): void {
   try {
     // Preserve legacy Lightning rows until payout-destinations.ts has a
     // chance to migrate them into `chama_payout_destinations`.
-    const legacyLightning = readStoredAll().filter(h => h.rail === LIGHTNING_RAIL);
+    const existingPrimary = readStoredFromKey(SAVED_HANDLES_STORAGE_KEY);
+    const existingBackup = readStoredFromKey(SAVED_HANDLES_BACKUP_STORAGE_KEY);
+    const legacySource = existingPrimary.length > 0 ? existingPrimary : existingBackup;
+    const legacyLightning = legacySource.filter(h => h.rail === LIGHTNING_RAIL);
+    const next = dedupeHandles([
+      ...handles.filter(h => h.rail !== LIGHTNING_RAIL),
+      ...legacyLightning,
+    ]);
+    if (next.length === 0 && !opts.allowEmptyOverwrite) {
+      const existing = readStoredFromKey(SAVED_HANDLES_STORAGE_KEY);
+      const backup = readStoredFromKey(SAVED_HANDLES_BACKUP_STORAGE_KEY);
+      if (existing.length > 0 || backup.length > 0) {
+        console.warn("[chama] Refusing to overwrite saved payment handles with an empty list");
+        return;
+      }
+    }
+    const serialized = JSON.stringify(next);
     setScopedStorageItem(
       SAVED_HANDLES_STORAGE_KEY,
-      JSON.stringify([...handles.filter(h => h.rail !== LIGHTNING_RAIL), ...legacyLightning]),
+      serialized,
     );
+    setScopedStorageItem(SAVED_HANDLES_BACKUP_STORAGE_KEY, serialized);
   } catch {
     // localStorage unavailable / quota exceeded — no-op. The Settings
     // UI surfaces persistence failures via the next read returning the
@@ -174,7 +220,7 @@ export function addSavedHandle(
 }
 
 export function deleteSavedHandle(id: string): void {
-  writeAll(readAll().filter(h => h.id !== id));
+  writeAll(readAll().filter(h => h.id !== id), { allowEmptyOverwrite: true });
 }
 
 /** Update mutable fields of a saved handle. Visibility changes go

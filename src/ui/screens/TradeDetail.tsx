@@ -2,9 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   type EscrowState,
   type ChatImageAttachment,
+  type SelectedMenuItem,
   Role,
   Outcome,
   EscrowStatus,
+  getEffectiveParticipantsAt,
+  getJoinHoldRemainingSeconds,
+  selectedMenuItemsTotalMsats,
 } from "../../escrow-engine/types.js";
 import { getWinner } from "../../escrow-engine/state-machine.js";
 import { getVoteLabel } from "../../labels/vote-labels.js";
@@ -28,6 +32,7 @@ import { Badge } from "../components/Badge.js";
 import { Dot } from "../components/Dot.js";
 import { CountdownTimer } from "../components/CountdownTimer.js";
 import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 
 export function TradeDetail({
@@ -66,8 +71,15 @@ export function TradeDetail({
   onBack: () => void;
   onVote: (outcome: Outcome) => void;
   onClaim: () => Promise<void>;
-  onJoin: (role: Role) => void;
-  onLock: (savedHandleId?: string) => Promise<void>;
+  onJoin: (
+    role: Role,
+    opts?: { selectedItems?: SelectedMenuItem[]; amountMsats?: number; orderFinalized?: boolean },
+  ) => void | Promise<void>;
+  onLock: (opts?: {
+    savedHandleId?: string;
+    selectedItems?: SelectedMenuItem[];
+    amountMsats?: number;
+  }) => Promise<void>;
   onPrewarmFunding?: () => void | Promise<void>;
   onSendChat: (message: string | { message: string; attachments?: ChatImageAttachment[] }) => void;
   onReleasePeriod?: (periodIndex: number) => void | Promise<void>;
@@ -93,17 +105,91 @@ export function TradeDetail({
   // queue another flow.
   const [claiming, setClaiming] = useState(false);
   const [selectedHandleId, setSelectedHandleId] = useState<string>("");
+  const [menuQuantities, setMenuQuantities] = useState<Record<string, number>>({});
+  const [menuAmounts, setMenuAmounts] = useState<Record<string, string>>({});
   // v0.3.0 Phase 6: one-time educational card for State B (cross-fed
   // listing). Renders ONCE per pubkey, same gate-pattern as v0.2.0's
   // first-publish honesty card. Dismiss is sticky in localStorage.
   const [stateBDismissed, setStateBDismissed] = useState(() => hasStateBExplained(pubkey));
-  const myRole = state.participants.buyer === pubkey ? Role.BUYER
-    : state.participants.seller === pubkey ? Role.SELLER
-    : state.participants.arbiter === pubkey ? Role.ARBITER : null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const menuItems = state.items ?? [];
+  const hasMenu = menuItems.length > 0;
+  const hasExchangeMenu = hasMenu && state.category === "p2p-trade";
+  const selectedMenuItems: SelectedMenuItem[] = hasMenu
+    ? hasExchangeMenu
+      ? menuItems.flatMap(item => {
+          const exactSats = parsePositiveWholeSats(menuAmounts[item.id] ?? "");
+          if (exactSats <= 0) return [];
+          const exactMsats = exactSats * 1000;
+          const minMsats = item.minAmountMsats ?? item.amountMsats;
+          const maxMsats = item.maxAmountMsats ?? item.amountMsats;
+          if (exactMsats < minMsats || exactMsats > maxMsats) return [];
+          return [{
+            itemId: item.id,
+            label: item.label,
+            kind: item.kind,
+            amountMsats: exactMsats,
+            quantity: 1,
+            minAmountMsats: item.minAmountMsats,
+            maxAmountMsats: item.maxAmountMsats,
+            description: item.description,
+            fiatAmount: item.fiatAmount,
+            fiatCurrency: item.fiatCurrency,
+            fulfillment: item.fulfillment,
+            imageDataUrl: item.imageDataUrl,
+            dueAt: item.dueAt,
+            termDays: item.termDays,
+            aprBps: item.aprBps,
+            trustTier: item.trustTier,
+          }];
+        })
+      : menuItems.flatMap(item => {
+        const quantity = menuQuantities[item.id] ?? 0;
+        if (quantity <= 0) return [];
+        return [{
+          itemId: item.id,
+          label: item.label,
+          kind: item.kind,
+          amountMsats: item.amountMsats,
+          quantity,
+          minAmountMsats: item.minAmountMsats,
+          maxAmountMsats: item.maxAmountMsats,
+          description: item.description,
+          fiatAmount: item.fiatAmount,
+          fiatCurrency: item.fiatCurrency,
+          fulfillment: item.fulfillment,
+          imageDataUrl: item.imageDataUrl,
+          dueAt: item.dueAt,
+          termDays: item.termDays,
+          aprBps: item.aprBps,
+          trustTier: item.trustTier,
+        }];
+      })
+    : [];
+  const selectedMenuAmountMsats = selectedMenuItemsTotalMsats(selectedMenuItems);
+  const menuSelectorRole = state.category === "lending" ? Role.SELLER : Role.BUYER;
+  const savedOrderItems = state.joinHolds?.[menuSelectorRole]?.selectedItems ?? [];
+  const savedOrderAmountMsats =
+    selectedMenuItemsTotalMsats(savedOrderItems)
+    || state.joinHolds?.[menuSelectorRole]?.amountMsats
+    || 0;
+  const savedOrderKey = savedOrderItems
+    .map(item => `${item.itemId}:${item.amountMsats}:${item.quantity}`)
+    .join("|");
+  const selectedOrderKey = selectedMenuItems
+    .map(item => `${item.itemId}:${item.amountMsats}:${item.quantity}`)
+    .join("|");
+  const selectionMatchesSavedOrder = selectedOrderKey.length > 0 && selectedOrderKey === savedOrderKey;
+  const savedOrderFinalizedAt = state.joinHolds?.[menuSelectorRole]?.orderFinalizedAt ?? null;
+  const savedOrderFinalized = !!savedOrderFinalizedAt;
+  const participants = getEffectiveParticipantsAt(state, nowSec);
+  const myRole = participants.buyer === pubkey ? Role.BUYER
+    : participants.seller === pubkey ? Role.SELLER
+    : participants.arbiter === pubkey ? Role.ARBITER : null;
   const participantPubkeys = [
-    state.participants.buyer,
-    state.participants.seller,
-    state.participants.arbiter,
+    participants.buyer,
+    participants.seller,
+    participants.arbiter,
   ].filter((pk): pk is string => !!pk);
   const hasDuplicateParticipant = participantPubkeys.length !== new Set(participantPubkeys).size;
   const currentKeyAlreadyPresent =
@@ -114,11 +200,11 @@ export function TradeDetail({
   // function escrow-bridge.ts uses at LOCK time, so the predicted
   // pubkey matches the eventual real assignment.
   const previewArbiterPk = state.status === EscrowStatus.CREATED
-    && !state.participants[Role.ARBITER]
+    && !participants[Role.ARBITER]
     && state.communityArbiters.length > 0
     ? (pickArbiterFromPool(state.communityArbiters, state.id, [
-        state.participants[Role.BUYER],
-        state.participants[Role.SELLER],
+        participants[Role.BUYER],
+        participants[Role.SELLER],
       ]) ?? null)
     : null;
   const votePrompt = decideVotePrompt(state, pubkey);
@@ -136,14 +222,40 @@ export function TradeDetail({
     : (state.category === "p2p-trade" || state.category === "bill-pay") ? Role.SELLER
     : null;
   const canILock = !expectedLocker || myRole === expectedLocker;
+  const canSelectMenu =
+    hasMenu &&
+    state.status === EscrowStatus.CREATED &&
+    myRole === menuSelectorRole &&
+    !savedOrderFinalized;
+  const selectorNeedsSaveOrder = canSelectMenu && !canILock;
+  const lockMenuItems = hasMenu && canILock && myRole !== menuSelectorRole
+    ? savedOrderItems
+    : selectedMenuItems;
+  const lockMenuAmountMsats = selectedMenuItemsTotalMsats(lockMenuItems);
+  const lockAmountMsats = hasMenu && lockMenuAmountMsats > 0
+    ? lockMenuAmountMsats
+    : state.amountMsats;
+  const lockRequiresFinalOrder = hasMenu && canILock && myRole !== menuSelectorRole;
+  const menuOrderNotFinal = lockRequiresFinalOrder && lockMenuItems.length > 0 && !savedOrderFinalized;
+  const createdMenuRows = canSelectMenu
+    ? menuItems
+    : savedOrderItems.length > 0
+      ? savedOrderItems
+      : [];
+  const renderedMenuRows = state.status === EscrowStatus.CREATED
+    ? createdMenuRows
+    : state.lock.selectedItems ?? [];
+  const menuDisplayAmountMsats = canSelectMenu
+    ? selectedMenuAmountMsats || savedOrderAmountMsats
+    : lockMenuAmountMsats || savedOrderAmountMsats;
   const hasEligibleArbiter =
-    !!state.participants[Role.ARBITER] || !!previewArbiterPk;
+    !!participants[Role.ARBITER] || !!previewArbiterPk;
   const lockBlockedByNoArbiter =
     state.status === EscrowStatus.CREATED &&
-    !!state.participants[Role.BUYER] &&
+    !!participants[Role.BUYER] &&
     !hasEligibleArbiter;
   const canJoinAsArbiter =
-    !state.participants.arbiter &&
+    !participants.arbiter &&
     !previewArbiterPk &&
     state.communityArbiters.includes(pubkey);
   const prewarmedEscrowRef = useRef<string | null>(null);
@@ -151,7 +263,7 @@ export function TradeDetail({
   useEffect(() => {
     if (!onPrewarmFunding) return;
     if (state.status !== EscrowStatus.CREATED) return;
-    if (!canILock || bootProbeFailed || receiveUnavailable || fundingInProgress) return;
+    if (!canILock || bootProbeFailed || receiveUnavailable || fundingInProgress || menuOrderNotFinal) return;
     if (prewarmedEscrowRef.current === state.id) return;
     prewarmedEscrowRef.current = state.id;
     void onPrewarmFunding();
@@ -162,14 +274,112 @@ export function TradeDetail({
     bootProbeFailed,
     receiveUnavailable,
     fundingInProgress,
+    menuOrderNotFinal,
     onPrewarmFunding,
   ]);
 
-  const lockLabel = state.category === "marketplace" ? "Pay for Item"
+  useEffect(() => {
+    if (!hasMenu || state.status !== EscrowStatus.CREATED) return;
+    if (hasExchangeMenu) {
+      setMenuAmounts(prev => {
+        const next: Record<string, string> = {};
+        for (const item of menuItems) {
+          next[item.id] = prev[item.id] ?? "";
+        }
+        return next;
+      });
+      return;
+    }
+    setMenuQuantities(prev => {
+      const next: Record<string, number> = {};
+      for (const item of menuItems) {
+        next[item.id] = Math.max(0, prev[item.id] ?? 0);
+      }
+      return next;
+    });
+  }, [hasExchangeMenu, hasMenu, state.id, state.status, menuItems]);
+
+  useEffect(() => {
+    if (!hasMenu || state.status !== EscrowStatus.CREATED || savedOrderItems.length === 0) return;
+    if (hasExchangeMenu) {
+      setMenuAmounts(prev => {
+        const next = { ...prev };
+        for (const item of savedOrderItems) {
+          if (!next[item.itemId]) next[item.itemId] = satsInputValue(item.amountMsats);
+        }
+        return next;
+      });
+      return;
+    }
+    setMenuQuantities(prev => {
+      const next = { ...prev };
+      for (const item of savedOrderItems) {
+        if (!next[item.itemId]) next[item.itemId] = item.quantity;
+      }
+      return next;
+    });
+  }, [savedOrderKey, hasExchangeMenu, hasMenu, state.id, state.status]);
+
+  const lockLabel = state.category === "marketplace" ? "Pay for Order"
     : state.category === "lending" ? "Fund Loan"
-    : state.category === "bill-pay" ? "Lock Sats"
-    : state.category === "p2p-trade" ? "Fund Escrow"
+    : state.category === "bill-pay" ? "Fund Bill Order"
+    : state.category === "p2p-trade" ? "Fund Buyer Order"
     : "Lock Sats";
+  const liveJoinHold = state.status === EscrowStatus.CREATED
+    ? [Role.BUYER, Role.SELLER]
+        .filter(role => role !== state.initiator.role)
+        .map(role => {
+          const remaining = getJoinHoldRemainingSeconds(state, role, nowSec);
+          const hold = state.joinHolds?.[role];
+          return remaining && remaining > 0 && hold
+            ? { role, expiresAt: hold.expiresAt, remaining }
+            : null;
+        })
+        .filter((hold): hold is { role: Role; expiresAt: number; remaining: number } => !!hold)
+        .sort((a, b) => a.expiresAt - b.expiresAt)[0] ?? null
+    : null;
+  const nextStep = detailNextStep({
+    state,
+    myRole,
+    canILock,
+    hasMenu,
+    menuSelectorRole,
+    savedOrderFinalized,
+    savedOrderAmountMsats,
+    lockAmountMsats,
+    menuSelectionMissing: hasMenu && lockMenuItems.length === 0,
+    menuOrderNotFinal,
+    participantsBuyer: participants.buyer ?? undefined,
+    votePromptKind: votePrompt.kind,
+    iAmWinner,
+    claimRetryBlocked,
+  });
+  const heroAmountMsats = nextStep.amountMsats ?? (menuDisplayAmountMsats || state.amountMsats);
+  const shortTradeId = state.id.length > 18 ? `${state.id.slice(0, 10)}…${state.id.slice(-6)}` : state.id;
+  const tradeRoomTitle = state.status === EscrowStatus.CREATED
+    ? hasMenu ? "Build the order" : "Ready to start"
+    : state.status === EscrowStatus.LOCKED
+      ? "Trade is live"
+      : state.status === EscrowStatus.COMPLETED
+        ? "Trade complete"
+        : state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED
+          ? "Ready to settle"
+          : "Trade room";
+  const releaseVoteCount = Object.values(state.votes).filter(v => v === Outcome.RELEASE).length;
+  const refundVoteCount = Object.values(state.votes).filter(v => v === Outcome.REFUND).length;
+  const heroImages = [
+    ...(renderedMenuRows.length > 0 ? renderedMenuRows : menuItems),
+  ].filter(item => !!item.imageDataUrl).slice(0, 2);
+  // Trade detail follows the sketch: route education stays as a tiny
+  // context note in the hero instead of a full pre-room card.
+  const showVerboseRouteEducation = false;
+  const routeNote = state.status === EscrowStatus.CREATED
+    ? framing.kind === "state-b"
+      ? `Cross-fed · ${framing.listingFlagEmoji} ${framing.listingCommunityName}`
+      : framing.sameFedSameCommunity
+        ? "Same community"
+        : "Same federation"
+    : null;
 
   const handleVote = async (outcome: Outcome) => {
     setVoting(true);
@@ -177,71 +387,451 @@ export function TradeDetail({
   };
 
   return (
-    <div style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
-      <button onClick={onBack} style={{
-        background: "none", border: "none", color: T.muted,
-        fontFamily: T.mono, fontSize: 12, cursor: "pointer",
-        padding: "4px 0", marginBottom: 16,
+    <div className="trade-detail-shell">
+      <div className="trade-live-head" style={{
+        display: "grid",
+        gridTemplateColumns: "42px minmax(0,1fr) auto",
+        alignItems: "center",
+        gap: 12,
+        marginBottom: 18,
       }}>
-        ← Back
-      </button>
-
-      {/* Header card */}
-      <div style={{
-        background: T.card, border: `1px solid ${T.border}`,
-        borderRadius: T.r, padding: 20, marginBottom: 16,
-        position: "relative", overflow: "hidden",
-      }}>
-        <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg,${s.c},${s.c}00)` }} />
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-          <Badge status={statusKey} />
-          <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-            {state.createdAt ? new Date(state.createdAt * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
-            {" · "}{state.id}
-          </span>
-        </div>
-        <div style={{ fontSize: 16, fontWeight: 600, color: T.text, fontFamily: T.sans, marginBottom: 4, lineHeight: 1.4 }}>
-          {state.description}
-        </div>
-        <div style={{
-          display: "inline-flex", alignItems: "center", gap: 6,
-          padding: "3px 10px", borderRadius: 12, marginBottom: 12,
-          background: T.surface, border: "1px solid " + T.border,
-          fontSize: 10, fontFamily: T.mono, color: T.muted,
+        <button onClick={onBack} aria-label="Back" style={{
+          width: 38,
+          height: 38,
+          borderRadius: 999,
+          background: T.surface,
+          border: `1px solid ${T.border}`,
+          color: T.text,
+          fontFamily: T.mono,
+          fontSize: 18,
+          cursor: "pointer",
+          lineHeight: 1,
         }}>
-          {CAT_LABEL[state.category] || state.category}
+          ←
+        </button>
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            color: T.muted,
+            fontFamily: T.mono,
+            fontSize: 10,
+            letterSpacing: 1.2,
+            textTransform: "uppercase",
+            marginBottom: 3,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}>
+            {CAT_LABEL[state.category] || state.category} · {shortTradeId}
+          </div>
+          <div className="trade-detail-title" style={{
+            color: T.text,
+            fontFamily: T.sans,
+            fontSize: 22,
+            fontWeight: 800,
+            lineHeight: 1.08,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}>
+            {tradeRoomTitle}
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", paddingTop: 12, borderTop: `1px solid ${T.border}` }}>
-          <div>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 2 }}>AMOUNT</div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: T.accent, fontFamily: T.mono }}>
-              {fmtSats(state.amountMsats)} <span style={{ fontSize: 11, color: T.muted }}>sats</span>
+        <Badge status={statusKey} />
+      </div>
+
+      <div className="trade-detail-layout">
+        <div className="trade-detail-listing-pane">
+          <div className="trade-detail-hero" style={{
+            padding: "6px 0 18px",
+            marginBottom: 6,
+            textAlign: "center" as const,
+          }}>
+            {heroImages.length > 0 && (
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: heroImages.length > 1 ? "1fr 1fr" : "1fr",
+                gap: 8,
+                marginBottom: 18,
+                borderRadius: T.r,
+                overflow: "hidden",
+                border: `1px solid ${T.border}`,
+              }}>
+                {heroImages.map((item, index) => (
+                  <img
+                    key={`${"itemId" in item ? item.itemId : item.id}-${index}`}
+                    src={item.imageDataUrl ?? ""}
+                    alt=""
+                    style={{
+                      width: "100%",
+                      height: 150,
+                      objectFit: "cover",
+                      display: "block",
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+            <img
+              className="trade-lock-ring"
+              src="/icons/chama-woven-trust-mark-transparent-256.png"
+              alt=""
+              aria-hidden="true"
+              style={{
+                width: 128,
+                height: 128,
+                margin: "0 auto 18px",
+                display: "block",
+                objectFit: "contain",
+                filter: `drop-shadow(0 0 34px ${s.c}22)`,
+              }}
+            />
+            <div className="trade-detail-amount-row" style={{
+              textAlign: "center",
+            }}>
+              <BitcoinAmount className="trade-detail-amount" msats={heroAmountMsats} size={46} gap={8} glyphScale={1.12} />
+            </div>
+            <div style={{
+              marginTop: 10,
+              color: T.muted,
+              fontFamily: T.mono,
+              fontSize: 11,
+              lineHeight: 1.5,
+            }}>
+              {state.description}
+              {state.fiatAmount ? ` · ${state.fiatCurrency} ${state.fiatAmount.toLocaleString()}` : ""}
+              {routeNote ? ` · ${routeNote}` : ""}
+              {myRole ? ` · ${roleDisplayName(myRole)}` : ""}
             </div>
           </div>
-          {state.fiatAmount && (
-            <div>
-              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 2 }}>FIAT</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: T.text, fontFamily: T.mono }}>
-                {state.fiatCurrency} {state.fiatAmount!.toLocaleString()}
-              </div>
+
+          {hasMenu && (
+            <div className="trade-order-panel" style={{
+              background: T.card,
+              border: `1px solid ${T.border}`,
+              borderRadius: T.r,
+              padding: 12,
+              marginBottom: 12,
+            }}>
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 12,
+          }}>
+            <div style={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: T.muted,
+              fontFamily: T.mono,
+              letterSpacing: 1,
+            }}>
+              {state.status === EscrowStatus.CREATED && !canSelectMenu
+                ? `${roleDisplayName(menuSelectorRole).toUpperCase()} CART`
+                : menuHeaderTitle(state.category, state.status === EscrowStatus.CREATED)}
             </div>
-          )}
-          {myRole && (
-            <div>
-              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 2 }}>YOUR ROLE</div>
-              <div style={{ fontSize: 14, fontWeight: 700, fontFamily: T.mono, color: ROLE_COLOR[myRole], textTransform: "capitalize" }}>
-                {myRole}
+            <div style={{
+              color: T.accent,
+              fontFamily: T.mono,
+              fontSize: 13,
+              fontWeight: 800,
+              display: "inline-flex",
+              justifyContent: "flex-end",
+              minWidth: 96,
+            }}>
+              {state.status === EscrowStatus.CREATED && !canSelectMenu && menuDisplayAmountMsats <= 0
+                ? `waiting on ${roleDisplayName(menuSelectorRole).toLowerCase()}`
+                : state.status === EscrowStatus.CREATED && hasExchangeMenu && menuDisplayAmountMsats <= 0
+                ? "choose amount"
+                : state.status === EscrowStatus.CREATED && menuDisplayAmountMsats <= 0
+                ? menuSelectionHint(state.category)
+                : (
+                  <BitcoinAmount
+                    msats={state.status === EscrowStatus.CREATED ? (menuDisplayAmountMsats || lockAmountMsats) : state.amountMsats}
+                    size={13}
+                    gap={4}
+                    glyphScale={1.18}
+                  />
+                )}
+            </div>
+          </div>
+          <div style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            maxHeight: canSelectMenu ? 260 : 170,
+            overflowY: "auto",
+            paddingRight: 2,
+          }}>
+            {renderedMenuRows.length === 0 && (
+              <div style={{
+                padding: "18px 14px",
+                background: T.surface,
+                border: `1px dashed ${T.border}`,
+                borderRadius: T.rs,
+                color: T.muted,
+                fontFamily: T.mono,
+                fontSize: 11,
+                lineHeight: 1.55,
+                textAlign: "center",
+              }}>
+                Waiting for {roleDisplayName(menuSelectorRole).toLowerCase()} to build the order.
               </div>
+            )}
+            {renderedMenuRows.map(item => {
+              const itemId = "itemId" in item ? item.itemId : item.id;
+              const savedOrderItem = savedOrderItems.find(orderItem => orderItem.itemId === itemId);
+              const interactive = canSelectMenu;
+              const qty = "quantity" in item
+                ? item.quantity
+                : interactive
+                  ? (menuQuantities[itemId] ?? 0)
+                  : (savedOrderItem?.quantity ?? 0);
+              const exactSats = parsePositiveWholeSats(menuAmounts[itemId] ?? "");
+              const minMsats = item.minAmountMsats ?? item.amountMsats;
+              const maxMsats = item.maxAmountMsats ?? item.amountMsats;
+              const exactMsats = exactSats * 1000;
+              const exactAmountValid = exactMsats >= minMsats && exactMsats <= maxMsats;
+              const metaLine = menuMetaLine(item);
+              const allowsQuantity = state.category === "marketplace";
+              const selected = hasExchangeMenu
+                ? interactive
+                  ? exactSats > 0 && exactAmountValid
+                  : !!savedOrderItem
+                : qty > 0;
+              return (
+                <div key={itemId} style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "10px 12px",
+                  background: T.surface,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: T.rs,
+                }}>
+                  {item.imageDataUrl && (
+                    <img
+                      src={item.imageDataUrl}
+                      alt=""
+                      style={{
+                        width: 54,
+                        height: 44,
+                        objectFit: "cover",
+                        borderRadius: 8,
+                        border: `1px solid ${T.border}`,
+                        flexShrink: 0,
+                      }}
+                    />
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: T.text,
+                      fontFamily: T.sans,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap" as const,
+                    }}>
+                      {item.label}
+                    </div>
+                    <div style={{
+                      marginTop: 3,
+                      fontSize: 10,
+                      color: T.muted,
+                      fontFamily: T.mono,
+                    }}>
+                      {menuAmountLabel(item)}
+                      {"quantity" in item && item.quantity > 1 ? ` × ${item.quantity}` : ""}
+                    </div>
+                    {metaLine && (
+                      <div style={{
+                        marginTop: 3,
+                        fontSize: 9,
+                        color: T.muted,
+                        fontFamily: T.mono,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap" as const,
+                      }}>
+                        {metaLine}
+                      </div>
+                    )}
+                  </div>
+                  {interactive && hasExchangeMenu ? (
+                    <div style={{ minWidth: 104 }}>
+                      <input
+                        type="number"
+                        value={menuAmounts[itemId] ?? ""}
+                        onChange={e => setMenuAmounts(prev => ({ ...prev, [itemId]: e.target.value }))}
+                        placeholder={fmtSats(minMsats)}
+                        style={{
+                          ...inputStyle,
+                          padding: "9px 10px",
+                          fontSize: 12,
+                          borderColor: (menuAmounts[itemId] && !exactAmountValid) ? `${T.red}66` : T.border,
+                          color: exactAmountValid ? T.accent : T.text,
+                        }}
+                      />
+                    </div>
+                  ) : interactive && !allowsQuantity ? (
+                    <button
+                      onClick={() => setMenuQuantities(prev => ({
+                        ...prev,
+                        [itemId]: (prev[itemId] ?? 0) > 0 ? 0 : 1,
+                      }))}
+                      style={menuPickButtonStyle(selected)}
+                    >
+                      {selected ? "Selected" : menuPickLabel(state.category)}
+                    </button>
+                  ) : interactive ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <button
+                        onClick={() => setMenuQuantities(prev => ({
+                          ...prev,
+                          [itemId]: Math.max(0, (prev[itemId] ?? 0) - 1),
+                        }))}
+                        style={menuQtyButtonStyle()}
+                      >
+                        −
+                      </button>
+                      <span style={{
+                        minWidth: 18,
+                        textAlign: "center",
+                        color: qty > 0 ? T.accent : T.muted,
+                        fontFamily: T.mono,
+                        fontSize: 12,
+                        fontWeight: 800,
+                      }}>
+                        {qty}
+                      </span>
+                      <button
+                        onClick={() => setMenuQuantities(prev => ({
+                          ...prev,
+                          [itemId]: Math.min(99, (prev[itemId] ?? 0) + 1),
+                        }))}
+                        style={menuQtyButtonStyle()}
+                      >
+                        +
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{
+                      color: selected ? T.accent : T.muted,
+                      fontFamily: T.mono,
+                      fontSize: 12,
+                      fontWeight: 800,
+                    }}>
+                      {selected
+                        ? hasExchangeMenu && savedOrderItem
+                          ? (
+                            <BitcoinAmount
+                              msats={savedOrderItem.amountMsats}
+                              size={12}
+                              gap={4}
+                              glyphScale={1.18}
+                            />
+                          )
+                          : allowsQuantity
+                            ? `×${qty}`
+                            : "selected"
+                        : ""}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {selectorNeedsSaveOrder && (
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
+              gap: 8,
+              marginTop: 12,
+            }}>
+              <button
+                disabled={joining || selectedMenuItems.length === 0 || selectionMatchesSavedOrder}
+                onClick={async () => {
+                  setJoining(true);
+                  try {
+                    await onJoin(menuSelectorRole, {
+                      selectedItems: selectedMenuItems,
+                      amountMsats: selectedMenuAmountMsats,
+                    });
+                  } finally {
+                    setJoining(false);
+                  }
+                }}
+                style={{
+                  padding: "12px 10px",
+                  borderRadius: T.rs,
+                  border: `1px solid ${selectedMenuItems.length > 0 && !selectionMatchesSavedOrder ? T.border : T.border}`,
+                  background: T.surface,
+                  color: selectedMenuItems.length > 0 && !selectionMatchesSavedOrder ? T.text : T.muted,
+                  fontFamily: T.mono,
+                  fontSize: 11,
+                  fontWeight: 900,
+                  cursor: joining || selectedMenuItems.length === 0 || selectionMatchesSavedOrder ? "default" : "pointer",
+                }}
+              >
+                {joining
+                  ? "Saving..."
+                  : selectionMatchesSavedOrder
+                    ? "Cart saved"
+                    : selectedMenuItems.length === 0
+                      ? menuSelectionButtonLabel(state.category)
+                      : (
+                        <>
+                          Save cart · <BitcoinAmount msats={selectedMenuAmountMsats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                        </>
+                      )}
+              </button>
+              <button
+                disabled={joining || selectedMenuItems.length === 0}
+                onClick={async () => {
+                  setJoining(true);
+                  try {
+                    await onJoin(menuSelectorRole, {
+                      selectedItems: selectedMenuItems,
+                      amountMsats: selectedMenuAmountMsats,
+                      orderFinalized: true,
+                    });
+                  } finally {
+                    setJoining(false);
+                  }
+                }}
+                style={{
+                  padding: "12px 10px",
+                  borderRadius: T.rs,
+                  border: `1px solid ${selectedMenuItems.length > 0 ? T.accent + "66" : T.border}`,
+                  background: selectedMenuItems.length > 0 ? T.accentDim : T.surface,
+                  color: selectedMenuItems.length > 0 ? T.accent : T.muted,
+                  fontFamily: T.mono,
+                  fontSize: 11,
+                  fontWeight: 900,
+                  cursor: joining || selectedMenuItems.length === 0 ? "default" : "pointer",
+                }}
+              >
+                {joining
+                  ? "Confirming..."
+                  : selectedMenuItems.length === 0
+                    ? "Not ready"
+                    : (
+                      <>
+                        Ready · <BitcoinAmount msats={selectedMenuAmountMsats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                      </>
+                    )}
+              </button>
             </div>
           )}
         </div>
-      </div>
+      )}
 
       {/* v0.2.0 item 1: State A vs State B narration. Only fires on
           CREATED listings (the funding moment); LOCKED+ trades have
           a clearer status surface elsewhere and don't need the
           home/listing-fed framing. */}
-      {state.status === EscrowStatus.CREATED && framing.kind === "state-a" && (
+      {showVerboseRouteEducation && state.status === EscrowStatus.CREATED && framing.kind === "state-a" && (
         <div style={{
           padding: "8px 12px", marginBottom: 12,
           fontSize: 11, color: T.muted, fontFamily: T.mono,
@@ -258,7 +848,7 @@ export function TradeDetail({
           (same shape as v0.2.0's chama_first_publish_done_<pubkey>).
           Pillar 2.7: educate at the first opportunity, never lecture
           returning users. */}
-      {state.status === EscrowStatus.CREATED && framing.kind === "state-b" && !stateBDismissed && (
+      {showVerboseRouteEducation && state.status === EscrowStatus.CREATED && framing.kind === "state-b" && !stateBDismissed && (
         <div style={{
           padding: 14, marginBottom: 12,
           background: T.accentDim, border: `1px solid ${T.accent}33`,
@@ -293,7 +883,7 @@ export function TradeDetail({
           </button>
         </div>
       )}
-      {state.status === EscrowStatus.CREATED && framing.kind === "state-b" && (
+      {showVerboseRouteEducation && state.status === EscrowStatus.CREATED && framing.kind === "state-b" && (
         <div style={{
           padding: 14, marginBottom: 12,
           background: T.surface, border: `1px solid ${T.amber}33`,
@@ -332,21 +922,6 @@ export function TradeDetail({
             }
           }}
         />
-      )}
-
-      {/* Community arbiter pool indicator */}
-      {state.communityArbiters && state.communityArbiters.length > 0 && (
-        <div style={{
-          marginBottom: 12, padding: "8px 14px", borderRadius: T.rs,
-          background: T.purpleDim, border: `1px solid ${T.purple}22`,
-          display: "flex", alignItems: "center", gap: 8,
-        }}>
-          <span style={{ fontSize: 14 }}>🛡️</span>
-          <span style={{ fontSize: 10, color: T.purple, fontFamily: T.mono }}>
-            Community arbiter pool: {state.communityArbiters.length} backup{state.communityArbiters.length !== 1 ? "s" : ""}
-            {" · "}SSS share encrypted to all
-          </span>
-        </div>
       )}
 
       {/* Expiry policy — visible on all LOCKED trades */}
@@ -398,9 +973,15 @@ export function TradeDetail({
         && state.status !== "APPROVED"
         && state.status !== "CLAIMED" && (
         <div style={{ marginBottom: 16 }}>
-          <CountdownTimer expiresAt={state.expiresAt} />
+          <CountdownTimer
+            expiresAt={liveJoinHold?.expiresAt ?? state.expiresAt}
+            label={liveJoinHold
+              ? `${roleDisplayName(liveJoinHold.role).toUpperCase()} LOCK WINDOW ENDS IN`
+              : state.status === EscrowStatus.CREATED ? "LISTING EXPIRES IN" : "TRADE EXPIRES IN"}
+          />
         </div>
       )}
+        </div>
 
       {/* Participants — Trinity Ring order: Buyer · Arbiter · Seller.
           Order is sourced from theme.TRINITY_RING_ORDER. PHILOSOPHY.md
@@ -417,11 +998,78 @@ export function TradeDetail({
           keyed on escrow id) is honest, not speculative — the round-
           robin is deterministic. The Dot renders this slot dimmer +
           italic "Auto · xxxx" so a real JOIN remains distinguishable. */}
-      <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 16 }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 16 }}>PARTICIPANTS</div>
+      <div className="trade-room-card" style={{
+        background: T.card,
+        border: `1px solid ${T.border}`,
+        borderRadius: T.r,
+        padding: 18,
+        marginBottom: 16,
+      }}>
+        <div style={{
+          padding: 14,
+          borderRadius: T.rs,
+          background: nextStep.tone === "green" ? T.greenDim
+            : nextStep.tone === "red" ? T.redDim
+            : nextStep.tone === "purple" ? T.purpleDim
+            : nextStep.tone === "teal" ? T.tealDim
+            : T.surface,
+          border: `1px solid ${
+            nextStep.tone === "green" ? T.green + "44"
+            : nextStep.tone === "red" ? T.red + "44"
+            : nextStep.tone === "purple" ? T.purple + "44"
+            : nextStep.tone === "teal" ? T.teal + "44"
+            : T.accent + "33"
+          }`,
+          marginBottom: 16,
+        }}>
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            marginBottom: 7,
+          }}>
+            <div style={{
+              color: nextStep.color,
+              fontFamily: T.mono,
+              fontSize: 11,
+              fontWeight: 900,
+              letterSpacing: 1,
+            }}>
+              {nextStep.kicker}
+            </div>
+            {nextStep.amountMsats !== null && (
+              <BitcoinAmount msats={nextStep.amountMsats} size={12} gap={4} style={{ whiteSpace: "nowrap" }} />
+            )}
+          </div>
+          <div style={{
+            color: T.text,
+            fontFamily: T.sans,
+            fontSize: 16,
+            fontWeight: 800,
+            lineHeight: 1.28,
+          }}>
+            {nextStep.title}
+          </div>
+        </div>
+
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 14,
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>PARTICIPANTS</div>
+          {state.communityArbiters && state.communityArbiters.length > 0 && (
+            <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono }}>
+              {state.communityArbiters.length} backup arbiter{state.communityArbiters.length !== 1 ? "s" : ""}
+            </div>
+          )}
+        </div>
         <div style={{ display: "flex", justifyContent: "space-around" }}>
           {TRINITY_RING_ORDER.map(role => {
-            const realPk = state.participants[role];
+            const realPk = participants[role];
             const isAutoArbiter = role === Role.ARBITER && !realPk && !!previewArbiterPk;
             return (
               <Dot key={role} role={role}
@@ -432,7 +1080,30 @@ export function TradeDetail({
             );
           })}
         </div>
-      </div>
+        {(state.status === EscrowStatus.LOCKED || state.status === EscrowStatus.APPROVED ||
+          state.status === EscrowStatus.CLAIMED || state.status === EscrowStatus.COMPLETED) && (
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr 1fr",
+            gap: 8,
+            paddingTop: 16,
+            marginTop: 16,
+            borderTop: `1px solid ${T.border}`,
+          }}>
+            <div style={voteCountChipStyle(T.green)}>
+              <strong>{releaseVoteCount}</strong>
+              <span>release</span>
+            </div>
+            <div style={voteCountChipStyle(T.amber)}>
+              <strong>{refundVoteCount}</strong>
+              <span>refund</span>
+            </div>
+            <div style={voteCountChipStyle(state.resolvedOutcome === Outcome.RELEASE ? T.green : state.resolvedOutcome === Outcome.REFUND ? T.amber : T.muted)}>
+              <strong>{state.resolvedOutcome ? "✓" : "…"}</strong>
+              <span>{state.resolvedOutcome ? state.resolvedOutcome : "decision"}</span>
+            </div>
+          </div>
+        )}
 
       {hasDuplicateParticipant && (
         <div style={{
@@ -470,14 +1141,16 @@ export function TradeDetail({
       {/* JOIN buttons — show when user is not a participant and slots are open */}
       {!myRole && !hasDuplicateParticipant && !currentKeyAlreadyPresent && state.status === EscrowStatus.CREATED && (
         <div style={{
-          background: T.card, border: `1px solid ${T.border}`,
-          borderRadius: T.r, padding: 20, marginBottom: 16,
+          paddingTop: 16,
+          marginTop: 16,
+          marginBottom: 16,
+          borderTop: `1px solid ${T.border}`,
         }}>
           <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
             JOIN THIS TRADE
           </div>
           <div style={{ display: "flex", gap: 10 }}>
-            {!state.participants.buyer && (
+            {!participants.buyer && (
               <button disabled={joining} onClick={async () => {
                 setJoining(true);
                 try { await onJoin(Role.BUYER); } finally { setJoining(false); }
@@ -508,7 +1181,7 @@ export function TradeDetail({
               </button>
             )}
           </div>
-          {!state.participants.seller && (
+          {!participants.seller && (
             <button disabled={joining} onClick={async () => {
               setJoining(true);
               try { await onJoin(Role.SELLER); } finally { setJoining(false); }
@@ -524,19 +1197,20 @@ export function TradeDetail({
         </div>
       )}
 
-      {/* CREATED — atomic lock surface for the locker. Per PR 1: there is
-          no FUNDED state and no readiness ceremony. The instant the
-          locker spends from their Chama, shares are split and LOCK
-          publishes (CREATED → LOCKED in one event). */}
+      {/* CREATED — atomic lock surface for the locker. The locker can
+          spend only after any cross-role menu order is finalized. */}
       {state.status === EscrowStatus.CREATED && myRole && canILock && (() => {
         const fiatCategory = state.category === "p2p-trade"
           || state.category === "bill-pay"
           || state.category === "lending";
         const allHandles = fiatCategory ? listSavedHandles() : [];
+        const menuSelectionMissing = hasMenu && lockMenuItems.length === 0;
         return (
         <div style={{
-          background: T.card, border: `1px solid ${T.accent}44`,
-          borderRadius: T.r, padding: 20, marginBottom: 16,
+          paddingTop: 16,
+          marginTop: 16,
+          marginBottom: 16,
+          borderTop: `1px solid ${T.accent}33`,
         }}>
           <div style={{
             fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
@@ -548,7 +1222,11 @@ export function TradeDetail({
             textAlign: "center", fontFamily: T.mono, fontSize: 12,
             color: T.accent, marginBottom: 14,
           }}>
-            {state.participants.buyer
+            {hasMenu && menuSelectionMissing
+              ? `Waiting for ${roleDisplayName(menuSelectorRole).toLowerCase()} to choose what they want…`
+              : menuOrderNotFinal
+              ? `${roleDisplayName(menuSelectorRole)} is still editing. Lock opens after they press Ready.`
+              : participants.buyer
               ? "Spending from your Chama will split shares and publish LOCK in one step."
               : "Waiting for buyer to acknowledge the trade…"}
           </div>
@@ -606,31 +1284,43 @@ export function TradeDetail({
               receive-blocked, the button label changes to "{lockLabel}
               unavailable" so the disabled state reads as intentional. */}
           <button
-            disabled={locking || fundingInProgress || !state.participants.buyer || fundUnavailable || lockBlockedByNoArbiter}
+            disabled={locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal}
             title={fundingInProgress
               ? "Another funding operation is in progress. Complete it first."
               : receiveUnavailable
                 ? "Lightning receive is unavailable on this Chama route. Reconnect or use sim demo."
               : lockBlockedByNoArbiter
                 ? "No eligible arbiter is available for this trade."
+              : menuOrderNotFinal
+                ? `${roleDisplayName(menuSelectorRole)} must press Ready before this order can be locked.`
+              : menuSelectionMissing
+                ? menuSelectionTitle(state.category)
                 : undefined}
             onClick={async () => {
               setLocking(true);
               try {
-                await onLock(selectedHandleId || undefined);
+                await onLock({
+                  savedHandleId: selectedHandleId || undefined,
+                  selectedItems: hasMenu ? lockMenuItems : undefined,
+                  amountMsats: lockAmountMsats,
+                });
               } finally {
                 setLocking(false);
               }
             }}
             style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
               width: "100%", padding: "16px", borderRadius: T.rs,
-              background: locking || fundingInProgress || !state.participants.buyer || fundUnavailable || lockBlockedByNoArbiter
+              background: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal
                 ? T.surface
                 : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
               border: "none",
-              color: locking || fundingInProgress || !state.participants.buyer || fundUnavailable || lockBlockedByNoArbiter ? T.muted : T.bg,
+              color: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal ? T.muted : T.bg,
               fontFamily: T.mono, fontSize: 14, fontWeight: 800,
-              cursor: locking || fundingInProgress || !state.participants.buyer || fundUnavailable || lockBlockedByNoArbiter ? "default" : "pointer",
+              cursor: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal ? "default" : "pointer",
               letterSpacing: 0.5, transition: "all 0.2s",
             }}
           >
@@ -638,7 +1328,15 @@ export function TradeDetail({
               ? "Funding…"
               : fundingInProgress || receiveUnavailable || lockBlockedByNoArbiter
                 ? lockLabel + " unavailable"
-                : "⚡ " + lockLabel + " · " + fmtSats(state.amountMsats) + " sats"}
+              : menuOrderNotFinal
+                ? `Waiting for ${roleDisplayName(menuSelectorRole)} Ready`
+              : menuSelectionMissing
+                ? menuSelectionButtonLabel(state.category)
+                : (
+                  <>
+                    ⚡ {lockLabel} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                  </>
+                )}
           </button>
           {fundingInProgress && (
             <div style={{
@@ -685,8 +1383,10 @@ export function TradeDetail({
       {/* Revealed payment handle for the trade's three participants. */}
       {state.status === EscrowStatus.LOCKED && state.lock.handle && (
         <div style={{
-          background: T.card, border: `1px solid ${T.amber}44`,
-          borderRadius: T.r, padding: 16, marginBottom: 16,
+          paddingTop: 16,
+          marginTop: 16,
+          marginBottom: 16,
+          borderTop: `1px solid ${T.amber}33`,
         }}>
           <div style={{
             fontSize: 11, fontWeight: 600, color: T.muted,
@@ -747,40 +1447,6 @@ export function TradeDetail({
         </div>
       )}
 
-      {/* Vote tally */}
-      {(state.status === EscrowStatus.LOCKED || state.status === EscrowStatus.APPROVED ||
-        state.status === EscrowStatus.CLAIMED || state.status === EscrowStatus.COMPLETED) && (
-        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 16 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 16 }}>STATUS</div>
-          <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
-            <div style={{ textAlign: "center", flex: 1 }}>
-              <div style={{ fontSize: 32, fontWeight: 900, color: T.green, fontFamily: T.mono, lineHeight: 1 }}>
-                {Object.values(state.votes).filter(v => v === Outcome.RELEASE).length}
-              </div>
-              <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginTop: 4 }}>RELEASE ₿</div>
-            </div>
-            <div style={{ width: 1, background: T.border }} />
-            <div style={{ textAlign: "center", flex: 1 }}>
-              <div style={{ fontSize: 32, fontWeight: 900, color: T.amber, fontFamily: T.mono, lineHeight: 1 }}>
-                {Object.values(state.votes).filter(v => v === Outcome.REFUND).length}
-              </div>
-              <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginTop: 4 }}>REFUND ₿</div>
-            </div>
-            {state.resolvedOutcome && (
-              <>
-                <div style={{ width: 1, background: T.border }} />
-                <div style={{ textAlign: "center", flex: 1.2 }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, fontFamily: T.mono, color: state.resolvedOutcome === Outcome.RELEASE ? T.green : T.amber }}>
-                    {state.resolvedOutcome.toUpperCase()} ✓
-                  </div>
-                  <div style={{ fontSize: 9, color: T.muted, marginTop: 4, fontFamily: T.mono }}>DECISION</div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Vote buttons — vertical-aware copy from the label dictionary.
           v0.2.0 item 9: when the user is the arbiter, the vote
           buttons mirror role colors per Pillar 5.2 — purple for
@@ -797,8 +1463,9 @@ export function TradeDetail({
           interaction in the product. */}
       {votePrompt.kind === "waiting" && (
         <div style={{
-          padding: "12px 14px", borderRadius: T.rs,
-          background: T.surface, border: `1px solid ${T.border}`,
+          padding: "14px 0 0",
+          marginTop: 16,
+          borderTop: `1px solid ${T.border}`,
           color: T.muted, fontFamily: T.mono, fontSize: 11,
           lineHeight: 1.5, textAlign: "center", marginBottom: 16,
         }}>
@@ -932,29 +1599,361 @@ export function TradeDetail({
 
       {/* Trade chat */}
       {myRole && (
-        <ChatPanel state={state} myRole={myRole} onSend={onSendChat} />
+        <ChatPanel state={state} myRole={myRole} onSend={onSendChat} embedded />
       )}
+      </div>
+      </div>
 
       {/* Event chain */}
-      <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20 }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 16 }}>
-          NOSTR EVENT CHAIN
+      <details style={{
+        background: T.card,
+        border: `1px solid ${T.border}`,
+        borderRadius: T.r,
+        padding: "14px 16px",
+      }}>
+        <summary style={{
+          color: T.muted,
+          cursor: "pointer",
+          fontFamily: T.mono,
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: 1,
+          listStyle: "none",
+        }}>
+          ADVANCED EVENT CHAIN · {state.eventChain.length} events · {state.chatMessages.length} chat messages
+        </summary>
+        <div style={{ marginTop: 12 }}>
+          {state.eventChain.map((evt) => (
+            <div key={evt.raw.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.green }} />
+              <span style={{ fontSize: 11, fontFamily: T.mono, color: T.muted }}>
+                kind:{evt.kind} — {evt.payload.type.replace("escrow:", "")}
+              </span>
+              <span style={{ fontSize: 9, fontFamily: T.mono, color: T.border, marginLeft: "auto" }}>
+                {evt.raw.id.slice(0, 8)}…
+              </span>
+            </div>
+          ))}
         </div>
-        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-          {state.eventChain.length} events · {state.chatMessages.length} chat messages
-        </div>
-        {state.eventChain.map((evt) => (
-          <div key={evt.raw.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
-            <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.green }} />
-            <span style={{ fontSize: 11, fontFamily: T.mono, color: T.muted }}>
-              kind:{evt.kind} — {evt.payload.type.replace("escrow:", "")}
-            </span>
-            <span style={{ fontSize: 9, fontFamily: T.mono, color: T.border, marginLeft: "auto" }}>
-              {evt.raw.id.slice(0, 8)}…
-            </span>
-          </div>
-        ))}
-      </div>
+      </details>
     </div>
   );
+}
+
+type DetailNextStepTone = "accent" | "green" | "red" | "purple" | "teal";
+
+function detailNextStep({
+  state,
+  myRole,
+  canILock,
+  hasMenu,
+  menuSelectorRole,
+  savedOrderFinalized,
+  savedOrderAmountMsats,
+  lockAmountMsats,
+  menuSelectionMissing,
+  menuOrderNotFinal,
+  participantsBuyer,
+  votePromptKind,
+  iAmWinner,
+  claimRetryBlocked,
+}: {
+  state: EscrowState;
+  myRole: Role | null;
+  canILock: boolean;
+  hasMenu: boolean;
+  menuSelectorRole: Role;
+  savedOrderFinalized: boolean;
+  savedOrderAmountMsats: number;
+  lockAmountMsats: number;
+  menuSelectionMissing: boolean;
+  menuOrderNotFinal: boolean;
+  participantsBuyer?: string;
+  votePromptKind: "waiting" | "buttons" | "none";
+  iAmWinner: boolean;
+  claimRetryBlocked: boolean;
+}): {
+  kicker: string;
+  title: string;
+  body: string;
+  tone: DetailNextStepTone;
+  color: string;
+  amountMsats: number | null;
+} {
+  if (state.status === EscrowStatus.CREATED) {
+    if (!myRole) {
+      return {
+        kicker: "CHECKOUT",
+        title: "Join when you are ready to build an order.",
+        body: "Joining reserves your side of the listing and starts the short lock window. No sats move until the locking side funds.",
+        tone: "teal",
+        color: T.teal,
+        amountMsats: hasMenu ? null : state.amountMsats,
+      };
+    }
+    if (hasMenu && myRole === menuSelectorRole && !savedOrderFinalized) {
+      return {
+        kicker: "YOUR ORDER",
+        title: savedOrderAmountMsats > 0 ? "Review your cart, then mark it ready." : "Build your cart before this trade can lock.",
+        body: "Save as many edits as you need. Press Ready when the selection is final so the counterparty can fund exactly that snapshot.",
+        tone: "accent",
+        color: T.accent,
+        amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
+      };
+    }
+    if (canILock) {
+      if (!participantsBuyer) {
+        return {
+          kicker: "WAITING",
+          title: "Waiting for the buyer to enter the trade.",
+          body: "Your listing stays visible. Funding opens once a buyer joins and, for menu listings, finalizes the order.",
+          tone: "teal",
+          color: T.teal,
+          amountMsats: null,
+        };
+      }
+      if (menuSelectionMissing || menuOrderNotFinal) {
+        return {
+          kicker: "ORDER PENDING",
+          title: `${roleDisplayName(menuSelectorRole)} is still choosing what they want.`,
+          body: "Do not fund early. The final order snapshot will appear here once they press Ready.",
+          tone: "accent",
+          color: T.accent,
+          amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
+        };
+      }
+      return {
+        kicker: "READY TO FUND",
+        title: "Fund this exact order when you are ready.",
+        body: "Chama will mint the ecash escrow, split the Shamir shares, and publish the lock in one step.",
+        tone: "accent",
+        color: T.accent,
+        amountMsats: lockAmountMsats,
+      };
+    }
+    return {
+      kicker: "WAITING",
+      title: "Waiting for the locking side to fund.",
+      body: "Stay nearby. Once sats enter escrow, the vote and claim path opens from this same trade room.",
+      tone: "purple",
+      color: T.purple,
+      amountMsats: savedOrderAmountMsats || state.amountMsats,
+    };
+  }
+
+  if (state.status === EscrowStatus.LOCKED) {
+    if (votePromptKind === "buttons") {
+      return {
+        kicker: "YOUR NEXT STEP",
+        title: "Confirm the outcome when the off-chain side is complete.",
+        body: "Release pays the winner for this vertical. Refund sends sats back to the original locker.",
+        tone: "purple",
+        color: T.purple,
+        amountMsats: state.amountMsats,
+      };
+    }
+    return {
+      kicker: "LIVE TRADE",
+      title: "Sats are locked. Waiting on the next confirmation.",
+      body: "Use chat for proof, receipts, and timing. The arbiter only matters if the two sides disagree.",
+      tone: "purple",
+      color: T.purple,
+      amountMsats: state.amountMsats,
+    };
+  }
+
+  if ((state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED) && iAmWinner) {
+    return {
+      kicker: claimRetryBlocked ? "CLAIM BLOCKED" : "READY TO CLAIM",
+      title: claimRetryBlocked ? "This claim needs recovery, not another retry." : "Claim your sats from escrow.",
+      body: claimRetryBlocked
+        ? "The federation consumed the notes before local settlement finished. Use the recovery surface if a balance appears."
+        : "Chama will settle the ecash and route payout through the best available path for this environment.",
+      tone: claimRetryBlocked ? "red" : "accent",
+      color: claimRetryBlocked ? T.red : T.accent,
+      amountMsats: state.amountMsats,
+    };
+  }
+
+  if (state.status === EscrowStatus.COMPLETED) {
+    return {
+      kicker: "COMPLETE",
+      title: "This trade is settled.",
+      body: "The event chain is preserved below for auditability. Ratings will plug into this moment next.",
+      tone: "green",
+      color: T.green,
+      amountMsats: state.amountMsats,
+    };
+  }
+
+  if (state.status === EscrowStatus.CANCELLED || state.status === EscrowStatus.EXPIRED) {
+    return {
+      kicker: "CLOSED",
+      title: "This trade is no longer active.",
+      body: "No new funding or claim action is available on this escrow.",
+      tone: "red",
+      color: T.red,
+      amountMsats: null,
+    };
+  }
+
+  return {
+    kicker: "TRADE ROOM",
+    title: STATUS[state.status]?.l ?? state.status,
+    body: "Follow the active controls below. Chama keeps the event trail available for auditability.",
+    tone: "teal",
+    color: T.teal,
+    amountMsats: state.amountMsats,
+  };
+}
+
+function menuQtyButtonStyle(): React.CSSProperties {
+  return {
+    width: 28,
+    height: 28,
+    borderRadius: 999,
+    border: `1px solid ${T.border}`,
+    background: T.card,
+    color: T.text,
+    fontFamily: T.mono,
+    fontSize: 15,
+    fontWeight: 900,
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    lineHeight: 1,
+  };
+}
+
+function menuPickButtonStyle(selected: boolean): React.CSSProperties {
+  return {
+    padding: "8px 11px",
+    borderRadius: 999,
+    border: `1px solid ${selected ? T.green : T.border}`,
+    background: selected ? `${T.green}22` : T.card,
+    color: selected ? T.green : T.text,
+    fontFamily: T.mono,
+    fontSize: 11,
+    fontWeight: 800,
+    cursor: "pointer",
+    lineHeight: 1,
+    whiteSpace: "nowrap",
+  };
+}
+
+function voteCountChipStyle(color: string): React.CSSProperties {
+  return {
+    minHeight: 58,
+    borderRadius: T.rs,
+    border: `1px solid ${color}33`,
+    background: color === T.muted ? T.surface : `${color}14`,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    color,
+    fontFamily: T.mono,
+    textTransform: "uppercase",
+  };
+}
+
+function menuPickLabel(category: string): string {
+  if (category === "bill-pay") return "Pick bill";
+  if (category === "lending") return "Pick loan";
+  return "Pick";
+}
+
+function roleDisplayName(role: Role): string {
+  if (role === Role.BUYER) return "Buyer";
+  if (role === Role.SELLER) return "Seller";
+  return "Arbiter";
+}
+
+function parsePositiveWholeSats(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function satsInputValue(amountMsats: number): string {
+  return String(Math.floor(amountMsats / 1000));
+}
+
+function menuAmountLabel(item: { amountMsats: number; minAmountMsats?: number; maxAmountMsats?: number }) {
+  if (item.minAmountMsats !== undefined && item.maxAmountMsats !== undefined) {
+    const min = fmtSats(item.minAmountMsats);
+    const max = fmtSats(item.maxAmountMsats);
+    return (
+      <BitcoinAmount
+        label={min === max ? min : `${min}-${max}`}
+        size={10}
+        gap={3}
+        glyphScale={1.2}
+        color={T.muted}
+        glyphColor={T.muted}
+      />
+    );
+  }
+  return (
+    <BitcoinAmount
+      msats={item.amountMsats}
+      size={10}
+      gap={3}
+      glyphScale={1.2}
+      color={T.muted}
+      glyphColor={T.muted}
+    />
+  );
+}
+
+function menuHeaderTitle(category: string, isListing: boolean): string {
+  if (!isListing) return "ORDER";
+  if (category === "p2p-trade") return "AMOUNT OPTIONS";
+  if (category === "bill-pay") return "BILL BUNDLE";
+  if (category === "lending") return "LOAN OFFERS";
+  if (category === "marketplace") return "STORE";
+  return "MENU";
+}
+
+function menuSelectionHint(category: string): string {
+  if (category === "bill-pay") return "pick bills";
+  if (category === "lending") return "pick loans";
+  if (category === "marketplace") return "build cart";
+  return "choose";
+}
+
+function menuSelectionTitle(category: string): string {
+  if (category === "p2p-trade") return "Enter an exact sats amount inside one option.";
+  if (category === "bill-pay") return "Pick at least one bill before locking.";
+  if (category === "lending") return "Pick at least one loan offer before locking.";
+  if (category === "marketplace") return "Add at least one store item before locking.";
+  return "Select at least one menu item.";
+}
+
+function menuSelectionButtonLabel(category: string): string {
+  if (category === "p2p-trade") return "Choose amount";
+  if (category === "bill-pay") return "Pick bills";
+  if (category === "lending") return "Pick loans";
+  if (category === "marketplace") return "Add item";
+  return "Select item";
+}
+
+function menuMetaLine(item: {
+  dueAt?: number;
+  termDays?: number;
+  aprBps?: number;
+  trustTier?: number;
+  fiatAmount?: number;
+  fiatCurrency?: string;
+}): string | null {
+  const parts: string[] = [];
+  if (item.fiatAmount !== undefined && item.fiatCurrency) {
+    parts.push(`${item.fiatCurrency} ${item.fiatAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+  }
+  if (item.dueAt) parts.push(`due ${new Date(item.dueAt * 1000).toLocaleDateString()}`);
+  if (item.termDays) parts.push(`${item.termDays}d`);
+  if (item.aprBps) parts.push(`${(item.aprBps / 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}% APR`);
+  if (item.trustTier) parts.push(`tier ${item.trustTier}`);
+  return parts.length > 0 ? parts.join(" · ") : null;
 }

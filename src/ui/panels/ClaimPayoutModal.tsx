@@ -28,7 +28,12 @@
 import { useEffect, useRef, useState } from "react";
 import { T } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
+import {
+  addOrTouchSavedNwcConnection,
+  type SavedNwcConnection,
+} from "../../payments/nwc-connections.js";
 import {
   createChapsmartPayoutInvoice,
   getChapsmartPayoutProfile,
@@ -56,6 +61,8 @@ export interface ClaimPayoutModalProps {
    *  list. Caller fetches via listPayoutDestinations(); the modal does
    *  not re-fetch. */
   savedDestinations: PayoutDestination[];
+  /** Saved NWC payout/funding wallets for the picker. */
+  savedNwcConnections?: SavedNwcConnection[];
   /** User's selected country/community Chama. Enables local payout rails
    *  such as Chapsmart when the user lives in Tanzania. */
   homeCommunity?: string | null;
@@ -66,7 +73,8 @@ export interface ClaimPayoutModalProps {
   claimAndPayout: (
     escrowId: string,
     args: {
-      bolt11: string;
+      bolt11?: string;
+      onchainAddress?: string;
       expectedDeltaMsats: number;
       saveAfter: boolean;
       addressUsed?: string;
@@ -97,15 +105,19 @@ type Stage =
  *  retry paths to re-dispatch with the same destination after a
  *  successful re-probe. */
 interface DispatchArgs {
-  bolt11: string;
+  bolt11?: string;
+  onchainAddress?: string;
   saveAfter: boolean;
   addressUsed?: string;
+  nwcConnectionString?: string;
+  saveNwcAfter?: boolean;
 }
 
 export function ClaimPayoutModal({
   escrowId,
   payoutMsats,
   savedDestinations,
+  savedNwcConnections = [],
   homeCommunity,
   fiatCurrency,
   claimAndPayout,
@@ -116,6 +128,7 @@ export function ClaimPayoutModal({
   const payoutSats = claimPayoutSats(payoutMsats, claimTarget);
   const reserveSats = claimPayoutReserveSats(payoutMsats, claimTarget);
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
+  const [payoutMethod, setPayoutMethod] = useState<"lightning" | "onchain" | null>(null);
   // Retry state: when a retryable terminal is up, the "Try again"
   // button toggles this to render the inline probing spinner.
   const [retryProbing, setRetryProbing] = useState(false);
@@ -130,15 +143,27 @@ export function ClaimPayoutModal({
   // schedules auto-close on success.
   const dispatchClaim = async (args: DispatchArgs) => {
     setStage({ kind: "running", phase: { kind: "claiming" } });
-    const terminal = await claimAndPayout(escrowId, {
-      bolt11: args.bolt11,
-      expectedDeltaMsats: payoutMsats,
-      saveAfter: args.saveAfter,
-      addressUsed: args.addressUsed,
-      onPhase: (phase) => setStage({ kind: "running", phase }),
-    });
+    let terminal: ClaimAndPayoutTerminal;
+    try {
+      terminal = await claimAndPayout(escrowId, {
+        bolt11: args.bolt11,
+        onchainAddress: args.onchainAddress,
+        expectedDeltaMsats: payoutMsats,
+        saveAfter: args.saveAfter,
+        addressUsed: args.addressUsed,
+        onPhase: (phase) => setStage({ kind: "running", phase }),
+      });
+    } catch (e: any) {
+      terminal = {
+        kind: "claim-bridge-threw",
+        error: e?.message || "Claim could not start. Reconnect your Chama and try again.",
+      };
+    }
     setStage({ kind: "terminal", terminal });
     if (terminal.kind === "done") {
+      if (args.saveNwcAfter && args.nwcConnectionString) {
+        try { addOrTouchSavedNwcConnection(args.nwcConnectionString); } catch {}
+      }
       // Auto-close on success after a brief celebratory beat.
       setTimeout(() => onClose(terminal), 1500);
     }
@@ -155,14 +180,29 @@ export function ClaimPayoutModal({
     void dispatchClaim(lastDispatchRef.current);
   }, [claimTarget, stage.kind]);
 
-  const resolveDestination = (bolt11: string, opts: { saveAfter: boolean; addressUsed?: string }) => {
+  const resolveDestination = (bolt11: string, opts: {
+    saveAfter: boolean;
+    addressUsed?: string;
+    nwcConnectionString?: string;
+    saveNwcAfter?: boolean;
+  }) => {
     lastDispatchRef.current = {
       bolt11,
       saveAfter: opts.saveAfter,
       addressUsed: opts.addressUsed,
+      nwcConnectionString: opts.nwcConnectionString,
+      saveNwcAfter: opts.saveNwcAfter,
     };
     // Fire-and-forget — dispatchClaim manages its own stage
     // transitions and terminal handling.
+    void dispatchClaim(lastDispatchRef.current);
+  };
+
+  const resolveOnchainAddress = (address: string) => {
+    lastDispatchRef.current = {
+      onchainAddress: address,
+      saveAfter: false,
+    };
     void dispatchClaim(lastDispatchRef.current);
   };
 
@@ -209,16 +249,43 @@ export function ClaimPayoutModal({
       );
     }
 
+    if (!payoutMethod) {
+      return (
+        <ClaimMethodChooser
+          payoutSats={payoutSats}
+          onSelect={setPayoutMethod}
+          onCancel={() => onClose(undefined)}
+        />
+      );
+    }
+
+    if (payoutMethod === "onchain") {
+      return (
+        <OnchainPayoutPicker
+          payoutSats={payoutSats}
+          onResolve={resolveOnchainAddress}
+          onBack={() => setPayoutMethod(null)}
+          onCancel={() => onClose(undefined)}
+        />
+      );
+    }
+
     return (
       <DestinationPicker
         amountSats={payoutSats}
         savedDestinations={savedDestinations}
+        savedNwcConnections={savedNwcConnections}
         title="Claim your sats"
-        subtitle={
-          reserveSats > 0
-            ? `Send ${payoutSats.toLocaleString()} sats to your Lightning wallet. About ${reserveSats.toLocaleString()} sats stays available for Lightning fees.`
-            : `Send ${payoutSats.toLocaleString()} sats to your Lightning wallet`
-        }
+        subtitle={(
+          <>
+            Send <BitcoinAmount sats={payoutSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> to your Lightning wallet
+            {reserveSats > 0 && (
+              <>
+                . About <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+              </>
+            )}
+          </>
+        )}
         topSlot={chapsmartEligible ? (
           <ChapsmartPayoutOption
             escrowId={escrowId}
@@ -261,7 +328,7 @@ export function ClaimPayoutModal({
               CLAIM
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
-              {payoutSats.toLocaleString()} <span style={{ color: T.muted, fontWeight: 600, fontSize: 14 }}>sats</span>
+              <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
             </div>
           </div>
           {stage.kind === "terminal" && !retryProbing && (
@@ -282,6 +349,189 @@ export function ClaimPayoutModal({
             onClose={() => onClose(stage.terminal)}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+function ClaimMethodChooser({
+  payoutSats,
+  onSelect,
+  onCancel,
+}: {
+  payoutSats: number;
+  onSelect: (method: "lightning" | "onchain") => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16, animation: "fadeIn 0.2s ease",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: T.card, border: `1px solid ${T.borderHi}`,
+          borderRadius: T.r, padding: 24, maxWidth: 420, width: "100%",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
+              CLAIM
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
+              <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
+            </div>
+          </div>
+          <button onClick={onCancel} style={{
+            background: "none", border: "none", color: T.muted,
+            fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
+          }}>×</button>
+        </div>
+        <div style={{
+          fontSize: 11, color: T.muted, fontFamily: T.mono,
+          lineHeight: 1.5, marginBottom: 12,
+        }}>
+          Choose where Chama sends the rebuilt ecash after your claim settles.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button
+            onClick={() => onSelect("lightning")}
+            style={{
+              minHeight: 118, padding: 12, borderRadius: T.r,
+              background: T.accentDim, border: `1px solid ${T.accent}66`,
+              color: T.text, cursor: "pointer", textAlign: "left",
+            }}
+          >
+            <div style={{ fontSize: 20, marginBottom: 8 }}>⚡</div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.accent, fontFamily: T.mono, marginBottom: 6 }}>
+              LN · FAST
+            </div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+              Best path. Send to a Lightning address, invoice, or NWC.
+            </div>
+          </button>
+          <button
+            onClick={() => onSelect("onchain")}
+            style={{
+              minHeight: 118, padding: 12, borderRadius: T.r,
+              background: T.amberDim, border: `1px solid ${T.amber}66`,
+              color: T.text, cursor: "pointer", textAlign: "left",
+            }}
+          >
+            <div style={{ fontSize: 20, marginBottom: 8 }}>₿</div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.amber, fontFamily: T.mono, marginBottom: 6 }}>
+              ONCHAIN · SLOW
+            </div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+              Paste a bitcoin address once. Fees are deducted from payout.
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OnchainPayoutPicker({
+  payoutSats,
+  onResolve,
+  onBack,
+  onCancel,
+}: {
+  payoutSats: number;
+  onResolve: (address: string) => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
+  const [address, setAddress] = useState("");
+  const trimmed = address.trim();
+  const looksLikeBitcoinAddress = /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{20,}$/i.test(trimmed);
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16, animation: "fadeIn 0.2s ease",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: T.card, border: `1px solid ${T.borderHi}`,
+          borderRadius: T.r, padding: 24, maxWidth: 420, width: "100%",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
+              ONCHAIN CLAIM
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
+              <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
+            </div>
+          </div>
+          <button onClick={onCancel} style={{
+            background: "none", border: "none", color: T.muted,
+            fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
+          }}>×</button>
+        </div>
+        <div style={{
+          padding: "10px 12px", borderRadius: T.rs,
+          background: T.amberDim, border: `1px solid ${T.amber}44`,
+          color: T.amber, fontFamily: T.mono, fontSize: 10,
+          lineHeight: 1.5, marginBottom: 12,
+        }}>
+          Slow path. Paste a fresh bitcoin address. Chama uses it only for
+          this transaction and does not save it. Network and peg-out fees
+          come out of the claimed amount.
+        </div>
+        <textarea
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          placeholder="bc1..."
+          rows={3}
+          style={{
+            width: "100%", boxSizing: "border-box", resize: "vertical",
+            minHeight: 74, padding: "10px 12px", borderRadius: T.rs,
+            background: T.bg, border: `1px solid ${T.border}`,
+            color: T.text, fontFamily: T.mono, fontSize: 12,
+            outline: "none", marginBottom: 10,
+          }}
+        />
+        <button
+          onClick={() => onResolve(trimmed)}
+          disabled={!looksLikeBitcoinAddress}
+          style={{
+            width: "100%", padding: "12px 16px", borderRadius: T.rs,
+            background: looksLikeBitcoinAddress ? T.amber : T.surface,
+            border: `1px solid ${looksLikeBitcoinAddress ? T.amber : T.border}`,
+            color: looksLikeBitcoinAddress ? T.bg : T.muted,
+            fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+            cursor: looksLikeBitcoinAddress ? "pointer" : "default",
+            marginBottom: 8,
+          }}
+        >
+          Claim onchain
+        </button>
+        <button
+          onClick={onBack}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          Back
+        </button>
       </div>
     </div>
   );
@@ -341,7 +591,7 @@ function ChapsmartPayoutOption({
             fontSize: 10, color: T.muted, fontFamily: T.sans,
             marginTop: 2,
           }}>
-            Send up to {amountSats.toLocaleString()} sats as TZS
+            Send up to <BitcoinAmount sats={amountSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> as TZS
           </div>
         </div>
         <span style={{ fontSize: 22, lineHeight: 1 }}>🇹🇿</span>
@@ -408,13 +658,16 @@ function RunningPanel({ phase }: { phase: ClaimAndPayoutPhase }) {
   const message =
     phase.kind === "claiming" ? "Recovering your share…" :
     phase.kind === "confirming" ? "Confirming with the federation…" :
+    phase.kind === "paying-onchain" ? "Broadcasting onchain payout…" :
     phase.kind === "paying-invoice" ? "Sending to your wallet…" :
     "Working…";
   const tone =
+    phase.kind === "paying-onchain" ? T.amber :
     phase.kind === "paying-invoice" ? T.amber :
     phase.kind === "confirming" ? T.amber :
     T.purple;
   const toneDim =
+    phase.kind === "paying-onchain" ? T.amberDim :
     phase.kind === "paying-invoice" ? T.amberDim :
     phase.kind === "confirming" ? T.amberDim :
     T.purpleDim;
@@ -470,6 +723,7 @@ function TerminalPanel({
   let toneDim: string;
   let icon: string;
   let showRetry = false;
+  const showRecoveryCta = terminal.kind === "payout-failed";
 
   if (terminal.kind === "claim-failed") {
     const settlementFailed = /reissue|consumed|settle/i.test(terminal.error);
@@ -498,7 +752,7 @@ function TerminalPanel({
   } else {
     // payout-failed
     title = "Payout couldn't be sent";
-    subtitle = `${terminal.error}\n\nYour sats are safe in your Chama. Close this and use the Recovery banner to retry the payout only.`;
+    subtitle = `${terminal.error}\n\nYour sats are safe in your Chama. Tap Show recovery now to retry the payout only.`;
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⏳";
@@ -551,12 +805,15 @@ function TerminalPanel({
         disabled={retryProbing}
         style={{
           width: "100%", padding: "10px 16px", borderRadius: T.rs,
-          background: T.surface, border: `1px solid ${T.border}`,
-          color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+          background: showRecoveryCta ? T.amber : T.surface,
+          border: `1px solid ${showRecoveryCta ? T.amber : T.border}`,
+          color: showRecoveryCta ? "#000" : T.muted,
+          fontFamily: T.mono, fontSize: 11, fontWeight: 800,
           cursor: retryProbing ? "not-allowed" : "pointer",
+          boxShadow: showRecoveryCta ? `0 0 24px ${T.amber}33` : "none",
         }}
       >
-        {terminal.kind === "payout-failed" ? "Show recovery" : "Close"}
+        {showRecoveryCta ? "Show recovery now" : "Close"}
       </button>
     </div>
   );

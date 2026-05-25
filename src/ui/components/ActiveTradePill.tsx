@@ -3,14 +3,15 @@
 // ══════════════════════════════════════════════════════════════════════════
 //
 // Informational only: active trades never close Browse, Create, chat, or
-// vote surfaces. The pill keeps live commitments visible and gives the
+// vote surfaces. The pill keeps money-moving commitments visible and gives the
 // user a quick route back to the most recent active trade. v0.6.5 made
 // it plural-aware so sellers serving multiple buyers, or buyers waiting
 // on one trade while browsing for the next, see the aggregate listed
 // value rather than a singular pill that suggests there's only one.
 
 import { type EscrowState, EscrowStatus } from "../../escrow-engine/types.js";
-import { T, fmtSats } from "../theme.js";
+import { T } from "../theme.js";
+import { BitcoinAmount } from "./BitcoinAmount.js";
 
 const STATUS_LABEL: Partial<Record<EscrowStatus, string>> = {
   [EscrowStatus.CREATED]: "open",
@@ -26,12 +27,11 @@ export function ActiveTradePill({
   onTap,
 }: {
   trade: EscrowState;
-  /** Total live buyer/seller commitments. When > 1 the headline reads
+  /** Total money-moving buyer/seller commitments. When > 1 the headline reads
    *  "N active trades"; tap target stays the most recent trade. */
   activeTradeCount?: number;
-  /** Aggregate msats across all live buyer/seller trades, including open
-   *  listings. This is total listed value, not proof that funds are
-   *  locked. */
+  /** Aggregate msats across money-moving buyer/seller trades. Open
+   *  listings stay in Browse/Me and do not light this attention banner. */
   activeTradeMsats?: number;
   onTap: () => void;
 }) {
@@ -66,7 +66,7 @@ export function ActiveTradePill({
           fontSize: 11, color: T.purple, fontFamily: T.mono,
           letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700,
         }}>
-          {count} {tradeWord} · {fmtSats(amountMsats)} sats total
+          {count} {tradeWord} · <BitcoinAmount msats={amountMsats} size={11} gap={3} glyphScale={1.18} /> total
         </div>
         <div style={{
           fontSize: 13, color: T.text, fontFamily: T.sans,

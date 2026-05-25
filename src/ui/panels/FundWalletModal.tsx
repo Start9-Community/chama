@@ -1,5 +1,6 @@
 import { useState, useEffect, lazy, Suspense, type WheelEvent } from "react";
 import { T, inputStyle } from "../theme.js";
+import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { isSimModeOn, setSimMode } from "../../sim/simMode.js";
 import { makeLightningInvoiceQrPayload } from "../../payments/lightning-qr.js";
 
@@ -210,7 +211,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
               Payment received
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
-              +{(expectedMsats / 1000).toLocaleString()} sats
+              +<BitcoinAmount sats={expectedMsats / 1000} size={22} gap={6} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
             </div>
             <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
               Balance updated · closing…
@@ -312,7 +313,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
             />
             <div style={{ display: "flex", gap: 8 }}>
               <button disabled={busy} onClick={handleSpendAmount} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`, color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{busy ? "Creating..." : "Create ecash"}</button>
-              <button disabled={busy} onClick={handleSpendAll} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{`Send ALL (${Math.floor(balanceMsats / 1000)} sats)`}</button>
+              <button disabled={busy} onClick={handleSpendAll} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>Send ALL (<BitcoinAmount sats={Math.floor(balanceMsats / 1000)} size={11} gap={3} glyphScale={1.18} color="inherit" glyphColor="inherit" />)</button>
             </div>
           </>)}
         </>)}

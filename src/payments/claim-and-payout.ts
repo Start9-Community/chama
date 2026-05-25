@@ -69,6 +69,7 @@ export type ClaimAndPayoutPhase =
   | { kind: "claiming" }
   | { kind: "confirming" }
   | { kind: "paying-invoice" }
+  | { kind: "paying-onchain" }
   | { kind: "done" }
   | { kind: "claim-failed"; error: string }
   | { kind: "claim-bridge-threw"; error: string }
@@ -267,6 +268,10 @@ export interface RunClaimAndPayoutDeps {
   claimAndRedeem: (escrowId: string) => Promise<unknown>;
   /** Bound to bridge.payInvoice. Outbound Lightning send. */
   payInvoice: (bolt11: string) => Promise<void>;
+  /** Optional native on-chain payout. Amount is the gross claimed sats
+   *  available before wallet-module peg-out fees. */
+  payOnchain?: (grossAmountSats: number) => Promise<void>;
+  payoutKind?: "lightning" | "onchain";
   /** Publish escrow COMPLETE after the wallet balance has actually
    *  confirmed. Best-effort: failure must not block payout/recovery. */
   completeClaim?: (escrowId: string) => Promise<void>;
@@ -497,22 +502,30 @@ export async function runClaimAndPayout(
     }
   }
 
-  // Phase 3: outbound Lightning. Pay the user's destination invoice.
+  // Phase 3: outbound payout. Pay the user's destination.
   // If this throws, the balance is now orphaned in the user's Chama —
   // recovery banner is the next stop.
-  emit({ kind: "paying-invoice" });
+  const payoutKind = opts.payoutKind ?? "lightning";
+  emit({ kind: payoutKind === "onchain" ? "paying-onchain" : "paying-invoice" });
   try {
     moneyLog("CLAIM-PAY-IN", {
       escrowId: opts.escrowId,
-      invoicePrefix: opts.bolt11.slice(0, 24),
+      kind: payoutKind,
+      invoicePrefix: payoutKind === "lightning" ? opts.bolt11.slice(0, 24) : "onchain",
     });
     claimTrace("orchestrator-pay-in", {
       escrowId: opts.escrowId,
-      invoicePrefix: opts.bolt11.slice(0, 24),
+      kind: payoutKind,
+      invoicePrefix: payoutKind === "lightning" ? opts.bolt11.slice(0, 24) : "onchain",
     });
-    await opts.payInvoice(opts.bolt11);
+    if (payoutKind === "onchain") {
+      if (!opts.payOnchain) throw new Error("Onchain payout is not available");
+      await opts.payOnchain(Math.floor(opts.expectedDeltaMsats / 1000));
+    } else {
+      await opts.payInvoice(opts.bolt11);
+    }
   } catch (e: any) {
-    const error = errorMessage(e, "Lightning payment failed");
+    const error = errorMessage(e, payoutKind === "onchain" ? "Onchain payout failed" : "Lightning payment failed");
     recordSatsTrace({
       source: "claim",
       escrowId: opts.escrowId,

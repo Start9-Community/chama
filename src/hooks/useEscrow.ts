@@ -73,6 +73,7 @@ import {
   type ParsedEscrowEvent,
   type ChatPayload,
   type ChatImageAttachment,
+  type SelectedMenuItem,
   EscrowStatus,
   Role,
   Outcome,
@@ -99,13 +100,14 @@ import {
   generateFediEcash,
   hasFediInternalEcash,
 } from "../fedimint/index.js";
-import type { LnReceiveStateKind } from "../fedimint/index.js";
+import type { LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
 import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
+import { payInvoiceWithNwc } from "../payments/nwc.js";
 import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
 import {
@@ -255,12 +257,18 @@ export interface UseEscrowActions {
     category: string;
     mintUrl: string;
     paymentMethods?: string[];
+    items?: Parameters<EscrowClient["createEscrow"]>[0]["items"];
     arbiterFeeMsats?: number;
     expirySeconds?: number;
     communityArbiters?: string[];
   }) => Promise<{ escrowId: string; state: EscrowState }>;
-  /** Join an existing escrow as buyer or arbiter (ACK only — does not gate state) */
-  joinEscrow: (escrowId: string, role: Role) => Promise<EscrowState>;
+  /** Join an existing escrow as buyer or arbiter; menu buyers can later
+   *  re-publish JOIN with selectedItems to save their order. */
+  joinEscrow: (
+    escrowId: string,
+    role: Role,
+    opts?: { selectedItems?: SelectedMenuItem[]; amountMsats?: number; orderFinalized?: boolean },
+  ) => Promise<EscrowState>;
   /**
    * Lock ecash into 2-of-3 SSS escrow.
    * Atomic-funding flow: triggered as a side-effect of payment landing.
@@ -271,7 +279,10 @@ export interface UseEscrowActions {
    * payment handles to reveal in the LOCK payload. Bridge resolves
    * to cleartext at lock time. Omit for non-fiat trades.
    */
-  lockAndPublish: (escrowId: string, opts?: { savedHandleId?: string }) => Promise<EscrowState>;
+  lockAndPublish: (escrowId: string, opts?: {
+    savedHandleId?: string;
+    selectedItems?: SelectedMenuItem[];
+  }) => Promise<EscrowState>;
   /** Cast a vote */
   vote: (escrowId: string, outcome: Outcome) => Promise<EscrowState>;
   /**
@@ -308,7 +319,8 @@ export interface UseEscrowActions {
   claimAndPayout: (
     escrowId: string,
     args: {
-      bolt11: string;
+      bolt11?: string;
+      onchainAddress?: string;
       expectedDeltaMsats: number;
       saveAfter: boolean;
       addressUsed?: string;
@@ -387,7 +399,11 @@ export interface UseEscrowActions {
     opts: {
       amountMsats: number;
       description: string;
+      fundingMethod?: "lightning" | "onchain" | "nwc";
+      nwcConnectionString?: string;
+      rememberNwc?: boolean;
       savedHandleId?: string;
+      selectedItems?: SelectedMenuItem[];
       onPhase: (phase: import("../payments/fund-and-lock.js").FundAndLockPhase) => void;
       signal?: AbortSignal;
     },
@@ -395,6 +411,8 @@ export interface UseEscrowActions {
   payInvoice: (bolt11: string, meta?: ChamaOperationMeta) => Promise<void>;
   spendNotes: (amountMsats: number, meta?: ChamaOperationMeta) => Promise<string>;
   redeemEcash: (oobNotes: string, meta?: ChamaOperationMeta) => Promise<void>;
+  /** Read federation wallet-module onchain fees and confirmation policy. */
+  getOnchainInfo: () => Promise<OnchainInfo>;
   /**
    * v0.3.1 Phase 1: explicit federation probe. Returns
    * `{ ok: true }` if the federation responds to the standard probe,
@@ -546,14 +564,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
   const updateEscrow = useCallback((escrowId: string, escrowState: EscrowState) => {
     if (isExpiredUnfundedEscrow(escrowState)) {
-      removeEscrowId(escrowId, stateRef.current?.pubkey ?? null);
       setState(prev => {
         if (!prev.escrows.has(escrowId)) return prev;
         const next = new Map(prev.escrows);
         next.delete(escrowId);
         return { ...prev, escrows: next };
       });
-      console.info(`[chama] Pruned expired unfunded escrow ${escrowId} from local state`);
+      console.info(`[chama] Hid expired unfunded escrow ${escrowId} from local state; saved pointer kept for relay recovery`);
       return;
     }
 
@@ -799,7 +816,6 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           try {
             const loaded = await client.loadEscrow(id);
             if (loaded && isExpiredUnfundedEscrow(loaded)) {
-              removeEscrowId(id, pubkey);
               (client as any).states?.delete?.(id);
               (client as any).rawEvents?.delete?.(id);
             }
@@ -871,17 +887,21 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // freshly-mounted hook's state and clobber a real balance update with
   // a stale read.
 
-  const mountedRef = useRef(true);
+	  const mountedRef = useRef(true);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      clientRef.current?.disconnect();
-      const fedimint = fedimintRef.current;
-      fedimint?.cleanup().catch(() => {});
-      if (fedimintRef.current === fedimint) fedimintRef.current = null;
-      if (bridgeRef.current) bridgeRef.current = null;
+	  useEffect(() => {
+	    mountedRef.current = true;
+	    return () => {
+	      mountedRef.current = false;
+	      if ((import.meta as any).env?.DEV && (import.meta as any).hot) {
+	        console.debug("[chama] preserving live Fedimint session across Vite hot reload cleanup");
+	        return;
+	      }
+	      clientRef.current?.disconnect();
+	      const fedimint = fedimintRef.current;
+	      fedimint?.cleanup().catch(() => {});
+	      if (fedimintRef.current === fedimint) fedimintRef.current = null;
+	      if (bridgeRef.current) bridgeRef.current = null;
       setLocalStorageUserScope(null);
     };
   }, []);
@@ -920,7 +940,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     return result;
   }, []);
 
-  const joinEscrow = useCallback(async (escrowId: string, role: Role) => {
+  const joinEscrow = useCallback(async (
+    escrowId: string,
+    role: Role,
+    opts: { selectedItems?: SelectedMenuItem[]; amountMsats?: number; orderFinalized?: boolean } = {},
+  ) => {
     const client = requireClient();
 
     // v0.4.4 federation gate (fed-ID equality) ─────────────────────────
@@ -958,7 +982,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
 
     try {
-      const result = await client.joinEscrow(escrowId, role);
+      const result = await client.joinEscrow(escrowId, role, opts);
       saveEscrowId(escrowId, stateRef.current?.pubkey ?? null);
       vibrate([30, 20, 30]);
       return result;
@@ -985,16 +1009,30 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
   }, []);
 
-  const requireBridge = (): EscrowFedimintBridge => {
-    if (!bridgeRef.current) {
-      throw new Error(
-        "Fedimint wallet not ready — join a federation before locking or claiming"
-      );
-    }
+	  const requireBridge = (): EscrowFedimintBridge => {
+	    if (!bridgeRef.current && clientRef.current && fedimintRef.current && signerRef.current) {
+	      const fedimint = fedimintRef.current;
+	      if (fedimint.isInitialized() && fedimint.isJoined()) {
+	        console.debug("[chama] Rebuilding missing Fedimint bridge from live wallet refs");
+	        bridgeRef.current = new EscrowFedimintBridge(
+	          clientRef.current,
+	          fedimint,
+	          signerRef.current,
+	        );
+	      }
+	    }
+	    if (!bridgeRef.current) {
+	      throw new Error(
+	        "Fedimint wallet not ready — join a federation before locking or claiming"
+	      );
+	    }
     return bridgeRef.current;
   };
 
-  const lockAndPublishAction = useCallback(async (escrowId: string, opts: { savedHandleId?: string } = {}) => {
+  const lockAndPublishAction = useCallback(async (
+    escrowId: string,
+    opts: { savedHandleId?: string; selectedItems?: SelectedMenuItem[] } = {},
+  ) => {
     const client = requireClient();
     const bridge = requireBridge();
     try {
@@ -1016,7 +1054,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   const lockAndPublishWithEcashAction = useCallback(async (
     escrowId: string,
     oobNotes: string,
-    opts: { savedHandleId?: string } = {},
+    opts: { savedHandleId?: string; selectedItems?: SelectedMenuItem[] } = {},
   ) => {
     const client = requireClient();
     const bridge = requireBridge();
@@ -2013,7 +2051,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     opts: {
       amountMsats: number;
       description: string;
+      fundingMethod?: "lightning" | "onchain" | "nwc";
+      nwcConnectionString?: string;
+      rememberNwc?: boolean;
       savedHandleId?: string;
+      selectedItems?: SelectedMenuItem[];
       onPhase: (phase: import("../payments/fund-and-lock.js").FundAndLockPhase) => void;
       signal?: AbortSignal;
     },
@@ -2067,7 +2109,117 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       ? prev
       : { ...prev, fundingInProgress: true });
     try {
-      if (hasFediInternalEcash()) {
+      if (opts.fundingMethod === "onchain") {
+        const meta = buildChamaOperationMeta({
+          flow: "fund_receive",
+          escrowId,
+          amountMsats: opts.amountMsats,
+        });
+        opts.onPhase({ kind: "creating-onchain-address" });
+        const amountSats = Math.floor(opts.amountMsats / 1000);
+        const onchainInfo = await fedimint.getOnchainInfo();
+        const pegInFeeSats = Math.max(0, Math.trunc(onchainInfo.pegInFeeSats));
+        const minimumDepositSats = Math.max(
+          1,
+          Math.trunc(onchainInfo.minimumDepositSats || pegInFeeSats + 1),
+        );
+        if (amountSats < minimumDepositSats) {
+          throw new Error(
+            `Onchain funding requires at least ${minimumDepositSats.toLocaleString()} sats. ` +
+            `Use Lightning for smaller trades.`
+          );
+        }
+        const depositAmountSats = amountSats + pegInFeeSats;
+        const baselineMsats = await fedimint.getBalance();
+        const deposit = await fedimint.createOnchainDepositAddress(meta);
+        if (opts.signal?.aborted) {
+          opts.onPhase({ kind: "aborted" });
+          return { kind: "aborted" };
+        }
+        opts.onPhase({
+          kind: "onchain-address-created",
+          address: deposit.address,
+          operationId: deposit.operationId,
+          finalityDelay: deposit.finalityDelay,
+          pegInFeeSats,
+          depositAmountSats,
+          minimumDepositSats,
+        });
+        opts.onPhase({
+          kind: "awaiting-onchain-confirmations",
+          address: deposit.address,
+          operationId: deposit.operationId,
+          finalityDelay: deposit.finalityDelay,
+          pegInFeeSats,
+          depositAmountSats,
+          minimumDepositSats,
+        });
+
+        let removeAbortListener: (() => void) | undefined;
+        const aborted = new Promise<{ kind: "aborted" }>((resolve) => {
+          if (!opts.signal) return;
+          const listener = () => resolve({ kind: "aborted" });
+          opts.signal.addEventListener("abort", listener, { once: true });
+          removeAbortListener = () => opts.signal?.removeEventListener("abort", listener);
+        });
+        const settledDepositPromise = fedimint.awaitOnchainDeposit(deposit.operationId);
+        const settled = settledDepositPromise.then(
+          (value) => ({ kind: "settled" as const, value }),
+          (error) => ({ kind: "error" as const, error }),
+        );
+        const result = await Promise.race([settled, aborted]);
+        if (removeAbortListener) removeAbortListener();
+        if (result.kind === "aborted" || opts.signal?.aborted) {
+          opts.onPhase({ kind: "aborted" });
+          return { kind: "aborted" };
+        }
+        if (result.kind === "error") {
+          throw result.error;
+        }
+        const settledDeposit = result.value;
+        if (
+          typeof settledDeposit.amountSats === "number" &&
+          settledDeposit.amountSats - pegInFeeSats < amountSats
+        ) {
+          const netSats = Math.max(0, settledDeposit.amountSats - pegInFeeSats);
+          throw new Error(
+            `Onchain deposit credited ${netSats.toLocaleString()} sats after federation fee, ` +
+            `but this trade needs ${amountSats.toLocaleString()} sats. ` +
+            `Send the full ${depositAmountSats.toLocaleString()} sats shown by Chama.`
+          );
+        }
+
+        opts.onPhase({ kind: "onchain-deposit-confirmed" });
+
+        const requiredBalanceMsats = baselineMsats + Math.floor(opts.amountMsats * 0.9);
+        const start = Date.now();
+        let balanceReady = false;
+        while (Date.now() - start < 120_000) {
+          if (opts.signal?.aborted) {
+            opts.onPhase({ kind: "aborted" });
+            return { kind: "aborted" };
+          }
+          const balance = await fedimint.getBalance();
+          if (balance >= requiredBalanceMsats) {
+            balanceReady = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 3_000));
+        }
+        if (!balanceReady) {
+          throw new Error("Onchain deposit was claimed, but Chama balance has not refreshed enough to lock yet. Try again shortly.");
+        }
+
+        opts.onPhase({ kind: "locking" });
+        await lockAndPublishAction(escrowId, {
+          savedHandleId: opts.savedHandleId,
+          selectedItems: opts.selectedItems,
+        });
+        opts.onPhase({ kind: "locked" });
+        return { kind: "locked" };
+      }
+
+      if (opts.fundingMethod !== "nwc" && hasFediInternalEcash()) {
         opts.onPhase({ kind: "requesting-fedi-ecash" });
         await requireBridge().preflightLock(escrowId);
         const { notes } = await generateFediEcash(opts.amountMsats, opts.description);
@@ -2079,6 +2231,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         opts.onPhase({ kind: "locking" });
         await lockAndPublishWithEcashAction(escrowId, notes, {
           savedHandleId: opts.savedHandleId,
+          selectedItems: opts.selectedItems,
         });
         opts.onPhase({ kind: "locked" });
         return { kind: "locked" };
@@ -2090,6 +2243,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         amountMsats: opts.amountMsats,
         description: opts.description,
         savedHandleId: opts.savedHandleId,
+        selectedItems: opts.selectedItems,
         getBalance: () => fedimint.getBalance(),
         createFundingInvoice: (amountMsats, description, onReceiveState) =>
           createFundingInvoice(
@@ -2102,6 +2256,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
               amountMsats,
             }),
           ),
+        autoPayInvoice: opts.fundingMethod === "nwc"
+          ? async (bolt11) => {
+              const connectionString = opts.nwcConnectionString?.trim();
+              if (!connectionString) throw new Error("Paste an NWC connection");
+              await payInvoiceWithNwc(connectionString, bolt11);
+            }
+          : undefined,
         lockAndPublish: lockAndPublishAction,
         onPhase: opts.onPhase,
         signal: opts.signal,
@@ -2133,7 +2294,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   const claimAndPayoutAction = useCallback(async (
     escrowId: string,
     args: {
-      bolt11: string;
+      bolt11?: string;
+      onchainAddress?: string;
       expectedDeltaMsats: number;
       saveAfter: boolean;
       addressUsed?: string;
@@ -2141,12 +2303,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     },
   ): Promise<import("../payments/claim-and-payout.js").ClaimAndPayoutTerminal> => {
     const fedimint = fedimintRef.current;
-    const bridge = requireBridge();
-    const client = requireClient();
     if (!fedimint) {
       const err = "Wallet not initialized";
-      args.onPhase({ kind: "claim-failed", error: err });
-      return { kind: "claim-failed", error: err };
+      args.onPhase({ kind: "claim-bridge-threw", error: err });
+      return { kind: "claim-bridge-threw", error: err };
+    }
+    let bridge: EscrowFedimintBridge;
+    let client: EscrowClient;
+    try {
+      bridge = requireBridge();
+      client = requireClient();
+    } catch (e: any) {
+      const err = e?.message || "Fedimint wallet not ready";
+      args.onPhase({ kind: "claim-bridge-threw", error: err });
+      return { kind: "claim-bridge-threw", error: err };
     }
     // v0.6.5: mirror the funding-operation gate for the claim sweep.
     // Between claim-redeems and the outbound LN send, the OPFS balance
@@ -2183,12 +2353,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       }
 
       const { runClaimAndPayout } = await import("../payments/claim-and-payout.js");
+      const onchainAddress = args.onchainAddress?.trim();
       return await runClaimAndPayout({
         escrowId,
-        bolt11: args.bolt11,
+        bolt11: args.bolt11 ?? "onchain-payout",
         expectedDeltaMsats: args.expectedDeltaMsats,
         saveAfter: args.saveAfter,
         addressUsed: args.addressUsed,
+        payoutKind: onchainAddress ? "onchain" : "lightning",
         getBalance: () => fedimint.getBalance(),
         // Production claim+payout uses the raw bridge claim, not
         // claimAndRedeemAction, because claimAndRedeemAction emits the
@@ -2214,6 +2386,30 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         payInvoice: async (bolt11: string) => {
           await bridge.payInvoice(
             bolt11,
+            buildChamaOperationMeta({
+              flow: "claim_payout",
+              escrowId,
+              amountMsats: args.expectedDeltaMsats,
+            }),
+          );
+          refreshBalanceRef.current?.().catch(() => {});
+        },
+        payOnchain: async (grossAmountSats: number) => {
+          if (!onchainAddress) throw new Error("Paste a bitcoin onchain address");
+          let sendSats = grossAmountSats;
+          let fees = await bridge.getOnchainWithdrawFees(onchainAddress, sendSats);
+          sendSats = grossAmountSats - fees.feesSats;
+          if (sendSats <= 0) {
+            throw new Error("Onchain network fee exceeds this claim amount. Use Lightning for this payout.");
+          }
+          fees = await bridge.getOnchainWithdrawFees(onchainAddress, sendSats);
+          sendSats = grossAmountSats - fees.feesSats;
+          if (sendSats <= 0) {
+            throw new Error("Onchain network fee exceeds this claim amount. Use Lightning for this payout.");
+          }
+          await bridge.withdrawOnchain(
+            onchainAddress,
+            sendSats,
             buildChamaOperationMeta({
               flow: "claim_payout",
               escrowId,
@@ -2273,6 +2469,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const bridge = requireBridge();
       await bridge.redeemEcash(oobNotes, meta);
       refreshBalanceRef.current?.().catch(() => {});
+    },
+    getOnchainInfo: async () => {
+      const fedimint = fedimintRef.current;
+      if (!fedimint || !fedimint.isInitialized() || !fedimint.isJoined()) {
+        markFedimintWalletNotReady();
+        throw new Error(FEDIMINT_WALLET_NOT_READY);
+      }
+      return fedimint.getOnchainInfo();
     },
     probeFederation: async () => {
       // v0.3.1 Phase 1: explicit probe seam for the Try-again path on
