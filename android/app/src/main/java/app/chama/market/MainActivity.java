@@ -15,6 +15,9 @@ public class MainActivity extends BridgeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         clearWebViewCacheAfterAppUpdate();
         super.onCreate(savedInstanceState);
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().hide();
+        }
     }
 
     private void clearWebViewCacheAfterAppUpdate() {

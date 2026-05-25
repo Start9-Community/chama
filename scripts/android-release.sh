@@ -9,9 +9,13 @@ set -euo pipefail
 #   ./scripts/android-release.sh --github-release
 #   ./scripts/android-release.sh --github-release --clobber
 #   ./scripts/android-release.sh --no-build --release-dir /tmp/chama-v1.0.1-assets
+#   ./scripts/android-release.sh --sign-checksum
+#   ./scripts/android-release.sh --no-sign-checksum
 #
 # Default mode builds the APK and prepares release assets in /private/tmp.
 # --github-release uploads those assets to the matching GitHub tag/release.
+# Checksum signing is automatic when gpg has a secret key available. Set
+# CHAMA_RELEASE_REQUIRE_ASC=1 to fail if app-release.apk.sha256.asc is missing.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_DIR="$ROOT_DIR/android"
@@ -24,7 +28,7 @@ TAG=""
 REPO="${GITHUB_REPOSITORY:-}"
 RELEASE_DIR=""
 NOTES_FILE=""
-SIGN_CHECKSUM=0
+SIGN_CHECKSUM="auto"
 
 cd "$ROOT_DIR"
 
@@ -76,6 +80,72 @@ sha256_file() {
   fi
 }
 
+has_gpg_secret_key() {
+  command -v gpg >/dev/null 2>&1 &&
+    gpg --list-secret-keys --with-colons 2>/dev/null | grep -q '^sec'
+}
+
+verify_checksum_signature() {
+  if [ ! -f "$ASC_FILE" ]; then
+    return 1
+  fi
+
+  if grep -q '^-----BEGIN PGP SIGNED MESSAGE-----' "$ASC_FILE"; then
+    local signed_payload
+    signed_payload=$(
+      awk '
+        BEGIN { body = 0 }
+        /^$/ && body == 0 { body = 1; next }
+        /^-----BEGIN PGP SIGNATURE-----/ { exit }
+        body == 1 { print }
+      ' "$ASC_FILE"
+    )
+    [ "$signed_payload" = "$(cat "$SHA_FILE")" ]
+    return $?
+  fi
+
+  if command -v gpg >/dev/null 2>&1; then
+    gpg --verify "$ASC_FILE" "$SHA_FILE" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+maybe_sign_checksum() {
+  if verify_checksum_signature; then
+    echo "✅ Checksum signature matches: $ASC_FILE"
+    return 0
+  fi
+
+  if [ -f "$ASC_FILE" ]; then
+    STALE_ASC="$ASC_FILE.stale.$(date +%s)"
+    mv "$ASC_FILE" "$STALE_ASC"
+    echo "⚠️  Existing checksum signature did not match; moved it to $STALE_ASC"
+  fi
+
+  if [ "$SIGN_CHECKSUM" = "no" ]; then
+    echo "↷ Skipping checksum signature because --no-sign-checksum was passed."
+    return 0
+  fi
+
+  if ! has_gpg_secret_key; then
+    if [ "$SIGN_CHECKSUM" = "yes" ] || [ "${CHAMA_RELEASE_REQUIRE_ASC:-}" = "1" ]; then
+      echo "❌ No local gpg secret key found, and checksum signature is required."
+      exit 1
+    fi
+    echo "⚠️  No local gpg secret key found; checksum signature not created."
+    echo "   Add $ASC_FILE manually, or import a signing key and rerun."
+    return 0
+  fi
+
+  local gpg_args=(--armor --detach-sign --output "$ASC_FILE")
+  if [ -n "${CHAMA_RELEASE_GPG_KEY:-}" ]; then
+    gpg_args+=(--local-user "$CHAMA_RELEASE_GPG_KEY")
+  fi
+  gpg "${gpg_args[@]}" "$SHA_FILE"
+  echo "✅ Checksum signature created: $ASC_FILE"
+}
+
 while [ $# -gt 0 ]; do
   case "${1:-}" in
     --github-release|--upload-github)
@@ -123,7 +193,11 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --sign-checksum)
-      SIGN_CHECKSUM=1
+      SIGN_CHECKSUM="yes"
+      shift
+      ;;
+    --no-sign-checksum)
+      SIGN_CHECKSUM="no"
       shift
       ;;
     -h|--help)
@@ -197,10 +271,20 @@ fi
 
 mkdir -p "$RELEASE_DIR"
 cp "$APK_PATH" "$RELEASE_APK"
+PREVIOUS_SHA=""
+if [ -f "$SHA_FILE" ]; then
+  PREVIOUS_SHA=$(cat "$SHA_FILE")
+fi
 (
   cd "$RELEASE_DIR"
   sha256_file "app-release.apk" > "app-release.apk.sha256"
 )
+CURRENT_SHA=$(cat "$SHA_FILE")
+if [ -f "$ASC_FILE" ] && [ -n "$PREVIOUS_SHA" ] && [ "$PREVIOUS_SHA" != "$CURRENT_SHA" ]; then
+  STALE_ASC="$ASC_FILE.stale.$(date +%s)"
+  mv "$ASC_FILE" "$STALE_ASC"
+  echo "⚠️  Checksum changed; moved stale signature to $STALE_ASC"
+fi
 
 AAPT=$(android_build_tool aapt2)
 if [ -n "$AAPT" ]; then
@@ -230,13 +314,7 @@ else
   echo "⚠️  apksigner not found; skipping APK signing verification."
 fi
 
-if [ "$SIGN_CHECKSUM" = "1" ]; then
-  if ! command -v gpg >/dev/null 2>&1; then
-    echo "❌ gpg is required for --sign-checksum."
-    exit 1
-  fi
-  gpg --armor --detach-sign "$SHA_FILE"
-fi
+maybe_sign_checksum
 
 echo "✅ Release assets prepared:"
 echo "   $RELEASE_APK"
@@ -244,7 +322,7 @@ echo "   $SHA_FILE"
 if [ -f "$ASC_FILE" ]; then
   echo "   $ASC_FILE"
 else
-  echo "   $ASC_FILE (optional; add this if signing checksum with Keybase/web signer)"
+  echo "   $ASC_FILE (missing; add it manually or import a gpg secret key)"
 fi
 if [ -f "$SIGNER_FILE" ]; then
   echo "   $SIGNER_FILE"
