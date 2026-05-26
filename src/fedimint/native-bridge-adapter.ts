@@ -1,9 +1,9 @@
 // Fedimint native sidecar adapter.
 //
 // This keeps Chama's existing IFedimintWallet boundary intact while routing
-// wallet operations through the local Rust Fedimint bridge. It is opt-in only:
-// the default browser WASM SDK path remains unchanged unless nativeFedimint is
-// enabled in the URL, localStorage, or Vite env.
+// wallet operations through the local Rust Fedimint bridge. Browser builds stay
+// opt-in; Capacitor native builds default to the bridge because the APK starts
+// the sidecar itself.
 
 import type {
   IFedimintWallet,
@@ -165,6 +165,27 @@ function getLocalStorageValue(key: string): string | null {
   }
 }
 
+function isCapacitorNativePlatform(): boolean {
+  const maybeCapacitor = (globalThis as {
+    Capacitor?: {
+      isNativePlatform?: () => boolean;
+      getPlatform?: () => string;
+    };
+  }).Capacitor;
+  try {
+    if (typeof maybeCapacitor?.isNativePlatform === "function") {
+      return maybeCapacitor.isNativePlatform();
+    }
+    if (typeof maybeCapacitor?.getPlatform === "function") {
+      const platform = maybeCapacitor.getPlatform();
+      return platform === "android" || platform === "ios";
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 function setLocalStorageValue(key: string, value: string): void {
   try {
     if (typeof localStorage === "undefined") return;
@@ -212,6 +233,33 @@ function inviteStorageKey(baseUrl: string, federationId: string): string {
   return `${NATIVE_BRIDGE_INVITE_KEY}:${baseUrl}:${federationId}`;
 }
 
+function nativeBridgeUnavailableError(
+  baseUrl: string,
+  path: string,
+  cause: unknown,
+): Error {
+  const causeMessage = cause instanceof Error ? cause.message : String(cause || "unknown error");
+  const diagnostic = {
+    issue: "native_fedimint_bridge_unavailable",
+    adapter: "native-rust-sidecar",
+    bridgeUrl: baseUrl,
+    path,
+    cause: causeMessage,
+    interpretation:
+      "Native Fedimint mode is enabled, but Chama cannot reach the local Rust bridge. " +
+      "Start the bridge process and reconnect. This is not the browser SDK gateway-vetting failure.",
+  };
+  const error = new Error(
+    `Native Fedimint bridge is enabled but unreachable at ${baseUrl}${path}. ` +
+      `Start the local Rust bridge and tap Reconnect, or disable nativeFedimint to use the browser SDK. ` +
+      `This is a Rust bridge availability issue, not a Lightning gateway-vetting failure.\n\n` +
+      `Chama diagnostics:\n${JSON.stringify(diagnostic, null, 2)}`,
+  );
+  (error as Error & { chamaDiagnostics?: Record<string, unknown> }).chamaDiagnostics =
+    diagnostic;
+  return error;
+}
+
 export function isNativeBridgeModeOn(): boolean {
   const params = getBrowserSearchParams();
   const urlFlag =
@@ -223,7 +271,10 @@ export function isNativeBridgeModeOn(): boolean {
   const storedFlag = getLocalStorageValue(NATIVE_BRIDGE_MODE_KEY);
   if (storedFlag !== null) return isEnabledSetting(storedFlag);
 
-  return isEnabledSetting(getImportEnv("VITE_CHAMA_NATIVE_FEDIMINT"));
+  const envFlag = getImportEnv("VITE_CHAMA_NATIVE_FEDIMINT");
+  if (envFlag !== null) return isEnabledSetting(envFlag);
+
+  return isCapacitorNativePlatform();
 }
 
 export function getNativeBridgeUrl(): string {
@@ -262,7 +313,12 @@ async function nativeBridgeFetch<T>(
     requestInit.body = JSON.stringify(jsonBody);
   }
 
-  const response = await fetch(`${baseUrl}${path}`, requestInit);
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, requestInit);
+  } catch (error) {
+    throw nativeBridgeUnavailableError(baseUrl, path, error);
+  }
   const text = await response.text();
   let json: unknown = null;
   if (text) {

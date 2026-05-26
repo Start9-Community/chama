@@ -1102,6 +1102,7 @@ async function buildGatewayTrustDiagnostics(args: {
     issue: args.purpose === "receive"
       ? "no_sdk_vetted_lightning_receive_gateway"
       : "no_trusted_lightning_pay_gateway",
+    adapter: "browser-wasm-sdk",
     federationId,
     sdkPackages: FEDIMINT_SDK_DIAGNOSTICS,
     jsSdkModuleKinds: ["", "ln", "meta", "mint", "wallet"],
@@ -1113,6 +1114,12 @@ async function buildGatewayTrustDiagnostics(args: {
       supportsPrivatePayments: gateway.info?.supports_private_payments ?? null,
     })),
     metaProbe: args.probe,
+    nativeBridge: {
+      active: false,
+      reason:
+        "This diagnostic is emitted by the browser WASM SDK adapter. " +
+        "If nativeFedimint=1 was expected, the app did not initialize the Rust sidecar wallet.",
+    },
     demoSafeFallback: args.purpose === "receive"
       ? {
           kind: "sim_mode",
@@ -1126,7 +1133,7 @@ async function buildGatewayTrustDiagnostics(args: {
           reason: "Outbound payout can be retried because claimed sats remain in the Chama wallet.",
         },
     interpretation: args.purpose === "receive"
-      ? "The federation advertises gateways, but this browser wallet does not mark any receive gateway as SDK-vetted. Metadata-only or curated receive trust can still produce claim_rejected after the payer sends sats, so no QR is created."
+      ? "The browser WASM SDK route cannot prove any receive gateway is SDK-vetted. This is not the Rust native bridge path. Metadata-only or curated receive trust can still produce claim_rejected after the payer sends sats, so no QR is created."
       : "The federation advertises gateways, but the browser wallet could not prove any pay gateway is trusted.",
   };
 }
@@ -1232,7 +1239,7 @@ export function adaptRealWallet(
           });
           const message =
             purpose === "receive"
-              ? "No wallet-verifiable Lightning receive gateway is available for this federation. " +
+              ? "Browser SDK route: No wallet-verifiable Lightning receive gateway is available for this federation. " +
                 "Refusing to show a QR code that may take payment and reject before ecash mints."
               : "No trusted Lightning pay gateway is available for this federation. " +
                 "Your claimed sats are still in your Chama wallet; payout can be retried.";

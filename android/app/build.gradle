@@ -25,6 +25,11 @@ def releaseStorePassword = signingValue("storePassword", "CHAMA_ANDROID_STORE_PA
 def releaseKeyAlias = signingValue("keyAlias", "CHAMA_ANDROID_KEY_ALIAS")
 def releaseKeyPassword = signingValue("keyPassword", "CHAMA_ANDROID_KEY_PASSWORD")
 def hasReleaseSigning = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+def fedimintBridgeJniDir = layout.buildDirectory.dir("generated/jniLibs/chamaFedimintBridge")
+def buildFedimintBridgeForDebug = providers
+        .environmentVariable("CHAMA_ANDROID_NATIVE_BRIDGE_DEBUG")
+        .map { it == "1" || it.equalsIgnoreCase("true") || it.equalsIgnoreCase("yes") }
+        .orElse(false)
 
 android {
     namespace = "app.chama.market"
@@ -36,10 +41,23 @@ android {
         versionCode appVersionCode
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters "arm64-v8a"
+        }
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    sourceSets {
+        main {
+            jniLibs.srcDirs += fedimintBridgeJniDir
+        }
+    }
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging true
         }
     }
     signingConfigs {
@@ -62,6 +80,22 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+    }
+}
+
+tasks.register("buildFedimintBridgeAndroid", Exec) {
+    workingDir rootDir.parentFile
+    commandLine "./scripts/build-android-fedimint-bridge.sh",
+            "--output-dir",
+            fedimintBridgeJniDir.get().asFile.absolutePath
+}
+
+afterEvaluate {
+    tasks.matching { task ->
+        task.name == "mergeReleaseJniLibFolders" ||
+                (buildFedimintBridgeForDebug.get() && task.name == "mergeDebugJniLibFolders")
+    }.configureEach {
+        dependsOn tasks.named("buildFedimintBridgeAndroid")
     }
 }
 

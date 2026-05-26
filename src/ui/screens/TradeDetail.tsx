@@ -211,7 +211,7 @@ export function TradeDetail({
         participants[Role.SELLER],
       ]) ?? null)
     : null;
-  const votePrompt = decideVotePrompt(state, pubkey);
+  const votePrompt = decideVotePrompt(state, pubkey, participants);
   const winner = getWinner(state);
   const iAmWinner = samePubkey(winner?.pubkey, pubkey);
   const claimRetryBlocked =
@@ -341,6 +341,9 @@ export function TradeDetail({
         })
         .filter((hold): hold is { role: Role; expiresAt: number; remaining: number } => !!hold)
         .sort((a, b) => a.expiresAt - b.expiresAt)[0] ?? null
+    : null;
+  const liveLockWindowRole = liveJoinHold
+    ? expectedLocker ?? liveJoinHold.role
     : null;
   const nextStep = detailNextStep({
     state,
@@ -980,7 +983,7 @@ export function TradeDetail({
           <CountdownTimer
             expiresAt={liveJoinHold?.expiresAt ?? state.expiresAt}
             label={liveJoinHold
-              ? `${roleDisplayName(liveJoinHold.role).toUpperCase()} LOCK WINDOW ENDS IN`
+              ? `${roleDisplayName(liveLockWindowRole ?? liveJoinHold.role).toUpperCase()} LOCK WINDOW ENDS IN`
               : state.status === EscrowStatus.CREATED ? "LISTING EXPIRES IN" : "TRADE EXPIRES IN"}
           />
         </div>
@@ -1292,7 +1295,7 @@ export function TradeDetail({
             title={fundingInProgress
               ? "Another funding operation is in progress. Complete it first."
               : receiveUnavailable
-                ? "Lightning receive is unavailable on this Chama route. Reconnect or use sim demo."
+                ? "Lightning receive is unavailable on this browser route. Use Fedi, native bridge, or sim demo."
               : lockBlockedByNoArbiter
                 ? "No eligible arbiter is available for this trade."
               : menuOrderNotFinal
@@ -1371,7 +1374,7 @@ export function TradeDetail({
               textAlign: "center", marginTop: 8,
               fontSize: 10, color: T.amber, fontFamily: T.mono,
             }}>
-              Lightning receive unavailable — reconnect or use sim demo
+              Lightning receive unavailable — use Fedi/native bridge or sim demo
             </div>
           )}
           <div style={{
@@ -1477,8 +1480,9 @@ export function TradeDetail({
         </div>
       )}
 
-      {votePrompt.kind === "buttons" && myRole && (() => {
-        const isArbiter = myRole === Role.ARBITER;
+      {votePrompt.kind === "buttons" && (() => {
+        const voteRole = votePrompt.role;
+        const isArbiter = voteRole === Role.ARBITER;
         const isMarketplace = state.category === "marketplace";
         const showRelease = votePrompt.outcomes.includes(Outcome.RELEASE);
         const showRefund = votePrompt.outcomes.includes(Outcome.REFUND);
@@ -1514,7 +1518,7 @@ export function TradeDetail({
                 fontFamily: T.mono, fontSize: 14, fontWeight: 700,
                 cursor: voting ? "default" : "pointer", transition: "all 0.2s",
               }}>
-                {isArbiter ? "Side with " + releaseWinner : "✓ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.RELEASE)}
+                {isArbiter ? "Side with " + releaseWinner : "✓ " + getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE)}
               </button>
             )}
             {showRefund && (
@@ -1530,7 +1534,7 @@ export function TradeDetail({
                   ? "🛑 Cancel & Refund Remaining"
                   : isArbiter
                     ? "Side with " + refundWinner
-                    : "↩ " + getVoteLabel(state.category, state.fulfillment, myRole, Outcome.REFUND)}
+                    : "↩ " + getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND)}
               </button>
             )}
           </div>

@@ -1373,19 +1373,25 @@ function MintTimeoutState({
 function LockFailedState({
   error, onCancel,
 }: { error: string; onCancel: () => void }) {
+  const isNativeBridgeUnavailable =
+    /native_fedimint_bridge_unavailable|Native Fedimint bridge is enabled but unreachable/i.test(error);
   const isWalletVerifiableGatewayError =
     /wallet-verifiable Lightning receive gateway/i.test(error);
   const isReceiveRejection =
     /Federation didn't accept the payment|canceled:|claim_rejected|before Chama received ecash/i.test(error);
   const diagnostics = extractChamaDiagnostics(error);
-  const showSimFallback = isWalletVerifiableGatewayError && !isSimModeOn();
-  const title = isWalletVerifiableGatewayError
+  const showSimFallback = isWalletVerifiableGatewayError && !isNativeBridgeUnavailable && !isSimModeOn();
+  const title = isNativeBridgeUnavailable
+    ? "Native Fedimint unavailable"
+    : isWalletVerifiableGatewayError
     ? "Funding unavailable here"
     : isReceiveRejection
       ? "Receive rejected"
     : "Couldn't lock the trade";
-  const detail = isWalletVerifiableGatewayError
-    ? "This federation is listing Lightning receive gateways, but none are wallet-verifiable from this browser. Chama did not create an invoice, so no sats were requested. Use sim demo to keep presenting without real sats."
+  const detail = isNativeBridgeUnavailable
+    ? "The Rust Fedimint bridge is enabled but not running or reachable. Start the local bridge and reconnect. Chama did not create an invoice, so no sats were requested."
+    : isWalletVerifiableGatewayError
+    ? "This is the browser Fedimint SDK route, not the Rust bridge. The SDK cannot verify a trusted receive gateway here, so Chama did not create an invoice and no sats were requested. Use nativeFedimint with the local bridge for BLF/GBF."
     : error;
 
   return (

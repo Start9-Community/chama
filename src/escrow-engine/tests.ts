@@ -297,7 +297,7 @@ import {
 } from "../payments/sats-trace.js";
 import { makeLightningInvoiceQrPayload } from "../payments/lightning-qr.js";
 import { EscrowFedimintBridge } from "../fedimint/escrow-bridge.js";
-import { NativeBridgeWallet } from "../fedimint/native-bridge-adapter.js";
+import { NativeBridgeWallet, isNativeBridgeModeOn } from "../fedimint/native-bridge-adapter.js";
 
 // v0.3.0 Phase 5 — ChamaBar label decision
 import {
@@ -2452,6 +2452,29 @@ console.log("\n── VOTE PROMPT TURN-GATE ──");
     && /buyer/i.test(prompt.message),
     "P2P seller waits until buyer confirms payment sent",
   );
+
+  const staleRawParticipantState = {
+    ...lockedP2P,
+    participants: {
+      [Role.BUYER]: SELLER_PK,
+      [Role.SELLER]: BUYER_PK,
+      [Role.ARBITER]: ARBITER_PK,
+    },
+    votes: {},
+  } as EscrowState;
+  prompt = decideVotePrompt(staleRawParticipantState, SELLER_PK, lockedP2P.participants);
+  assert(
+    prompt.kind === "waiting"
+    && prompt.waitingOn === Role.BUYER,
+    "TradeDetail effective participants keep P2P seller waiting even if raw participants are stale",
+  );
+  prompt = decideVotePrompt(staleRawParticipantState, BUYER_PK, lockedP2P.participants);
+  assert(
+    prompt.kind === "buttons"
+    && prompt.role === Role.BUYER,
+    "TradeDetail effective participants keep P2P buyer as the first voter",
+  );
+
   prompt = decideVotePrompt(lockedP2P, BUYER_PK.toUpperCase());
   assert(prompt.kind === "buttons" && prompt.role === Role.BUYER, "Vote prompt matches buyer pubkey case-insensitively");
   prompt = decideVotePrompt(lockedP2P, SELLER_PK.toUpperCase());
@@ -6257,6 +6280,49 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       "Native bridge still sends explicit amount for amountless BOLT11 invoices");
   } finally {
     (globalThis as any).fetch = originalFetch;
+  }
+
+  {
+    const originalFetch = (globalThis as any).fetch;
+    (globalThis as any).fetch = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    try {
+      const wallet = new NativeBridgeWallet("http://127.0.0.1:8788");
+      let message = "";
+      let diagnostics: any = null;
+      try {
+        await wallet.open();
+      } catch (e) {
+        message = (e as Error).message;
+        diagnostics = (e as any).chamaDiagnostics;
+      }
+      assert(/Native Fedimint bridge is enabled but unreachable/.test(message),
+        "Native bridge unavailable errors name the Rust bridge, not gateway vetting");
+      assert(diagnostics?.issue === "native_fedimint_bridge_unavailable",
+        "Native bridge unavailable errors carry a distinct diagnostic issue");
+      assert(diagnostics?.adapter === "native-rust-sidecar",
+        "Native bridge unavailable diagnostics identify the native adapter");
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  }
+
+  {
+    const originalCapacitor = (globalThis as any).Capacitor;
+    (globalThis as any).localStorage?.removeItem?.("chama_native_fedimint");
+    try {
+      (globalThis as any).Capacitor = { isNativePlatform: () => true };
+      assert(isNativeBridgeModeOn(),
+        "Native Fedimint defaults on inside Capacitor native builds");
+
+      (globalThis as any).Capacitor = { getPlatform: () => "web" };
+      assert(!isNativeBridgeModeOn(),
+        "Native Fedimint does not default on for web platform detection");
+    } finally {
+      if (originalCapacitor === undefined) delete (globalThis as any).Capacitor;
+      else (globalThis as any).Capacitor = originalCapacitor;
+    }
   }
 }
 
@@ -10166,6 +10232,10 @@ console.log("\n── REAL SDK ADAPTER — Lightning receive watcher ──");
 
     assert(threw,
       "Adapter refuses receive invoices when gateway trust is metadata-only");
+    assert(diagnostics?.adapter === "browser-wasm-sdk",
+      "Receive refusal diagnostics identify the browser SDK adapter");
+    assert(diagnostics?.nativeBridge?.active === false,
+      "Receive refusal diagnostics say this is not the native bridge path");
     assert(diagnostics?.metaProbe?.metaVettedGatewayIds?.includes(metaTrustedGatewayId),
       "Receive refusal diagnostics include the metadata-vetted gateway ID");
     assert(h.calls.createInvoice === 0,

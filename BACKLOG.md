@@ -85,6 +85,11 @@ candidate list with the older roadmap.
 - [ ] **APK rebuild + Zapstore listing.** Rebuild and list after the core
       product surface is stable enough to invite non-developer testers.
 
+- [ ] **Remove browser-default blue button glow.** Smoke testing surfaced a
+      blue focus/halo behind buttons on Android and desktop. Replace it with
+      a subtle Chama focus treatment (amber or role-colored, accessibility-safe)
+      so the app does not leak native/browser button styling.
+
 - [x] **v0.7.0 onboarding + NWC foundation.** Next product push: make first-run feel
       intentional instead of discovered by wandering. Guide a new user
       through Nostr signer connection, community choice, the built-in

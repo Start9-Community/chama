@@ -11,12 +11,18 @@ set -euo pipefail
 #   ./scripts/android-release.sh --no-build --release-dir /tmp/chama-v1.0.1-assets
 #   ./scripts/android-release.sh --sign-checksum
 #   ./scripts/android-release.sh --no-sign-checksum
+#   ./scripts/android-release.sh --gpg-key <key-id-or-fingerprint>
+#   ./scripts/android-release.sh --pgp-public-key-url https://example.com/key.asc
 #
 # Default mode builds the APK and prepares release assets in /private/tmp.
 # --github-release uploads those assets to the matching GitHub tag/release.
-# Checksum signing is automatic when gpg has a secret key available, or when
-# Keybase has a local PGP key available. Set CHAMA_RELEASE_REQUIRE_ASC=1 to
-# fail if app-release.apk.sha256.asc is missing.
+# Checksum signing is automatic when gpg has a secret key available.
+# Use --gpg-key or CHAMA_RELEASE_GPG_KEY to pin a specific signing key.
+# Use --pgp-public-key-url or CHAMA_RELEASE_PGP_PUBLIC_KEY_URL to set the
+# optional verification key linked in generated release notes. The release
+# signing public key is also exported into the release assets.
+# Set CHAMA_RELEASE_REQUIRE_ASC=1 to fail if app-release.apk.sha256.asc
+# is missing.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_DIR="$ROOT_DIR/android"
@@ -30,6 +36,8 @@ REPO="${GITHUB_REPOSITORY:-}"
 RELEASE_DIR=""
 NOTES_FILE=""
 SIGN_CHECKSUM="auto"
+RELEASE_PGP_KEY_ID="${CHAMA_RELEASE_GPG_KEY:-}"
+RELEASE_PGP_PUBLIC_KEY_URL="${CHAMA_RELEASE_PGP_PUBLIC_KEY_URL:-}"
 
 cd "$ROOT_DIR"
 
@@ -82,13 +90,23 @@ sha256_file() {
 }
 
 has_gpg_secret_key() {
-  command -v gpg >/dev/null 2>&1 &&
+  command -v gpg >/dev/null 2>&1 || return 1
+
+  if [ -n "$RELEASE_PGP_KEY_ID" ]; then
+    gpg --list-secret-keys --with-colons "$RELEASE_PGP_KEY_ID" 2>/dev/null | grep -q '^sec'
+  else
     gpg --list-secret-keys --with-colons 2>/dev/null | grep -q '^sec'
+  fi
 }
 
-has_keybase_pgp_key() {
-  command -v keybase >/dev/null 2>&1 &&
-    keybase pgp list >/dev/null 2>&1
+effective_gpg_key() {
+  if [ -n "$RELEASE_PGP_KEY_ID" ]; then
+    echo "$RELEASE_PGP_KEY_ID"
+    return 0
+  fi
+
+  command -v gpg >/dev/null 2>&1 || return 1
+  gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }'
 }
 
 verify_checksum_signature() {
@@ -117,6 +135,38 @@ verify_checksum_signature() {
   fi
 }
 
+write_default_release_notes() {
+  local notes_path="$1"
+  cat > "$notes_path" <<EOF
+Android patch release for Chama $TAG.
+
+Included:
+- v1.0.x hotfix: improve browser/native detection and error copy so we never confuse SDK failure with Rust failure.
+- Android APK packages the native Rust Fedimint bridge and refuses release builds that do not include it.
+
+Verification:
+- Download \`app-release.apk\`, \`app-release.apk.sha256\`,
+  \`app-release.apk.sha256.asc\`, and \`chama-release-pgp-key.asc\`.
+- Verify the checksum signature:
+  \`\`\`sh
+  gpg --import chama-release-pgp-key.asc
+  gpg --verify app-release.apk.sha256.asc app-release.apk.sha256
+  shasum -a 256 -c app-release.apk.sha256
+  \`\`\`
+$(
+  if [ -n "$RELEASE_PGP_PUBLIC_KEY_URL" ]; then
+    cat <<URLNOTE
+
+Public PGP key URL:
+- $RELEASE_PGP_PUBLIC_KEY_URL
+URLNOTE
+  fi
+)
+
+The APK is also verified by Android APK signing before upload; see \`app-release.apk.apksigner.txt\`.
+EOF
+}
+
 maybe_sign_checksum() {
   if verify_checksum_signature; then
     echo "✅ Checksum signature matches: $ASC_FILE"
@@ -135,31 +185,39 @@ maybe_sign_checksum() {
   fi
 
   if ! has_gpg_secret_key; then
-    if has_keybase_pgp_key; then
-      local keybase_args=(pgp sign --detached --infile "$SHA_FILE" --outfile "$ASC_FILE")
-      if [ -n "${CHAMA_RELEASE_KEYBASE_KEY:-}" ]; then
-        keybase_args+=(--key "$CHAMA_RELEASE_KEYBASE_KEY")
-      fi
-      keybase "${keybase_args[@]}"
-      echo "✅ Checksum signature created with Keybase: $ASC_FILE"
-      return 0
-    fi
-
     if [ "$SIGN_CHECKSUM" = "yes" ] || [ "${CHAMA_RELEASE_REQUIRE_ASC:-}" = "1" ]; then
-      echo "❌ No local gpg secret key or Keybase PGP key found, and checksum signature is required."
+      echo "❌ No local gpg secret key found, and checksum signature is required."
       exit 1
     fi
-    echo "⚠️  No local gpg secret key or Keybase PGP key found; checksum signature not created."
-    echo "   Add $ASC_FILE manually, import a gpg signing key, or sign in to Keybase and rerun."
+    echo "⚠️  No local gpg secret key found; checksum signature not created."
+    echo "   Import the release signing key and rerun, or pass --gpg-key <key-id>."
     return 0
   fi
 
   local gpg_args=(--armor --detach-sign --output "$ASC_FILE")
-  if [ -n "${CHAMA_RELEASE_GPG_KEY:-}" ]; then
-    gpg_args+=(--local-user "$CHAMA_RELEASE_GPG_KEY")
+  if [ -n "$RELEASE_PGP_KEY_ID" ]; then
+    gpg_args+=(--local-user "$RELEASE_PGP_KEY_ID")
   fi
   gpg "${gpg_args[@]}" "$SHA_FILE"
   echo "✅ Checksum signature created: $ASC_FILE"
+}
+
+export_release_public_key() {
+  command -v gpg >/dev/null 2>&1 || return 0
+
+  local key
+  key=$(effective_gpg_key || true)
+  if [ -z "$key" ]; then
+    echo "⚠️  No gpg key available to export as $PUBLIC_KEY_FILE."
+    return 0
+  fi
+
+  if gpg --armor --export "$key" > "$PUBLIC_KEY_FILE"; then
+    echo "✅ Release public key exported: $PUBLIC_KEY_FILE"
+  else
+    rm -f "$PUBLIC_KEY_FILE"
+    echo "⚠️  Could not export release public key for $key."
+  fi
 }
 
 while [ $# -gt 0 ]; do
@@ -216,6 +274,22 @@ while [ $# -gt 0 ]; do
       SIGN_CHECKSUM="no"
       shift
       ;;
+    --gpg-key)
+      RELEASE_PGP_KEY_ID="${2:-}"
+      if [ -z "$RELEASE_PGP_KEY_ID" ]; then
+        echo "❌ --gpg-key requires a key id, fingerprint, or email"
+        exit 1
+      fi
+      shift 2
+      ;;
+    --pgp-public-key-url)
+      RELEASE_PGP_PUBLIC_KEY_URL="${2:-}"
+      if [ -z "$RELEASE_PGP_PUBLIC_KEY_URL" ]; then
+        echo "❌ --pgp-public-key-url requires a URL"
+        exit 1
+      fi
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -255,6 +329,7 @@ RELEASE_APK="$RELEASE_DIR/app-release.apk"
 SHA_FILE="$RELEASE_DIR/app-release.apk.sha256"
 ASC_FILE="$SHA_FILE.asc"
 SIGNER_FILE="$RELEASE_DIR/app-release.apk.apksigner.txt"
+PUBLIC_KEY_FILE="$RELEASE_DIR/chama-release-pgp-key.asc"
 
 if [ -z "${JAVA_HOME:-}" ] && [ -x "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java" ]; then
   export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
@@ -287,6 +362,17 @@ fi
 
 mkdir -p "$RELEASE_DIR"
 cp "$APK_PATH" "$RELEASE_APK"
+if command -v unzip >/dev/null 2>&1; then
+  APK_LISTING=$(unzip -l "$RELEASE_APK")
+  if ! grep -q 'lib/arm64-v8a/libchama_fedimint_bridge.so' <<<"$APK_LISTING"; then
+    echo "❌ Release APK is missing the native Fedimint bridge binary."
+    echo "   Refusing to prepare Zapstore assets that would fall back to the browser SDK path."
+    exit 1
+  fi
+  echo "✅ Native Fedimint bridge packaged in APK."
+else
+  echo "⚠️  unzip not found; skipping native bridge package verification."
+fi
 PREVIOUS_SHA=""
 if [ -f "$SHA_FILE" ]; then
   PREVIOUS_SHA=$(cat "$SHA_FILE")
@@ -331,6 +417,7 @@ else
 fi
 
 maybe_sign_checksum
+export_release_public_key
 
 echo "✅ Release assets prepared:"
 echo "   $RELEASE_APK"
@@ -339,6 +426,12 @@ if [ -f "$ASC_FILE" ]; then
   echo "   $ASC_FILE"
 else
   echo "   $ASC_FILE (missing; add it manually or import a gpg secret key)"
+fi
+if [ -f "$PUBLIC_KEY_FILE" ]; then
+  echo "   $PUBLIC_KEY_FILE"
+fi
+if [ -n "$RELEASE_PGP_PUBLIC_KEY_URL" ]; then
+  echo "   public key URL: $RELEASE_PGP_PUBLIC_KEY_URL"
 fi
 if [ -f "$SIGNER_FILE" ]; then
   echo "   $SIGNER_FILE"
@@ -370,7 +463,16 @@ fi
 
 COMMIT_SHA=$(git rev-parse HEAD)
 if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-  echo "❌ Local tag $TAG does not exist. Run ./scripts/release.sh --current first."
+  echo "❌ Local tag $TAG does not exist."
+  if ! git diff-index --quiet HEAD -- || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    echo "   The working tree is dirty, so commit and push this version before tagging:"
+    git status --short
+    echo "   Then run:"
+    echo "     ./scripts/release.sh --current --no-deploy"
+    echo "     ./scripts/android-release.sh --no-build --github-release --clobber"
+  else
+    echo "   Run ./scripts/release.sh --current first."
+  fi
   exit 1
 fi
 
@@ -389,6 +491,9 @@ ASSETS=("$RELEASE_APK" "$SHA_FILE")
 if [ -f "$SIGNER_FILE" ]; then
   ASSETS+=("$SIGNER_FILE")
 fi
+if [ -f "$PUBLIC_KEY_FILE" ]; then
+  ASSETS+=("$PUBLIC_KEY_FILE")
+fi
 if [ -f "$ASC_FILE" ]; then
   ASSETS+=("$ASC_FILE")
 else
@@ -402,7 +507,9 @@ else
   if [ -n "$NOTES_FILE" ]; then
     gh release create "$TAG" --repo "$REPO" --target "$COMMIT_SHA" --title "$TAG" --notes-file "$NOTES_FILE"
   else
-    gh release create "$TAG" --repo "$REPO" --target "$COMMIT_SHA" --title "$TAG" --notes "Android patch release for Chama $TAG."
+    DEFAULT_NOTES_FILE="$RELEASE_DIR/github-release-notes.md"
+    write_default_release_notes "$DEFAULT_NOTES_FILE"
+    gh release create "$TAG" --repo "$REPO" --target "$COMMIT_SHA" --title "$TAG" --notes-file "$DEFAULT_NOTES_FILE"
   fi
 fi
 

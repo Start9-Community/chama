@@ -301,9 +301,9 @@ export class FedimintClient {
       return createMockWallet();
     }
 
-    // ?nativeFedimint=1 → route wallet calls to the local Rust sidecar.
-    // This is an opt-in escape hatch for public federations that need native
-    // Fedimint transport behavior while the browser SDK path remains default.
+    // ?nativeFedimint=1, or Capacitor native app → route wallet calls to the
+    // local Rust sidecar. Browser builds remain opt-in; Android release builds
+    // package and start the sidecar automatically.
     const { isNativeBridgeModeOn, createNativeBridgeWallet, getNativeBridgeUrl } =
       await import("./native-bridge-adapter.js");
     if (isNativeBridgeModeOn()) {
@@ -352,7 +352,7 @@ export class FedimintClient {
         await this.wallet.open();
       } catch (openErr) {
         const msg = typeof openErr === "string" ? openErr : (openErr as Error)?.message || "";
-        if (/client is not initialized|not initialized for this database|no such client/i.test(msg)) {
+        if (/client is not initialized|not initialized for this database|no such client|client secret is not present|run join first/i.test(msg)) {
           console.info(
             "[chama] No existing Fedimint client in this DB — will be created on join"
           );

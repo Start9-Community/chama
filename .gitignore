@@ -6,3 +6,4 @@ dist/
 .env
 .DS_Store
 .claude/
+native/fedimint-bridge/target/

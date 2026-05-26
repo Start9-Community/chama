@@ -988,10 +988,14 @@ function samePubkey(a?: string | null, b?: string | null): boolean {
   return !!a && !!b && a.toLowerCase() === b.toLowerCase();
 }
 
-function participantRoleForPubkey(state: EscrowState, pubkey: string): Role | null {
-  if (samePubkey(state.participants[Role.BUYER], pubkey)) return Role.BUYER;
-  if (samePubkey(state.participants[Role.SELLER], pubkey)) return Role.SELLER;
-  if (samePubkey(state.participants[Role.ARBITER], pubkey)) return Role.ARBITER;
+function participantRoleForPubkey(
+  state: EscrowState,
+  pubkey: string,
+  participants: EscrowState["participants"] = state.participants,
+): Role | null {
+  if (samePubkey(participants[Role.BUYER], pubkey)) return Role.BUYER;
+  if (samePubkey(participants[Role.SELLER], pubkey)) return Role.SELLER;
+  if (samePubkey(participants[Role.ARBITER], pubkey)) return Role.ARBITER;
   return null;
 }
 
@@ -1011,12 +1015,16 @@ function waitingForFirstVoteCopy(state: EscrowState, role: Role): string {
   return "Waiting on buyer to confirm payment sent";
 }
 
-export function decideVotePrompt(state: EscrowState, pubkey: string): VotePrompt {
+export function decideVotePrompt(
+  state: EscrowState,
+  pubkey: string,
+  participants: EscrowState["participants"] = state.participants,
+): VotePrompt {
   if (state.status !== EscrowStatus.LOCKED && state.status !== EscrowStatus.EXPIRED) {
     return { kind: "none", reason: "not-votable-state" };
   }
 
-  const role = participantRoleForPubkey(state, pubkey);
+  const role = participantRoleForPubkey(state, pubkey, participants);
   if (!role) return { kind: "none", reason: "not-participant" };
   if (state.votes[role] !== undefined) return { kind: "none", reason: "already-voted" };
 

@@ -128,6 +128,8 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
     navigator.clipboard?.writeText(text).catch(() => {});
   };
   const diagnostics = err ? extractChamaDiagnostics(err) : null;
+  const nativeBridgeUnavailable = !!err &&
+    /native_fedimint_bridge_unavailable|Native Fedimint bridge is enabled but unreachable/i.test(err);
   const gatewayTrustError = !!err && /wallet-verifiable Lightning receive gateway/i.test(err);
 
   const tabBtn = (t: "receive" | "send", label: string) => (
@@ -329,8 +331,10 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
         {err && (
           <>
             <div style={{ marginTop: 12, padding: 10, borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}44`, color: T.red, fontFamily: T.mono, fontSize: 10, wordBreak: "break-word" }}>
-              {gatewayTrustError
-                ? "Funding unavailable here. Chama did not create an invoice because this browser could not verify a trusted receive gateway."
+              {nativeBridgeUnavailable
+                ? "Native Fedimint is enabled, but the local Rust bridge is not running or reachable. Start the bridge and reconnect."
+                : gatewayTrustError
+                ? "Funding unavailable here. This is the browser Fedimint SDK route, not the Rust bridge; the SDK could not verify a trusted receive gateway."
                 : err}
             </div>
             {diagnostics && (
@@ -341,7 +345,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
                 Copy Fedimint diagnostics
               </button>
             )}
-            {gatewayTrustError && !isSimModeOn() && (
+            {gatewayTrustError && !nativeBridgeUnavailable && !isSimModeOn() && (
               <button
                 onClick={openSimDemo}
                 style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.amberDim, border: `1px solid ${T.amber}55`, color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer", marginTop: 8 }}

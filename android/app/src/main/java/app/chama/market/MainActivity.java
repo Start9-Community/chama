@@ -5,14 +5,26 @@ import android.content.pm.PackageInfo;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.Window;
 import android.webkit.WebView;
 
 import com.getcapacitor.BridgeActivity;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
+
 public class MainActivity extends BridgeActivity {
+    private static final String TAG = "Chama";
     private static final String PREFS_NAME = "chama_native";
     private static final String ASSET_VERSION_KEY = "web_asset_version";
+    private static final String FEDIMINT_BRIDGE_BINARY = "libchama_fedimint_bridge.so";
+    private static final String FEDIMINT_BRIDGE_BIND = "127.0.0.1:8787";
+
+    private Process fedimintBridgeProcess;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -26,6 +38,83 @@ public class MainActivity extends BridgeActivity {
         if (getSupportActionBar() != null) {
             getSupportActionBar().hide();
         }
+        startFedimintBridge();
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        startFedimintBridge();
+    }
+
+    @Override
+    public void onDestroy() {
+        stopFedimintBridge();
+        super.onDestroy();
+    }
+
+    private synchronized void startFedimintBridge() {
+        if (fedimintBridgeProcess != null && fedimintBridgeProcess.isAlive()) {
+            return;
+        }
+
+        File bridgeBinary = new File(getApplicationInfo().nativeLibraryDir, FEDIMINT_BRIDGE_BINARY);
+        if (!bridgeBinary.exists()) {
+            Log.w(TAG, "Native Fedimint bridge binary not packaged: " + bridgeBinary.getAbsolutePath());
+            return;
+        }
+
+        File dataDir = new File(getFilesDir(), "fedimint-bridge");
+        if (!dataDir.exists() && !dataDir.mkdirs()) {
+            Log.e(TAG, "Could not create Fedimint bridge data dir: " + dataDir.getAbsolutePath());
+            return;
+        }
+
+        List<String> command = new ArrayList<>();
+        command.add(bridgeBinary.getAbsolutePath());
+        command.add("--data-dir");
+        command.add(dataDir.getAbsolutePath());
+        command.add("serve");
+        command.add("--bind");
+        command.add(FEDIMINT_BRIDGE_BIND);
+
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.redirectErrorStream(true);
+        builder.environment().put("RUST_LOG", "warn");
+
+        try {
+            fedimintBridgeProcess = builder.start();
+            streamFedimintBridgeLogs(fedimintBridgeProcess);
+            Log.i(TAG, "Native Fedimint bridge started on http://" + FEDIMINT_BRIDGE_BIND);
+        } catch (Exception e) {
+            fedimintBridgeProcess = null;
+            Log.e(TAG, "Failed to start native Fedimint bridge", e);
+        }
+    }
+
+    private void streamFedimintBridgeLogs(Process process) {
+        Thread thread = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream())
+            )) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    Log.i(TAG, "fedimint-bridge: " + line);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Fedimint bridge log stream ended", e);
+            }
+        }, "chama-fedimint-bridge-log");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private synchronized void stopFedimintBridge() {
+        if (fedimintBridgeProcess == null) {
+            return;
+        }
+        fedimintBridgeProcess.destroy();
+        fedimintBridgeProcess = null;
     }
 
     private void clearWebViewCacheAfterAppUpdate() {

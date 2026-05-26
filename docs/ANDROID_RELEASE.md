@@ -52,12 +52,18 @@ CHAMA_ANDROID_KEY_PASSWORD=...
 
 ## 3. Build the signed APK
 
+Release builds also compile and package the native Rust Fedimint bridge. Install
+Android Studio's **NDK (Side by side)** package before building, or set
+`ANDROID_NDK_HOME` to an existing NDK path. This is required: the release script
+refuses APKs that do not contain `lib/arm64-v8a/libchama_fedimint_bridge.so`.
+
 ```sh
 ./scripts/android-release.sh
 ```
 
-The script runs typecheck, tests, web build, Capacitor sync, Gradle release
-build, and prints the APK path plus SHA-256 hash.
+The script runs typecheck, tests, web build, Capacitor sync, native Fedimint
+bridge build, Gradle release build, APK bridge verification, and prints the APK
+path plus SHA-256 hash.
 
 Expected APK:
 
@@ -76,4 +82,3 @@ adb install -r android/app/build/outputs/apk/release/app-release.apk
 1. Push the source commit and `vX.Y.Z` tag.
 2. Create the GitHub release with the APK and SHA-256.
 3. Publish the same APK through Zapstore with the Chama publisher identity.
-
