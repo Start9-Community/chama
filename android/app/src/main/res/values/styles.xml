@@ -35,11 +35,11 @@
 
 
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
-        <item name="android:background">@drawable/splash</item>
-        <item name="android:windowBackground">@drawable/splash</item>
-        <item name="windowSplashScreenBackground">#05050A</item>
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
-        <item name="windowSplashScreenIconBackgroundColor">#05050A</item>
+        <item name="android:background">@drawable/chama_splash</item>
+        <item name="android:windowBackground">@drawable/chama_splash</item>
+        <item name="windowSplashScreenBackground">@color/chama_splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/chama_splash_mark_inset</item>
+        <item name="windowSplashScreenIconBackgroundColor">@color/chama_splash_background</item>
         <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>

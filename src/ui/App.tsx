@@ -13,7 +13,7 @@ import {
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import {
   getActiveInvite,
-  getNativeBridgeCommunitySlug,
+  getConfiguredNativeBridgeCommunitySlug,
   hasFediInternalEcash,
   isNativeBridgeModeOn,
   isTestnetMode,
@@ -355,7 +355,7 @@ export default function App() {
     const activeInvite = getActiveInvite();
     const storedHomeCommunity = getUserCommunitySlugRaw();
     const nativeCommunity = isNativeBridgeModeOn()
-      ? getNativeBridgeCommunitySlug()
+      ? getConfiguredNativeBridgeCommunitySlug()
       : null;
     const nativeCommunityIsValid = nativeCommunity
       ? getCommunityBySlug(nativeCommunity) !== null
@@ -390,10 +390,9 @@ export default function App() {
     if (target.kind === "skip") return;
     setAutoInitDone(true);
 
-    // Native sidecar mode is currently the GBF proof path. Persist the
-    // native community before initFedimint reads community storage so
-    // create/list/lock flows tag new trades with the GBF route instead
-    // of the user's previous BLF home.
+    // Native sidecar mode can still be pointed at an explicit debug
+    // community via nativeFedimintCommunity. Otherwise it follows the
+    // user's normal home-community routing, just like the browser path.
     if (nativeCommunityIsValid && homeCommunity && storedHomeCommunity !== homeCommunity) {
       actions.setCommunity(homeCommunity);
       setBrowseCommunity(homeCommunity);

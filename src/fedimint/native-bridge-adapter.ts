@@ -22,7 +22,7 @@ export const NATIVE_BRIDGE_URL_KEY = "chama_native_fedimint_url";
 export const NATIVE_BRIDGE_INVITE_KEY = "chama_native_fedimint_invite";
 export const NATIVE_BRIDGE_COMMUNITY_KEY = "chama_native_fedimint_community";
 export const DEFAULT_NATIVE_BRIDGE_URL = "http://127.0.0.1:8787";
-export const DEFAULT_NATIVE_BRIDGE_COMMUNITY = "us-gbf";
+export const DEFAULT_NATIVE_BRIDGE_COMMUNITY = "us-blf";
 
 const TRUE_SETTING_VALUES = new Set(["1", "true", "yes", "on"]);
 
@@ -289,14 +289,18 @@ export function getNativeBridgeUrl(): string {
 }
 
 export function getNativeBridgeCommunitySlug(): string {
+  return getConfiguredNativeBridgeCommunitySlug() ?? DEFAULT_NATIVE_BRIDGE_COMMUNITY;
+}
+
+export function getConfiguredNativeBridgeCommunitySlug(): string | null {
   const params = getBrowserSearchParams();
   const slug =
     params?.get("nativeFedimintCommunity") ??
     params?.get("native-fedimint-community") ??
     getLocalStorageValue(NATIVE_BRIDGE_COMMUNITY_KEY) ??
-    getImportEnv("VITE_CHAMA_NATIVE_COMMUNITY") ??
-    DEFAULT_NATIVE_BRIDGE_COMMUNITY;
-  return slug.trim();
+    getImportEnv("VITE_CHAMA_NATIVE_COMMUNITY");
+  const trimmed = slug?.trim() ?? "";
+  return trimmed ? trimmed : null;
 }
 
 async function nativeBridgeFetch<T>(

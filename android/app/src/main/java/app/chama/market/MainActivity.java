@@ -81,11 +81,12 @@ public class MainActivity extends BridgeActivity {
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.redirectErrorStream(true);
         builder.environment().put("RUST_LOG", "warn");
+        builder.environment().put("LD_LIBRARY_PATH", getApplicationInfo().nativeLibraryDir);
 
         try {
             fedimintBridgeProcess = builder.start();
             streamFedimintBridgeLogs(fedimintBridgeProcess);
-            Log.i(TAG, "Native Fedimint bridge started on http://" + FEDIMINT_BRIDGE_BIND);
+            Log.i(TAG, "Native Fedimint bridge launching on http://" + FEDIMINT_BRIDGE_BIND);
         } catch (Exception e) {
             fedimintBridgeProcess = null;
             Log.e(TAG, "Failed to start native Fedimint bridge", e);
@@ -100,6 +101,13 @@ public class MainActivity extends BridgeActivity {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     Log.i(TAG, "fedimint-bridge: " + line);
+                }
+                int exitCode = process.waitFor();
+                Log.w(TAG, "Native Fedimint bridge exited with code " + exitCode);
+                synchronized (MainActivity.this) {
+                    if (fedimintBridgeProcess == process) {
+                        fedimintBridgeProcess = null;
+                    }
                 }
             } catch (Exception e) {
                 Log.w(TAG, "Fedimint bridge log stream ended", e);

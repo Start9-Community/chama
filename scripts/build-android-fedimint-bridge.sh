@@ -15,6 +15,7 @@ Usage:
 
 Builds the Chama Fedimint Rust bridge for Android arm64 and writes it as:
   DIR/arm64-v8a/libchama_fedimint_bridge.so
+  DIR/arm64-v8a/libc++_shared.so
 
 Required:
   Android NDK side-by-side install, or ANDROID_NDK_HOME/ANDROID_NDK_ROOT.
@@ -155,14 +156,24 @@ env \
 SOURCE_BIN="$TARGET_DIR/$TARGET/release/chama-fedimint-bridge"
 DEST_DIR="$OUTPUT_DIR/$ABI"
 DEST_BIN="$DEST_DIR/libchama_fedimint_bridge.so"
+SOURCE_LIBCXX="$SYSROOT/usr/lib/$TARGET/libc++_shared.so"
+DEST_LIBCXX="$DEST_DIR/libc++_shared.so"
 
 if [ ! -f "$SOURCE_BIN" ]; then
   echo "❌ Expected bridge binary not found: $SOURCE_BIN"
   exit 1
 fi
+if [ ! -f "$SOURCE_LIBCXX" ]; then
+  echo "❌ Expected Android C++ runtime not found: $SOURCE_LIBCXX"
+  echo "   The bridge binary links against libc++_shared.so, so the APK must package it."
+  exit 1
+fi
 
 mkdir -p "$DEST_DIR"
 cp "$SOURCE_BIN" "$DEST_BIN"
+cp "$SOURCE_LIBCXX" "$DEST_LIBCXX"
 chmod 755 "$DEST_BIN"
+chmod 755 "$DEST_LIBCXX"
 
 echo "✅ Android Fedimint bridge packaged: $DEST_BIN"
+echo "✅ Android C++ runtime packaged: $DEST_LIBCXX"

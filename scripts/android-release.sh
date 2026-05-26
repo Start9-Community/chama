@@ -9,6 +9,7 @@ set -euo pipefail
 #   ./scripts/android-release.sh --github-release
 #   ./scripts/android-release.sh --github-release --clobber
 #   ./scripts/android-release.sh --no-build --release-dir /tmp/chama-v1.0.1-assets
+#   ./scripts/android-release.sh --skip-web-gate --github-release
 #   ./scripts/android-release.sh --sign-checksum
 #   ./scripts/android-release.sh --no-sign-checksum
 #   ./scripts/android-release.sh --gpg-key <key-id-or-fingerprint>
@@ -16,6 +17,8 @@ set -euo pipefail
 #
 # Default mode builds the APK and prepares release assets in /private/tmp.
 # --github-release uploads those assets to the matching GitHub tag/release.
+# --skip-web-gate assumes npm predeploy/build already passed in this shell,
+# and only syncs Capacitor + builds/verifies the APK.
 # Checksum signing is automatic when gpg has a secret key available.
 # Use --gpg-key or CHAMA_RELEASE_GPG_KEY to pin a specific signing key.
 # Use --pgp-public-key-url or CHAMA_RELEASE_PGP_PUBLIC_KEY_URL to set the
@@ -30,6 +33,7 @@ KEYSTORE_PROPS="$ANDROID_DIR/keystore.properties"
 APK_PATH="$ANDROID_DIR/app/build/outputs/apk/release/app-release.apk"
 UPLOAD_GITHUB=0
 BUILD_APK=1
+RUN_WEB_GATE=1
 CLOBBER=0
 TAG=""
 REPO="${GITHUB_REPOSITORY:-}"
@@ -230,6 +234,10 @@ while [ $# -gt 0 ]; do
       BUILD_APK=0
       shift
       ;;
+    --skip-web-gate|--skip-predeploy)
+      RUN_WEB_GATE=0
+      shift
+      ;;
     --clobber)
       CLOBBER=1
       shift
@@ -337,11 +345,15 @@ if [ -z "${JAVA_HOME:-}" ] && [ -x "/Applications/Android Studio.app/Contents/jb
 fi
 
 if [ "$BUILD_APK" = "1" ]; then
-  echo "🔎 Running web predeploy gate..."
-  npm run predeploy
+  if [ "$RUN_WEB_GATE" = "1" ]; then
+    echo "🔎 Running web predeploy gate..."
+    npm run predeploy
 
-  echo "🔎 Building web bundle..."
-  npm run build
+    echo "🔎 Building web bundle..."
+    npm run build
+  else
+    echo "↷ Skipping web predeploy/build because --skip-web-gate was passed."
+  fi
 
   echo "🔁 Syncing Capacitor Android assets..."
   npx cap sync android
@@ -369,7 +381,13 @@ if command -v unzip >/dev/null 2>&1; then
     echo "   Refusing to prepare Zapstore assets that would fall back to the browser SDK path."
     exit 1
   fi
+  if ! grep -q 'lib/arm64-v8a/libc++_shared.so' <<<"$APK_LISTING"; then
+    echo "❌ Release APK is missing libc++_shared.so."
+    echo "   The native Fedimint bridge links against the Android C++ runtime and will not start without it."
+    exit 1
+  fi
   echo "✅ Native Fedimint bridge packaged in APK."
+  echo "✅ Android C++ runtime packaged in APK."
 else
   echo "⚠️  unzip not found; skipping native bridge package verification."
 fi

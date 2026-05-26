@@ -297,7 +297,14 @@ import {
 } from "../payments/sats-trace.js";
 import { makeLightningInvoiceQrPayload } from "../payments/lightning-qr.js";
 import { EscrowFedimintBridge } from "../fedimint/escrow-bridge.js";
-import { NativeBridgeWallet, isNativeBridgeModeOn } from "../fedimint/native-bridge-adapter.js";
+import {
+  DEFAULT_NATIVE_BRIDGE_COMMUNITY,
+  NATIVE_BRIDGE_COMMUNITY_KEY,
+  NativeBridgeWallet,
+  getConfiguredNativeBridgeCommunitySlug,
+  getNativeBridgeCommunitySlug,
+  isNativeBridgeModeOn,
+} from "../fedimint/native-bridge-adapter.js";
 
 // v0.3.0 Phase 5 — ChamaBar label decision
 import {
@@ -6323,6 +6330,21 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       if (originalCapacitor === undefined) delete (globalThis as any).Capacitor;
       else (globalThis as any).Capacitor = originalCapacitor;
     }
+  }
+
+  {
+    (globalThis as any).localStorage?.removeItem?.(NATIVE_BRIDGE_COMMUNITY_KEY);
+    assert(DEFAULT_NATIVE_BRIDGE_COMMUNITY === DEFAULT_COMMUNITY_SLUG,
+      "Native bridge default community follows the normal BLF default");
+    assert(getNativeBridgeCommunitySlug() === DEFAULT_COMMUNITY_SLUG,
+      "Native bridge default slug is us-blf, not the GBF proof route");
+    assert(getConfiguredNativeBridgeCommunitySlug() === null,
+      "Native bridge has no implicit configured community override");
+
+    (globalThis as any).localStorage?.setItem?.(NATIVE_BRIDGE_COMMUNITY_KEY, "us-gbf");
+    assert(getConfiguredNativeBridgeCommunitySlug() === "us-gbf",
+      "Native bridge still honors an explicit debug community override");
+    (globalThis as any).localStorage?.removeItem?.(NATIVE_BRIDGE_COMMUNITY_KEY);
   }
 }
 

@@ -13,6 +13,7 @@ export {
 } from "./sdk-adapter.js";
 export {
   createNativeBridgeWallet,
+  getConfiguredNativeBridgeCommunitySlug,
   getNativeBridgeCommunitySlug,
   getNativeBridgeUrl,
   isNativeBridgeModeOn,
