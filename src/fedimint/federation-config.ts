@@ -26,12 +26,16 @@ import {
   AFRIBIT_KIBERA_FEDERATION_NAME,
   AFRIBIT_KIBERA_FEDERATION_INVITE,
   AFRIBIT_KIBERA_FEDERATION_ID,
+  BITSACCO_FEDERATION_NAME,
+  BITSACCO_FEDERATION_INVITE,
+  BITSACCO_FEDERATION_ID,
   BLF_FEDERATION_NAME,
   BLF_FEDERATION_INVITE,
   BLF_FEDERATION_ID,
   GBF_FEDERATION_NAME,
   GBF_FEDERATION_INVITE,
   GBF_FEDERATION_ID,
+  PUBLIC_FEDI_OBSERVER_FEDERATIONS,
 } from "./federation-invites.js";
 import {
   getScopedStorageItem,
@@ -46,12 +50,16 @@ export {
   AFRIBIT_KIBERA_FEDERATION_NAME,
   AFRIBIT_KIBERA_FEDERATION_INVITE,
   AFRIBIT_KIBERA_FEDERATION_ID,
+  BITSACCO_FEDERATION_NAME,
+  BITSACCO_FEDERATION_INVITE,
+  BITSACCO_FEDERATION_ID,
   BLF_FEDERATION_NAME,
   BLF_FEDERATION_INVITE,
   BLF_FEDERATION_ID,
   GBF_FEDERATION_NAME,
   GBF_FEDERATION_INVITE,
   GBF_FEDERATION_ID,
+  PUBLIC_FEDI_OBSERVER_FEDERATIONS,
 };
 
 /**
@@ -65,7 +73,7 @@ export const CUSTOM_INVITE_STORAGE_KEY = "chama_federation_invite";
  * Custom user invite wins; otherwise fall back to BP — the universal
  * browser-friendly default. Community-aware callers should prefer
  * `resolveFederationForCommunity(slug)` so a community-pinned invite
- * (e.g. ke-kes → BLF while Kenya's native route is disabled) is honored.
+ * (e.g. ke-kes → Afribit) is honored.
  */
 export function getFederationInvite(): string {
   try {
@@ -160,8 +168,11 @@ export function expectedFederationIdForInvite(invite: string | null | undefined)
   const trimmed = invite?.trim();
   if (trimmed === BP_FEDERATION_INVITE) return BP_FEDERATION_ID;
   if (trimmed === AFRIBIT_KIBERA_FEDERATION_INVITE) return AFRIBIT_KIBERA_FEDERATION_ID;
+  if (trimmed === BITSACCO_FEDERATION_INVITE) return BITSACCO_FEDERATION_ID;
   if (trimmed === BLF_FEDERATION_INVITE) return BLF_FEDERATION_ID;
   if (trimmed === GBF_FEDERATION_INVITE) return GBF_FEDERATION_ID;
+  const publicFedi = PUBLIC_FEDI_OBSERVER_FEDERATIONS.find((route) => route.invite === trimmed);
+  if (publicFedi) return publicFedi.federationId;
   return null;
 }
 
@@ -266,7 +277,7 @@ export function resolveFederationForCommunity(slug: string | null | undefined): 
 /**
  * Metadata describing a single Fedimint federation option in the picker.
  * Chama combines three sources at runtime:
- *   1. CURATED_PRESETS (this file) — BLF + any private invites baked in
+ *   1. CURATED_PRESETS (this file) — Chama-backed routes baked in
  *   2. fetchObserverFederations() — live list from observer.fedimint.org
  *   3. User's own custom invite (advanced field)
  */
@@ -323,12 +334,37 @@ export const CURATED_PRESETS: FederationPreset[] = [
     source: "curated",
   },
   {
+    name: AFRIBIT_KIBERA_FEDERATION_NAME,
+    federationId: AFRIBIT_KIBERA_FEDERATION_ID,
+    inviteCode: AFRIBIT_KIBERA_FEDERATION_INVITE,
+    description: "Kenya KES route for the Afribit Chama.",
+    source: "curated",
+    region: "KE",
+  },
+  {
+    name: BITSACCO_FEDERATION_NAME,
+    inviteCode: BITSACCO_FEDERATION_INVITE,
+    description: "Kenya KES route for the Bitsacco Chama.",
+    source: "curated",
+    region: "KE",
+  },
+  {
     name: GBF_FEDERATION_NAME,
     federationId: GBF_FEDERATION_ID,
     inviteCode: GBF_FEDERATION_INVITE,
     description: "Native Rust sidecar test route. Public gateways reachable.",
     source: "curated",
   },
+  ...PUBLIC_FEDI_OBSERVER_FEDERATIONS
+    .filter((route) => route.invite !== BP_FEDERATION_INVITE)
+    .map((route): FederationPreset => ({
+      name: route.name,
+      federationId: route.federationId,
+      inviteCode: route.invite,
+      description: "Public Fedi wallet service from Fedimint Observer.",
+      source: "curated",
+      region: route.country ?? undefined,
+    })),
 ];
 
 export function federationNameForInvite(invite: string | null | undefined): string | null {

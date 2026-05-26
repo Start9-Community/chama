@@ -1,7 +1,7 @@
 {
   "name": "satoshi-nostr-app",
   "private": true,
-  "version": "1.0.5",
+  "version": "1.0.6",
   "type": "module",
   "description": "Chama — Nostr-native P2P escrow client. Non-custodial. No server.",
   "scripts": {
@@ -13,7 +13,11 @@
     "predeploy": "npm run typecheck && npm test",
     "deploy:live": "./scripts/release.sh --deploy-live",
     "release:current": "./scripts/release.sh --current",
-    "release:all": "./scripts/release-all.sh"
+    "release:all": "./scripts/release-all.sh",
+    "tauri": "tauri",
+    "tauri:build": "tauri build",
+    "tauri:dev": "tauri dev",
+    "tauri:sidecar": "./scripts/build-tauri-fedimint-bridge.sh"
   },
   "dependencies": {
     "@capacitor-mlkit/barcode-scanning": "^8.0.1",
@@ -33,6 +37,7 @@
     "shamir-secret-sharing": "^0.0.4"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",

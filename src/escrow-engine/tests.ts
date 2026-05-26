@@ -118,14 +118,17 @@ import {
   setCustomFederationInvite,
   shouldReconcileFederation,
   expectedFederationIdForInvite,
+  PUBLIC_FEDI_OBSERVER_FEDERATIONS,
   BP_FEDERATION_ID,
   AFRIBIT_KIBERA_FEDERATION_ID,
+  BITSACCO_FEDERATION_ID,
   BLF_FEDERATION_ID,
   BP_FEDERATION_INVITE,
   AFRIBIT_KIBERA_FEDERATION_INVITE,
+  BITSACCO_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
-import { adaptRealWallet } from "../fedimint/sdk-adapter.js";
+import { adaptRealWallet, resetLocalFedimintWallet } from "../fedimint/sdk-adapter.js";
 import {
   clearAllPendingRedemptions,
   listPendingRedemptions,
@@ -300,6 +303,7 @@ import { EscrowFedimintBridge } from "../fedimint/escrow-bridge.js";
 import {
   DEFAULT_NATIVE_BRIDGE_COMMUNITY,
   NATIVE_BRIDGE_COMMUNITY_KEY,
+  NATIVE_BRIDGE_MODE_KEY,
   NativeBridgeWallet,
   getConfiguredNativeBridgeCommunitySlug,
   getNativeBridgeCommunitySlug,
@@ -1773,10 +1777,11 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   // v0.7.0: the visible USD default keeps the stable us-blf slug but
   // presents as Global · USD; legacy global-usd is hidden with BP.
   // Permissionless additions live in localStorage and are not counted here.
-  assert(COMMUNITY_REGISTRY.length === 47,
-    "Registry has 47 pre-seeds: Global, GBF, East/West/Central Africa, plus hidden legacy entries");
+  assert(COMMUNITY_REGISTRY.length === 64,
+    "Registry has 64 pre-seeds: Global, GBF, public Fedi routes, Kenya routes, East/West/Central Africa, plus hidden legacy entries");
   assert(getCommunityBySlug("sn-cfa")?.currency === "XOF", "sn-cfa is XOF");
   assert(getCommunityBySlug("ke-kes")?.currency === "KES", "ke-kes is KES");
+  assert(getCommunityBySlug("ke-kes-bitsacco")?.currency === "KES", "ke-kes-bitsacco is KES");
   assert(getCommunityBySlug("tz-tzs")?.currency === "TZS", "tz-tzs is TZS");
   assert(getCommunityBySlug("tz-tzs")?.country === "TZ", "tz-tzs country is Tanzania");
   assert(getCommunityBySlug("gh-ghs")?.currency === "GHS", "gh-ghs is GHS");
@@ -1798,10 +1803,36 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug("us-blf")?.currency === "USD", "us-blf is USD");
   assert(getCommunityBySlug("us-blf")?.displayName === "Global · USD",
     "us-blf presents as Global · USD");
+  assert(getCommunityBySlug("us-blf")?.pickerLabel === "Bitcoin Life Federation",
+    "Global picker names the BLF wallet service as Bitcoin Life Federation");
+  assert(getCommunityBySlug("us-gbf")?.pickerLabel === "Global Bitcoin Federation",
+    "Global picker names the GBF wallet service as Global Bitcoin Federation");
   assert(getCommunityBySlug("us-blf")?.flagEmoji === "🌍",
     "Global · USD uses the Africa-facing globe emoji");
   assert(getCommunityBySlug("us-blf")?.disambiguator === "BLF",
     "Global USD shows BLF as its backing route in onboarding");
+  assert(PUBLIC_FEDI_OBSERVER_FEDERATIONS.length === 16,
+    "Baked public Fedi observer list carries 16 public wallet services beyond GBF's existing route");
+  assert(getCommunityBySlug("fedi-victoria-btc")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-victoria-btc")?.invite,
+    "Victoria BTC public Fedi route is wired from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-orange-club-africa")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-orange-club-africa")?.invite,
+    "Orange Club Africa public Fedi route is wired from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-latnet")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-latnet")?.invite,
+    "LatNet public Fedi route is wired from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-marigold-trust-network")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-marigold-trust-network")?.invite,
+    "Marigold Trust Network public Fedi route is wired from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-e-cash-club")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-e-cash-club")?.invite,
+    "E-Cash Club public Fedi route is wired from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-bitcoin-principles")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-bitcoin-principles")?.invite,
+    "Bitcoin Principles public Fedi route is visible from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-bitcoinomad")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-bitcoinomad")?.invite,
+    "Bitcoinomad public Fedi route is wired from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-btc-brasil")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-btc-brasil")?.invite,
+    "BTC Brasil public Fedi route is wired from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-odin-federation")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-odin-federation")?.invite,
+    "Odin Federation public Fedi route is wired from Fedimint Observer");
+  assert(getCommunityBySlug("fedi-freedom-one-lowercase")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-freedom-one-lowercase")?.invite,
+    "lowercase freedom one public Fedi route is wired from Fedimint Observer");
   assert(DEFAULT_COMMUNITY_SLUG === "us-blf", "Default community is us-blf (BLF, v0.5.0)");
   assert(DEFAULT_RELAYS.length >= 5, "Default relay pool has at least 5 stable relays");
   (globalThis as any).localStorage.clear();
@@ -1829,7 +1860,9 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   }).join(",") === BLF_OFFICIAL_ARBITERS[1]!,
     "Official arbiter pool respects participant exclusion");
   assert(getTrustedArbiterPool({ community: "ke-kes" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
-    "Kenya KES is BLF-backed for now and carries the official BLF arbiters");
+    "Kenya KES/Afribit carries the bootstrap official arbiter pool");
+  assert(getTrustedArbiterPool({ community: "ke-kes-bitsacco" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+    "Kenya KES/Bitsacco carries the bootstrap official arbiter pool");
 
   // Lookup with valid + missing slug
   assert(getCommunityBySlug("sn-cfa") !== null, "Valid slug returns community");
@@ -1838,8 +1871,9 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug(undefined) === null, "Undefined slug returns null");
 
   // v0.1.85: every visible pre-seed now pins federationInvite explicitly.
-  // v0.8.1: public country routes all point at BLF until native federation
-  // gateway/trust paths are proven by community leaders.
+  // v1.0.6: Kenya now has first-class Afribit + Bitsacco routes; the
+  // remaining public country shells stay on BLF until local federations
+  // are claimed by community leaders.
   // Hidden legacy slugs remain resolvable for old listings.
   const allPinned = COMMUNITY_REGISTRY
     .filter(c => !c.hiddenFromPicker)
@@ -1881,14 +1915,18 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     );
   }
   assert(getCommunityBySlug("ke-kes")?.displayName === "Kenya · KES",
-    "ke-kes displayName names Kenya KES without a disabled federation brand");
-  assert(getCommunityBySlug("ke-kes")?.disambiguator === null,
-    "ke-kes disambiguator is null while Kenya is routed through BLF");
+    "ke-kes displayName names Kenya KES");
+  assert(getCommunityBySlug("ke-kes")?.disambiguator === "Afribit",
+    "ke-kes disambiguator surfaces the Afribit backing route");
+  assert(getCommunityBySlug("ke-kes-bitsacco")?.displayName === "Kenya · KES",
+    "ke-kes-bitsacco displayName names Kenya KES");
+  assert(getCommunityBySlug("ke-kes-bitsacco")?.disambiguator === "Bitsacco",
+    "ke-kes-bitsacco disambiguator surfaces the Bitsacco backing route");
 
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
-  assert(picker.length === 45,
-    "Picker shows Global, GBF, plus every East/West/Central Africa country Chama");
+  assert(picker.length === 62,
+    "Picker shows Global, GBF, public Fedi wallet services, two Kenya routes, plus every East/West/Central Africa country Chama");
   assert(picker[0]?.slug === DEFAULT_COMMUNITY_SLUG,
     "Picker starts with Global USD on BLF (active pill visible first)");
   assert(!picker.some(c => c.slug === "sv-usd"),
@@ -1897,10 +1935,16 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Picker excludes legacy BP global-usd");
   assert(picker.some(c => c.slug === "us-blf"),
     "Picker includes us-blf as the Global USD route");
+  assert(picker.some(c => c.slug === "fedi-bitcoin-principles"),
+    "Picker includes Bitcoin Principles as a public Fedi wallet service");
+  assert(PUBLIC_FEDI_OBSERVER_FEDERATIONS.every(route => picker.some(c => c.slug === route.slug)),
+    "Picker includes every baked public Fedi wallet service route");
   assert(picker.some(c => c.slug === "tz-tzs"),
     "Picker includes Tanzania TZS for first-run country selection");
-  assert(picker.some(c => c.slug === "ke-kes" && c.country === "KE" && c.disambiguator === null),
-    "Picker includes Kenya KES as a BLF-backed country Chama");
+  assert(picker.some(c => c.slug === "ke-kes" && c.country === "KE" && c.disambiguator === "Afribit"),
+    "Picker includes Kenya KES as an Afribit-backed country Chama");
+  assert(picker.some(c => c.slug === "ke-kes-bitsacco" && c.country === "KE" && c.disambiguator === "Bitsacco"),
+    "Picker includes Kenya KES as a Bitsacco-backed country Chama");
   assert(picker.some(c => c.slug === "cm-xaf"),
     "Picker includes Cameroon XAF for first-run country selection");
   assert(picker.some(c => c.slug === "ao-aoa"),
@@ -1923,6 +1967,9 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   // Set + read
   setUserCommunitySlug("sn-cfa");
   assert(getUserCommunitySlug() === "sn-cfa", "Persisted slug round-trips");
+  setUserCommunitySlug("ke-kes-bitsacco");
+  assert(getUserCommunitySlug() === "ke-kes-bitsacco",
+    "Bitsacco Kenya route persists as the user's home Chama");
 
   // Stale/invalid slug falls back to default rather than flowing through
   (globalThis as any).localStorage.setItem(COMMUNITY_STORAGE_KEY, "ghost-fed");
@@ -1937,6 +1984,10 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 
   assert(defaultCurrencyForCommunity("tz-tzs") === "TZS",
     "defaultCurrencyForCommunity follows Tanzania/TZS home Chama");
+  assert(defaultCurrencyForCommunity("ke-kes-bitsacco") === "KES",
+    "defaultCurrencyForCommunity follows Bitsacco Kenya/KES home Chama");
+  assert(defaultCurrencyForCommunity("fedi-victoria-btc") === "BTC",
+    "defaultCurrencyForCommunity follows public Fedi wallet service routes as BTC");
   assert(defaultCurrencyForCommunity("cm-xaf") === "XAF",
     "defaultCurrencyForCommunity follows Cameroon/XAF home Chama");
   assert(defaultCurrencyForCommunity("cd-cdf") === "CDF",
@@ -2133,14 +2184,32 @@ console.log("\n── BP / BLF RESOLVER ──");
   const keKesInvite = getCommunityBySlug("ke-kes")!.federationInvite!;
   assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
     "ke-kes → registry-pinned invite");
-  assert(keKesInvite === BLF_FEDERATION_INVITE,
-    "ke-kes pins BLF while Afribit is disabled");
+  assert(keKesInvite === AFRIBIT_KIBERA_FEDERATION_INVITE,
+    "ke-kes pins Afribit Kibera");
   const blfFederationIdForComparison: string = BLF_FEDERATION_ID;
   const bpFederationIdForComparison: string = BP_FEDERATION_ID;
   assert(blfFederationIdForComparison !== bpFederationIdForComparison,
     "BLF federation ID is distinct from BP");
-  assert(expectedFederationIdForInvite(keKesInvite) === BLF_FEDERATION_ID,
-    "Kenya KES invite resolves to BLF for drift detection");
+  assert(expectedFederationIdForInvite(keKesInvite) === AFRIBIT_KIBERA_FEDERATION_ID,
+    "Kenya KES invite resolves to Afribit for drift detection");
+
+  const bitsaccoInvite = getCommunityBySlug("ke-kes-bitsacco")!.federationInvite!;
+  assert(resolveFederationForCommunity("ke-kes-bitsacco") === bitsaccoInvite,
+    "ke-kes-bitsacco → registry-pinned invite");
+  assert(bitsaccoInvite === BITSACCO_FEDERATION_INVITE,
+    "ke-kes-bitsacco pins Bitsacco");
+  assert(expectedFederationIdForInvite(bitsaccoInvite) === BITSACCO_FEDERATION_ID,
+    "Bitsacco federation ID stays null until verified locally");
+
+  const victoriaBtcRoute = PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(route => route.slug === "fedi-victoria-btc")!;
+  assert(resolveFederationForCommunity(victoriaBtcRoute.slug) === victoriaBtcRoute.invite,
+    "Public Fedi wallet service slug resolves to its observer invite");
+  assert(expectedFederationIdForInvite(victoriaBtcRoute.invite) === victoriaBtcRoute.federationId,
+    "Public Fedi wallet service invite resolves to its observer federation ID");
+  assert(PUBLIC_FEDI_OBSERVER_FEDERATIONS.every(route =>
+    resolveFederationForCommunity(route.slug) === route.invite &&
+    expectedFederationIdForInvite(route.invite) === route.federationId
+  ), "Every baked public Fedi route resolves to its observer invite and federation ID");
 
   const globalUsdInvite = getCommunityBySlug("global-usd")!.federationInvite!;
   assert(resolveFederationForCommunity("global-usd") === globalUsdInvite,
@@ -2156,13 +2225,17 @@ console.log("\n── BP / BLF RESOLVER ──");
 
   // Custom invite override only applies when no selected community has a
   // pinned invite. Community identity wins so stale sandbox state cannot
-  // show Kenya while joining BLF/BP.
+  // show one Kenya route while joining a different federation.
   const fakeCustomInvite = "fed1qcustom_user_pasted_invite_for_resolver_test";
   setCustomFederationInvite(fakeCustomInvite);
   assert(resolveFederationForCommunity("sn-cfa") === snCfaInvite,
     "Pinned community invite beats stale custom invite");
   assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
     "Kenya community invite beats stale custom invite");
+  assert(resolveFederationForCommunity("ke-kes-bitsacco") === bitsaccoInvite,
+    "Bitsacco Kenya invite beats stale custom invite");
+  assert(resolveFederationForCommunity(victoriaBtcRoute.slug) === victoriaBtcRoute.invite,
+    "Public Fedi route invite beats stale custom invite");
   assert(resolveFederationForCommunity(null) === fakeCustomInvite,
     "Custom invite overrides null slug");
   assert(resolveFederationForCommunity("xx-unknown") === fakeCustomInvite,
@@ -3973,8 +4046,45 @@ console.log("\n── AUTO-INIT TARGET ──");
     hasCurrentEscrow: false,
     balanceMsats: 0,
   });
-  assert(afribitNoHome.kind === "skip",
-    "Disabled Afribit active invite without home remains manual reconnect");
+  assert(afribitNoHome.kind === "use-default",
+    "Afribit active invite without home repairs to Kenya");
+  if (afribitNoHome.kind === "use-default") {
+    assert(afribitNoHome.defaultCommunity === "ke-kes",
+      "Afribit active invite repairs to ke-kes");
+    assert(afribitNoHome.reason === "active-invite-without-home",
+      "Afribit active-without-home repair is labeled");
+  }
+
+  const bitsaccoNoHome = decideAutoInitTarget({
+    activeInvite: BITSACCO_FEDERATION_INVITE,
+    homeCommunity: null,
+    hasCurrentEscrow: false,
+    balanceMsats: 0,
+  });
+  assert(bitsaccoNoHome.kind === "use-default",
+    "Bitsacco active invite without home repairs to Kenya");
+  if (bitsaccoNoHome.kind === "use-default") {
+    assert(bitsaccoNoHome.defaultCommunity === "ke-kes-bitsacco",
+      "Bitsacco active invite repairs to ke-kes-bitsacco");
+    assert(bitsaccoNoHome.reason === "active-invite-without-home",
+      "Bitsacco active-without-home repair is labeled");
+  }
+
+  const publicFediRoute = PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(route => route.slug === "fedi-victoria-btc")!;
+  const publicFediNoHome = decideAutoInitTarget({
+    activeInvite: publicFediRoute.invite,
+    homeCommunity: null,
+    hasCurrentEscrow: false,
+    balanceMsats: 0,
+  });
+  assert(publicFediNoHome.kind === "use-default",
+    "Public Fedi active invite without home repairs to its wallet service");
+  if (publicFediNoHome.kind === "use-default") {
+    assert(publicFediNoHome.defaultCommunity === publicFediRoute.slug,
+      "Public Fedi active invite repairs to the matching route slug");
+    assert(publicFediNoHome.reason === "active-invite-without-home",
+      "Public Fedi active-without-home repair is labeled");
+  }
 
   const customNoHome = decideAutoInitTarget({
     activeInvite: "fed1qcustomunknownroute",
@@ -4231,6 +4341,36 @@ console.log("\n── PROBE REACHABILITY ──");
     const result = await client.probeReachable();
     assert(result.fed === FED_ID,
       "probeReachable returns the cached federation ID at 0 balance (old probe's structural failure case now passes)");
+    await client.cleanup();
+  }
+
+  // (1a.1) Tauri/native first run: the Rust sidecar returns
+  // "Client database not initialized" from /info before /join. That
+  // must be treated the same as the browser SDK's fresh-DB message so
+  // init can continue and joinFederation can create the client.
+  {
+    const FED_ID = "native_fresh_db_fed";
+    let opened = false;
+    let joinCount = 0;
+    const wallet: any = makeZeroBalanceWallet({ federationId: FED_ID });
+    wallet.open = async () => {
+      throw new Error(
+        "Native Fedimint bridge /info failed (500): failed to open Fedimint client: Client database not initialized",
+      );
+    };
+    wallet.isOpen = () => opened;
+    wallet.joinFederation = async (_invite: string) => {
+      opened = true;
+      joinCount += 1;
+    };
+
+    const client = new FedimintClient({}, async () => wallet);
+    await client.init();
+    const federationId = await client.joinFederation("fed1nativefresh");
+    assert(federationId === FED_ID,
+      "Native first-run database-not-initialized error is swallowed so join can create the client");
+    assert(joinCount === 1,
+      "Native first-run path calls joinFederation after the harmless open miss");
     await client.cleanup();
   }
 
@@ -6317,6 +6457,7 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
 
   {
     const originalCapacitor = (globalThis as any).Capacitor;
+    const originalTauri = (globalThis as any).__TAURI_INTERNALS__;
     (globalThis as any).localStorage?.removeItem?.("chama_native_fedimint");
     try {
       (globalThis as any).Capacitor = { isNativePlatform: () => true };
@@ -6326,9 +6467,15 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       (globalThis as any).Capacitor = { getPlatform: () => "web" };
       assert(!isNativeBridgeModeOn(),
         "Native Fedimint does not default on for web platform detection");
+
+      (globalThis as any).__TAURI_INTERNALS__ = {};
+      assert(isNativeBridgeModeOn(),
+        "Native Fedimint defaults on inside Tauri native builds");
     } finally {
       if (originalCapacitor === undefined) delete (globalThis as any).Capacitor;
       else (globalThis as any).Capacitor = originalCapacitor;
+      if (originalTauri === undefined) delete (globalThis as any).__TAURI_INTERNALS__;
+      else (globalThis as any).__TAURI_INTERNALS__ = originalTauri;
     }
   }
 
@@ -6345,6 +6492,28 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
     assert(getConfiguredNativeBridgeCommunitySlug() === "us-gbf",
       "Native bridge still honors an explicit debug community override");
     (globalThis as any).localStorage?.removeItem?.(NATIVE_BRIDGE_COMMUNITY_KEY);
+  }
+
+  {
+    const originalFetch = (globalThis as any).fetch;
+    const calls: Array<{ url: string; method?: string }> = [];
+    (globalThis as any).localStorage?.setItem?.(NATIVE_BRIDGE_MODE_KEY, "1");
+    (globalThis as any).fetch = async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), method: init?.method });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    try {
+      await resetLocalFedimintWallet();
+      assert(calls.length === 1,
+        "Native reset uses the Rust bridge reset endpoint instead of browser OPFS");
+      assert(calls[0].url === "http://127.0.0.1:8787/reset",
+        "Native reset targets the local sidecar reset endpoint");
+      assert(calls[0].method === "POST",
+        "Native reset posts to the sidecar reset endpoint");
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+      (globalThis as any).localStorage?.removeItem?.(NATIVE_BRIDGE_MODE_KEY);
+    }
   }
 }
 

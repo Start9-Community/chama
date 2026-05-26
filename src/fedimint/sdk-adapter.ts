@@ -1921,6 +1921,14 @@ export async function resetLocalFedimintWallet(
     return;
   }
 
+  const { isNativeBridgeModeOn, resetNativeBridgeWallet } =
+    await import("./native-bridge-adapter.js");
+  if (isNativeBridgeModeOn()) {
+    await resetNativeBridgeWallet();
+    console.info("[chama] resetLocalFedimintWallet: native bridge DB reset");
+    return;
+  }
+
   // 1. Release any live sync handle by killing the worker that owns it.
   terminateCurrentWorker();
 

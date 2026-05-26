@@ -97,7 +97,7 @@ export function BrowseView({
         </div>
         {homeCommunity && (
           <button
-            title={homeCommunity.displayName}
+            title={browseCommunityButtonLabel(homeCommunity)}
             onClick={() => setShowCommunityPicker((v) => !v)}
             style={{
               padding: "7px 10px", borderRadius: 18,
@@ -223,7 +223,7 @@ export function BrowseView({
                   letterSpacing: 0,
                 }}
               >
-                {c.flagEmoji} {c.displayName}
+                {c.flagEmoji} {browseCommunityButtonLabel(c)}
               </button>
             );
           })}
@@ -404,6 +404,12 @@ function browseCommunitySortLabel(community: Community): string {
   return community.displayName
     .replace(/\s·\s[A-Z]{3}$/, "")
     .replace(/\s·\s/g, " ");
+}
+
+function browseCommunityButtonLabel(community: Community): string {
+  return community.disambiguator
+    ? `${community.displayName} · ${community.disambiguator}`
+    : community.displayName;
 }
 
 function listingMatchesSearch(listing: EscrowState, query: string): boolean {

@@ -7,3 +7,5 @@ dist/
 .DS_Store
 .claude/
 native/fedimint-bridge/target/
+src-tauri/target/
+src-tauri/binaries/chama-fedimint-bridge-*

@@ -301,9 +301,9 @@ export class FedimintClient {
       return createMockWallet();
     }
 
-    // ?nativeFedimint=1, or Capacitor native app → route wallet calls to the
-    // local Rust sidecar. Browser builds remain opt-in; Android release builds
-    // package and start the sidecar automatically.
+    // ?nativeFedimint=1, Capacitor, or Tauri → route wallet calls to the local
+    // Rust sidecar. Browser builds remain opt-in; native shells package and
+    // start the sidecar automatically.
     const { isNativeBridgeModeOn, createNativeBridgeWallet, getNativeBridgeUrl } =
       await import("./native-bridge-adapter.js");
     if (isNativeBridgeModeOn()) {
@@ -344,15 +344,15 @@ export class FedimintClient {
 
       // Try to open an existing client in the DB. On a fresh OPFS file
       // (e.g. after filename rotation or a first-ever launch) there is
-      // no client yet and the SDK throws "client is not initialized for
-      // this database" — that's not a real error, it just means we
-      // haven't joined a federation on this DB yet. We'll open it
-      // implicitly when joinFederation() runs.
+      // no client yet and the SDK/native bridge throws a first-run
+      // "client/database is not initialized" variant — that's not a
+      // real error, it just means we haven't joined a federation on
+      // this DB yet. We'll open it implicitly when joinFederation() runs.
       try {
         await this.wallet.open();
       } catch (openErr) {
         const msg = typeof openErr === "string" ? openErr : (openErr as Error)?.message || "";
-        if (/client is not initialized|not initialized for this database|no such client|client secret is not present|run join first/i.test(msg)) {
+        if (/client is not initialized|client database not initialized|database not initialized|not initialized for this database|no such client|client secret is not present|run join first/i.test(msg)) {
           console.info(
             "[chama] No existing Fedimint client in this DB — will be created on join"
           );

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default permissions for Chama desktop","local":true,"windows":["main"],"permissions":["core:default",{"identifier":"shell:allow-spawn","allow":[{"args":true,"name":"chama-fedimint-bridge","sidecar":true},{"args":true,"name":"binaries/chama-fedimint-bridge","sidecar":true}]}]}}

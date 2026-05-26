@@ -25,9 +25,13 @@
 // resolveFederationForCommunity, and we'd hit a TDZ on COMMUNITY_REGISTRY
 // initialization if we let that cycle stand.
 import {
+  AFRIBIT_KIBERA_FEDERATION_INVITE,
+  BITSACCO_FEDERATION_INVITE,
   BP_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
   GBF_FEDERATION_INVITE,
+  PUBLIC_FEDI_OBSERVER_FEDERATIONS,
+  type PublicFediFederation,
 } from "../fedimint/federation-invites.js";
 
 export interface Community {
@@ -55,6 +59,9 @@ export interface Community {
   /** ISO country code for the primary flag-display country. `null` for
    *  global / regional aggregators. */
   country: string | null;
+  /** Optional first-run/onboarding label when the picker should name the
+   *  backing wallet service instead of the stable community identity. */
+  pickerLabel?: string;
   /** True when the backing federation works reliably from browsers.
    *  v0.5.0: now true across the board after the Fedimint canary SDK
    *  bumped iroh-relay to 0.90 and resolved the 400 Bad Request that
@@ -135,14 +142,55 @@ function blfCountryChama(seed: CountryChamaSeed): Community {
   };
 }
 
-// Temporary test route: keep the stable Kenya `ke-kes` community identity,
-// but back it with BLF until the Afribit gateway/trust path is proven.
-const KENYA_BLF_CHAMA: Community = blfCountryChama({
-  country: "KE",
-  name: "Kenya",
+const KENYA_AFRIBIT_CHAMA: Community = {
+  slug: "ke-kes",
+  displayName: "Kenya · KES",
   currency: "KES",
+  countries: ["KE"],
   languages: ["sw", "en"],
-});
+  federationInvite: AFRIBIT_KIBERA_FEDERATION_INVITE,
+  flagEmoji: "🇰🇪",
+  country: "KE",
+  browserReliable: true,
+  notes: "Native Fedimint sidecar route wired for Afribit Kibera.",
+  disambiguator: "Afribit",
+  hiddenFromPicker: false,
+};
+
+const KENYA_BITSACCO_CHAMA: Community = {
+  slug: "ke-kes-bitsacco",
+  displayName: "Kenya · KES",
+  currency: "KES",
+  countries: ["KE"],
+  languages: ["sw", "en"],
+  federationInvite: BITSACCO_FEDERATION_INVITE,
+  flagEmoji: "🇰🇪",
+  country: "KE",
+  browserReliable: true,
+  notes: `${IROH_LIMITATION_NOTE} Kenya route backed by Bitsacco.`,
+  disambiguator: "Bitsacco",
+  hiddenFromPicker: false,
+};
+
+function publicFediWalletServiceChama(route: PublicFediFederation): Community {
+  return {
+    slug: route.slug,
+    displayName: route.name,
+    currency: "BTC",
+    countries: route.country ? [route.country] : [],
+    languages: ["en"],
+    federationInvite: route.invite,
+    flagEmoji: route.flagEmoji,
+    country: route.country,
+    browserReliable: true,
+    notes: `${IROH_LIMITATION_NOTE} Public Fedi wallet service from Fedimint Observer.`,
+    disambiguator: null,
+    hiddenFromPicker: false,
+  };
+}
+
+const PUBLIC_FEDI_WALLET_SERVICE_CHAMAS: Community[] =
+  PUBLIC_FEDI_OBSERVER_FEDERATIONS.map(publicFediWalletServiceChama);
 
 const EAST_AFRICA_COUNTRY_CHAMAS: Community[] = [
   blfCountryChama({ country: "BI", name: "Burundi", currency: "BIF", languages: ["rn", "fr", "en"] }),
@@ -150,7 +198,8 @@ const EAST_AFRICA_COUNTRY_CHAMAS: Community[] = [
   blfCountryChama({ country: "DJ", name: "Djibouti", currency: "DJF", languages: ["fr", "ar"] }),
   blfCountryChama({ country: "ER", name: "Eritrea", currency: "ERN", languages: ["ti", "ar", "en"] }),
   blfCountryChama({ country: "ET", name: "Ethiopia", currency: "ETB", languages: ["am", "en"] }),
-  KENYA_BLF_CHAMA,
+  KENYA_AFRIBIT_CHAMA,
+  KENYA_BITSACCO_CHAMA,
   blfCountryChama({ country: "MG", name: "Madagascar", currency: "MGA", languages: ["mg", "fr"] }),
   blfCountryChama({ country: "MW", name: "Malawi", currency: "MWK", languages: ["en", "ny"] }),
   blfCountryChama({ country: "MU", name: "Mauritius", currency: "MUR", languages: ["en", "fr"] }),
@@ -213,6 +262,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     federationInvite: BLF_FEDERATION_INVITE,
     flagEmoji: "🌍",
     country: null,
+    pickerLabel: "Bitcoin Life Federation",
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "BLF",
@@ -227,11 +277,13 @@ export const COMMUNITY_REGISTRY: Community[] = [
     federationInvite: GBF_FEDERATION_INVITE,
     flagEmoji: "🇺🇸",
     country: "US",
+    pickerLabel: "Global Bitcoin Federation",
     browserReliable: true,
     notes: "Native Fedimint sidecar route verified end-to-end against GBF.",
     disambiguator: "GBF",
     hiddenFromPicker: false,
   },
+  ...PUBLIC_FEDI_WALLET_SERVICE_CHAMAS,
   {
     slug: "sn-cfa",
     displayName: "Senegal · CFA",

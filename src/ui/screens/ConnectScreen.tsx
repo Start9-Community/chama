@@ -321,6 +321,7 @@ function BrandHeader() {
 function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
   const communities = useMemo(() => getPickerCommunities(), []);
   const [region, setRegion] = useState<RegionFilter | null>(null);
+  const [selectedCountryKey, setSelectedCountryKey] = useState<string | null>(null);
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestedChama, setRequestedChama] = useState("");
   const [requestNote, setRequestNote] = useState("");
@@ -335,6 +336,10 @@ function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
           return countryLabel(a).localeCompare(countryLabel(b));
         })
     : [];
+  const countryChoices = countryChoicesForCommunities(visible);
+  const selectedCountryChoice = selectedCountryKey
+    ? countryChoices.find((choice) => choice.key === selectedCountryKey) ?? null
+    : null;
   const requestReady = requestStatus.state !== "sending" && requestedChama.trim().length > 0;
 
   const sendCommunityRequest = async () => {
@@ -384,7 +389,10 @@ function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
           return (
             <button
               key={id}
-              onClick={() => setRegion(id)}
+              onClick={() => {
+                setRegion(id);
+                setSelectedCountryKey(null);
+              }}
               aria-pressed={active}
               style={{
                 minHeight: 112,
@@ -505,50 +513,135 @@ function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
           }}>
             {selectedRegion?.label}
           </div>
+          {selectedCountryChoice && selectedCountryChoice.communities.length > 1 && (
+            <button
+              onClick={() => setSelectedCountryKey(null)}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                marginBottom: 10, padding: "6px 9px", borderRadius: T.rs,
+                background: T.surface, border: `1px solid ${T.border}`,
+                color: T.muted, fontFamily: T.mono, fontSize: 10,
+                cursor: "pointer",
+              }}
+            >
+              <span style={{ fontSize: 12, lineHeight: 1 }}>←</span>
+              {selectedCountryChoice.label}
+            </button>
+          )}
           <div style={{ display: "grid", gap: 10, width: "100%" }}>
-            {visible.map((community) => (
-              <button
-                key={community.slug}
-                onClick={() => onSelect(community.slug)}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
-                  gap: 12, padding: "13px 14px", borderRadius: T.r,
-                  background: T.card, border: `1px solid ${T.border}`,
-                  color: T.text, cursor: "pointer", textAlign: "left",
-                }}
-              >
-                <span style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                  <span style={{ fontSize: 26, lineHeight: 1 }}>{community.flagEmoji}</span>
-                  <span style={{ minWidth: 0 }}>
-                    <span style={{
-                      display: "block", fontFamily: T.sans,
-                      fontSize: 14, fontWeight: 800,
-                    }}>
-                      {countryLabel(community)}
-                    </span>
-                    <span style={{
-                      display: "block", fontFamily: T.mono,
-                      color: T.muted, fontSize: 10, marginTop: 2,
-                    }}>
-                      {community.disambiguator
-                        ? `${community.currency} · ${community.disambiguator}`
-                        : community.currency}
+            {(selectedCountryChoice?.communities ?? countryChoices).map((choice) => {
+              let countryChoice: CountryChoice | null = null;
+              let community: Community;
+              if (isCommunityChoice(choice)) {
+                community = choice;
+              } else {
+                countryChoice = choice;
+                community = choice.communities[0]!;
+              }
+              const hasRoutes = countryChoice !== null && countryChoice.communities.length > 1;
+              const title = countryChoice === null
+                ? community.disambiguator ?? countryLabel(community)
+                : countryChoice.label;
+              const subtitle = countryChoice === null
+                ? community.displayName
+                : hasRoutes
+                  ? `${countryChoice.communities.length} Chamas`
+                  : community.disambiguator
+                    ? `${community.currency} · ${community.disambiguator}`
+                    : community.currency;
+              return (
+                <button
+                  key={countryChoice ? countryChoice.key : community.slug}
+                  onClick={() => {
+                    if (hasRoutes && countryChoice) {
+                      setSelectedCountryKey(countryChoice.key);
+                      return;
+                    }
+                    onSelect(community.slug);
+                  }}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    gap: 12, padding: "13px 14px", borderRadius: T.r,
+                    background: T.card, border: `1px solid ${T.border}`,
+                    color: T.text, cursor: "pointer", textAlign: "left",
+                  }}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                    <span style={{ fontSize: 26, lineHeight: 1 }}>{community.flagEmoji}</span>
+                    <span style={{ minWidth: 0 }}>
+                      <span style={{
+                        display: "block", fontFamily: T.sans,
+                        fontSize: 14, fontWeight: 800,
+                      }}>
+                        {title}
+                      </span>
+                      <span style={{
+                        display: "block", fontFamily: T.mono,
+                        color: T.muted, fontSize: 10, marginTop: 2,
+                      }}>
+                        {subtitle}
+                      </span>
                     </span>
                   </span>
-                </span>
-                <span style={{
-                  fontFamily: T.mono, color: T.accent,
-                  fontSize: 16, lineHeight: 1,
-                }}>
-                  →
-                </span>
-              </button>
-            ))}
+                  <span style={{
+                    fontFamily: T.mono, color: T.accent,
+                    fontSize: 16, lineHeight: 1,
+                  }}>
+                    →
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
     </>
   );
+}
+
+interface CountryChoice {
+  key: string;
+  label: string;
+  flagEmoji: string;
+  communities: Community[];
+}
+
+function countryChoicesForCommunities(communities: Community[]): CountryChoice[] {
+  const choices: CountryChoice[] = [];
+  const byKey = new Map<string, CountryChoice>();
+  for (const community of communities) {
+    const key = community.country ?? community.slug;
+    let choice = byKey.get(key);
+    if (!choice) {
+      choice = {
+        key,
+        label: community.pickerLabel ?? countryLabel(community),
+        flagEmoji: community.flagEmoji,
+        communities: [],
+      };
+      byKey.set(key, choice);
+      choices.push(choice);
+    }
+    choice.communities.push(community);
+  }
+  for (const choice of choices) {
+    choice.communities.sort(compareCommunityRoutes);
+  }
+  return choices;
+}
+
+function compareCommunityRoutes(a: Community, b: Community): number {
+  const byLabel = (a.disambiguator ?? a.displayName).localeCompare(
+    b.disambiguator ?? b.displayName,
+    undefined,
+    { sensitivity: "base" },
+  );
+  if (byLabel !== 0) return byLabel;
+  return a.slug.localeCompare(b.slug, undefined, { sensitivity: "base" });
+}
+
+function isCommunityChoice(choice: Community | CountryChoice): choice is Community {
+  return "slug" in choice;
 }
 
 function MiniGlobe({

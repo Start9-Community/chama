@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -528,6 +529,42 @@ impl Bridge {
                 .await
                 .with_context(|| format!("open failed before join attempt: {open_err:#}")),
         }
+    }
+
+    async fn reset_local_state(&self) -> Result<()> {
+        let db_path = self.data_dir.join("client.db");
+        for attempt in 0..3 {
+            match tokio::fs::remove_dir_all(&db_path).await {
+                Ok(()) => {
+                    tokio::fs::create_dir_all(&self.data_dir)
+                        .await
+                        .with_context(|| {
+                            format!("failed to recreate data dir {}", self.data_dir.display())
+                        })?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+                Err(error) if attempt < 2 => {
+                    eprintln!(
+                        "failed to remove Fedimint client database {} on attempt {}: {}; retrying",
+                        db_path.display(),
+                        attempt + 1,
+                        error,
+                    );
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to remove Fedimint client database {}",
+                            db_path.display()
+                        )
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn list_gateways(
@@ -1071,6 +1108,7 @@ async fn serve_bridge(bridge: Bridge, bind: SocketAddr, invite_code: Option<Stri
     let app = Router::new()
         .route("/health", get(api_health))
         .route("/join", post(api_join))
+        .route("/reset", post(api_reset))
         .route("/info", get(api_info))
         .route("/gateways", get(api_gateways))
         .route("/probe-gateways", get(api_probe_gateways))
@@ -1116,6 +1154,12 @@ impl AppState {
         *self.client.lock().await = Some(client.clone());
         Ok(client)
     }
+
+    async fn reset(&self) -> Result<()> {
+        let stale_client = self.client.lock().await.take();
+        drop(stale_client);
+        self.bridge.reset_local_state().await
+    }
 }
 
 async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -1135,6 +1179,11 @@ async fn api_join(
         joined: req.invite_code,
         federation_id: client.federation_id().to_string(),
     }))
+}
+
+async fn api_reset(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    state.reset().await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn api_info(State(state): State<AppState>) -> Result<Json<InfoOutput>, ApiError> {

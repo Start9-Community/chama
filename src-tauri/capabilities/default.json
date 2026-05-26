@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permissions for Chama desktop",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "chama-fedimint-bridge",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "binaries/chama-fedimint-bridge",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
+  ]
+}

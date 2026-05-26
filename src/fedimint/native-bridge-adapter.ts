@@ -2,7 +2,7 @@
 //
 // This keeps Chama's existing IFedimintWallet boundary intact while routing
 // wallet operations through the local Rust Fedimint bridge. Browser builds stay
-// opt-in; Capacitor native builds default to the bridge because the APK starts
+// opt-in; native shells default to the bridge because the APK/Tauri shell starts
 // the sidecar itself.
 
 import type {
@@ -40,6 +40,10 @@ interface NativeInfoResponse {
 interface NativeJoinResponse {
   joined: string;
   federation_id: string;
+}
+
+interface NativeResetResponse {
+  ok: boolean;
 }
 
 interface NativeInvoiceResponse {
@@ -186,6 +190,14 @@ function isCapacitorNativePlatform(): boolean {
   return false;
 }
 
+function isTauriNativePlatform(): boolean {
+  const global = globalThis as {
+    __TAURI__?: unknown;
+    __TAURI_INTERNALS__?: unknown;
+  };
+  return Boolean(global.__TAURI__ || global.__TAURI_INTERNALS__);
+}
+
 function setLocalStorageValue(key: string, value: string): void {
   try {
     if (typeof localStorage === "undefined") return;
@@ -274,7 +286,7 @@ export function isNativeBridgeModeOn(): boolean {
   const envFlag = getImportEnv("VITE_CHAMA_NATIVE_FEDIMINT");
   if (envFlag !== null) return isEnabledSetting(envFlag);
 
-  return isCapacitorNativePlatform();
+  return isCapacitorNativePlatform() || isTauriNativePlatform();
 }
 
 export function getNativeBridgeUrl(): string {
@@ -301,6 +313,12 @@ export function getConfiguredNativeBridgeCommunitySlug(): string | null {
     getImportEnv("VITE_CHAMA_NATIVE_COMMUNITY");
   const trimmed = slug?.trim() ?? "";
   return trimmed ? trimmed : null;
+}
+
+export async function resetNativeBridgeWallet(baseUrl = getNativeBridgeUrl()): Promise<void> {
+  await nativeBridgeFetch<NativeResetResponse>(normalizeBaseUrl(baseUrl), "/reset", {
+    method: "POST",
+  });
 }
 
 async function nativeBridgeFetch<T>(

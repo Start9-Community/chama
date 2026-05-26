@@ -17,6 +17,7 @@ export {
   getNativeBridgeCommunitySlug,
   getNativeBridgeUrl,
   isNativeBridgeModeOn,
+  resetNativeBridgeWallet,
 } from "./native-bridge-adapter.js";
 export { isTestnetMode, createMockWallet } from "./mock-wallet.js";
 export { drainPendingRedemptions } from "./pending-redemptions.js";
