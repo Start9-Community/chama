@@ -135,7 +135,18 @@ function isTerminalStatus(status: EscrowStatus): boolean {
 function isPartialReplayDowngrade(current: EscrowState | undefined, incoming: EscrowState): boolean {
   if (!current) return false;
   if (isTerminalStatus(incoming.status)) return false;
-  return statusProgressRank(incoming.status) < statusProgressRank(current.status);
+  if (statusProgressRank(incoming.status) < statusProgressRank(current.status)) return true;
+  if (incoming.status !== current.status) return false;
+
+  const incomingChainIds = new Set(incoming.eventChain.map(event => event.raw.id));
+  return current.eventChain.some(event => !incomingChainIds.has(event.raw.id));
+}
+
+function mergeRawEventsById(primary: NostrEvent[], secondary: NostrEvent[]): NostrEvent[] {
+  const byId = new Map<string, NostrEvent>();
+  for (const event of primary) byId.set(event.id, event);
+  for (const event of secondary) byId.set(event.id, event);
+  return [...byId.values()];
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -1015,8 +1026,17 @@ export class EscrowClient {
 
   /** Fetch and reconstruct full escrow state from relays */
   async loadEscrow(escrowId: string): Promise<EscrowState | null> {
-    const rawEvents = await this.relayManager.fetchEscrowEvents(escrowId);
-    console.debug(`[escrow] loadEscrow ${escrowId}: fetched ${rawEvents.length} raw events from relays`);
+    const current = this.states.get(escrowId);
+    const fetchedRawEvents = await this.relayManager.fetchEscrowEvents(escrowId);
+    const cachedRawEvents = mergeRawEventsById(
+      this.rawEvents.get(escrowId) ?? [],
+      current?.eventChain.map(event => event.raw) ?? [],
+    );
+    const rawEvents = mergeRawEventsById(cachedRawEvents, fetchedRawEvents);
+    console.debug(
+      `[escrow] loadEscrow ${escrowId}: fetched ${fetchedRawEvents.length} raw events from relays` +
+        (cachedRawEvents.length > 0 ? `, replaying ${rawEvents.length} with local cache` : ""),
+    );
     if (rawEvents.length === 0) return null;
 
     // Parse all events — try plaintext JSON first, then NIP-44 decrypt.
@@ -1109,7 +1129,6 @@ export class EscrowClient {
     }
     console.debug(`[escrow] loadEscrow ${escrowId}: replay OK — state is ${result.state.status}`);
 
-    const current = this.states.get(escrowId);
     if (isPartialReplayDowngrade(current, result.state)) {
       const known = new Map((this.rawEvents.get(escrowId) ?? []).map(event => [event.id, event]));
       for (const event of rawEvents) known.set(event.id, event);

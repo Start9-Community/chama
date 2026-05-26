@@ -262,6 +262,9 @@ export function TradeDetail({
     !participants.arbiter &&
     !previewArbiterPk &&
     state.communityArbiters.includes(pubkey);
+  const canJoinAsBuyer = !participants.buyer;
+  const canJoinAsSeller = !participants.seller;
+  const canJoinTrade = canJoinAsBuyer || canJoinAsSeller || canJoinAsArbiter;
   const prewarmedEscrowRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -373,6 +376,7 @@ export function TradeDetail({
     votePromptKind: votePrompt.kind,
     iAmWinner,
     claimRetryBlocked,
+    canJoinTrade,
   });
   const heroAmountMsats = nextStep.amountMsats ?? (menuDisplayAmountMsats || state.amountMsats);
   const shortTradeId = state.id.length > 18 ? `${state.id.slice(0, 10)}…${state.id.slice(-6)}` : state.id;
@@ -1184,7 +1188,7 @@ export function TradeDetail({
       )}
 
       {/* JOIN buttons — show when user is not a participant and slots are open */}
-      {!myRole && !hasDuplicateParticipant && !currentKeyAlreadyPresent && state.status === EscrowStatus.CREATED && (
+      {!myRole && !hasDuplicateParticipant && !currentKeyAlreadyPresent && state.status === EscrowStatus.CREATED && canJoinTrade && (
         <div style={{
           paddingTop: 16,
           marginTop: 16,
@@ -1195,7 +1199,7 @@ export function TradeDetail({
             JOIN THIS TRADE
           </div>
           <div style={{ display: "flex", gap: 10 }}>
-            {!participants.buyer && (
+            {canJoinAsBuyer && (
               <button disabled={joining} onClick={async () => {
                 setJoining(true);
                 try { await onJoin(Role.BUYER); } finally { setJoining(false); }
@@ -1226,7 +1230,7 @@ export function TradeDetail({
               </button>
             )}
           </div>
-          {!participants.seller && (
+          {canJoinAsSeller && (
             <button disabled={joining} onClick={async () => {
               setJoining(true);
               try { await onJoin(Role.SELLER); } finally { setJoining(false); }
@@ -1720,6 +1724,7 @@ function detailNextStep({
   votePromptKind,
   iAmWinner,
   claimRetryBlocked,
+  canJoinTrade,
 }: {
   state: EscrowState;
   myRole: Role | null;
@@ -1735,6 +1740,7 @@ function detailNextStep({
   votePromptKind: "waiting" | "buttons" | "none";
   iAmWinner: boolean;
   claimRetryBlocked: boolean;
+  canJoinTrade: boolean;
 }): {
   kicker: string;
   title: string;
@@ -1745,6 +1751,26 @@ function detailNextStep({
 } {
   if (state.status === EscrowStatus.CREATED) {
     if (!myRole) {
+      if (!canJoinTrade) {
+        if (hasMenu && participantsBuyer && !savedOrderFinalized) {
+          return {
+            kicker: "ORDER PENDING",
+            title: `${roleDisplayName(menuSelectorRole)} is still choosing what they want.`,
+            body: "The trade is reserved. The final order snapshot will appear once they press Ready.",
+            tone: "accent",
+            color: T.accent,
+            amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
+          };
+        }
+        return {
+          kicker: "WAITING",
+          title: "Waiting for the locking side to fund.",
+          body: "This trade is already reserved. Once sats enter escrow, the vote and claim path opens from this same trade room.",
+          tone: "purple",
+          color: T.purple,
+          amountMsats: savedOrderAmountMsats || state.amountMsats,
+        };
+      }
       return {
         kicker: "CHECKOUT",
         title: "Join when you are ready to build an order.",

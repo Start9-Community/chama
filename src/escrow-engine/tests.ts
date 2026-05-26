@@ -11346,6 +11346,111 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
   );
 
   client.disconnect();
+
+  FakeWebSocket.instances = [];
+  const orderClient = new EscrowClient(
+    fakeSigner,
+    { relays: ["wss://relay.test"], wsImpl: FakeWebSocket as unknown as typeof WebSocket },
+  );
+  orderClient.connect();
+  const orderSocket = FakeWebSocket.instances[0]!;
+  orderSocket.onopen?.({} as Event);
+
+  const exchangeItem: MenuItem = {
+    id: "exact-100-sats",
+    label: "Sats for sale",
+    amountMsats: 100_000,
+    kind: "exchange-bracket",
+    minAmountMsats: 100_000,
+    maxAmountMsats: 100_000,
+  };
+  const orderCreate = createEvent({
+    amountMsats: 100_000,
+    items: [exchangeItem],
+  });
+  const buyerJoin = joinEvent(Role.BUYER, BUYER_PK, orderCreate.raw.id);
+  const selectedItems: JoinPayload["selectedItems"] = [{
+    itemId: exchangeItem.id,
+    label: exchangeItem.label,
+    amountMsats: 100_000,
+    quantity: 1,
+    kind: "exchange-bracket",
+    minAmountMsats: 100_000,
+    maxAmountMsats: 100_000,
+  }];
+  const finalizedJoin = joinEvent(Role.BUYER, BUYER_PK, buyerJoin.raw.id, {
+    selectedItems,
+    amountMsats: 100_000,
+    orderFinalized: true,
+  });
+
+  const firstLoad = orderClient.loadEscrow(ESCROW_ID);
+  await waitUntil(() => orderSocket.sent.some(raw => {
+    const msg = JSON.parse(raw);
+    return msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_");
+  }));
+  const firstFetchReq = orderSocket.sent
+    .map(raw => JSON.parse(raw))
+    .find(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_"));
+  assert(!!firstFetchReq, "Order replay test starts with a full escrow-chain fetch");
+
+  for (const event of [orderCreate, buyerJoin, finalizedJoin]) {
+    orderSocket.emit(["EVENT", firstFetchReq[1], rawFromParsed(event)]);
+  }
+  orderSocket.emit(["EOSE", firstFetchReq[1]]);
+  const initialOrderState = await firstLoad;
+  assert(
+    initialOrderState?.eventChain.length === 3,
+    "Initial order replay sees the finalized CREATED chain"
+  );
+  assert(
+    !!initialOrderState?.joinHolds?.[Role.BUYER]?.orderFinalizedAt,
+    "Initial order replay marks the buyer hold ready"
+  );
+  await waitUntil(() => orderSocket.sent.some(raw => {
+    const msg = JSON.parse(raw);
+    return msg[0] === "REQ" &&
+      String(msg[1]).startsWith("sm_fetch_") &&
+      msg[1] !== firstFetchReq[1];
+  }), 100);
+  for (const raw of orderSocket.sent) {
+    const msg = JSON.parse(raw);
+    if (
+      msg[0] === "REQ" &&
+      String(msg[1]).startsWith("sm_fetch_") &&
+      msg[1] !== firstFetchReq[1]
+    ) {
+      orderSocket.emit(["EOSE", msg[1]]);
+    }
+  }
+
+  const staleFetchStart = orderSocket.sent.length;
+  const staleLoad = orderClient.loadEscrow(ESCROW_ID);
+  await waitUntil(() => orderSocket.sent.slice(staleFetchStart).some(raw => {
+    const msg = JSON.parse(raw);
+    return msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_");
+  }));
+  const staleFetchReq = orderSocket.sent
+    .slice(staleFetchStart)
+    .map(raw => JSON.parse(raw))
+    .find(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_"));
+  assert(!!staleFetchReq, "Stale reload test starts a second full escrow-chain fetch");
+
+  for (const event of [orderCreate, buyerJoin]) {
+    orderSocket.emit(["EVENT", staleFetchReq[1], rawFromParsed(event)]);
+  }
+  orderSocket.emit(["EOSE", staleFetchReq[1]]);
+  const mergedOrderState = await staleLoad;
+  assert(
+    mergedOrderState?.eventChain.length === 3,
+    "Reload merges cached order-finalized JOIN with a shorter relay fetch"
+  );
+  assert(
+    !!mergedOrderState?.joinHolds?.[Role.BUYER]?.orderFinalizedAt,
+    "Reload preserves the finalized buyer order after a shorter relay fetch"
+  );
+
+  orderClient.disconnect();
 }
 
 // ══════════════════════════════════════════════════════════════════════════
