@@ -342,6 +342,19 @@ export function TradeDetail({
         .filter((hold): hold is { role: Role; expiresAt: number; remaining: number } => !!hold)
         .sort((a, b) => a.expiresAt - b.expiresAt)[0] ?? null
     : null;
+  const expiredJoinHold = state.status === EscrowStatus.CREATED
+    ? [Role.BUYER, Role.SELLER]
+        .filter(role => role !== state.initiator.role)
+        .map(role => {
+          const hold = state.joinHolds?.[role];
+          if (!hold || state.participants[role] !== hold.pubkey || participants[role]) return null;
+          return hold.expiresAt <= nowSec
+            ? { role, pubkey: hold.pubkey, expiredAgo: nowSec - hold.expiresAt }
+            : null;
+        })
+        .filter((hold): hold is { role: Role; pubkey: string; expiredAgo: number } => !!hold)
+        .sort((a, b) => b.expiredAgo - a.expiredAgo)[0] ?? null
+    : null;
   const liveLockWindowRole = liveJoinHold
     ? expectedLocker ?? liveJoinHold.role
     : null;
@@ -1138,6 +1151,24 @@ export function TradeDetail({
         }}>
           No eligible arbiter is available for this buyer and seller pair.
           A participant cannot also be the arbiter, so this trade should not be funded.
+        </div>
+      )}
+
+      {expiredJoinHold && (
+        <div style={{
+          background: T.amberDim, border: `1px solid ${T.amber}44`,
+          borderRadius: T.r, padding: 14, marginBottom: 16,
+          color: T.amber, fontFamily: T.sans, fontSize: 12, lineHeight: 1.45,
+        }}>
+          <div style={{
+            fontSize: 11, fontWeight: 800, fontFamily: T.mono,
+            letterSpacing: 1, marginBottom: 6,
+          }}>
+            LOCK WINDOW EXPIRED
+          </div>
+          {samePubkey(expiredJoinHold.pubkey, pubkey)
+            ? `Your ${roleDisplayName(expiredJoinHold.role).toLowerCase()} reservation expired before LOCK was published. Join again when you are ready. No sats moved.`
+            : `${roleDisplayName(expiredJoinHold.role)} ${expiredJoinHold.pubkey.slice(0, 8)}... joined, but no LOCK was published before the window closed. Ask them to join again. No sats moved.`}
         </div>
       )}
 

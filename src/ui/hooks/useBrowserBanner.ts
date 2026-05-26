@@ -1,11 +1,10 @@
 // ══════════════════════════════════════════════════════════════════════════
-// useBrowserBanner — per-pubkey dismissal of the browser-support banner
+// useBrowserBanner — per-pubkey dismissal of the runtime-support banner
 // ══════════════════════════════════════════════════════════════════════════
 //
-// The browser-support banner (BrowserSupportBanner.tsx) fires once per
-// pubkey to announce that browser Fedimint is enabled (v0.5.0 canary
-// iroh bump cleared the prior transport gate), per Pillar 2.7.
-// Dismissal is stored under `chama_browser_support_dismissed_${pubkey}`
+// The runtime-support banner (BrowserSupportBanner.tsx) fires once per
+// pubkey to announce the supported real-sats shells: Fedi, Tauri, and
+// APK. Dismissal is stored under `chama_runtime_support_dismissed_${pubkey}`
 // so:
 //
 //   - A new npub on the same browser sees the banner once until they
@@ -24,7 +23,7 @@
 
 import { useState, useEffect } from "react";
 
-const STORAGE_KEY_PREFIX = "chama_browser_support_dismissed_";
+const STORAGE_KEY_PREFIX = "chama_runtime_support_dismissed_";
 
 function readDismissed(pubkey: string): boolean {
   try {

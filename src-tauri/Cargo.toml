@@ -1,6 +1,6 @@
 [package]
 name = "chama"
-version = "1.0.5"
+version = "1.0.7"
 description = "Chama desktop shell"
 authors = ["Chama"]
 edition = "2021"

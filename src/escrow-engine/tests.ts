@@ -304,9 +304,11 @@ import {
   DEFAULT_NATIVE_BRIDGE_COMMUNITY,
   NATIVE_BRIDGE_COMMUNITY_KEY,
   NATIVE_BRIDGE_MODE_KEY,
+  NATIVE_BRIDGE_URL_KEY,
   NativeBridgeWallet,
   getConfiguredNativeBridgeCommunitySlug,
   getNativeBridgeCommunitySlug,
+  getNativeBridgeUrl,
   isNativeBridgeModeOn,
 } from "../fedimint/native-bridge-adapter.js";
 
@@ -4096,15 +4098,13 @@ console.log("\n── AUTO-INIT TARGET ──");
     "Unknown custom active invite without home remains manual reconnect");
 }
 
-// ── 29. BROWSER SUPPORT BANNER GATE ─────────────────────────────────────
+// ── 29. RUNTIME SUPPORT BANNER GATE ─────────────────────────────────────
 //
-// One-time-per-account positive announcement for browser users. v0.5.0
-// reframes the banner from a warning ("temporarily blocked") to a
-// current-state announcement ("Browser Fedimint enabled") after the
-// canary iroh bump cleared the transport gate. Gate logic itself is
-// unchanged: show once per browser pubkey, suppress in sim mode, never
-// re-show after dismissal.
-console.log("\n── BROWSER SUPPORT BANNER GATE ──");
+// One-time-per-account positive announcement for supported real-sats
+// runtimes. v1.0.7 reframes the old browser note into a clear Fedi /
+// Tauri / APK support note. Gate logic: show once per pubkey, suppress
+// in sim mode, never re-show after dismissal.
+console.log("\n── RUNTIME SUPPORT BANNER GATE ──");
 {
   // Browser, never dismissed → show (regardless of join state)
   assert(
@@ -4114,12 +4114,13 @@ console.log("\n── BROWSER SUPPORT BANNER GATE ──");
     "Browser user (not yet dismissed) sees the banner",
   );
 
-  // Native platform — no need to announce browser support, never show
+  // Native platform — also show, because the copy names APK/Tauri/Fedi
+  // as the preferred real-sats runtimes.
   assert(
     shouldShowBrowserSupportBanner({
       isBrowser: false, dismissed: false,
-    }) === false,
-    "Native (APK) user does NOT see the banner — only browser users get the announcement",
+    }) === true,
+    "Native (APK/Tauri/Fedi) user sees the supported-runtime banner",
   );
 
   // Dismissed earlier — never re-show
@@ -6567,6 +6568,26 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       else (globalThis as any).Capacitor = originalCapacitor;
       if (originalTauri === undefined) delete (globalThis as any).__TAURI_INTERNALS__;
       else (globalThis as any).__TAURI_INTERNALS__ = originalTauri;
+    }
+  }
+
+  {
+    const originalInjected = (globalThis as any).__CHAMA_NATIVE_FEDIMINT__;
+    (globalThis as any).localStorage?.setItem?.(
+      NATIVE_BRIDGE_URL_KEY,
+      "http://127.0.0.1:8787",
+    );
+    try {
+      (globalThis as any).__CHAMA_NATIVE_FEDIMINT__ = {
+        bridgeUrl: "http://127.0.0.1:61234",
+        instanceId: "second-demo-window",
+      };
+      assert(getNativeBridgeUrl() === "http://127.0.0.1:61234",
+        "Tauri-injected bridge URL wins over shared localStorage");
+    } finally {
+      if (originalInjected === undefined) delete (globalThis as any).__CHAMA_NATIVE_FEDIMINT__;
+      else (globalThis as any).__CHAMA_NATIVE_FEDIMINT__ = originalInjected;
+      (globalThis as any).localStorage?.removeItem?.(NATIVE_BRIDGE_URL_KEY);
     }
   }
 

@@ -1,12 +1,10 @@
 import { T } from "../theme.js";
 
-// One-time-per-account positive announcement for browser users.
-// v0.5.0: the Fedimint canary SDK bumped iroh-relay to 0.90 and
-// cleared the 400 Bad Request that previously gated browser-WebSocket
-// transport. End-to-end browser flows — federation join, ecash mint,
-// claim/redeem — verified working. Per Pillar 2.7 (educate at every
-// opportunity), surface the current honest state so returning users
-// who saw the old "temporarily blocked" copy know the gate is gone.
+// One-time-per-account positive runtime announcement.
+// v1.0.7: the production-safe real-sats paths are the shells that ship
+// their own Fedimint path directly: Fedi, Tauri desktop, and the APK.
+// The component keeps the old name so callsites/storage migration stay
+// small, but the copy is no longer browser-specific.
 export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
   return (
     <div style={{
@@ -19,16 +17,16 @@ export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
         fontSize: 11, fontWeight: 700, color: T.amber, fontFamily: T.mono,
         letterSpacing: 1,
       }}>
-        BROWSER SUPPORT NOTE
+        CHAMA SUPPORT NOTE
       </div>
       <div style={{
         fontSize: 13, color: T.text, fontFamily: T.sans,
         lineHeight: 1.55,
       }}>
-        Browser Fedimint enabled. Chama now runs end-to-end in the
-        browser — federations join, ecash mints, claims redeem.
-        Available on canary SDK pending Fedimint stable release.
-        Tracking: github.com/fedimint/fedimint-sdk/issues/288
+        Safe to use directly with Fedi, Tauri desktop, and the Android APK.
+        These routes use Chama's supported Fedimint paths for real sats.
+        Browser mode is fine for browsing and testing; for production money
+        movement, use one of the supported shells.
       </div>
       <button
         onClick={onDismiss}

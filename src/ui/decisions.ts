@@ -252,25 +252,23 @@ function inferCommunitySlugForInvite(invite: string | null): string | null {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Browser-support announcement banner
+// Runtime-support announcement banner
 // ──────────────────────────────────────────────────────────────────────────
 //
-// Per Pillar 2.7 (educate at every opportunity). v0.5.0 reframes this
-// from a "temporarily blocked" warning to a positive current-state
-// announcement — the Fedimint canary iroh-relay 0.90 bump cleared the
-// browser-WebSocket gate, so end-to-end browser flows work. Web users
-// see a one-time honest announcement regardless of whether they've
-// committed to a federation yet.
+// Per Pillar 2.7 (educate at every opportunity). v1.0.7 reframes this
+// from a browser-specific note to a production-path note: Fedi, Tauri,
+// and APK are the supported real-sats shells. It still fires once per
+// account regardless of whether the user has committed to a federation.
 //
 // Render only when ALL of:
-//   - we're in a browser (native APK doesn't need the announcement)
 //   - the user hasn't dismissed the banner before (one-time-per-account)
 
 export interface BrowserBannerInputs {
-  isBrowser: boolean;
+  /** Kept for older callsites/tests. v1.0.7 shows this in every real runtime. */
+  isBrowser?: boolean;
   dismissed: boolean;
   /** v0.4.2: sim mode swaps the WASM Fedimint client for a localStorage
-   *  mock, so the browser-Fedimint announcement is moot. The copy
+   *  mock, so the real-runtime announcement is moot. The copy
    *  directly contradicts the SIM MODE pill if shown alongside it.
    *  Hide unconditionally when sim mode is on. */
   simModeOn?: boolean;
@@ -278,7 +276,6 @@ export interface BrowserBannerInputs {
 
 export function shouldShowBrowserSupportBanner(inputs: BrowserBannerInputs): boolean {
   if (inputs.simModeOn) return false;
-  if (!inputs.isBrowser) return false;
   if (inputs.dismissed) return false;
   return true;
 }

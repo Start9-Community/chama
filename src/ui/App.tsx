@@ -1036,10 +1036,10 @@ export default function App() {
         </>
       )}
 
-      {/* Honest browser-support disclosure — one-time-per-account. Fires
-          for ALL browser users regardless of join state, so first-time
-          users encounter it before committing to a federation (the right
-          educational moment per Pillar 2.7). */}
+      {/* Honest runtime-support disclosure — one-time-per-account. Fires
+          regardless of join state, so first-time users encounter it
+          before committing to a federation (the right educational
+          moment per Pillar 2.7). */}
       {!detailMode && shouldShowBrowserSupportBanner({
         isBrowser: !Capacitor.isNativePlatform(),
         dismissed: browserBannerDismissed,

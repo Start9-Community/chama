@@ -207,6 +207,16 @@ function isTauriNativePlatform(): boolean {
   return Boolean(global.__TAURI__ || global.__TAURI_INTERNALS__);
 }
 
+function getInjectedNativeBridgeUrl(): string | null {
+  const global = globalThis as {
+    __CHAMA_NATIVE_FEDIMINT__?: {
+      bridgeUrl?: unknown;
+    };
+  };
+  const value = global.__CHAMA_NATIVE_FEDIMINT__?.bridgeUrl;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 function setLocalStorageValue(key: string, value: string): void {
   try {
     if (typeof localStorage === "undefined") return;
@@ -334,6 +344,7 @@ export function getNativeBridgeUrl(): string {
   const url =
     params?.get("nativeFedimintUrl") ??
     params?.get("native-fedimint-url") ??
+    getInjectedNativeBridgeUrl() ??
     getLocalStorageValue(NATIVE_BRIDGE_URL_KEY) ??
     getImportEnv("VITE_CHAMA_NATIVE_BRIDGE_URL") ??
     DEFAULT_NATIVE_BRIDGE_URL;
