@@ -4374,6 +4374,66 @@ console.log("\n── PROBE REACHABILITY ──");
     await client.cleanup();
   }
 
+  // (1a.2) Route-integrity guard: an already-open wallet must not let a
+  // requested Afribit invite be recorded while the OPFS/native client is
+  // actually still bound to BLF. This is the exact stale-route shape that
+  // can make the UI say one community while money operations hit another.
+  {
+    const wallet: any = makeZeroBalanceWallet({ federationId: BLF_FEDERATION_ID });
+    const client = new FedimintClient({}, async () => wallet);
+    await client.init();
+
+    let threw = false;
+    try {
+      await client.joinFederation(AFRIBIT_KIBERA_FEDERATION_INVITE);
+    } catch (e: any) {
+      threw = true;
+      assert(e?.code === "FED_JOIN_MISMATCH",
+        "Already-open wallet rejects known invite/federation ID mismatch");
+      assert(e?.expected === AFRIBIT_KIBERA_FEDERATION_ID,
+        "Already-open mismatch reports the requested federation ID");
+      assert(e?.got === BLF_FEDERATION_ID,
+        "Already-open mismatch reports the actual wallet federation ID");
+    }
+    assert(threw,
+      "Already-open BLF wallet cannot be recorded as Afribit");
+    await client.cleanup();
+  }
+
+  // (1a.3) Fresh join guard: if an adapter claims it joined an invite but
+  // getFederationId() returns a different known federation, fail before
+  // callbacks/localStorage can pin the wrong active route.
+  {
+    let opened = false;
+    const wallet: any = makeZeroBalanceWallet({ federationId: BLF_FEDERATION_ID });
+    wallet.open = async () => {
+      throw new Error("Client database not initialized");
+    };
+    wallet.isOpen = () => opened;
+    wallet.joinFederation = async (_invite: string) => {
+      opened = true;
+    };
+
+    const client = new FedimintClient({}, async () => wallet);
+    await client.init();
+
+    let threw = false;
+    try {
+      await client.joinFederation(AFRIBIT_KIBERA_FEDERATION_INVITE);
+    } catch (e: any) {
+      threw = true;
+      assert(e?.code === "FED_JOIN_MISMATCH",
+        "Fresh join rejects known invite/federation ID mismatch");
+      assert(e?.expected === AFRIBIT_KIBERA_FEDERATION_ID,
+        "Fresh join mismatch reports the requested federation ID");
+      assert(e?.got === BLF_FEDERATION_ID,
+        "Fresh join mismatch reports the actual wallet federation ID");
+    }
+    assert(threw,
+      "Fresh join cannot silently return BLF for an Afribit invite");
+    await client.cleanup();
+  }
+
   // (1b) probeReachable throws when not joined (requireWallet path).
   {
     const client = new FedimintClient({}, async () => {
@@ -6456,6 +6516,37 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
   }
 
   {
+    const originalFetch = (globalThis as any).fetch;
+    (globalThis as any).fetch = async (url: unknown) => {
+      const path = String(url);
+      if (path.endsWith("/health")) {
+        return new Response(JSON.stringify({ ok: true, joined: true }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: "unexpected path" }), { status: 404 });
+    };
+    try {
+      const wallet = new NativeBridgeWallet("http://127.0.0.1:8788");
+      let message = "";
+      let diagnostics: any = null;
+      try {
+        await wallet.open();
+      } catch (e) {
+        message = (e as Error).message;
+        diagnostics = (e as any).chamaDiagnostics;
+      }
+      assert(/stale or incompatible/.test(message),
+        "Native bridge rejects stale sidecars before opening a wallet");
+      assert(diagnostics?.issue === "native_fedimint_bridge_incompatible",
+        "Native bridge stale-sidecar errors carry a distinct diagnostic issue");
+      assert(Array.isArray(diagnostics?.requiredCapabilities) &&
+        diagnostics.requiredCapabilities.includes("reset"),
+        "Native bridge stale-sidecar diagnostics name the missing reset capability");
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  }
+
+  {
     const originalCapacitor = (globalThis as any).Capacitor;
     const originalTauri = (globalThis as any).__TAURI_INTERNALS__;
     (globalThis as any).localStorage?.removeItem?.("chama_native_fedimint");
@@ -6500,15 +6591,25 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
     (globalThis as any).localStorage?.setItem?.(NATIVE_BRIDGE_MODE_KEY, "1");
     (globalThis as any).fetch = async (url: unknown, init?: RequestInit) => {
       calls.push({ url: String(url), method: init?.method });
+      if (String(url).endsWith("/health")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          joined: true,
+          api_version: 2,
+          capabilities: ["reset"],
+        }), { status: 200 });
+      }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
     try {
       await resetLocalFedimintWallet();
-      assert(calls.length === 1,
+      assert(calls.length === 2,
         "Native reset uses the Rust bridge reset endpoint instead of browser OPFS");
-      assert(calls[0].url === "http://127.0.0.1:8787/reset",
+      assert(calls[0].url === "http://127.0.0.1:8787/health",
+        "Native reset checks bridge capability before reset");
+      assert(calls[1].url === "http://127.0.0.1:8787/reset",
         "Native reset targets the local sidecar reset endpoint");
-      assert(calls[0].method === "POST",
+      assert(calls[1].method === "POST",
         "Native reset posts to the sidecar reset endpoint");
     } finally {
       (globalThis as any).fetch = originalFetch;

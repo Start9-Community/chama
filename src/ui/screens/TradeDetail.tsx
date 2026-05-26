@@ -374,6 +374,13 @@ export function TradeDetail({
           : "Trade room";
   const releaseVoteCount = Object.values(state.votes).filter(v => v === Outcome.RELEASE).length;
   const refundVoteCount = Object.values(state.votes).filter(v => v === Outcome.REFUND).length;
+  const decisionTone = state.resolvedOutcome === Outcome.RELEASE
+    ? T.green
+    : state.resolvedOutcome === Outcome.REFUND
+      ? T.amber
+      : T.muted;
+  const decisionLabel = state.resolvedOutcome ? "final decision" : "awaiting decision";
+  const decisionValue = state.resolvedOutcome ?? "pending";
   const heroImages = [
     ...(renderedMenuRows.length > 0 ? renderedMenuRows : menuItems),
   ].filter(item => !!item.imageDataUrl).slice(0, 2);
@@ -1089,25 +1096,25 @@ export function TradeDetail({
         </div>
         {(state.status === EscrowStatus.LOCKED || state.status === EscrowStatus.APPROVED ||
           state.status === EscrowStatus.CLAIMED || state.status === EscrowStatus.COMPLETED) && (
-          <div style={{
+          <div className="trade-vote-decisions" style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr 1fr",
-            gap: 8,
+            gap: 10,
             paddingTop: 16,
             marginTop: 16,
             borderTop: `1px solid ${T.border}`,
           }}>
-            <div style={voteCountChipStyle(T.green)}>
-              <strong>{releaseVoteCount}</strong>
-              <span>release</span>
+            <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.green)}>
+              <strong style={voteDecisionValueStyle()}>{releaseVoteCount}</strong>
+              <span style={voteDecisionLabelStyle()}>release votes</span>
             </div>
-            <div style={voteCountChipStyle(T.amber)}>
-              <strong>{refundVoteCount}</strong>
-              <span>refund</span>
+            <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.amber)}>
+              <strong style={voteDecisionValueStyle()}>{refundVoteCount}</strong>
+              <span style={voteDecisionLabelStyle()}>refund votes</span>
             </div>
-            <div style={voteCountChipStyle(state.resolvedOutcome === Outcome.RELEASE ? T.green : state.resolvedOutcome === Outcome.REFUND ? T.amber : T.muted)}>
-              <strong>{state.resolvedOutcome ? "✓" : "…"}</strong>
-              <span>{state.resolvedOutcome ? state.resolvedOutcome : "decision"}</span>
+            <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(decisionTone)}>
+              <strong style={voteDecisionValueStyle()}>{decisionValue}</strong>
+              <span style={voteDecisionLabelStyle()}>{decisionLabel}</span>
             </div>
           </div>
         )}
@@ -1506,35 +1513,52 @@ export function TradeDetail({
         const refundText = isArbiter
           ? arbiterRefundColor
           : state.subscription ? T.red : T.amber;
+        const releaseLabel = isArbiter
+          ? "Side with " + releaseWinner
+          : voteOutcomeLabel("Release", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE));
+        const refundLabel = state.subscription
+          ? "Cancel & refund remaining"
+          : isArbiter
+            ? "Side with " + refundWinner
+            : voteOutcomeLabel("Refund", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND));
 
         return (
-          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+          <div className="trade-vote-actions" style={{
+            display: "grid",
+            gridTemplateColumns: showRelease && showRefund ? "minmax(0, 1fr) minmax(0, 1fr)" : "1fr",
+            gap: 10,
+            marginBottom: 16,
+          }}>
             {showRelease && (
-              <button disabled={voting} onClick={() => handleVote(Outcome.RELEASE)} style={{
-                flex: 1, padding: "16px", borderRadius: T.rs,
-                background: voting ? T.surface : releaseBg,
-                border: `1px solid ${releaseBorder}`,
-                color: releaseText,
-                fontFamily: T.mono, fontSize: 14, fontWeight: 700,
-                cursor: voting ? "default" : "pointer", transition: "all 0.2s",
-              }}>
-                {isArbiter ? "Side with " + releaseWinner : "✓ " + getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE)}
+              <button
+                disabled={voting}
+                onClick={() => handleVote(Outcome.RELEASE)}
+                aria-label={`Vote release: ${releaseLabel}`}
+                style={voteActionButtonStyle({
+                  disabled: voting,
+                  background: releaseBg,
+                  border: releaseBorder,
+                  color: releaseText,
+                })}
+              >
+                <span aria-hidden="true" style={voteActionIconStyle(releaseText)}>✓</span>
+                <span style={voteActionLabelStyle()}>{releaseLabel}</span>
               </button>
             )}
             {showRefund && (
-              <button disabled={voting} onClick={() => handleVote(Outcome.REFUND)} style={{
-                flex: 1, padding: "16px", borderRadius: T.rs,
-                background: voting ? T.surface : refundBg,
-                border: `1px solid ${refundBorder}`,
-                color: refundText,
-                fontFamily: T.mono, fontSize: 14, fontWeight: 700,
-                cursor: voting ? "default" : "pointer", transition: "all 0.2s",
-              }}>
-                {state.subscription
-                  ? "🛑 Cancel & Refund Remaining"
-                  : isArbiter
-                    ? "Side with " + refundWinner
-                    : "↩ " + getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND)}
+              <button
+                disabled={voting}
+                onClick={() => handleVote(Outcome.REFUND)}
+                aria-label={`Vote refund: ${refundLabel}`}
+                style={voteActionButtonStyle({
+                  disabled: voting,
+                  background: refundBg,
+                  border: refundBorder,
+                  color: refundText,
+                })}
+              >
+                <span aria-hidden="true" style={voteActionIconStyle(refundText)}>↩</span>
+                <span style={voteActionLabelStyle()}>{refundLabel}</span>
               </button>
             )}
           </div>
@@ -1850,21 +1874,125 @@ function menuPickButtonStyle(selected: boolean): React.CSSProperties {
   };
 }
 
-function voteCountChipStyle(color: string): React.CSSProperties {
+function voteDecisionChipStyle(color: string): React.CSSProperties {
   return {
-    minHeight: 58,
-    borderRadius: T.rs,
-    border: `1px solid ${color}33`,
-    background: color === T.muted ? T.surface : `${color}14`,
+    minHeight: 54,
+    minWidth: 0,
+    borderRadius: 999,
+    border: `1px solid ${color}38`,
+    background: color === T.muted
+      ? T.surface
+      : `linear-gradient(180deg, ${color}1f 0%, ${color}0f 100%)`,
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    gap: 2,
+    gap: 1,
+    padding: "9px 6px",
     color,
     fontFamily: T.mono,
     textTransform: "uppercase",
+    boxShadow: color === T.muted ? "none" : `inset 0 1px 0 ${color}22`,
+    overflow: "hidden",
   };
+}
+
+function voteDecisionValueStyle(): React.CSSProperties {
+  return {
+    minWidth: 0,
+    maxWidth: "100%",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    fontSize: 19,
+    fontWeight: 900,
+    lineHeight: 1.05,
+    letterSpacing: 0,
+  };
+}
+
+function voteDecisionLabelStyle(): React.CSSProperties {
+  return {
+    minWidth: 0,
+    maxWidth: "100%",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    fontSize: 8,
+    fontWeight: 800,
+    lineHeight: 1.15,
+    letterSpacing: 0.45,
+    opacity: 0.86,
+  };
+}
+
+function voteActionButtonStyle({
+  disabled,
+  background,
+  border,
+  color,
+}: {
+  disabled: boolean;
+  background: string;
+  border: string;
+  color: string;
+}): React.CSSProperties {
+  return {
+    width: "100%",
+    minWidth: 0,
+    minHeight: 54,
+    padding: "11px 12px",
+    borderRadius: 999,
+    background: disabled ? T.surface : background,
+    border: `1px solid ${border}`,
+    color,
+    fontFamily: T.mono,
+    cursor: disabled ? "default" : "pointer",
+    transition: "transform 0.2s, border-color 0.2s, background 0.2s",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    boxShadow: disabled ? "none" : `inset 0 1px 0 ${color}24`,
+    overflow: "hidden",
+  };
+}
+
+function voteActionIconStyle(color: string): React.CSSProperties {
+  return {
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    border: `1px solid ${color}55`,
+    background: `${color}18`,
+    color,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flex: "0 0 auto",
+    fontSize: 14,
+    fontWeight: 900,
+    lineHeight: 1,
+  };
+}
+
+function voteActionLabelStyle(): React.CSSProperties {
+  return {
+    minWidth: 0,
+    color: "inherit",
+    fontSize: 12,
+    fontWeight: 800,
+    lineHeight: 1.14,
+    letterSpacing: 0,
+    textAlign: "left",
+    overflowWrap: "anywhere",
+  };
+}
+
+function voteOutcomeLabel(outcome: "Release" | "Refund", label: string): string {
+  return label.toLowerCase().includes(outcome.toLowerCase())
+    ? label
+    : `${outcome} · ${label}`;
 }
 
 function menuPickLabel(category: string): string {

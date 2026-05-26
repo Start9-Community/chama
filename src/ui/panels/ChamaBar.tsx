@@ -26,6 +26,7 @@ import {
   fetchObserverFederations,
   mergePresets,
 } from "../../fedimint/federation-config.js";
+import { getCommunityBySlug, type Community } from "../../communities/registry.js";
 import type { ChamaBarLabel } from "../decisions.js";
 import { T } from "../theme.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
@@ -36,6 +37,7 @@ export function ChamaBar({
   onTapStranded,
   onInit,
   showReconnect,
+  communitySlug,
 }: {
   fedimint: FedimintState;
   /** Pre-computed by the shell via decideChamaBarLabel. The bar is a
@@ -57,6 +59,11 @@ export function ChamaBar({
    *  returning users; false for first-time users (community pills are
    *  the join surface). */
   showReconnect: boolean;
+  /** Selected Chama identity from Browse/onboarding. Prefer this label
+   *  over the raw federation ID so Afribit/Bitsacco and other community
+   *  routes read like the user's chosen Chama, not the lower-level
+   *  fallback federation. */
+  communitySlug?: string | null;
 }) {
   const [pillPresets, setPillPresets] = useState<FederationPreset[]>(CURATED_PRESETS);
   useEffect(() => {
@@ -73,10 +80,13 @@ export function ChamaBar({
   if (!fedimint.joined) {
     displayName = fedimint.busy ? "Connecting Chama..." : "No Chama";
   } else {
+    const community = communitySlug ? getCommunityBySlug(communitySlug) : null;
     const matched = fedimint.federationId
       ? pillPresets.find((p) => p.federationId === fedimint.federationId)
       : null;
-    if (matched) {
+    if (community) {
+      displayName = communityChamaBarLabel(community);
+    } else if (matched) {
       displayName = matched.name;
     } else if (fedimint.federationId) {
       displayName = "External route";
@@ -141,6 +151,12 @@ export function ChamaBar({
       )}
     </div>
   );
+}
+
+function communityChamaBarLabel(community: Community): string {
+  return community.pickerLabel
+    ?? community.disambiguator
+    ?? community.displayName;
 }
 
 function ChamaBarLabelPill({

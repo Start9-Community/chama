@@ -1167,6 +1167,10 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "ok": true,
         "joined": joined,
+        "api_version": 2,
+        "capabilities": [
+            "reset",
+        ],
     }))
 }
 

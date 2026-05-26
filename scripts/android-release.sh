@@ -60,6 +60,40 @@ default_repo() {
   fi
 }
 
+assert_release_tag_signed() {
+  local tag="$1"
+  local ref="refs/tags/$tag"
+  local type
+  type=$(git cat-file -t "$ref")
+  if [ "$type" != "tag" ]; then
+    echo "❌ Local tag $tag is lightweight, not a signed annotated tag."
+    echo "   Run ./scripts/release.sh --current first, or recreate it with:"
+    echo "     git tag -s $tag <commit-sha> -m \"$tag\""
+    exit 1
+  fi
+  if ! git cat-file tag "$ref" | grep -q -- "-----BEGIN PGP SIGNATURE-----"; then
+    echo "❌ Local tag $tag is annotated but not signed."
+    echo "   Run ./scripts/release.sh --current first, or recreate it with:"
+    echo "     git tag -s $tag <commit-sha> -m \"$tag\""
+    exit 1
+  fi
+}
+
+remote_tag_target_sha() {
+  local tag="$1"
+  local sha
+  sha=$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}')
+  if [ -z "$sha" ]; then
+    sha=$(git ls-remote origin "refs/tags/$tag" | awk '{print $1}')
+  fi
+  printf '%s\n' "$sha"
+}
+
+remote_tag_ref_sha() {
+  local tag="$1"
+  git ls-remote origin "refs/tags/$tag" | awk '{print $1}'
+}
+
 android_sdk_dir() {
   if [ -n "${ANDROID_HOME:-}" ]; then
     echo "$ANDROID_HOME"
@@ -494,6 +528,8 @@ if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   exit 1
 fi
 
+assert_release_tag_signed "$TAG"
+
 TAG_SHA=$(git rev-list -n 1 "$TAG")
 if [ "$TAG_SHA" != "$COMMIT_SHA" ]; then
   echo "❌ Local tag $TAG points at $TAG_SHA, not HEAD $COMMIT_SHA."
@@ -502,6 +538,22 @@ fi
 
 if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
   echo "❌ Remote tag $TAG is missing. Run ./scripts/release.sh --current first."
+  exit 1
+fi
+
+REMOTE_TAG_SHA=$(remote_tag_target_sha "$TAG")
+if [ "$REMOTE_TAG_SHA" != "$COMMIT_SHA" ]; then
+  echo "❌ Remote tag $TAG points at $REMOTE_TAG_SHA, not HEAD $COMMIT_SHA."
+  exit 1
+fi
+
+LOCAL_TAG_REF_SHA=$(git rev-parse "refs/tags/$TAG")
+REMOTE_TAG_REF_SHA=$(remote_tag_ref_sha "$TAG")
+if [ "$REMOTE_TAG_REF_SHA" != "$LOCAL_TAG_REF_SHA" ]; then
+  echo "❌ Remote tag $TAG is not the local signed tag object."
+  echo "   Refusing to publish GitHub release assets against a stale lightweight or unsigned tag."
+  echo "   Run ./scripts/release.sh --current first, or replace the remote tag explicitly:"
+  echo "     git push --force origin $TAG"
   exit 1
 fi
 

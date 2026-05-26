@@ -1010,6 +1010,7 @@ export default function App() {
           the failure-mode escape hatch is reachable from anywhere. */}
           <ChamaBar
             fedimint={fedimint}
+            communitySlug={browseCommunity}
             chamaLabel={decideChamaBarLabel({
               balanceMsats: fedimint.balanceMsats ?? 0,
               hasActiveBuyerSellerCommitment: hasActiveCommitment,

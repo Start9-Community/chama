@@ -30,6 +30,7 @@
 import type { LnReceiveStateKind } from "./sdk-adapter.js";
 export type { LnReceiveStateKind };
 import type { ChamaOperationMeta } from "../payments/sats-trace.js";
+import { expectedFederationIdForInvite } from "./federation-config.js";
 
 export interface OnchainInfo {
   network: string;
@@ -214,6 +215,36 @@ function claimTrace(checkpoint: string, fields: Record<string, unknown>): void {
   }
   // eslint-disable-next-line no-console
   console.info(parts.join(" "));
+}
+
+function normalizeKnownFederationId(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function assertJoinedFederationMatchesInvite(
+  inviteCode: string,
+  federationId: string | null | undefined,
+): void {
+  const expected = expectedFederationIdForInvite(inviteCode);
+  if (!expected) return;
+
+  const actual = normalizeKnownFederationId(federationId);
+  if (actual === expected) return;
+
+  const err: Error & {
+    code?: string;
+    expected?: string;
+    got?: string | null;
+    invitePrefix?: string;
+  } = new Error(
+    `Requested federation invite resolves to ${expected}, but the wallet opened ` +
+      `${actual || "an unknown federation"}. Refusing to record a mismatched route.`
+  );
+  err.code = "FED_JOIN_MISMATCH";
+  err.expected = expected;
+  err.got = actual || null;
+  err.invitePrefix = inviteCode.slice(0, 24);
+  throw err;
 }
 
 // ── Callback interface ────────────────────────────────────────────────────
@@ -478,6 +509,7 @@ export class FedimintClient {
     if (wallet.isOpen()) {
       const currentId =
         this._federationId || (await wallet.federation.getFederationId());
+      assertJoinedFederationMatchesInvite(inviteCode, currentId);
 
       // (b) Re-open case: wallet is open from a previous session but
       // we haven't called joinFederation yet this session. Record the
@@ -509,6 +541,7 @@ export class FedimintClient {
 
     await wallet.joinFederation(inviteCode);
     this._federationId = await wallet.federation.getFederationId();
+    assertJoinedFederationMatchesInvite(inviteCode, this._federationId);
     this._joinedInvite = inviteCode.trim();
 
     // Now that the client exists in the DB, wire up the balance stream

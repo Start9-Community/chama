@@ -25,6 +25,7 @@ export const DEFAULT_NATIVE_BRIDGE_URL = "http://127.0.0.1:8787";
 export const DEFAULT_NATIVE_BRIDGE_COMMUNITY = "us-blf";
 
 const TRUE_SETTING_VALUES = new Set(["1", "true", "yes", "on"]);
+const REQUIRED_NATIVE_BRIDGE_CAPABILITIES = ["reset"];
 
 interface NativeBridgeFetchInit extends Omit<RequestInit, "body"> {
   body?: unknown;
@@ -35,6 +36,14 @@ interface NativeInfoResponse {
   network: string;
   total_amount_msat: number;
   meta: unknown;
+}
+
+interface NativeHealthResponse {
+  ok: boolean;
+  joined?: boolean;
+  api_version?: number;
+  apiVersion?: number;
+  capabilities?: string[];
 }
 
 interface NativeJoinResponse {
@@ -272,6 +281,37 @@ function nativeBridgeUnavailableError(
   return error;
 }
 
+function hasChamaDiagnostics(
+  error: unknown,
+): error is Error & { chamaDiagnostics: Record<string, unknown> } {
+  return error instanceof Error && isRecord((error as any).chamaDiagnostics);
+}
+
+function nativeBridgeCompatibilityError(
+  baseUrl: string,
+  cause: string,
+): Error {
+  const diagnostic = {
+    issue: "native_fedimint_bridge_incompatible",
+    adapter: "native-rust-sidecar",
+    bridgeUrl: baseUrl,
+    requiredCapabilities: REQUIRED_NATIVE_BRIDGE_CAPABILITIES,
+    cause,
+    interpretation:
+      "A local process answered at the native Fedimint bridge URL, but it is not the current " +
+      "Chama Rust bridge API. Stop the stale bridge process and start the bridge built from " +
+      "this Chama release.",
+  };
+  const error = new Error(
+    `Native Fedimint bridge at ${baseUrl} looks stale or incompatible: ${cause}. ` +
+      `Stop the old bridge process, start the current Chama Rust bridge, then tap Reconnect.\n\n` +
+      `Chama diagnostics:\n${JSON.stringify(diagnostic, null, 2)}`,
+  );
+  (error as Error & { chamaDiagnostics?: Record<string, unknown> }).chamaDiagnostics =
+    diagnostic;
+  return error;
+}
+
 export function isNativeBridgeModeOn(): boolean {
   const params = getBrowserSearchParams();
   const urlFlag =
@@ -316,9 +356,36 @@ export function getConfiguredNativeBridgeCommunitySlug(): string | null {
 }
 
 export async function resetNativeBridgeWallet(baseUrl = getNativeBridgeUrl()): Promise<void> {
-  await nativeBridgeFetch<NativeResetResponse>(normalizeBaseUrl(baseUrl), "/reset", {
+  const normalized = normalizeBaseUrl(baseUrl);
+  await assertNativeBridgeCompatible(normalized);
+  await nativeBridgeFetch<NativeResetResponse>(normalized, "/reset", {
     method: "POST",
   });
+}
+
+async function assertNativeBridgeCompatible(baseUrl: string): Promise<void> {
+  let health: NativeHealthResponse;
+  try {
+    health = await nativeBridgeFetch<NativeHealthResponse>(baseUrl, "/health");
+  } catch (error) {
+    if (hasChamaDiagnostics(error)) throw error;
+    throw nativeBridgeCompatibilityError(baseUrl, asErrorMessage(error));
+  }
+
+  if (!health.ok) {
+    throw nativeBridgeCompatibilityError(baseUrl, "health check returned ok=false");
+  }
+
+  const capabilities = new Set((health.capabilities ?? []).map((value) => String(value)));
+  const missing = REQUIRED_NATIVE_BRIDGE_CAPABILITIES.filter((capability) =>
+    !capabilities.has(capability)
+  );
+  if (missing.length > 0) {
+    throw nativeBridgeCompatibilityError(
+      baseUrl,
+      `missing bridge capability: ${missing.join(", ")}`,
+    );
+  }
 }
 
 async function nativeBridgeFetch<T>(
@@ -380,6 +447,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
   }
 
   async open(): Promise<void> {
+    await assertNativeBridgeCompatible(this.baseUrl);
     const info = await this.request<NativeInfoResponse>("/info");
     this.applyInfo(info);
     this.loadCachedInvite();
@@ -390,6 +458,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
   }
 
   async joinFederation(inviteCode: string): Promise<void> {
+    await assertNativeBridgeCompatible(this.baseUrl);
     const joined = await this.request<NativeJoinResponse>("/join", {
       method: "POST",
       body: { inviteCode },
