@@ -54,6 +54,14 @@ import {
   setScopedStorageItem,
 } from "../../storage/user-scope.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
+import {
+  estimateFiatForMsats,
+  estimateSatsForFiat,
+  formatFiatAmount,
+  type AmountDisplayMode,
+} from "../amount-display.js";
+import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
+import { useFiatRates } from "../hooks/useFiatRates.js";
 
 type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
@@ -72,6 +80,7 @@ interface FormState {
   sats: string;
   fiat: string;
   cur: string;
+  premium: string;
   fulfillment: Fulfillment;
   isSubscription: boolean;
   periods: string;
@@ -210,6 +219,7 @@ function normalizeFormState(raw: any, currency = "USD"): FormState {
     ...raw,
     listingMode,
     cur: fallback.cur,
+    premium: typeof raw.premium === "string" || typeof raw.premium === "number" ? String(raw.premium) : fallback.premium,
     paymentMethods: Array.isArray(raw.paymentMethods)
       ? raw.paymentMethods
           .map((method: unknown) => typeof method === "string" ? method.trim() : "")
@@ -230,6 +240,14 @@ function parseWholeSats(value: string): number {
 function parseOptionalPositiveNumber(value: string): number | undefined {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function parsePremiumBps(value: string): number | undefined {
+  if (!value.trim()) return undefined;
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  const clamped = Math.max(-99, Math.min(1000, parsed));
+  return Math.round(clamped * 100);
 }
 
 function parseOptionalPositiveInt(value: string): number | undefined {
@@ -375,6 +393,7 @@ function hasDraftContent(form: FormState): boolean {
     form.desc.trim()
     || form.sats.trim()
     || form.fiat.trim()
+    || form.premium.trim()
     || form.paymentMethods.length > 0
     || form.menuItems.some(item =>
       item.label.trim()
@@ -569,7 +588,78 @@ function menuCountLabel(vertical: Vertical, count: number): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
-function formatMenuAmount(item: MenuItem) {
+function menuFiatFloor(items: MenuItem[]): { amount: number; currency: string } | null {
+  const priced = items.filter((item) => item.fiatAmount !== undefined && item.fiatCurrency);
+  if (priced.length === 0) return null;
+  const currencies = new Set(priced.map((item) => item.fiatCurrency));
+  if (currencies.size !== 1) return null;
+  const amount = Math.min(...priced.map((item) => item.fiatAmount ?? Number.POSITIVE_INFINITY));
+  const currency = priced[0]?.fiatCurrency;
+  return Number.isFinite(amount) && currency ? { amount, currency } : null;
+}
+
+function estimatedMenuFiatFloor({
+  menuItems,
+  currency,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  menuItems: MenuItem[];
+  currency: string;
+  usdPerBtc: number | null;
+  usdFiatRates: Record<string, number>;
+}): { amount: number; currency: string } | null {
+  if (menuItems.length === 0) return null;
+  const floorMsats = Math.min(...menuItems.map(item => item.amountMsats));
+  const amount = estimateFiatForMsats({
+    amountMsats: floorMsats,
+    currency,
+    usdPerBtc,
+    usdFiatRates,
+  });
+  return amount === null ? null : { amount, currency };
+}
+
+function formatMenuAmount(
+  item: MenuItem,
+  amountDisplayMode: AmountDisplayMode,
+  estimate?: {
+    currency: string;
+    usdPerBtc: number | null;
+    usdFiatRates: Record<string, number>;
+  },
+) {
+  if (amountDisplayMode === "fiat" && item.fiatAmount !== undefined && item.fiatCurrency) {
+    return <>{formatFiatAmount(item.fiatAmount, item.fiatCurrency)}</>;
+  }
+  if (amountDisplayMode === "fiat" && estimate) {
+    if (item.minAmountMsats !== undefined && item.maxAmountMsats !== undefined) {
+      const min = estimateFiatForMsats({
+        amountMsats: item.minAmountMsats,
+        currency: estimate.currency,
+        usdPerBtc: estimate.usdPerBtc,
+        usdFiatRates: estimate.usdFiatRates,
+      });
+      const max = estimateFiatForMsats({
+        amountMsats: item.maxAmountMsats,
+        currency: estimate.currency,
+        usdPerBtc: estimate.usdPerBtc,
+        usdFiatRates: estimate.usdFiatRates,
+      });
+      if (min !== null && max !== null) {
+        const minLabel = formatFiatAmount(min, estimate.currency);
+        const maxLabel = formatFiatAmount(max, estimate.currency);
+        return <>{minLabel === maxLabel ? minLabel : `${minLabel}-${maxLabel.replace(`${estimate.currency} `, "")}`}</>;
+      }
+    }
+    const amount = estimateFiatForMsats({
+      amountMsats: item.amountMsats,
+      currency: estimate.currency,
+      usdPerBtc: estimate.usdPerBtc,
+      usdFiatRates: estimate.usdFiatRates,
+    });
+    if (amount !== null) return <>{formatFiatAmount(amount, estimate.currency)}</>;
+  }
   if (item.minAmountMsats !== undefined && item.maxAmountMsats !== undefined) {
     const min = fmtSats(item.minAmountMsats);
     const max = fmtSats(item.maxAmountMsats);
@@ -585,6 +675,114 @@ function formatMenuAmount(item: MenuItem) {
   return <BitcoinAmount msats={item.amountMsats} size={12} gap={4} glyphScale={1.18} />;
 }
 
+function supportsPremium(vertical: Vertical): boolean {
+  return vertical === "p2p-trade" || vertical === "bill-pay" || vertical === "lending";
+}
+
+function premiumLabelForVertical(vertical: Vertical): string {
+  if (vertical === "lending") return "PREMIUM APR (%)";
+  if (vertical === "bill-pay") return "SERVICE PREMIUM (%)";
+  return "PREMIUM (%)";
+}
+
+function premiumHintForVertical(vertical: Vertical, currency: string): string {
+  if (vertical === "lending") return "Shown as APR on the loan request.";
+  if (vertical === "bill-pay") return `Shown with the ${currency} bill price.`;
+  return `Shown with the ${currency} exchange price.`;
+}
+
+function formatPremiumPercent(premiumBps: number): string {
+  const pct = premiumBps / 100;
+  return Math.abs(pct) < 10 && !Number.isInteger(pct)
+    ? pct.toFixed(1)
+    : pct.toFixed(Number.isInteger(pct) ? 0 : 2).replace(/\.?0+$/, "");
+}
+
+function premiumReviewLine(form: FormState, vertical: Vertical): string | null {
+  if (!supportsPremium(vertical)) return null;
+  const premiumBps = parsePremiumBps(form.premium);
+  if (premiumBps === undefined) return null;
+  const display = formatPremiumPercent(premiumBps);
+  if (vertical === "lending") return `${display}% premium APR`;
+  const signed = premiumBps > 0 ? `+${display}` : display;
+  return `${signed}% premium`;
+}
+
+function parseFiatAmount(value: string): number | null {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function fiatInputValue(amount: number): string {
+  if (!Number.isFinite(amount) || amount <= 0) return "";
+  const maximumFractionDigits = amount >= 1000 ? 0 : amount >= 100 ? 1 : 2;
+  return amount.toLocaleString("en-US", {
+    useGrouping: false,
+    maximumFractionDigits,
+  });
+}
+
+function fiatInputForSats({
+  satsValue,
+  currency,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  satsValue: string;
+  currency: string;
+  usdPerBtc: number | null;
+  usdFiatRates: Record<string, number>;
+}): string | null {
+  const trimmed = satsValue.trim();
+  if (!trimmed) return "";
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed)) return null;
+  const sats = parseWholeSats(trimmed);
+  if (sats <= 0) return "";
+  const amount = estimateFiatForMsats({
+    amountMsats: sats * 1000,
+    currency,
+    usdPerBtc,
+    usdFiatRates,
+  });
+  return amount === null ? null : fiatInputValue(amount);
+}
+
+function satsInputForFiat({
+  fiatValue,
+  currency,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  fiatValue: string;
+  currency: string;
+  usdPerBtc: number | null;
+  usdFiatRates: Record<string, number>;
+}): string | null {
+  if (!fiatValue.trim()) return "";
+  const fiatAmount = parseFiatAmount(fiatValue);
+  if (fiatAmount === null) return null;
+  if (fiatAmount <= 0) return "";
+  const sats = estimateSatsForFiat({
+    fiatAmount,
+    currency,
+    usdPerBtc,
+    usdFiatRates,
+  });
+  return sats === null ? null : String(sats);
+}
+
+function premiumCheckoutLine(form: FormState, vertical: Vertical): string | null {
+  if (vertical === "lending" || !supportsPremium(vertical)) return null;
+  const premiumBps = parsePremiumBps(form.premium);
+  const baseFiat = parseFiatAmount(form.fiat);
+  if (premiumBps === undefined || baseFiat === null || baseFiat <= 0) return null;
+  const checkoutFiat = baseFiat * (1 + premiumBps / 10_000);
+  if (!Number.isFinite(checkoutFiat) || checkoutFiat < 0) return null;
+  const signed = premiumBps > 0 ? `+${formatPremiumPercent(premiumBps)}%` : `${formatPremiumPercent(premiumBps)}%`;
+  return `${formatFiatAmount(baseFiat, form.cur)} ${signed} = ${formatFiatAmount(checkoutFiat, form.cur)} at checkout`;
+}
+
 export function emptyCreateFormState(currency = "USD"): FormState {
   return {
     listingMode: "single",
@@ -592,6 +790,7 @@ export function emptyCreateFormState(currency = "USD"): FormState {
     sats: "",
     fiat: "",
     cur: currency,
+    premium: "",
     fulfillment: "physical",
     isSubscription: false,
     periods: "3",
@@ -605,6 +804,7 @@ export function CreateForm({
   onCreate, onClose,
   arbiterWarning, onGoToArbiterTrade,
   canOfferSubscription, userPubkey, activeInvite,
+  amountDisplayMode,
 }: {
   onCreate: (params: any) => void;
   onClose: () => void;
@@ -613,6 +813,7 @@ export function CreateForm({
   canOfferSubscription: boolean;
   userPubkey: string | null;
   activeInvite: string | null;
+  amountDisplayMode: AmountDisplayMode;
 }) {
   // Resolve community context for the listing. Read once at mount;
   // listing publishes into seller's current community (Pillar 2.3).
@@ -685,6 +886,7 @@ export function CreateForm({
             : amountMsats,
         fiatAmount: !hasMenu && form.fiat ? parseFloat(form.fiat) : undefined,
         fiatCurrency: !hasMenu && form.fiat ? form.cur : undefined,
+        premiumBps: parsePremiumBps(form.premium),
         category: vertical,
         community,
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
@@ -760,6 +962,7 @@ export function CreateForm({
           setForm={setForm}
           homeCommunity={homeCommunity}
           canOfferSubscription={canOfferSubscription}
+          amountDisplayMode={amountDisplayMode}
           onBack={() => setStep(1)}
           onNext={() => setStep(3)}
         />
@@ -773,6 +976,7 @@ export function CreateForm({
           homeCommunity={homeCommunity}
           firstPublishDone={hasFirstPublishedBefore(userPubkey)}
           submitting={submitting}
+          amountDisplayMode={amountDisplayMode}
           onBack={() => setStep(2)}
           onPublish={handlePublish}
           onSaveDraft={() => {
@@ -1138,6 +1342,7 @@ function Step2({
   vertical, form, setForm,
   homeCommunity,
   canOfferSubscription,
+  amountDisplayMode,
   onBack, onNext,
 }: {
   vertical: Vertical;
@@ -1145,9 +1350,12 @@ function Step2({
   setForm: (updater: (f: FormState) => FormState) => void;
   homeCommunity: ReturnType<typeof getCommunityBySlug>;
   canOfferSubscription: boolean;
+  amountDisplayMode: AmountDisplayMode;
   onBack: () => void;
   onNext: () => void;
 }) {
+  const btcPrice = useBitcoinPrice();
+  const fiatRates = useFiatRates();
   const menuItems = normalizeMenuItems(form, vertical);
   const hasMenu = menuItems.length > 0;
   const usingMenu = form.listingMode === "menu";
@@ -1169,6 +1377,105 @@ function Step2({
     !lendingCapExceeded;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
+  const syncSingleSats = (value: string) => {
+    setForm(prev => {
+      const next: FormState = { ...prev, sats: value };
+      if (vertical !== "lending") {
+        const fiat = fiatInputForSats({
+          satsValue: value,
+          currency: prev.cur,
+          usdPerBtc: btcPrice.usd,
+          usdFiatRates: fiatRates.rates,
+        });
+        if (fiat !== null) next.fiat = fiat;
+      }
+      return next;
+    });
+  };
+  const syncSingleFiat = (value: string) => {
+    setForm(prev => {
+      const next: FormState = { ...prev, fiat: value };
+      const sats = satsInputForFiat({
+        fiatValue: value,
+        currency: prev.cur,
+        usdPerBtc: btcPrice.usd,
+        usdFiatRates: fiatRates.rates,
+      });
+      if (sats !== null) next.sats = sats;
+      return next;
+    });
+  };
+  const updateMenuSats = (id: string, value: string) => {
+    setForm(prev => ({
+      ...prev,
+      isSubscription: false,
+      menuItems: prev.menuItems.map(item => {
+        if (item.id !== id) return item;
+        const patch: Partial<MenuDraftItem> = { sats: value };
+        if (vertical !== "lending") {
+          const fiat = fiatInputForSats({
+            satsValue: value,
+            currency: prev.cur,
+            usdPerBtc: btcPrice.usd,
+            usdFiatRates: fiatRates.rates,
+          });
+          if (fiat !== null) patch.fiat = fiat;
+        }
+        return { ...item, ...patch };
+      }),
+    }));
+  };
+  const updateMenuFiat = (id: string, value: string) => {
+    setForm(prev => ({
+      ...prev,
+      isSubscription: false,
+      menuItems: prev.menuItems.map(item => {
+        if (item.id !== id) return item;
+        const sats = satsInputForFiat({
+          fiatValue: value,
+          currency: prev.cur,
+          usdPerBtc: btcPrice.usd,
+          usdFiatRates: fiatRates.rates,
+        });
+        return {
+          ...item,
+          fiat: value,
+          ...(sats !== null ? { sats } : {}),
+        };
+      }),
+    }));
+  };
+  useEffect(() => {
+    if (vertical === "lending" || !form.sats.trim() || form.fiat.trim()) return;
+    const fiat = fiatInputForSats({
+      satsValue: form.sats,
+      currency: form.cur,
+      usdPerBtc: btcPrice.usd,
+      usdFiatRates: fiatRates.rates,
+    });
+    if (!fiat) return;
+    setForm(prev => prev.fiat.trim() ? prev : { ...prev, fiat });
+  }, [vertical, form.sats, form.fiat, form.cur, btcPrice.usd, fiatRates.rates, setForm]);
+
+  useEffect(() => {
+    if (vertical === "lending" || form.menuItems.length === 0) return;
+    setForm(prev => {
+      let changed = false;
+      const menuItems = prev.menuItems.map(item => {
+        if (!item.sats.trim() || item.fiat.trim()) return item;
+        const fiat = fiatInputForSats({
+          satsValue: item.sats,
+          currency: prev.cur,
+          usdPerBtc: btcPrice.usd,
+          usdFiatRates: fiatRates.rates,
+        });
+        if (!fiat) return item;
+        changed = true;
+        return { ...item, fiat };
+      });
+      return changed ? { ...prev, menuItems } : prev;
+    });
+  }, [vertical, form.menuItems, btcPrice.usd, fiatRates.rates, setForm]);
   const paymentMethodOptions = railsForCommunity(homeCommunity?.slug);
   const togglePaymentMethod = (method: string) => {
     setForm(prev => {
@@ -1196,6 +1503,17 @@ function Step2({
   };
   const menuTitle = menuTitleForVertical(vertical);
   const menuHint = menuHintForVertical(vertical);
+  const fiatPrimary = amountDisplayMode === "fiat" && vertical !== "lending";
+  const menuFiatFloorValue = amountDisplayMode === "fiat" ? menuFiatFloor(menuItems) : null;
+  const menuDisplayFiatFloorValue = amountDisplayMode === "fiat"
+    ? menuFiatFloorValue ?? estimatedMenuFiatFloor({
+        menuItems,
+        currency: form.cur,
+        usdPerBtc: btcPrice.usd,
+        usdFiatRates: fiatRates.rates,
+      })
+    : null;
+  const premiumCheckout = premiumCheckoutLine(form, vertical);
   const addMenuItem = () => {
     setForm(prev => ({
       ...prev,
@@ -1299,6 +1617,7 @@ function Step2({
 
       {!usingMenu ? (
         <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+          {!fiatPrimary && (
           <div style={{ flex: vertical === "lending" ? 1.15 : 1 }}>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
               {vertical === "lending" ? "LOAN PRINCIPAL (SATS)" : "AMOUNT (SATS)"}
@@ -1306,12 +1625,53 @@ function Step2({
             <input
               type="number"
               value={form.sats}
-              onChange={e => set("sats", e.target.value)}
+              onChange={e => syncSingleSats(e.target.value)}
               onWheel={blurNumberInputOnWheel}
               placeholder="100000"
               style={inputStyle}
             />
           </div>
+          )}
+          {fiatPrimary && (
+          <div style={{ flex: 1.15 }}>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>{form.cur} PRICE</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <div style={{
+                width: 72,
+                padding: "12px 6px",
+                borderRadius: T.rs,
+                border: `1px solid ${T.border}`,
+                background: T.surface,
+                color: T.text,
+                fontFamily: T.mono,
+                fontSize: 12,
+                fontWeight: 900,
+                textAlign: "center",
+              }}>
+                {form.cur}
+              </div>
+              <input type="number" value={form.fiat} onChange={e => syncSingleFiat(e.target.value)} placeholder="50" style={{ ...inputStyle, flex: 1 }} />
+            </div>
+            <div style={{ marginTop: 5, fontSize: 9, color: T.muted, fontFamily: T.mono }}>
+              local price · escrow still settles in sats
+            </div>
+          </div>
+          )}
+          {fiatPrimary && (
+          <div style={{ flex: 0.85 }}>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+              AMOUNT (SATS)
+            </div>
+            <input
+              type="number"
+              value={form.sats}
+              onChange={e => syncSingleSats(e.target.value)}
+              onWheel={blurNumberInputOnWheel}
+              placeholder="100000"
+              style={inputStyle}
+            />
+          </div>
+          )}
           {vertical === "lending" ? (
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>BORROWER TIER</div>
@@ -1331,7 +1691,7 @@ function Step2({
                 {lendingTierSummary(form.sats)}
               </div>
             </div>
-          ) : (
+          ) : !fiatPrimary && (
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FIAT</div>
             <div style={{ display: "flex", gap: 6 }}>
@@ -1349,7 +1709,7 @@ function Step2({
               }}>
                 {form.cur}
               </div>
-              <input type="number" value={form.fiat} onChange={e => set("fiat", e.target.value)} placeholder="50" style={{ ...inputStyle, flex: 1 }} />
+              <input type="number" value={form.fiat} onChange={e => syncSingleFiat(e.target.value)} placeholder="50" style={{ ...inputStyle, flex: 1 }} />
             </div>
             <div style={{ marginTop: 5, fontSize: 9, color: T.muted, fontFamily: T.mono }}>
               auto from {homeCommunity?.flagEmoji ?? "🌐"} Chama
@@ -1386,6 +1746,44 @@ function Step2({
             <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.45 }}>
               {menuCurrencyHint(vertical, form.cur)}
               {" "}Auto from {homeCommunity?.flagEmoji ?? "🌐"} Chama.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {supportsPremium(vertical) && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+            {premiumLabelForVertical(vertical)}
+          </div>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(112px, 0.45fr) 1fr",
+            gap: 8,
+            alignItems: "stretch",
+          }}>
+            <input
+              type="number"
+              value={form.premium}
+              onChange={e => set("premium", e.target.value)}
+              onWheel={blurNumberInputOnWheel}
+              placeholder={vertical === "lending" ? "12" : "2.5"}
+              style={inputStyle}
+            />
+            <div style={{
+              minHeight: 44,
+              padding: "9px 10px",
+              borderRadius: T.rs,
+              border: `1px solid ${T.border}`,
+              background: T.surface,
+              color: premiumCheckout ? T.accent : T.muted,
+              fontFamily: T.mono,
+              fontSize: 10,
+              lineHeight: 1.35,
+              display: "flex",
+              alignItems: "center",
+            }}>
+              {premiumCheckout ?? premiumHintForVertical(vertical, form.cur)}
             </div>
           </div>
         </div>
@@ -1514,7 +1912,9 @@ function Step2({
                 alignItems: "baseline",
                 gap: 4,
               }}>
-                from <BitcoinAmount msats={Math.min(...menuItems.map(item => item.amountMsats))} size={10} gap={3} glyphScale={1.2} color={T.muted} glyphColor={T.muted} />
+                from {menuDisplayFiatFloorValue
+                  ? formatFiatAmount(menuDisplayFiatFloorValue.amount, menuDisplayFiatFloorValue.currency)
+                  : <BitcoinAmount msats={Math.min(...menuItems.map(item => item.amountMsats))} size={10} gap={3} glyphScale={1.2} color={T.muted} glyphColor={T.muted} />}
               </div>
             )}
           </div>
@@ -1555,7 +1955,7 @@ function Step2({
                   <input
                     type="number"
                     value={item.sats}
-                    onChange={e => updateMenuItem(item.id, { sats: e.target.value })}
+                    onChange={e => updateMenuSats(item.id, e.target.value)}
                     onWheel={blurNumberInputOnWheel}
                     placeholder={vertical === "p2p-trade" ? "min sats" : vertical === "lending" ? "principal" : "sats"}
                     style={{ ...inputStyle, width: 92 }}
@@ -1582,7 +1982,7 @@ function Step2({
                     <input
                       type="number"
                       value={item.fiat}
-                      onChange={e => updateMenuItem(item.id, { fiat: e.target.value })}
+                      onChange={e => updateMenuFiat(item.id, e.target.value)}
                       onWheel={blurNumberInputOnWheel}
                       placeholder={form.cur}
                       style={{ ...inputStyle, width: 84, fontSize: 12 }}
@@ -1835,6 +2235,7 @@ function Step3({
   homeCommunity,
   firstPublishDone,
   submitting,
+  amountDisplayMode,
   onBack, onPublish, onSaveDraft,
 }: {
   vertical: Vertical;
@@ -1843,10 +2244,13 @@ function Step3({
   homeCommunity: ReturnType<typeof getCommunityBySlug>;
   firstPublishDone: boolean;
   submitting: boolean;
+  amountDisplayMode: AmountDisplayMode;
   onBack: () => void;
   onPublish: () => void;
   onSaveDraft: () => void;
 }) {
+  const btcPrice = useBitcoinPrice();
+  const fiatRates = useFiatRates();
   const v = VERTICALS.find(vert => vert.id === vertical)!;
   const menuItems = normalizeMenuItems(form, vertical);
   const hasMenu = menuItems.length > 0;
@@ -1867,6 +2271,23 @@ function Step3({
     !lendingCapExceeded;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
+  const fiatFloor = menuFiatFloor(menuItems);
+  const singleFiatAmount = parseFiatAmount(form.fiat);
+  const estimatedSingleFiatAmount = singleFiatAmount ?? estimateFiatForMsats({
+    amountMsats: totalSats * 1000,
+    currency: form.cur,
+    usdPerBtc: btcPrice.usd,
+    usdFiatRates: fiatRates.rates,
+  });
+  const previewFiatFloor = fiatFloor ?? estimatedMenuFiatFloor({
+    menuItems,
+    currency: form.cur,
+    usdPerBtc: btcPrice.usd,
+    usdFiatRates: fiatRates.rates,
+  });
+  const previewPremium = premiumReviewLine(form, vertical);
+  const previewPremiumCheckout = premiumCheckoutLine(form, vertical);
+  const showFiatPrimary = amountDisplayMode === "fiat";
 
   return (
     <>
@@ -1976,11 +2397,22 @@ function Step3({
               gap: 6,
             }}>
               <span style={{ color: T.muted, fontWeight: 700 }}>from</span>
-              <BitcoinAmount msats={Math.min(...menuItems.map(item => item.amountMsats))} size={14} gap={4} glyphScale={1.18} />
+              {showFiatPrimary && previewFiatFloor ? (
+                <span>{formatFiatAmount(previewFiatFloor.amount, previewFiatFloor.currency)}</span>
+              ) : (
+                <BitcoinAmount msats={Math.min(...menuItems.map(item => item.amountMsats))} size={14} gap={4} glyphScale={1.18} />
+              )}
               <span style={{ color: T.muted, marginLeft: 8, fontWeight: 500 }}>
+                {showFiatPrimary && previewFiatFloor ? `₿ ${fmtSats(Math.min(...menuItems.map(item => item.amountMsats)))} · ` : ""}
                 {menuCountLabel(vertical, menuItems.length)}
               </span>
             </div>
+            {previewPremium && (
+              <div style={{ marginTop: -4, marginBottom: 10, color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 800 }}>
+                {previewPremium}
+                {previewPremiumCheckout ? ` · ${previewPremiumCheckout}` : ""}
+              </div>
+            )}
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {menuItems.map(item => (
                 <div key={item.id} style={{
@@ -2036,37 +2468,63 @@ function Step3({
                     fontWeight: 800,
                     whiteSpace: "nowrap" as const,
                   }}>
-                    {formatMenuAmount(item)}
+                    {formatMenuAmount(item, amountDisplayMode, {
+                      currency: form.cur,
+                      usdPerBtc: btcPrice.usd,
+                      usdFiatRates: fiatRates.rates,
+                    })}
                   </span>
                 </div>
               ))}
             </div>
           </>
         ) : (
-          <div style={{
-            fontSize: 14,
-            fontWeight: 700,
-            color: T.accent,
-            fontFamily: T.mono,
-            display: "flex",
-            alignItems: "baseline",
-            gap: 8,
-          }}>
-            <BitcoinAmount
-              sats={form.isSubscription
-                ? parseWholeSats(form.periods) * parseWholeSats(form.sats)
-                : parseWholeSats(form.sats)}
-              size={14}
-              gap={4}
-              glyphScale={1.18}
-            />
-            {form.isSubscription && <span style={{ color: T.muted, fontWeight: 500 }}>total</span>}
-            {form.fiat && (
-              <span style={{ color: T.muted, marginLeft: 8, fontWeight: 400 }}>
-                {form.cur} {form.fiat}
-              </span>
+          <>
+            <div style={{
+              fontSize: 14,
+              fontWeight: 700,
+              color: T.accent,
+              fontFamily: T.mono,
+              display: "flex",
+              alignItems: "baseline",
+              gap: 8,
+              flexWrap: "wrap",
+            }}>
+              {showFiatPrimary && estimatedSingleFiatAmount !== null ? (
+                <>
+                  <span>{formatFiatAmount(estimatedSingleFiatAmount, form.cur)}</span>
+                  <span style={{ color: T.muted, fontWeight: 400 }}>
+                    ₿ {fmtSats((form.isSubscription
+                      ? parseWholeSats(form.periods) * parseWholeSats(form.sats)
+                      : parseWholeSats(form.sats)) * 1000)}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <BitcoinAmount
+                    sats={form.isSubscription
+                      ? parseWholeSats(form.periods) * parseWholeSats(form.sats)
+                      : parseWholeSats(form.sats)}
+                    size={14}
+                    gap={4}
+                    glyphScale={1.18}
+                  />
+                  {singleFiatAmount !== null && (
+                    <span style={{ color: T.muted, marginLeft: 8, fontWeight: 400 }}>
+                      {formatFiatAmount(singleFiatAmount, form.cur)}
+                    </span>
+                  )}
+                </>
+              )}
+              {form.isSubscription && <span style={{ color: T.muted, fontWeight: 500 }}>total</span>}
+            </div>
+            {previewPremium && (
+              <div style={{ marginTop: 6, color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 800 }}>
+                {previewPremium}
+                {previewPremiumCheckout ? ` · ${previewPremiumCheckout}` : ""}
+              </div>
             )}
-          </div>
+          </>
         )}
         {partialMenuRows && (
           <div style={{ marginTop: 8, fontSize: 10, color: T.amber, fontFamily: T.mono }}>

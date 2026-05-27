@@ -11,9 +11,16 @@ import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER, fmtSats } from "../theme.js";
 import { listingPremiumLine } from "../listing-metrics.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
+import { useFiatRates } from "../hooks/useFiatRates.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
 import { profileNameFor, type NostrProfileNameMap } from "../nostr-profiles.js";
-import { formatFiatAmount, type AmountDisplayMode } from "../amount-display.js";
+import {
+  estimateFiatForMsats,
+  formatEstimatedFiatForMsats,
+  formatFiatAmount,
+  normalizeFiatCurrency,
+  type AmountDisplayMode,
+} from "../amount-display.js";
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
 // chama_browse_amber_tint_sorted. Quiet, not alarmist — it's a
@@ -40,6 +47,7 @@ export function TradeCard({
   amountDisplayMode?: AmountDisplayMode;
 }) {
   const btcPrice = useBitcoinPrice();
+  const fiatRates = useFiatRates();
   const nowSec = Math.floor(Date.now() / 1000);
   const participants = getEffectiveParticipantsAt(state, nowSec);
   const isAmber = variant === "non-matching";
@@ -68,9 +76,22 @@ export function TradeCard({
     : [];
   const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null) : null;
   const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, fiatFloor) : null;
+  const listingCurrency = listingFiatCurrency(state, fiatFloor, listingCommunity?.currency);
   const fiatPrimary = fiatLine
     ?? (fiatFloor ? `${hasMenu ? "from " : ""}${formatFiatAmount(fiatFloor.amount, fiatFloor.currency)}` : null);
-  const showFiatPrimary = amountDisplayMode === "fiat" && !!fiatPrimary;
+  const estimatedFiatPrimary = !fiatPrimary && listingCurrency
+    ? estimatedFiatPrimaryLabel({
+        amountMsats: state.amountMsats,
+        currency: listingCurrency,
+        exchangeRange,
+        menuItems,
+        hasMenu,
+        usdPerBtc: btcPrice.usd,
+        usdFiatRates: fiatRates.rates,
+      })
+    : null;
+  const displayFiatPrimary = fiatPrimary ?? estimatedFiatPrimary;
+  const showFiatPrimary = amountDisplayMode === "fiat" && !!displayFiatPrimary;
   const paymentMethodsLine = paymentMethodsSummary(state.paymentMethods);
   const premiumLine = listingPremiumLine(state, btcPrice.usd);
   const secondaryLine = showFiatPrimary
@@ -220,7 +241,7 @@ export function TradeCard({
                   letterSpacing: 0,
                   color: T.accent,
                 }}>
-                  {fiatPrimary}
+                  {displayFiatPrimary}
                 </span>
               ) : exchangeRange ? (
                 <BitcoinAmount label={satsRangeLabel(exchangeRange)} size={24} />
@@ -361,6 +382,79 @@ function menuFiatFloor(items: NonNullable<EscrowState["items"]>): { amount: numb
   const amount = Math.min(...fiatItems.map((item) => item.fiatAmount ?? Number.POSITIVE_INFINITY));
   const currency = fiatItems[0]?.fiatCurrency;
   return Number.isFinite(amount) && currency ? { amount, currency } : null;
+}
+
+function listingFiatCurrency(
+  state: EscrowState,
+  fiatFloor: { amount: number; currency: string } | null,
+  communityCurrency: string | null | undefined,
+): string | null {
+  return normalizeFiatCurrency(state.fiatCurrency)
+    ?? normalizeFiatCurrency(fiatFloor?.currency)
+    ?? normalizeFiatCurrency(communityCurrency);
+}
+
+function estimatedFiatPrimaryLabel({
+  amountMsats,
+  currency,
+  exchangeRange,
+  menuItems,
+  hasMenu,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  amountMsats: number;
+  currency: string;
+  exchangeRange: { minMsats: number; maxMsats: number } | null;
+  menuItems: NonNullable<EscrowState["items"]>;
+  hasMenu: boolean;
+  usdPerBtc: number | null;
+  usdFiatRates: Record<string, number>;
+}): string | null {
+  const normalizedCurrency = normalizeFiatCurrency(currency);
+  if (!normalizedCurrency) return null;
+
+  if (exchangeRange) {
+    return estimatedFiatRangeLabel({
+      minMsats: exchangeRange.minMsats,
+      maxMsats: exchangeRange.maxMsats,
+      currency: normalizedCurrency,
+      usdPerBtc,
+      usdFiatRates,
+    });
+  }
+
+  const displayMsats = hasMenu && menuItems.length > 0
+    ? Math.min(...menuItems.map(item => item.amountMsats))
+    : amountMsats;
+  const label = formatEstimatedFiatForMsats({
+    amountMsats: displayMsats,
+    currency: normalizedCurrency,
+    usdPerBtc,
+    usdFiatRates,
+  });
+  return label && hasMenu ? `from ${label}` : label;
+}
+
+function estimatedFiatRangeLabel({
+  minMsats,
+  maxMsats,
+  currency,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  minMsats: number;
+  maxMsats: number;
+  currency: string;
+  usdPerBtc: number | null;
+  usdFiatRates: Record<string, number>;
+}): string | null {
+  const min = estimateFiatForMsats({ amountMsats: minMsats, currency, usdPerBtc, usdFiatRates });
+  const max = estimateFiatForMsats({ amountMsats: maxMsats, currency, usdPerBtc, usdFiatRates });
+  if (min === null || max === null) return null;
+  const minLabel = formatFiatAmount(min, currency);
+  const maxLabel = formatFiatAmount(max, currency);
+  return minLabel === maxLabel ? minLabel : `${minLabel}-${maxLabel.replace(`${currency} `, "")}`;
 }
 
 function exchangeBracketRange(items: NonNullable<EscrowState["items"]>): { minMsats: number; maxMsats: number } | null {

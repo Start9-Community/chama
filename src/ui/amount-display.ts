@@ -29,3 +29,89 @@ export function writeAmountDisplayMode(mode: AmountDisplayMode): void {
 export function formatFiatAmount(amount: number, currency: string): string {
   return `${currency} ${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
+
+export function estimateFiatForMsats({
+  amountMsats,
+  currency,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  amountMsats: number;
+  currency: string | null | undefined;
+  usdPerBtc: number | null | undefined;
+  usdFiatRates: Record<string, number> | null | undefined;
+}): number | null {
+  const normalizedCurrency = normalizeFiatCurrency(currency);
+  if (!normalizedCurrency || !usdPerBtc || !Number.isFinite(usdPerBtc) || usdPerBtc <= 0) {
+    return null;
+  }
+  const rate = fiatRateForCurrency(normalizedCurrency, usdFiatRates);
+  if (!rate) return null;
+  const amount = (amountMsats / 100_000_000_000) * usdPerBtc * rate;
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+export function formatEstimatedFiatForMsats({
+  amountMsats,
+  currency,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  amountMsats: number;
+  currency: string | null | undefined;
+  usdPerBtc: number | null | undefined;
+  usdFiatRates: Record<string, number> | null | undefined;
+}): string | null {
+  const normalizedCurrency = normalizeFiatCurrency(currency);
+  if (!normalizedCurrency) return null;
+  const amount = estimateFiatForMsats({
+    amountMsats,
+    currency: normalizedCurrency,
+    usdPerBtc,
+    usdFiatRates,
+  });
+  return amount === null ? null : formatFiatAmount(amount, normalizedCurrency);
+}
+
+export function estimateSatsForFiat({
+  fiatAmount,
+  currency,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  fiatAmount: number;
+  currency: string | null | undefined;
+  usdPerBtc: number | null | undefined;
+  usdFiatRates: Record<string, number> | null | undefined;
+}): number | null {
+  const normalizedCurrency = normalizeFiatCurrency(currency);
+  if (
+    !normalizedCurrency ||
+    !Number.isFinite(fiatAmount) ||
+    fiatAmount <= 0 ||
+    !usdPerBtc ||
+    !Number.isFinite(usdPerBtc) ||
+    usdPerBtc <= 0
+  ) {
+    return null;
+  }
+  const rate = fiatRateForCurrency(normalizedCurrency, usdFiatRates);
+  if (!rate) return null;
+  const sats = Math.round((fiatAmount / rate / usdPerBtc) * 100_000_000);
+  return Number.isFinite(sats) && sats > 0 ? sats : null;
+}
+
+export function normalizeFiatCurrency(currency: string | null | undefined): string | null {
+  const normalized = currency?.trim().toUpperCase();
+  if (!normalized || normalized === "BTC" || normalized.length < 3) return null;
+  return normalized;
+}
+
+function fiatRateForCurrency(
+  currency: string,
+  usdFiatRates: Record<string, number> | null | undefined,
+): number | null {
+  if (currency === "USD") return 1;
+  const rate = usdFiatRates?.[currency];
+  return typeof rate === "number" && Number.isFinite(rate) && rate > 0 ? rate : null;
+}

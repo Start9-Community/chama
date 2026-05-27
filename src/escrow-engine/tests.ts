@@ -318,6 +318,11 @@ import {
   decideVotePrompt,
 } from "../ui/decisions.js";
 import {
+  estimateFiatForMsats,
+  estimateSatsForFiat,
+  normalizeFiatCurrency,
+} from "../ui/amount-display.js";
+import {
   isFediWebViewSignInEnvironment,
   isMobileSignInEnvironment,
   shouldApplyCssSafeAreaInsets,
@@ -427,6 +432,7 @@ function createEvent(opts: {
   community?: string;
   communityArbiters?: string[];
   amountMsats?: number;
+  premiumBps?: number;
   items?: MenuItem[];
 } = {}): ParsedEscrowEvent<CreatePayload> {
   return makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
@@ -435,6 +441,7 @@ function createEvent(opts: {
     amountMsats: opts.amountMsats ?? 100_000_000,
     fiatAmount: 50,
     fiatCurrency: "USD",
+    premiumBps: opts.premiumBps,
     category: "p2p-trade",
     community: opts.community,
     mintUrl: "fed11q...",
@@ -628,6 +635,7 @@ console.log("── CREATE ──");
     assert(s.participants[Role.BUYER] === null, "Buyer slot empty pre-LOCK");
     assert(s.participants[Role.ARBITER] === null, "Arbiter slot empty pre-LOCK");
     assert(s.amountMsats === 100_000_000, "Amount set correctly");
+    assert(s.premiumBps === undefined, "CREATE premium is optional by default");
     assert(s.fees.platformBps === 50, "Platform fee BPS set");
     assert(s.fees.platformMsats === 500_000, "Platform fee calculated");
     assert(s.eventChain.length === 1, "Event chain has 1 event");
@@ -637,6 +645,14 @@ console.log("── CREATE ──");
       "CREATE stores trade timeout duration for LOCK");
     assert(s.expiresAt === s.listingExpiresAt,
       "CREATED active deadline is the listing deadline");
+  }
+}
+
+{
+  const create = createEvent({ premiumBps: 250 });
+  const result = applyEvent(null, create);
+  if (assertOk(result, "CREATE accepts optional premium")) {
+    assert(result.state.premiumBps === 250, "CREATE stores premium BPS");
   }
 }
 
@@ -1678,6 +1694,7 @@ console.log("\n── EVENT PARSER ──");
     type: "escrow:create",
     description: "Test listing",
     amountMsats: 50_000_000,
+    premiumBps: 350,
     category: "marketplace",
     mintUrl: "fed://test",
     platformFeeBps: 50,
@@ -1692,6 +1709,7 @@ console.log("\n── EVENT PARSER ──");
     assert(result.event.escrowId === "test-123", "Escrow ID extracted");
     assert(result.event.kind === EscrowEventKind.CREATE, "Kind parsed");
     assert((result.event.payload as CreatePayload).description === "Test listing", "Payload parsed");
+    assert((result.event.payload as CreatePayload).premiumBps === 350, "Premium BPS parsed");
   }
 
   // Bad kind
@@ -4114,7 +4132,7 @@ console.log("\n── AUTO-INIT TARGET ──");
 // ── 29. RUNTIME SUPPORT BANNER GATE ─────────────────────────────────────
 //
 // One-time-per-account positive announcement for supported real-sats
-// runtimes. v1.0.7 reframes the old browser note into a clear Fedi /
+// runtimes. v1.1.0 reframes the old browser note into a clear Fedi /
 // Tauri / APK support note. Gate logic: show once per pubkey, suppress
 // in sim mode, never re-show after dismissal.
 console.log("\n── RUNTIME SUPPORT BANNER GATE ──");
@@ -9316,6 +9334,52 @@ console.log("\n── CHAMA BAR LABEL ──");
       nowSec: committedNowSec,
     }) === 75_000_000,
     "activeCommittedMsats: sums across multiple active commitments",
+  );
+}
+
+// ── 42a2. AMOUNT DISPLAY MODE — Chama fiat estimates ───────────────────
+console.log("\n── AMOUNT DISPLAY MODE ──");
+{
+  const rates = { KES: 130, XOF: 600 };
+  assert(
+    Math.abs((estimateFiatForMsats({
+      amountMsats: 100_000,
+      currency: "KES",
+      usdPerBtc: 100_000,
+      usdFiatRates: rates,
+    }) ?? 0) - 13) < 0.000001,
+    "100 sats estimates to local Chama fiat when BTC/USD and USD/KES are known",
+  );
+  assert(
+    estimateSatsForFiat({
+      fiatAmount: 13,
+      currency: "KES",
+      usdPerBtc: 100_000,
+      usdFiatRates: rates,
+    }) === 100,
+    "Local Chama fiat estimates round-trip back to sats for the Create form",
+  );
+  assert(
+    Math.abs((estimateFiatForMsats({
+      amountMsats: 100_000,
+      currency: "USD",
+      usdPerBtc: 100_000,
+      usdFiatRates: {},
+    }) ?? 0) - 0.1) < 0.000001,
+    "USD estimates work without an external fiat-FX quote",
+  );
+  assert(
+    normalizeFiatCurrency("btc") === null,
+    "BTC Chamas stay sats-native instead of showing BTC-as-fiat",
+  );
+  assert(
+    estimateSatsForFiat({
+      fiatAmount: 13,
+      currency: "KES",
+      usdPerBtc: null,
+      usdFiatRates: rates,
+    }) === null,
+    "Fiat-to-sats conversion refuses missing BTC price instead of guessing",
   );
 }
 

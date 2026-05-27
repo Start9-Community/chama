@@ -205,6 +205,8 @@ export interface CreatePayload {
   /** Fiat amount if applicable */
   fiatAmount?: number;
   fiatCurrency?: string;
+  /** Listing premium in basis points. For lending, this is APR bps. */
+  premiumBps?: number;
   /** Category: p2p-trade, bill-pay, marketplace, lending */
   category: string;
   /** Fulfillment type: "physical" | "service" | "digital". Generic to
@@ -597,6 +599,8 @@ export interface EscrowState {
   /** Fiat amount and currency (if applicable) */
   fiatAmount?: number;
   fiatCurrency?: string;
+  /** Listing premium in basis points. For lending, this is APR bps. */
+  premiumBps?: number;
   /** Category */
   category: string;
   /** Public payment rails/methods accepted for this listing, when the

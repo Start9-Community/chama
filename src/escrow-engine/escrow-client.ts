@@ -303,6 +303,7 @@ export class EscrowClient {
     amountMsats: number;
     fiatAmount?: number;
     fiatCurrency?: string;
+    premiumBps?: number;
     category: string;
     /** PR 2: marketplace user picks; non-marketplace categories get
      *  "service" written by handleCreate regardless of what's passed. */
@@ -346,6 +347,7 @@ export class EscrowClient {
       amountMsats: params.amountMsats,
       fiatAmount: params.fiatAmount,
       fiatCurrency: params.fiatCurrency,
+      premiumBps: params.premiumBps,
       category: params.category,
       fulfillment,
       community: params.community,

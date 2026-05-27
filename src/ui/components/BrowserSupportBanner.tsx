@@ -1,7 +1,7 @@
 import { T } from "../theme.js";
 
 // One-time-per-account positive runtime announcement.
-// v1.0.7: the production-safe real-sats paths are the shells that ship
+// v1.1.0: the production-safe real-sats paths are the shells that ship
 // their own Fedimint path directly: Fedi, Tauri desktop, and the APK.
 // The component keeps the old name so callsites/storage migration stay
 // small, but the copy is no longer browser-specific.

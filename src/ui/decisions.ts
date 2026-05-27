@@ -255,7 +255,7 @@ function inferCommunitySlugForInvite(invite: string | null): string | null {
 // Runtime-support announcement banner
 // ──────────────────────────────────────────────────────────────────────────
 //
-// Per Pillar 2.7 (educate at every opportunity). v1.0.7 reframes this
+// Per Pillar 2.7 (educate at every opportunity). v1.1.0 reframes this
 // from a browser-specific note to a production-path note: Fedi, Tauri,
 // and APK are the supported real-sats shells. It still fires once per
 // account regardless of whether the user has committed to a federation.
@@ -264,7 +264,7 @@ function inferCommunitySlugForInvite(invite: string | null): string | null {
 //   - the user hasn't dismissed the banner before (one-time-per-account)
 
 export interface BrowserBannerInputs {
-  /** Kept for older callsites/tests. v1.0.7 shows this in every real runtime. */
+  /** Kept for older callsites/tests. v1.1.0 shows this in every real runtime. */
   isBrowser?: boolean;
   dismissed: boolean;
   /** v0.4.2: sim mode swaps the WASM Fedimint client for a localStorage

@@ -284,6 +284,7 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
     amountMsats: p.amountMsats,
     fiatAmount: p.fiatAmount,
     fiatCurrency: p.fiatCurrency,
+    premiumBps: p.premiumBps,
     category: p.category,
     paymentMethods: normalizePaymentMethods(p.paymentMethods),
     items,

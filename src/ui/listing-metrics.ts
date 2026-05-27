@@ -4,6 +4,7 @@ import { premiumPercentForSats } from "../markets/bitcoin-price.js";
 export function listingPremiumLine(state: EscrowState, usdPerBtc: number | null): string | null {
   if (state.category === "lending") return lendingPremiumLine(state);
   if (state.category !== "p2p-trade" && state.category !== "bill-pay") return null;
+  if (state.premiumBps !== undefined) return `${signedPremium(state.premiumBps)} premium`;
   if (!usdPerBtc) return null;
   const anchor = listingFiatAnchor(state);
   if (!anchor || anchor.currency !== "USD") return null;
@@ -19,14 +20,26 @@ export function listingPremiumLine(state: EscrowState, usdPerBtc: number | null)
 }
 
 function lendingPremiumLine(state: EscrowState): string | null {
+  if (state.premiumBps !== undefined) return `${formatBps(state.premiumBps)} premium APR`;
   const terms = firstMenuItem(state);
   if (terms?.aprBps && terms.aprBps > 0) {
-    const apr = terms.aprBps / 100;
-    const display = Number.isInteger(apr) ? apr.toFixed(0) : apr.toFixed(1);
-    return `${display}% premium APR`;
+    return `${formatBps(terms.aprBps)} premium APR`;
   }
   if (terms?.trustTier) return `tier ${terms.trustTier} borrower`;
   return null;
+}
+
+function formatBps(bps: number): string {
+  const value = bps / 100;
+  const display = Math.abs(value) < 10 && !Number.isInteger(value)
+    ? value.toFixed(1)
+    : value.toFixed(Number.isInteger(value) ? 0 : 2).replace(/\.?0+$/, "");
+  return `${display}%`;
+}
+
+function signedPremium(bps: number): string {
+  if (bps === 0) return "0%";
+  return `${bps > 0 ? "+" : ""}${formatBps(bps)}`;
 }
 
 function listingFiatAnchor(state: EscrowState): {

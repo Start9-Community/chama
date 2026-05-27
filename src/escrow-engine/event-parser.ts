@@ -74,6 +74,10 @@ function isOptionalPositiveNumber(v: unknown): boolean {
   return v === undefined || isPositiveNumber(v);
 }
 
+function isOptionalFiniteNumber(v: unknown): boolean {
+  return v === undefined || (typeof v === "number" && Number.isFinite(v));
+}
+
 function validateMenuItem(data: unknown): boolean {
   const d = data as Record<string, unknown>;
   if (!d || typeof d !== "object") return false;
@@ -212,6 +216,9 @@ function validateCreatePayload(data: unknown): data is CreatePayload {
     d.type === "escrow:create" &&
     typeof d.description === "string" &&
     typeof d.amountMsats === "number" && d.amountMsats > 0 &&
+    isOptionalFiniteNumber(d.fiatAmount) &&
+    (d.fiatCurrency === undefined || typeof d.fiatCurrency === "string") &&
+    isOptionalFiniteNumber(d.premiumBps) &&
     typeof d.mintUrl === "string" &&
     typeof d.category === "string" &&
     typeof d.platformFeeBps === "number" &&

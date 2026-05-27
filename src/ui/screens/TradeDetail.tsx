@@ -14,6 +14,7 @@ import {
   selectedMenuItemsTotalMsats,
 } from "../../escrow-engine/types.js";
 import { getWinner } from "../../escrow-engine/state-machine.js";
+import { getCommunityBySlug } from "../../communities/registry.js";
 import { getVoteLabel } from "../../labels/vote-labels.js";
 import {
   listSavedHandles,
@@ -27,6 +28,7 @@ import {
 } from "../theme.js";
 import { listingPremiumLine } from "../listing-metrics.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
+import { useFiatRates } from "../hooks/useFiatRates.js";
 import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import {
@@ -41,7 +43,12 @@ import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { BitcoinPricePill } from "../components/BitcoinPricePill.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 import { profileNameFor, type NostrProfileNameMap } from "../nostr-profiles.js";
-import { formatFiatAmount, type AmountDisplayMode } from "../amount-display.js";
+import {
+  estimateFiatForMsats,
+  formatFiatAmount,
+  normalizeFiatCurrency,
+  type AmountDisplayMode,
+} from "../amount-display.js";
 
 const samePubkey = (a?: string | null, b?: string | null): boolean =>
   !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -101,6 +108,7 @@ export function TradeDetail({
   onOpenSettings?: () => void;
 }) {
   const btcPrice = useBitcoinPrice();
+  const fiatRates = useFiatRates();
   // v0.2.0 item 1: State A/B framing for CREATED listings. By the time
   // the detail screen renders, the silent re-init has already landed
   // the user on the listing's fed (the openEscrow dispatch in
@@ -440,8 +448,14 @@ export function TradeDetail({
     selectedMenuItems,
     savedOrderItems,
     menuItems,
+  }) ?? detailEstimatedHeroFiatAmount({
+    state,
+    amountMsats: heroAmountMsats,
+    usdPerBtc: btcPrice.usd,
+    usdFiatRates: fiatRates.rates,
   });
   const heroFiatLabel = heroFiat ? formatFiatAmount(heroFiat.amount, heroFiat.currency) : null;
+  const premiumCheckoutLine = detailPremiumCheckoutLine(state, heroFiat);
   const showHeroFiat = amountDisplayMode === "fiat" && !!heroFiatLabel;
   const shortTradeId = state.id.length > 18 ? `${state.id.slice(0, 10)}…${state.id.slice(-6)}` : state.id;
   const tradeRoomTitle = state.status === EscrowStatus.CREATED
@@ -1042,6 +1056,17 @@ export function TradeDetail({
           }}>
             {premiumLine}
           </div>
+          {premiumCheckoutLine && (
+            <div style={{
+              marginTop: 6,
+              color: T.muted,
+              fontFamily: T.mono,
+              fontSize: 11,
+              lineHeight: 1.4,
+            }}>
+              {premiumCheckoutLine}
+            </div>
+          )}
         </div>
       )}
 
@@ -2394,6 +2419,40 @@ function detailHeroFiatAmount({
     return { amount: state.fiatAmount, currency: state.fiatCurrency };
   }
   return fiatFloorRows(menuItems);
+}
+
+function detailEstimatedHeroFiatAmount({
+  state,
+  amountMsats,
+  usdPerBtc,
+  usdFiatRates,
+}: {
+  state: EscrowState;
+  amountMsats: number;
+  usdPerBtc: number | null;
+  usdFiatRates: Record<string, number>;
+}): { amount: number; currency: string } | null {
+  const currency = normalizeFiatCurrency(state.fiatCurrency)
+    ?? normalizeFiatCurrency(state.community ? getCommunityBySlug(state.community)?.currency : null);
+  if (!currency) return null;
+  const amount = estimateFiatForMsats({
+    amountMsats,
+    currency,
+    usdPerBtc,
+    usdFiatRates,
+  });
+  return amount === null ? null : { amount, currency };
+}
+
+function detailPremiumCheckoutLine(
+  state: EscrowState,
+  heroFiat: { amount: number; currency: string } | null,
+): string | null {
+  if (state.category !== "p2p-trade" && state.category !== "bill-pay") return null;
+  if (state.premiumBps === undefined || !heroFiat || heroFiat.amount <= 0) return null;
+  const checkoutFiat = heroFiat.amount * (1 + state.premiumBps / 10_000);
+  if (!Number.isFinite(checkoutFiat) || checkoutFiat < 0) return null;
+  return `${formatFiatAmount(heroFiat.amount, heroFiat.currency)} -> ${formatFiatAmount(checkoutFiat, heroFiat.currency)} at checkout`;
 }
 
 function sumFiatRows(rows: readonly { fiatAmount?: number; fiatCurrency?: string; quantity?: number }[]): { amount: number; currency: string } | null {

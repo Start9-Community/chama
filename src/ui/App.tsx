@@ -1548,6 +1548,7 @@ export default function App() {
               canOfferSubscription={userCanSubscribe}
               userPubkey={pubkey ?? null}
               activeInvite={getActiveInvite()}
+              amountDisplayMode={amountDisplayMode}
             />
           )}
         </div>
