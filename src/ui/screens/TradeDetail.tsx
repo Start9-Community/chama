@@ -40,13 +40,15 @@ import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { BitcoinPricePill } from "../components/BitcoinPricePill.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
+import { profileNameFor, type NostrProfileNameMap } from "../nostr-profiles.js";
+import { formatFiatAmount, type AmountDisplayMode } from "../amount-display.js";
 
 const samePubkey = (a?: string | null, b?: string | null): boolean =>
   !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
-  claimBlockedReason,
+  claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
   onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings,
   onPrewarmFunding,
 }: {
@@ -77,6 +79,10 @@ export function TradeDetail({
    *  the same CLAIM cannot help because the federation already consumed
    *  the ecash notes and the local mint reissue failed. */
   claimBlockedReason?: string | null;
+  amountDisplayMode?: AmountDisplayMode;
+  onAmountDisplayModeChange?: (mode: AmountDisplayMode) => void;
+  kind0Enabled?: boolean;
+  profileNames?: NostrProfileNameMap;
   onBack: () => void;
   onVote: (outcome: Outcome) => void;
   onClaim: () => Promise<void>;
@@ -207,6 +213,7 @@ export function TradeDetail({
   ].filter((pk): pk is string => !!pk);
   const sellerPubkey = participants.seller
     ?? (state.initiator.role === Role.SELLER ? state.initiator.pubkey : null);
+  const sellerProfileName = profileNameFor(profileNames, sellerPubkey, kind0Enabled);
   const participantPubkeySet = new Set(participantPubkeys.map(pk => pk.toLowerCase()));
   const hasDuplicateParticipant = participantPubkeys.length !== participantPubkeySet.size;
   const currentKeyAlreadyPresent =
@@ -428,6 +435,14 @@ export function TradeDetail({
     canJoinTrade,
   });
   const heroAmountMsats = nextStep.amountMsats ?? (menuDisplayAmountMsats || state.amountMsats);
+  const heroFiat = detailHeroFiatAmount({
+    state,
+    selectedMenuItems,
+    savedOrderItems,
+    menuItems,
+  });
+  const heroFiatLabel = heroFiat ? formatFiatAmount(heroFiat.amount, heroFiat.currency) : null;
+  const showHeroFiat = amountDisplayMode === "fiat" && !!heroFiatLabel;
   const shortTradeId = state.id.length > 18 ? `${state.id.slice(0, 10)}…${state.id.slice(-6)}` : state.id;
   const tradeRoomTitle = state.status === EscrowStatus.CREATED
     ? hasMenu ? "Build the order" : "Ready to start"
@@ -523,7 +538,11 @@ export function TradeDetail({
           gap: 6,
           minWidth: 0,
         }}>
-          <BitcoinPricePill compact />
+          <BitcoinPricePill
+            compact
+            amountMode={amountDisplayMode}
+            onAmountModeChange={onAmountDisplayModeChange}
+          />
           <Badge status={statusKey} />
         </div>
       </div>
@@ -577,7 +596,20 @@ export function TradeDetail({
             <div className="trade-detail-amount-row" style={{
               textAlign: "center",
             }}>
-              <BitcoinAmount className="trade-detail-amount" msats={heroAmountMsats} size={46} gap={8} glyphScale={1.12} />
+              {showHeroFiat ? (
+                <div className="trade-detail-amount" style={{
+                  color: T.accent,
+                  fontFamily: T.mono,
+                  fontSize: 44,
+                  fontWeight: 900,
+                  lineHeight: 1,
+                  letterSpacing: 0,
+                }}>
+                  {heroFiatLabel}
+                </div>
+              ) : (
+                <BitcoinAmount className="trade-detail-amount" msats={heroAmountMsats} size={46} gap={8} glyphScale={1.12} />
+              )}
             </div>
             <div style={{
               marginTop: 10,
@@ -587,7 +619,11 @@ export function TradeDetail({
               lineHeight: 1.5,
             }}>
               {state.description}
-              {state.fiatAmount ? ` · ${state.fiatCurrency} ${state.fiatAmount.toLocaleString()}` : ""}
+              {showHeroFiat
+                ? ` · ₿ ${fmtSats(heroAmountMsats)}`
+                : state.fiatAmount && state.fiatCurrency
+                  ? ` · ${formatFiatAmount(state.fiatAmount, state.fiatCurrency)}`
+                  : ""}
               {routeNote ? ` · ${routeNote}` : ""}
               {myRole ? ` · ${roleDisplayName(myRole)}` : ""}
             </div>
@@ -599,14 +635,18 @@ export function TradeDetail({
                 marginTop: 10,
                 padding: "5px 9px",
                 borderRadius: 999,
-                background: T.greenDim,
-                border: `1px solid ${T.green}44`,
-                color: T.green,
+                background: `linear-gradient(135deg, ${T.amber}2b, ${T.green}18)`,
+                border: `1px solid ${T.amber}55`,
+                color: T.amber,
                 fontFamily: T.mono,
                 fontSize: 10,
                 fontWeight: 900,
+                maxWidth: "100%",
               }}>
-                Store · {shortParticipantPubkey(sellerPubkey)}
+                <span aria-hidden="true">★</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  Store · {sellerProfileName ?? shortParticipantPubkey(sellerPubkey)}
+                </span>
               </div>
             )}
           </div>
@@ -1358,7 +1398,12 @@ export function TradeDetail({
                 pk={realPk ?? (isAutoArbiter ? previewArbiterPk : null)}
                 isYou={myRole === role}
                 voted={!!state.votes[role]} outcome={state.votes[role]}
-                autoAssigned={isAutoArbiter} />
+                autoAssigned={isAutoArbiter}
+                displayName={profileNameFor(
+                  profileNames,
+                  realPk ?? (isAutoArbiter ? previewArbiterPk : null),
+                  kind0Enabled,
+                )} />
             );
           })}
         </div>
@@ -1367,9 +1412,10 @@ export function TradeDetail({
           <div className="trade-vote-decisions" style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr 1fr",
-            gap: 10,
-            paddingTop: 16,
+            gap: 8,
+            paddingTop: 14,
             marginTop: 16,
+            marginBottom: 18,
             borderTop: `1px solid ${T.border}`,
           }}>
             <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.green)}>
@@ -1858,7 +1904,12 @@ export function TradeDetail({
           subtitle. The Reconnect CTA lives in ChamaBar (single
           source of truth). */}
       {(state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED) && iAmWinner && !state.subscription && (
-        <div style={{ marginBottom: 16 }}>
+        <div style={{
+          marginTop: 18,
+          paddingTop: 16,
+          marginBottom: 18,
+          borderTop: `1px solid ${T.border}`,
+        }}>
           <button
             disabled={claiming || bootProbeFailed || claimRetryBlocked}
             onClick={async () => {
@@ -2184,9 +2235,9 @@ function menuPickButtonStyle(selected: boolean): React.CSSProperties {
 
 function voteDecisionChipStyle(color: string): React.CSSProperties {
   return {
-    minHeight: 54,
+    minHeight: 44,
     minWidth: 0,
-    borderRadius: 999,
+    borderRadius: 18,
     border: `1px solid ${color}38`,
     background: color === T.muted
       ? T.surface
@@ -2196,7 +2247,7 @@ function voteDecisionChipStyle(color: string): React.CSSProperties {
     alignItems: "center",
     justifyContent: "center",
     gap: 1,
-    padding: "9px 6px",
+    padding: "7px 5px",
     color,
     fontFamily: T.mono,
     textTransform: "uppercase",
@@ -2212,7 +2263,7 @@ function voteDecisionValueStyle(): React.CSSProperties {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
-    fontSize: 19,
+    fontSize: 16,
     fontWeight: 900,
     lineHeight: 1.05,
     letterSpacing: 0,
@@ -2226,7 +2277,7 @@ function voteDecisionLabelStyle(): React.CSSProperties {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
-    fontSize: 8,
+    fontSize: 7,
     fontWeight: 800,
     lineHeight: 1.15,
     letterSpacing: 0.45,
@@ -2318,6 +2369,51 @@ function roleDisplayName(role: Role): string {
 function parsePositiveWholeSats(value: string): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function detailHeroFiatAmount({
+  state,
+  selectedMenuItems,
+  savedOrderItems,
+  menuItems,
+}: {
+  state: EscrowState;
+  selectedMenuItems: SelectedMenuItem[];
+  savedOrderItems: SelectedMenuItem[];
+  menuItems: NonNullable<EscrowState["items"]>;
+}): { amount: number; currency: string } | null {
+  const lockedRows = state.lock.selectedItems ?? [];
+  const activeRows = lockedRows.length > 0
+    ? lockedRows
+    : selectedMenuItems.length > 0
+      ? selectedMenuItems
+      : savedOrderItems;
+  const rowTotal = sumFiatRows(activeRows);
+  if (rowTotal) return rowTotal;
+  if (state.fiatAmount != null && state.fiatCurrency) {
+    return { amount: state.fiatAmount, currency: state.fiatCurrency };
+  }
+  return fiatFloorRows(menuItems);
+}
+
+function sumFiatRows(rows: readonly { fiatAmount?: number; fiatCurrency?: string; quantity?: number }[]): { amount: number; currency: string } | null {
+  const priced = rows.filter((row) => row.fiatAmount !== undefined && row.fiatCurrency);
+  if (priced.length === 0) return null;
+  const currencies = new Set(priced.map((row) => row.fiatCurrency));
+  if (currencies.size !== 1) return null;
+  const currency = priced[0]?.fiatCurrency;
+  const amount = priced.reduce((sum, row) => sum + (row.fiatAmount ?? 0) * Math.max(1, row.quantity ?? 1), 0);
+  return currency && Number.isFinite(amount) && amount > 0 ? { amount, currency } : null;
+}
+
+function fiatFloorRows(rows: readonly { fiatAmount?: number; fiatCurrency?: string }[]): { amount: number; currency: string } | null {
+  const priced = rows.filter((row) => row.fiatAmount !== undefined && row.fiatCurrency);
+  if (priced.length === 0) return null;
+  const currencies = new Set(priced.map((row) => row.fiatCurrency));
+  if (currencies.size !== 1) return null;
+  const currency = priced[0]?.fiatCurrency;
+  const amount = Math.min(...priced.map((row) => row.fiatAmount ?? Number.POSITIVE_INFINITY));
+  return currency && Number.isFinite(amount) ? { amount, currency } : null;
 }
 
 function satsInputValue(amountMsats: number): string {

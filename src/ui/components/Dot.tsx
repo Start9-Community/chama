@@ -1,6 +1,6 @@
 import { T, ROLE_COLOR, ROLE_ICON } from "../theme.js";
 
-export function Dot({ role, pk, isYou, voted, outcome, autoAssigned }: {
+export function Dot({ role, pk, isYou, voted, outcome, autoAssigned, displayName }: {
   role: string; pk: string | null; isYou: boolean; voted: boolean; outcome?: string;
   /** v0.6.5: when true, `pk` is a pool-derived preview (same arbiter
    *  LOCK will pick) rather than a confirmed JOIN. Renders solid so the
@@ -9,6 +9,7 @@ export function Dot({ role, pk, isYou, voted, outcome, autoAssigned }: {
    *  arbiter pool, but uses a dimmer fill + "auto" label so it remains
    *  visually distinguishable from a JOINed participant. */
   autoAssigned?: boolean;
+  displayName?: string | null;
 }) {
   const c = ROLE_COLOR[role as keyof typeof ROLE_COLOR] || T.muted;
   const filled = !!pk;
@@ -16,9 +17,11 @@ export function Dot({ role, pk, isYou, voted, outcome, autoAssigned }: {
   const borderStyle = filled ? "solid" : "dashed";
   const borderColor = filled ? c : T.border;
   const label = isYou
-    ? "You"
+    ? (displayName ? `You · ${displayName}` : "You")
     : pk
-      ? (autoAssigned ? "Auto · " + pk.slice(0, 4) + "…" : pk.slice(0, 6) + "…")
+      ? displayName
+        ? (autoAssigned ? `Auto · ${displayName}` : displayName)
+        : (autoAssigned ? "Auto · " + pk.slice(0, 4) + "…" : pk.slice(0, 6) + "…")
       : "Empty";
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
@@ -51,6 +54,10 @@ export function Dot({ role, pk, isYou, voted, outcome, autoAssigned }: {
         fontFamily: T.mono,
         fontWeight: isYou ? 700 : 400,
         fontStyle: autoAssigned ? "italic" : "normal",
+        maxWidth: 104,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
       }}>
         {label}
       </span>

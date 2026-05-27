@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, lazy, Suspense, type ReactNode } from "react";
+import { useState, useEffect, useMemo, useRef, lazy, Suspense, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 
@@ -21,7 +21,7 @@ import {
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
 
-import { BROWSE_CATS, T } from "./theme.js";
+import { BROWSE_CATS, T, TRINITY_RING_ORDER } from "./theme.js";
 import {
   decideAutoInitTarget,
   decideListingTapEffect,
@@ -83,6 +83,12 @@ import { PayoutDestinationsPanel } from "./panels/PayoutDestinationsPanel.js";
 import { SimModePill, SimEntryModal, SIM_PILL_HEIGHT } from "../sim/SimModeBanner.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import { getSignInEnvironment, shouldApplyCssSafeAreaInsets } from "./sign-in-environment.js";
+import { readKind0Toggle, type NostrProfileNameMap } from "./nostr-profiles.js";
+import {
+  readAmountDisplayMode,
+  writeAmountDisplayMode,
+  type AmountDisplayMode,
+} from "./amount-display.js";
 
 const QRScanner = lazy(() => import("./QRScanner.js"));
 
@@ -252,6 +258,13 @@ export default function App() {
       amountMsats?: number;
     };
   } | null>(null);
+  const [kind0Enabled, setKind0Enabled] = useState(false);
+  const [nostrProfiles, setNostrProfiles] = useState<NostrProfileNameMap>({});
+  const [amountDisplayMode, setAmountDisplayModeState] = useState<AmountDisplayMode>(readAmountDisplayMode);
+  const setAmountDisplayMode = (mode: AmountDisplayMode) => {
+    setAmountDisplayModeState(mode);
+    writeAmountDisplayMode(mode);
+  };
   // Browser-support banner state lives in a dedicated hook so the
   // per-pubkey scoping (Bug E from v0.1.85 smoke testing) stays
   // testable in isolation and App.tsx stays an orchestrator.
@@ -305,6 +318,7 @@ export default function App() {
   useEffect(() => {
     if (!connected) return;
     setBrowseCommunity(getUserCommunitySlugRaw() ?? DEFAULT_COMMUNITY_SLUG);
+    setKind0Enabled(readKind0Toggle(pubkey));
   }, [connected, pubkey]);
 
   // Auto-login: on native platforms, check for saved nsec in secure storage
@@ -589,6 +603,7 @@ export default function App() {
   const listingMatchesRoute = (s: EscrowState) => listingMatchesActiveRoute({
     listingMintUrl: s.mintUrl,
     listingFedId: (s.eventChain[0]?.payload as { fed?: string } | undefined)?.fed ?? null,
+    listingCommunity: s.community,
     activeInvite: myActiveInvite,
     activeFedId: fedimint.federationId,
   });
@@ -633,6 +648,44 @@ export default function App() {
   const selectedClaimBlockedReason = selected
     ? blockedClaimReasons[selected.id] ?? selectedPoisonedClaimReason
     : null;
+  const profilePubkeys = useMemo(() => {
+    const keys = new Set<string>();
+    const add = (value?: string | null) => {
+      const pk = value?.trim().toLowerCase();
+      if (pk && /^[0-9a-f]{64}$/.test(pk)) keys.add(pk);
+    };
+
+    for (const trade of visibleTrades) {
+      add(trade.initiator.pubkey);
+      for (const role of TRINITY_RING_ORDER) {
+        add(getEffectiveParticipantsAt(trade, now)[role]);
+      }
+      for (const arbiter of trade.communityArbiters) add(arbiter);
+      for (const event of trade.eventChain) add(event.raw.pubkey);
+    }
+
+    return Array.from(keys).sort();
+  }, [visibleTrades, now]);
+  const profilePubkeyKey = profilePubkeys.join(",");
+
+  useEffect(() => {
+    if (!kind0Enabled || !connected || connectedRelays === 0 || profilePubkeys.length === 0) return;
+    let cancelled = false;
+
+    actions.fetchNostrProfiles(profilePubkeys)
+      .then(names => {
+        if (cancelled || Object.keys(names).length === 0) return;
+        setNostrProfiles(prev => ({ ...prev, ...names }));
+      })
+      .catch(err => {
+        console.debug("[chama] kind:0 profile fetch failed:", err);
+      });
+
+    return () => { cancelled = true; };
+    // actions is intentionally omitted: the hook returns a fresh object
+    // each render, while the fetch target is fully captured by the key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind0Enabled, connected, connectedRelays, profilePubkeyKey]);
 
   const queueDestroyConfirm = (request: PendingDestroyConfirm | null) => {
     if (!request) {
@@ -991,7 +1044,10 @@ export default function App() {
               gap: 6,
               flexShrink: 0,
             }}>
-              <BitcoinPricePill />
+              <BitcoinPricePill
+                amountMode={amountDisplayMode}
+                onAmountModeChange={setAmountDisplayMode}
+              />
               <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, padding: "4px 10px", borderRadius: 6, background: T.surface, border: `1px solid ${T.border}` }}>
                 v{__APP_VERSION__}
               </div>
@@ -1310,6 +1366,10 @@ export default function App() {
             state={selected}
             pubkey={pubkey!}
             homeCommunity={getUserCommunitySlugRaw()}
+            amountDisplayMode={amountDisplayMode}
+            onAmountDisplayModeChange={setAmountDisplayMode}
+            kind0Enabled={kind0Enabled}
+            profileNames={nostrProfiles}
             // v0.3.1 Phase 3 (Q4 scope): same boot-probe flag the
             // ChamaBar's "unreachable" pill reads from. Fund + Claim
             // buttons disable with the "Federation unreachable —
@@ -1496,6 +1556,8 @@ export default function App() {
           )}
           <MeScreen
             pubkey={pubkey!}
+            kind0Enabled={kind0Enabled}
+            onKind0EnabledChange={setKind0Enabled}
             myTrades={myTrades}
             allTrades={visibleTrades}
             ratings={null /* v0.2.0: no rating events yet; v0.2.1 wires the aggregator */}
@@ -1627,6 +1689,7 @@ export default function App() {
               setBrowseCategory={setBrowseCategory}
               browseCommunity={browseCommunity}
               onSelectCommunity={handleSelectCommunity}
+              amountDisplayMode={amountDisplayMode}
               matchingListings={matchingListings}
               nonMatchingListings={nonMatchingListings}
               categoryCounts={browseCategoryCounts}
@@ -1634,6 +1697,8 @@ export default function App() {
               isFirstTime={getUserCommunitySlugRaw() === null}
               onPasteCustomInvite={handlePasteCustomInvite}
               pubkey={pubkey!}
+              kind0Enabled={kind0Enabled}
+              profileNames={nostrProfiles}
               onOpenEscrow={openEscrow}
               onLoadById={async (id) => {
                 try {
@@ -1676,6 +1741,7 @@ const globalCss = `
   ::-webkit-scrollbar{width:4px}
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:${T.border};border-radius:4px}
+  .payment-rail-scroll::-webkit-scrollbar{display:none}
   .trade-detail-shell{padding:16px;max-width:520px;margin:0 auto}
   .trade-detail-layout{display:block}
   .trade-detail-listing-pane,.trade-room-card{min-width:0}

@@ -47,8 +47,8 @@ import {
 import { T } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
+import { readKind0Toggle, writeKind0Toggle } from "../nostr-profiles.js";
 
-const KIND0_TOGGLE_KEY_PREFIX = "chama_fetch_kind0_enabled_";
 type MeTradeFilter = "all" | "needs" | "live" | "listings" | "done";
 
 const ME_TRADE_FILTERS: { id: MeTradeFilter; label: string }[] = [
@@ -59,23 +59,10 @@ const ME_TRADE_FILTERS: { id: MeTradeFilter; label: string }[] = [
   { id: "done", label: "Done" },
 ];
 
-function readKind0Toggle(pubkey: string): boolean {
-  try {
-    if (typeof localStorage === "undefined") return false;
-    return localStorage.getItem(KIND0_TOGGLE_KEY_PREFIX + pubkey) === "1";
-  } catch { return false; }
-}
-
-function writeKind0Toggle(pubkey: string, on: boolean): void {
-  try {
-    if (typeof localStorage === "undefined") return;
-    if (on) localStorage.setItem(KIND0_TOGGLE_KEY_PREFIX + pubkey, "1");
-    else localStorage.removeItem(KIND0_TOGGLE_KEY_PREFIX + pubkey);
-  } catch { /* no-op */ }
-}
-
 export function MeScreen({
   pubkey,
+  kind0Enabled,
+  onKind0EnabledChange,
   myTrades,
   allTrades,
   ratings,
@@ -92,6 +79,8 @@ export function MeScreen({
   onSignOut,
 }: {
   pubkey: string;
+  kind0Enabled?: boolean;
+  onKind0EnabledChange?: (enabled: boolean) => void;
   myTrades: EscrowState[];
   allTrades?: EscrowState[];
   /** Aggregate rating data. v0.2.0 always null (no rating events yet);
@@ -110,9 +99,17 @@ export function MeScreen({
   onSignOut: () => void;
 }) {
   const npubShort = pubkey.slice(0, 8) + "…" + pubkey.slice(-4);
-  const [kind0On, setKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
+  const [localKind0On, setLocalKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
+  const kind0On = kind0Enabled ?? localKind0On;
   const [tradeFilter, setTradeFilter] = useState<MeTradeFilter>("all");
+  useEffect(() => {
+    setLocalKind0On(readKind0Toggle(pubkey));
+  }, [pubkey]);
   useEffect(() => { writeKind0Toggle(pubkey, kind0On); }, [pubkey, kind0On]);
+  const setKind0On = (enabled: boolean) => {
+    setLocalKind0On(enabled);
+    onKind0EnabledChange?.(enabled);
+  };
   const localRecoverySats = Math.floor(Math.max(0, balanceMsats) / 1000);
   const localRecoverableSats = maxLightningPayoutSats(balanceMsats);
   const localReserveSats = lightningPayoutReserveSats(balanceMsats);
@@ -307,8 +304,8 @@ export function MeScreen({
             </div>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 4, lineHeight: 1.5 }}>
               Off (default): trades show truncated npubs only. On: Chama
-              fetches the counterparty's self-published Nostr profile name.
-              Privacy default is npub-only.
+              fetches self-published Nostr profile names for trade
+              participants. Privacy default is npub-only.
             </div>
           </div>
           <div style={{
@@ -333,8 +330,9 @@ export function MeScreen({
           borderRadius: T.rs,
         }}>
           Chama doesn't manage your Nostr profile. Use a Nostr client
-          (Damus, Primal, Amethyst) to set your name and picture — it'll
-          show up here automatically once the fetcher ships.
+          (Damus, Primal, Amethyst) to set your name and picture. When
+          the toggle is on, names appear under participant dots and
+          store/seller badges after relays return your kind:0 profile.
         </div>
       </div>
 

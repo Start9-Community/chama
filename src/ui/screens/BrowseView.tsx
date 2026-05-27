@@ -4,6 +4,8 @@ import { getPickerCommunities, getCommunityBySlug, type Community } from "../../
 import { T, BROWSE_CATS, inputStyle } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
+import { type NostrProfileNameMap } from "../nostr-profiles.js";
+import { type AmountDisplayMode } from "../amount-display.js";
 
 // Browse tab content — category filters, collapsed Chama selector, and card list.
 // Per PHILOSOPHY.md §2.3, the community pills are the user's identity
@@ -20,9 +22,11 @@ import { LoadTradeInput } from "../components/LoadTradeInput.js";
 export function BrowseView({
   browseCategory, setBrowseCategory,
   browseCommunity, onSelectCommunity,
+  amountDisplayMode,
   matchingListings, nonMatchingListings,
   categoryCounts,
   fedimintJoined, pubkey,
+  kind0Enabled = false, profileNames,
   isFirstTime, onPasteCustomInvite,
   onOpenEscrow, onLoadById,
 }: {
@@ -30,11 +34,14 @@ export function BrowseView({
   setBrowseCategory: (s: string) => void;
   browseCommunity: string;
   onSelectCommunity: (slug: string) => void;
+  amountDisplayMode: AmountDisplayMode;
   matchingListings: EscrowState[];
   nonMatchingListings: EscrowState[];
   categoryCounts?: Record<string, number>;
   fedimintJoined: boolean;
   pubkey: string;
+  kind0Enabled?: boolean;
+  profileNames?: NostrProfileNameMap;
   isFirstTime: boolean;
   onPasteCustomInvite: (invite: string) => void | Promise<void>;
   onOpenEscrow: (id: string) => void;
@@ -262,6 +269,9 @@ export function BrowseView({
                     section={section}
                     pubkey={pubkey}
                     onOpenEscrow={onOpenEscrow}
+                    kind0Enabled={kind0Enabled}
+                    profileNames={profileNames}
+                    amountDisplayMode={amountDisplayMode}
                   />
                 ))
               ) : (
@@ -272,6 +282,9 @@ export function BrowseView({
                         state={s}
                         pubkey={pubkey}
                         onSelect={() => onOpenEscrow(s.id)}
+                        kind0Enabled={kind0Enabled}
+                        profileNames={profileNames}
+                        amountDisplayMode={amountDisplayMode}
                       />
                     </div>
                   ))}
@@ -307,6 +320,9 @@ export function BrowseView({
                     pubkey={pubkey}
                     onOpenEscrow={onOpenEscrow}
                     variant="non-matching"
+                    kind0Enabled={kind0Enabled}
+                    profileNames={profileNames}
+                    amountDisplayMode={amountDisplayMode}
                   />
                 ))
               ) : (
@@ -318,6 +334,9 @@ export function BrowseView({
                         pubkey={pubkey}
                         onSelect={() => onOpenEscrow(s.id)}
                         variant="non-matching"
+                        kind0Enabled={kind0Enabled}
+                        profileNames={profileNames}
+                        amountDisplayMode={amountDisplayMode}
                       />
                     </div>
                   ))}
@@ -480,11 +499,17 @@ function BrowseSection({
   pubkey,
   onOpenEscrow,
   variant = "matching",
+  kind0Enabled = false,
+  profileNames,
+  amountDisplayMode,
 }: {
   section: BrowseListingSection;
   pubkey: string;
   onOpenEscrow: (id: string) => void;
   variant?: "matching" | "non-matching";
+  kind0Enabled?: boolean;
+  profileNames?: NostrProfileNameMap;
+  amountDisplayMode: AmountDisplayMode;
 }) {
   return (
     <section style={{ marginBottom: 16 }}>
@@ -525,6 +550,9 @@ function BrowseSection({
               pubkey={pubkey}
               onSelect={() => onOpenEscrow(s.id)}
               variant={variant}
+              kind0Enabled={kind0Enabled}
+              profileNames={profileNames}
+              amountDisplayMode={amountDisplayMode}
             />
           </div>
         ))}

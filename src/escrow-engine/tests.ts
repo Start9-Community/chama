@@ -2732,7 +2732,9 @@ console.log("\n── RAIL REGISTRY ──");
   assert(railAllowsPublicHandle(null) === false,
     "Null rail conservatively refuses public");
 
-  // railsForCommunity: region-scoped + cross-community filtering
+  // railsForCommunity: local-first ordering, but the picker now exposes
+  // the full Africa/global-south catalog so sellers can tag real rails
+  // even when a country Chama is still routed through a broader fed.
   const senegal = railsForCommunity("sn-cfa");
   assert(senegal.some(r => r.key === "wave"),
     "sn-cfa community shows Wave");
@@ -2742,16 +2744,20 @@ console.log("\n── RAIL REGISTRY ──");
     "sn-cfa community ALSO shows global rails (Revtag)");
   assert(senegal.some(r => r.key === "phone-number"),
     "sn-cfa community shows universal Phone number rail");
-  assert(!senegal.some(r => r.key === "m-pesa"),
-    "sn-cfa community does NOT show m-pesa (Kenya-only)");
+  assert(senegal.some(r => r.key === "m-pesa"),
+    "sn-cfa community also surfaces M-Pesa in the Africa rail catalog");
 
   const kenya = railsForCommunity("ke-kes");
   assert(kenya.some(r => r.key === "m-pesa"),
     "ke-kes community shows M-Pesa");
   assert(kenya.some(r => r.key === "phone-number"),
     "ke-kes community shows universal Phone number rail");
-  assert(!kenya.some(r => r.key === "wave"),
-    "ke-kes community does NOT show Wave (Senegal-only)");
+  assert(kenya.some(r => r.key === "wave"),
+    "ke-kes community also shows Wave for cross-Africa sellers");
+  assert(kenya.some(r => r.key === "orange-money"),
+    "ke-kes community also shows Orange Money for cross-Africa sellers");
+  assert(kenya.findIndex(r => r.key === "m-pesa") < kenya.findIndex(r => r.key === "wave"),
+    "ke-kes keeps local rails ahead of the cross-Africa tail");
   const tanzania = railsForCommunity("tz-tzs");
   assert(tanzania.some(r => r.key === "m-pesa"),
     "tz-tzs community shows M-Pesa");
@@ -2772,6 +2778,12 @@ console.log("\n── RAIL REGISTRY ──");
   // ordering in phoneNetworksForCommunity.
   assert(getRailByKey("mtn-momo")?.displayName === "MTN Mobile Money",
     "MTN MoMo registered");
+  assert(getRailByKey("moov-money")?.displayName === "Moov Money",
+    "Moov Money registered");
+  assert(getRailByKey("opay")?.displayName === "OPay",
+    "OPay registered");
+  assert(getRailByKey("ecocash")?.displayName === "EcoCash",
+    "EcoCash registered");
   assert(getRailByKey("bkash")?.displayName === "bKash",
     "bKash registered");
   assert(getRailByKey("gcash")?.displayName === "GCash",
@@ -5876,6 +5888,16 @@ console.log("\n── decideListingTapEffect ──");
       activeFedId: blfFedId,
     }) === true,
     "Legacy listing without fed id falls back to mintUrl matching",
+  );
+  assert(
+    listingMatchesActiveRoute({
+      listingMintUrl: BP_FEDERATION_INVITE,
+      listingFedId: null,
+      listingCommunity: "ke-kes",
+      activeInvite: AFRIBIT_KIBERA_FEDERATION_INVITE,
+      activeFedId: AFRIBIT_KIBERA_FEDERATION_ID,
+    }) === true,
+    "Legacy listing without fed id can match by community-derived invite",
   );
 }
 

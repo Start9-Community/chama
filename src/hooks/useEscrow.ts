@@ -115,6 +115,7 @@ import {
   minimumAtomicFundingMessage,
 } from "../payments/funding-limits.js";
 import { setLocalStorageUserScope } from "../storage/user-scope.js";
+import { extractNostrProfileName, type NostrProfileNameMap } from "../ui/nostr-profiles.js";
 
 function isExpiredUnfundedEscrow(escrowState: EscrowState, nowSec = Math.floor(Date.now() / 1000)): boolean {
   return (
@@ -338,6 +339,8 @@ export interface UseEscrowActions {
   cancel: (escrowId: string, reason?: string) => Promise<EscrowState>;
   /** Load an escrow from relays by ID */
   loadEscrow: (escrowId: string) => Promise<EscrowState | null>;
+  /** Fetch self-published kind:0 profile names for visible participants. */
+  fetchNostrProfiles: (pubkeys: string[]) => Promise<NostrProfileNameMap>;
   /** Trigger haptic feedback */
   vibrate: (pattern?: number | number[]) => void;
 
@@ -1347,6 +1350,34 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       }));
       return null;
     }
+  }, []);
+
+  const fetchNostrProfiles = useCallback(async (pubkeys: string[]): Promise<NostrProfileNameMap> => {
+    const client = clientRef.current;
+    if (!client) return {};
+
+    const authors = Array.from(new Set(
+      pubkeys
+        .map(pk => pk.trim().toLowerCase())
+        .filter(pk => /^[0-9a-f]{64}$/.test(pk)),
+    ));
+    if (authors.length === 0) return {};
+
+    const events = await client.queryOnce(
+      { kinds: [0], authors, limit: Math.max(1, authors.length * 2) },
+      3_000,
+    );
+
+    const profiles: NostrProfileNameMap = {};
+    const newestFirst = [...events].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+    for (const event of newestFirst) {
+      const author = event.pubkey?.toLowerCase();
+      if (!author || profiles[author]) continue;
+      const name = extractNostrProfileName(event.content ?? "");
+      if (name) profiles[author] = name;
+    }
+
+    return profiles;
   }, []);
 
   // ── Fedimint actions ────────────────────────────────────────────────────
@@ -2449,6 +2480,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     sendChat,
     cancel: cancelAction,
     loadEscrow,
+    fetchNostrProfiles,
     vibrate,
     initFedimint,
     setCustomInvite,

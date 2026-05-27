@@ -847,6 +847,7 @@ function resolveListingInvite(listing: { mintUrl: string; community: string | nu
 export interface ListingRouteMatchInputs {
   listingMintUrl: string;
   listingFedId?: string | null;
+  listingCommunity?: string | null;
   activeInvite: string | null;
   activeFedId?: string | null;
 }
@@ -864,7 +865,15 @@ export function listingMatchesActiveRoute(inputs: ListingRouteMatchInputs): bool
     return !!activeFedId && listingFedId === activeFedId;
   }
 
-  return !!inputs.activeInvite && inputs.listingMintUrl === inputs.activeInvite;
+  if (!inputs.activeInvite) return false;
+  if (inputs.listingMintUrl === inputs.activeInvite) return true;
+
+  // Legacy / cross-device listings may have a stale or missing mintUrl
+  // while still carrying the community slug. If the slug resolves to
+  // the user's active invite, keep the card in the matching section
+  // instead of incorrectly tinting it as "other routes".
+  const community = inputs.listingCommunity ? getCommunityBySlug(inputs.listingCommunity) : null;
+  return community?.federationInvite === inputs.activeInvite;
 }
 
 export function resolveCreateMintUrl(inputs: {

@@ -1169,9 +1169,7 @@ function Step2({
     !lendingCapExceeded;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
-  const paymentMethodOptions = railsForCommunity(homeCommunity?.slug)
-    .filter(rail => rail.key !== "phone-number")
-    .slice(0, 12);
+  const paymentMethodOptions = railsForCommunity(homeCommunity?.slug);
   const togglePaymentMethod = (method: string) => {
     setForm(prev => {
       const exists = prev.paymentMethods.some(value => value.toLowerCase() === method.toLowerCase());
@@ -1398,40 +1396,51 @@ function Step2({
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
             ACCEPTED PAYMENT
           </div>
-          <div style={{
+          <div className="payment-rail-scroll" style={{
             display: "flex",
-            flexWrap: "wrap",
-            gap: 7,
             padding: 10,
             borderRadius: T.rs,
             background: T.surface,
             border: `1px solid ${T.border}`,
+            overflowX: "auto",
+            overflowY: "hidden",
+            WebkitOverflowScrolling: "touch",
+            scrollbarWidth: "none",
           }}>
-            {paymentMethodOptions.map(rail => {
-              const selected = form.paymentMethods.some(method =>
-                method.toLowerCase() === rail.displayName.toLowerCase()
-              );
-              return (
-                <button
-                  key={rail.key}
-                  type="button"
-                  onClick={() => togglePaymentMethod(rail.displayName)}
-                  style={{
-                    padding: "6px 9px",
-                    borderRadius: 999,
-                    border: `1px solid ${selected ? T.accent + "77" : T.border}`,
-                    background: selected ? T.accentDim : T.card,
-                    color: selected ? T.accent : T.muted,
-                    fontFamily: T.mono,
-                    fontSize: 10,
-                    fontWeight: 800,
-                    cursor: "pointer",
-                  }}
-                >
-                  {selected ? "✓ " : ""}{rail.displayName}
-                </button>
-              );
-            })}
+            <div style={{
+              display: "flex",
+              gap: 7,
+              minWidth: "100%",
+              width: "max-content",
+            }}>
+              {paymentMethodOptions.map(rail => {
+                const selected = form.paymentMethods.some(method =>
+                  method.toLowerCase() === rail.displayName.toLowerCase()
+                );
+                return (
+                  <button
+                    key={rail.key}
+                    type="button"
+                    onClick={() => togglePaymentMethod(rail.displayName)}
+                    style={{
+                      padding: "6px 9px",
+                      borderRadius: 999,
+                      border: `1px solid ${selected ? T.accent + "77" : T.border}`,
+                      background: selected ? T.accentDim : T.card,
+                      color: selected ? T.accent : T.muted,
+                      fontFamily: T.mono,
+                      fontSize: 10,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                      flex: "0 0 auto",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {selected ? "✓ " : ""}{rail.displayName}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}

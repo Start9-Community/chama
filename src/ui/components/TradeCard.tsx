@@ -12,6 +12,8 @@ import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER, fmtSats
 import { listingPremiumLine } from "../listing-metrics.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
+import { profileNameFor, type NostrProfileNameMap } from "../nostr-profiles.js";
+import { formatFiatAmount, type AmountDisplayMode } from "../amount-display.js";
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
 // chama_browse_amber_tint_sorted. Quiet, not alarmist — it's a
@@ -20,11 +22,22 @@ import { BitcoinAmount } from "./BitcoinAmount.js";
 // balance==0; destroy-confirm modal when balance>0). The community
 // flag/name appears inline so users can see at a glance which fed
 // they'd be switching to.
-export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
+export function TradeCard({
+  state,
+  pubkey,
+  onSelect,
+  variant = "matching",
+  kind0Enabled = false,
+  profileNames,
+  amountDisplayMode = "sats",
+}: {
   state: EscrowState;
   pubkey: string;
   onSelect: () => void;
   variant?: "matching" | "non-matching";
+  kind0Enabled?: boolean;
+  profileNames?: NostrProfileNameMap;
+  amountDisplayMode?: AmountDisplayMode;
 }) {
   const btcPrice = useBitcoinPrice();
   const nowSec = Math.floor(Date.now() / 1000);
@@ -37,27 +50,36 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
     : null;
   const sellerPubkey = state.participants[Role.SELLER]
     ?? (state.initiator.role === Role.SELLER ? state.initiator.pubkey : null);
+  const sellerName = profileNameFor(profileNames, sellerPubkey, kind0Enabled);
   const status = STATUS[state.status] ?? STATUS.CREATED;
   const timeLine = compactJoinHoldRemaining(state, nowSec) ?? compactTimeRemaining(state, nowSec);
   const fiatLine = state.fiatAmount != null && state.fiatCurrency
-    ? `${state.fiatAmount.toLocaleString()} ${state.fiatCurrency}`
+    ? formatFiatAmount(state.fiatAmount, state.fiatCurrency)
     : null;
   const menuItems = state.items ?? [];
   const hasMenu = menuItems.length > 0;
+  const fiatFloor = menuFiatFloor(menuItems);
   const exchangeRange = state.category === "p2p-trade"
     ? exchangeBracketRange(menuItems)
     : null;
+  const satsLabel = exchangeRange ? satsRangeLabel(exchangeRange) : fmtSats(state.amountMsats);
   const marketplaceImages = state.category === "marketplace"
     ? menuItems.map(item => item.imageDataUrl).filter((src): src is string => !!src)
     : [];
-  const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, menuFiatFloor(menuItems)) : null;
+  const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null) : null;
+  const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, fiatFloor) : null;
+  const fiatPrimary = fiatLine
+    ?? (fiatFloor ? `${hasMenu ? "from " : ""}${formatFiatAmount(fiatFloor.amount, fiatFloor.currency)}` : null);
+  const showFiatPrimary = amountDisplayMode === "fiat" && !!fiatPrimary;
   const paymentMethodsLine = paymentMethodsSummary(state.paymentMethods);
   const premiumLine = listingPremiumLine(state, btcPrice.usd);
-  const secondaryLine = fiatLine ?? (
-    hasMenu
-      ? menuLine
-      : state.category === "marketplace" ? fulfillmentLabel(state.fulfillment) : null
-  );
+  const secondaryLine = showFiatPrimary
+    ? [`₿ ${satsLabel}`, menuCountLine].filter(Boolean).join(" · ")
+    : fiatLine ?? (
+      hasMenu
+        ? menuLine
+        : state.category === "marketplace" ? fulfillmentLabel(state.fulfillment) : null
+    );
   const previewArbiterPk = state.status === EscrowStatus.CREATED
     && !participants[Role.ARBITER]
     && state.communityArbiters.length > 0
@@ -140,12 +162,18 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
             )}
             {state.category === "marketplace" && sellerPubkey && (
               <span style={{
-                fontSize: 10, padding: "3px 8px", borderRadius: 999,
-                background: T.greenDim, color: T.green,
-                border: `1px solid ${T.green}33`,
+                fontSize: 10, padding: "3px 9px", borderRadius: 999,
+                background: `linear-gradient(135deg, ${T.amber}2b, ${T.green}18)`,
+                color: T.amber,
+                border: `1px solid ${T.amber}55`,
                 fontFamily: T.mono, fontWeight: 800,
+                display: "inline-flex", alignItems: "center", gap: 4,
+                maxWidth: "100%",
               }}>
-                Store · {shortPubkey(sellerPubkey)}
+                <span aria-hidden="true">★</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  Store · {sellerName ?? shortPubkey(sellerPubkey)}
+                </span>
               </span>
             )}
             {isAmber && listingCommunity && (
@@ -180,12 +208,21 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
               display: "inline-flex", alignItems: "center", gap: 6,
               color: T.accent, fontFamily: T.mono, lineHeight: 1,
             }}>
-              {hasMenu && !exchangeRange && (
+              {hasMenu && !exchangeRange && !showFiatPrimary && (
                 <span style={{ fontSize: 10, color: T.muted, fontWeight: 800, lineHeight: 1 }}>
                   from
                 </span>
               )}
-              {exchangeRange ? (
+              {showFiatPrimary ? (
+                <span style={{
+                  fontSize: 24,
+                  fontWeight: 900,
+                  letterSpacing: 0,
+                  color: T.accent,
+                }}>
+                  {fiatPrimary}
+                </span>
+              ) : exchangeRange ? (
                 <BitcoinAmount label={satsRangeLabel(exchangeRange)} size={24} />
               ) : (
                 <BitcoinAmount msats={state.amountMsats} size={24} />

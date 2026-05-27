@@ -40,10 +40,12 @@ export interface Rail {
   placeholder?: string;
 }
 
-/** v1 seed list. Bias toward small + honest: enumerate the rails we
- *  actually expect users in our four seed communities to want. Sensitive
- *  rails (phone-number-based mobile money, bank transfers) are private-
- *  only; public-by-design tags get the opt-in path. */
+/** v1 seed list. Bias toward Africa-first + honest: enumerate the rails
+ *  users already reach for across Chama's early communities, then keep
+ *  the global-south tail close enough that cross-border sellers do not
+ *  need a new release to tag a local rail. Sensitive rails
+ *  (phone-number-based mobile money, bank transfers) are private-only;
+ *  public-by-design tags get the opt-in path. */
 export const RAIL_REGISTRY: Rail[] = [
   // ── universal default ──────────────────────────────────────────────
   // Mobile money, bank-transfer coordination, and cash-in/cash-out
@@ -86,6 +88,24 @@ export const RAIL_REGISTRY: Rail[] = [
     allowPublicHandle: false,
     region: ["sn-cfa"],
     placeholder: "+221 77 123 4567",
+  },
+  {
+    key: "moov-money",
+    displayName: "Moov Money",
+    allowPublicHandle: false,
+    placeholder: "+229 91 234 567",
+  },
+  {
+    key: "vodafone-cash",
+    displayName: "Vodafone Cash",
+    allowPublicHandle: false,
+    placeholder: "+233 20 123 4567",
+  },
+  {
+    key: "airtel-tigo-money",
+    displayName: "AirtelTigo Money",
+    allowPublicHandle: false,
+    placeholder: "+233 27 123 4567",
   },
 
   // ── East Africa & broader M-Pesa / Airtel footprint ───────────────
@@ -132,6 +152,20 @@ export const RAIL_REGISTRY: Rail[] = [
     region: ["tz-tzs"],
     placeholder: "+255 71 234 5678",
   },
+  {
+    key: "halopesa",
+    displayName: "HaloPesa",
+    allowPublicHandle: false,
+    region: ["tz-tzs"],
+    placeholder: "+255 62 123 4567",
+  },
+  {
+    key: "azampesa",
+    displayName: "AzamPesa",
+    allowPublicHandle: false,
+    region: ["tz-tzs"],
+    placeholder: "+255 68 123 4567",
+  },
   // Telebirr — Ethio Telecom's wallet, Ethiopia's dominant mobile
   // money since 2021.
   {
@@ -139,6 +173,48 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Telebirr",
     allowPublicHandle: false,
     placeholder: "+251 91 234 5678",
+  },
+  {
+    key: "ecocash",
+    displayName: "EcoCash",
+    allowPublicHandle: false,
+    placeholder: "+263 77 123 4567",
+  },
+  {
+    key: "opay",
+    displayName: "OPay",
+    allowPublicHandle: false,
+    placeholder: "+234 801 234 5678",
+  },
+  {
+    key: "paga",
+    displayName: "Paga",
+    allowPublicHandle: false,
+    placeholder: "+234 801 234 5678",
+  },
+  {
+    key: "palmpay",
+    displayName: "PalmPay",
+    allowPublicHandle: false,
+    placeholder: "+234 801 234 5678",
+  },
+  {
+    key: "chipper-cash",
+    displayName: "Chipper Cash",
+    allowPublicHandle: false,
+    placeholder: "+256 70 123 4567",
+  },
+  {
+    key: "mukuru",
+    displayName: "Mukuru",
+    allowPublicHandle: false,
+    placeholder: "+27 71 123 4567",
+  },
+  {
+    key: "fawry",
+    displayName: "Fawry",
+    allowPublicHandle: false,
+    placeholder: "+20 100 123 4567",
   },
 
   // ── South & Southeast Asia mobile money ───────────────────────────
@@ -276,6 +352,46 @@ const BY_KEY: Map<string, Rail> = new Map(
   RAIL_REGISTRY.map(r => [r.key, r])
 );
 
+const AFRICA_FIRST_RAIL_KEYS = [
+  "wave",
+  "orange-money",
+  "m-pesa",
+  "airtel-money",
+  "mtn-momo",
+  "moov-money",
+  "tigo-pesa",
+  "halopesa",
+  "azampesa",
+  "vodafone-cash",
+  "airtel-tigo-money",
+  "telebirr",
+  "ecocash",
+  "opay",
+  "paga",
+  "palmpay",
+  "chipper-cash",
+  "mukuru",
+  "fawry",
+  "wizall",
+  "free-money",
+];
+
+const GLOBAL_SOUTH_TAIL_RAIL_KEYS = [
+  "bkash",
+  "gcash",
+  "maya",
+  "easypaisa",
+  "jazzcash",
+  "pix",
+  "mercado-pago",
+  "nequi",
+  "strike",
+  "revtag",
+  "cashtag",
+  "zbd",
+  "wise-tag",
+];
+
 /** Look up a rail by its wire key. Returns null for unknown keys
  *  (e.g. a listing using a rail from a future registry version) so
  *  callers can render a generic pill without crashing. */
@@ -284,15 +400,14 @@ export function getRailByKey(key: string | null | undefined): Rail | null {
   return BY_KEY.get(key) ?? null;
 }
 
-/** Rails available to a given community. Includes:
- *   - region-scoped rails whose `region` array contains the slug
- *   - cross-community rails (no region field)
- *  Returns the original registry order (curated). */
+/** Rails available to a given community. The picker intentionally shows
+ *  the full global-south catalog now, with ordering doing the curation:
+ *  phone-number meta rail first, local community rails next, Africa rails
+ *  next, broader global-south rails after that, then legacy global apps.
+ *  This keeps Afribit/Kenya from hiding Orange Money or Wave while still
+ *  putting M-Pesa and Airtel Money where Kenyan users expect them. */
 export function railsForCommunity(slug: string | null | undefined): Rail[] {
-  return RAIL_REGISTRY.filter(r => {
-    if (!r.region || r.region.length === 0) return true;
-    return slug ? r.region.includes(slug) : false;
-  });
+  return [...RAIL_REGISTRY].sort((a, b) => railCommunityRank(a, slug) - railCommunityRank(b, slug));
 }
 
 /** Convenience: whether a rail's handles can EVER be made public.
@@ -328,21 +443,17 @@ export function phoneNetworksForCommunity(slug: string | null | undefined): Rail
     r.key !== "phone-number"
     && (r.placeholder ? r.placeholder.startsWith("+") : false);
 
-  const allPhone = RAIL_REGISTRY.filter(isPhoneShaped);
+  return railsForCommunity(slug).filter(isPhoneShaped);
+}
 
-  const regionMatched = allPhone.filter(r =>
-    r.region && r.region.length > 0 && slug ? r.region!.includes(slug) : false
-  );
-  const crossRegion = allPhone.filter(r => !r.region || r.region.length === 0);
-
-  if (regionMatched.length > 0) {
-    // Community user: their local rails first, popular cross-region
-    // options after, deduped by key.
-    const seen = new Set(regionMatched.map(r => r.key));
-    return [...regionMatched, ...crossRegion.filter(r => !seen.has(r.key))];
-  }
-  // No region match (community doesn't have phone rails configured,
-  // or unknown slug): show everything phone-shaped so a Bangladeshi
-  // user on Global · USD can still pick bKash.
-  return allPhone;
+function railCommunityRank(rail: Rail, slug: string | null | undefined): number {
+  const registryIndex = RAIL_REGISTRY.findIndex(r => r.key === rail.key);
+  if (rail.key === "phone-number") return registryIndex / 1000;
+  const local = slug && rail.region?.includes(slug);
+  if (local) return 100 + registryIndex / 1000;
+  const africaIndex = AFRICA_FIRST_RAIL_KEYS.indexOf(rail.key);
+  if (africaIndex >= 0) return 200 + africaIndex;
+  const globalSouthIndex = GLOBAL_SOUTH_TAIL_RAIL_KEYS.indexOf(rail.key);
+  if (globalSouthIndex >= 0) return 400 + globalSouthIndex;
+  return 600 + registryIndex;
 }

@@ -82,6 +82,8 @@ const MAX_RETRY_COUNT = 8;
 const BASE_RETRY_MS = 1000;
 const MAX_RETRY_MS = 60_000;
 const PUBLISH_TIMEOUT_MS = 8_000;
+const PUBLISH_CONNECT_WAIT_MS = 8_000;
+const PUBLISH_CONNECT_POLL_MS = 250;
 
 // ══════════════════════════════════════════════════════════════════════════
 // RELAY MANAGER
@@ -338,10 +340,14 @@ export class RelayManager {
    * Rejects if zero relays accept within the timeout.
    */
   async publish(event: NostrEvent): Promise<{ accepted: number; rejected: number; errors: string[] }> {
-    const connected = [...this.relays.values()].filter(r => r.status === RelayStatus.CONNECTED);
+    let connected = [...this.relays.values()].filter(r => r.status === RelayStatus.CONNECTED);
 
     if (connected.length === 0) {
-      throw new Error("No connected relays — cannot publish");
+      connected = await this.waitForConnectedRelays(PUBLISH_CONNECT_WAIT_MS);
+    }
+
+    if (connected.length === 0) {
+      throw new Error("Relays are still reconnecting — couldn't publish yet. Wait a few seconds and try again.");
     }
 
     // Mark as seen BEFORE publishing — prevents the relay echo from
@@ -373,6 +379,29 @@ export class RelayManager {
     }
 
     return { accepted, rejected, errors };
+  }
+
+  private async waitForConnectedRelays(timeoutMs: number): Promise<RelayConnection[]> {
+    if (this.relays.size === 0) return [];
+
+    // A mobile WebView can briefly report 0 relays while sockets are
+    // reconnecting. Kick every non-open relay once, then give the normal
+    // onopen handlers a bounded window before failing the publish.
+    for (const [url, relay] of this.relays) {
+      if (relay.status !== RelayStatus.CONNECTED && relay.status !== RelayStatus.CONNECTING) {
+        this.connectRelay(url);
+      }
+    }
+
+    let waited = 0;
+    while (waited < timeoutMs) {
+      const connected = [...this.relays.values()].filter(r => r.status === RelayStatus.CONNECTED);
+      if (connected.length > 0) return connected;
+      await new Promise(resolve => setTimeout(resolve, PUBLISH_CONNECT_POLL_MS));
+      waited += PUBLISH_CONNECT_POLL_MS;
+    }
+
+    return [...this.relays.values()].filter(r => r.status === RelayStatus.CONNECTED);
   }
 
   /** Pending OK handlers — keyed by "eventId:relayUrl" */
