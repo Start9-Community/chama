@@ -8,7 +8,7 @@ import {
 } from "../../escrow-engine/types.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
-import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER } from "../theme.js";
+import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER, fmtSats } from "../theme.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
@@ -39,10 +39,14 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
     : null;
   const menuItems = state.items ?? [];
   const hasMenu = menuItems.length > 0;
+  const exchangeRange = state.category === "p2p-trade"
+    ? exchangeBracketRange(menuItems)
+    : null;
   const marketplaceImages = state.category === "marketplace"
     ? menuItems.map(item => item.imageDataUrl).filter((src): src is string => !!src)
     : [];
   const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, menuFiatFloor(menuItems)) : null;
+  const paymentMethodsLine = paymentMethodsSummary(state.paymentMethods);
   const secondaryLine = fiatLine ?? (
     hasMenu
       ? menuLine
@@ -160,12 +164,16 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
               display: "inline-flex", alignItems: "center", gap: 6,
               color: T.accent, fontFamily: T.mono, lineHeight: 1,
             }}>
-              {hasMenu && (
+              {hasMenu && !exchangeRange && (
                 <span style={{ fontSize: 10, color: T.muted, fontWeight: 800, lineHeight: 1 }}>
                   from
                 </span>
               )}
-              <BitcoinAmount msats={state.amountMsats} size={24} />
+              {exchangeRange ? (
+                <BitcoinAmount label={satsRangeLabel(exchangeRange)} size={24} />
+              ) : (
+                <BitcoinAmount msats={state.amountMsats} size={24} />
+              )}
             </span>
             {secondaryLine && (
               <span style={{
@@ -178,6 +186,21 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
               </span>
             )}
           </div>
+          {paymentMethodsLine && (
+            <div style={{
+              marginTop: -5,
+              marginBottom: 11,
+              color: T.muted,
+              fontFamily: T.mono,
+              fontSize: 10,
+              lineHeight: 1.4,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap" as const,
+            }}>
+              accepts {paymentMethodsLine}
+            </div>
+          )}
           <MiniTrinityRing
             state={state}
             pubkey={pubkey}
@@ -265,6 +288,35 @@ function menuFiatFloor(items: NonNullable<EscrowState["items"]>): { amount: numb
   const amount = Math.min(...fiatItems.map((item) => item.fiatAmount ?? Number.POSITIVE_INFINITY));
   const currency = fiatItems[0]?.fiatCurrency;
   return Number.isFinite(amount) && currency ? { amount, currency } : null;
+}
+
+function exchangeBracketRange(items: NonNullable<EscrowState["items"]>): { minMsats: number; maxMsats: number } | null {
+  const brackets = items
+    .filter((item) => item.kind === "exchange-bracket")
+    .map((item) => ({
+      minMsats: item.minAmountMsats ?? item.amountMsats,
+      maxMsats: item.maxAmountMsats ?? item.amountMsats,
+    }))
+    .filter((range) => range.minMsats > 0 && range.maxMsats >= range.minMsats);
+  if (brackets.length === 0) return null;
+  return {
+    minMsats: Math.min(...brackets.map((range) => range.minMsats)),
+    maxMsats: Math.max(...brackets.map((range) => range.maxMsats)),
+  };
+}
+
+function satsRangeLabel(range: { minMsats: number; maxMsats: number }): string {
+  const min = fmtSats(range.minMsats);
+  const max = fmtSats(range.maxMsats);
+  return min === max ? min : `${min}-${max}`;
+}
+
+function paymentMethodsSummary(methods: string[] | undefined): string | null {
+  const cleaned = (methods ?? []).map((method) => method.trim()).filter(Boolean);
+  if (cleaned.length === 0) return null;
+  const visible = cleaned.slice(0, 3).join(" · ");
+  const extra = cleaned.length > 3 ? ` · +${cleaned.length - 3}` : "";
+  return `${visible}${extra}`;
 }
 
 function compactStatusLabel(state: EscrowState, nowSec: number): string {

@@ -599,6 +599,10 @@ export interface EscrowState {
   fiatCurrency?: string;
   /** Category */
   category: string;
+  /** Public payment rails/methods accepted for this listing, when the
+   *  seller chose to advertise them at create time. Handle cleartext
+   *  still stays private until LOCK. */
+  paymentMethods?: string[];
   /** Optional menu/listing items. Undefined keeps legacy single-offer
    *  listings small on replay. */
   items?: MenuItem[];

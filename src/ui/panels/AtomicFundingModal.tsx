@@ -786,6 +786,10 @@ function makeBitcoinUri(address: string, amountSats: number): string {
   return btcAmount ? `bitcoin:${address}?amount=${btcAmount}` : `bitcoin:${address}`;
 }
 
+function formatBtcDecimal(sats: number): string {
+  return `${(sats / 100_000_000).toFixed(8)} BTC`;
+}
+
 function OnchainAddressDisplay({
   address,
   amountSats,
@@ -801,7 +805,14 @@ function OnchainAddressDisplay({
   finalityDelay: number;
   onCopy: (s: string) => void;
 }) {
+  const [amountUnit, setAmountUnit] = useState<"btc" | "sats">("btc");
   const qrPayload = makeBitcoinUri(address, depositAmountSats);
+  const totalPrimary = amountUnit === "btc"
+    ? formatBtcDecimal(depositAmountSats)
+    : `${depositAmountSats.toLocaleString()} sats`;
+  const totalSecondary = amountUnit === "btc"
+    ? `${depositAmountSats.toLocaleString()} sats`
+    : formatBtcDecimal(depositAmountSats);
   return (
     <>
       <div style={{
@@ -821,6 +832,57 @@ function OnchainAddressDisplay({
             alt="Bitcoin onchain address QR code"
           />
         </Suspense>
+      </div>
+      <div style={{
+        padding: 12, marginBottom: 12, borderRadius: T.rs,
+        background: T.amberDim, border: `1px solid ${T.amber}55`,
+      }}>
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          gap: 10, marginBottom: 8,
+        }}>
+          <div style={{
+            fontSize: 9, color: T.amber, fontFamily: T.mono,
+            letterSpacing: 1, fontWeight: 800,
+          }}>
+            QR INCLUDES FULL TOTAL
+          </div>
+          <div style={{
+            display: "inline-flex", padding: 2, borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            flexShrink: 0,
+          }}>
+            {(["btc", "sats"] as const).map((unit) => (
+              <button
+                key={unit}
+                onClick={() => setAmountUnit(unit)}
+                style={{
+                  padding: "4px 8px", borderRadius: Math.max(4, T.rs - 2),
+                  background: amountUnit === unit ? T.amber : "transparent",
+                  border: "none",
+                  color: amountUnit === unit ? "#000" : T.muted,
+                  fontFamily: T.mono, fontSize: 9, fontWeight: 900,
+                  cursor: "pointer",
+                }}
+              >
+                {unit === "btc" ? "BTC" : "sats"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{
+          color: T.text, fontFamily: T.mono, fontSize: 20,
+          fontWeight: 900, lineHeight: 1.1, marginBottom: 4,
+          overflowWrap: "anywhere",
+        }}>
+          {totalPrimary}
+        </div>
+        <div style={{
+          color: T.muted, fontFamily: T.mono, fontSize: 10,
+          lineHeight: 1.45,
+        }}>
+          {totalSecondary} · trade {amountSats.toLocaleString()} sats + federation fee {pegInFeeSats.toLocaleString()} sats
+        </div>
       </div>
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "center",
@@ -852,7 +914,7 @@ function OnchainAddressDisplay({
         fontFamily: T.mono, fontSize: 10, color: T.amber,
         lineHeight: 1.45, textAlign: "center",
       }}>
-        Send <BitcoinAmount sats={depositAmountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> total:{" "}
+        Scan this QR or send <BitcoinAmount sats={depositAmountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> total:{" "}
         <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> trade +{" "}
         <BitcoinAmount sats={pegInFeeSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> federation deposit fee.
         Your wallet shows and pays the Bitcoin miner fee separately.

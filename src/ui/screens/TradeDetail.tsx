@@ -182,6 +182,9 @@ export function TradeDetail({
   const selectedOrderKey = selectedMenuItems
     .map(item => `${item.itemId}:${item.amountMsats}:${item.quantity}`)
     .join("|");
+  const acceptedPaymentMethods = (state.paymentMethods ?? [])
+    .map(method => method.trim())
+    .filter(Boolean);
   const selectionMatchesSavedOrder = selectedOrderKey.length > 0 && selectedOrderKey === savedOrderKey;
   const savedOrderFinalizedAt = state.joinHolds?.[menuSelectorRole]?.orderFinalizedAt ?? null;
   const savedOrderFinalized = !!savedOrderFinalizedAt;
@@ -855,6 +858,48 @@ export function TradeDetail({
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {acceptedPaymentMethods.length > 0 && (
+        <div style={{
+          background: T.card,
+          border: `1px solid ${T.border}`,
+          borderRadius: T.r,
+          padding: 12,
+          marginBottom: 12,
+        }}>
+          <div style={{
+            fontSize: 11,
+            fontWeight: 700,
+            color: T.muted,
+            fontFamily: T.mono,
+            letterSpacing: 1,
+            marginBottom: 10,
+          }}>
+            ACCEPTED PAYMENT
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+            {acceptedPaymentMethods.map(method => (
+              <span
+                key={method}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "5px 9px",
+                  borderRadius: 999,
+                  background: T.surface,
+                  border: `1px solid ${T.border}`,
+                  color: T.text,
+                  fontFamily: T.mono,
+                  fontSize: 11,
+                  fontWeight: 800,
+                }}
+              >
+                {method}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 

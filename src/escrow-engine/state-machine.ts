@@ -60,6 +60,7 @@ function err(code: string, message: string, eventId?: string, details?: Record<s
 function cloneState(state: EscrowState): EscrowState {
   return {
     ...state,
+    paymentMethods: state.paymentMethods ? [...state.paymentMethods] : undefined,
     items: state.items ? state.items.map(item => ({ ...item })) : undefined,
     participants: { ...state.participants },
     joinHolds: state.joinHolds
@@ -97,6 +98,20 @@ function cloneState(state: EscrowState): EscrowState {
     eventChain: [...state.eventChain],
     chatMessages: [...state.chatMessages],
   };
+}
+
+function normalizePaymentMethods(methods: string[] | undefined): string[] | undefined {
+  if (!methods) return undefined;
+  const seen = new Set<string>();
+  const cleaned: string[] = [];
+  for (const method of methods) {
+    const value = method.trim();
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    cleaned.push(value);
+  }
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 function cloneMenuItem(item: MenuItem): MenuItem {
@@ -270,6 +285,7 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
     fiatAmount: p.fiatAmount,
     fiatCurrency: p.fiatCurrency,
     category: p.category,
+    paymentMethods: normalizePaymentMethods(p.paymentMethods),
     items,
     fulfillment,
     community: p.community ?? null,

@@ -624,6 +624,7 @@ console.log("── CREATE ──");
     assert(s.status === EscrowStatus.CREATED, "Status is CREATED");
     assert(s.id === ESCROW_ID, "Escrow ID set correctly");
     assert(s.participants[Role.SELLER] === SELLER_PK, "Seller is initiator");
+    assert(s.paymentMethods?.join(",") === "Zelle,CashApp", "CREATE stores accepted payment methods");
     assert(s.participants[Role.BUYER] === null, "Buyer slot empty pre-LOCK");
     assert(s.participants[Role.ARBITER] === null, "Arbiter slot empty pre-LOCK");
     assert(s.amountMsats === 100_000_000, "Amount set correctly");
