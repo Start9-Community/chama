@@ -9,6 +9,8 @@ import {
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER, fmtSats } from "../theme.js";
+import { listingPremiumLine } from "../listing-metrics.js";
+import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
@@ -24,6 +26,7 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
   onSelect: () => void;
   variant?: "matching" | "non-matching";
 }) {
+  const btcPrice = useBitcoinPrice();
   const nowSec = Math.floor(Date.now() / 1000);
   const participants = getEffectiveParticipantsAt(state, nowSec);
   const isAmber = variant === "non-matching";
@@ -32,6 +35,8 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
   const listingCommunity = state.community
     ? getCommunityBySlug(state.community)
     : null;
+  const sellerPubkey = state.participants[Role.SELLER]
+    ?? (state.initiator.role === Role.SELLER ? state.initiator.pubkey : null);
   const status = STATUS[state.status] ?? STATUS.CREATED;
   const timeLine = compactJoinHoldRemaining(state, nowSec) ?? compactTimeRemaining(state, nowSec);
   const fiatLine = state.fiatAmount != null && state.fiatCurrency
@@ -47,6 +52,7 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
     : [];
   const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, menuFiatFloor(menuItems)) : null;
   const paymentMethodsLine = paymentMethodsSummary(state.paymentMethods);
+  const premiumLine = listingPremiumLine(state, btcPrice.usd);
   const secondaryLine = fiatLine ?? (
     hasMenu
       ? menuLine
@@ -132,6 +138,16 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
                 {menuBadgeLabel(state.category)}
               </span>
             )}
+            {state.category === "marketplace" && sellerPubkey && (
+              <span style={{
+                fontSize: 10, padding: "3px 8px", borderRadius: 999,
+                background: T.greenDim, color: T.green,
+                border: `1px solid ${T.green}33`,
+                fontFamily: T.mono, fontWeight: 800,
+              }}>
+                Store · {shortPubkey(sellerPubkey)}
+              </span>
+            )}
             {isAmber && listingCommunity && (
               <span style={{
                 fontSize: 10, padding: "3px 8px", borderRadius: 999,
@@ -189,7 +205,7 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
           {paymentMethodsLine && (
             <div style={{
               marginTop: -5,
-              marginBottom: 11,
+              marginBottom: premiumLine ? 4 : 11,
               color: T.muted,
               fontFamily: T.mono,
               fontSize: 10,
@@ -199,6 +215,22 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
               whiteSpace: "nowrap" as const,
             }}>
               accepts {paymentMethodsLine}
+            </div>
+          )}
+          {premiumLine && (
+            <div style={{
+              marginTop: paymentMethodsLine ? 0 : -5,
+              marginBottom: 11,
+              color: T.amber,
+              fontFamily: T.mono,
+              fontSize: 10,
+              fontWeight: 800,
+              lineHeight: 1.4,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap" as const,
+            }}>
+              {premiumLine}
             </div>
           )}
           <MiniTrinityRing
@@ -241,6 +273,10 @@ export function TradeCard({ state, pubkey, onSelect, variant = "matching" }: {
       </div>
     </div>
   );
+}
+
+function shortPubkey(pubkey: string): string {
+  return pubkey.length > 13 ? `${pubkey.slice(0, 6)}…${pubkey.slice(-4)}` : pubkey;
 }
 
 function shortCategoryLabel(category: string): string {

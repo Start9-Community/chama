@@ -45,6 +45,7 @@ import { BitcoinAmount } from "./components/BitcoinAmount.js";
 import { BottomNav, BOTTOM_NAV_HEIGHT, type Tab } from "./components/BottomNav.js";
 import { BrowserSupportBanner } from "./components/BrowserSupportBanner.js";
 import { ActiveTradePill } from "./components/ActiveTradePill.js";
+import { BitcoinPricePill } from "./components/BitcoinPricePill.js";
 import { RecoveryBanner } from "./screens/RecoveryBanner.js";
 import { useBrowserBanner } from "./hooks/useBrowserBanner.js";
 import { useFederationCommands } from "./hooks/useFederationCommands.js";
@@ -984,8 +985,16 @@ export default function App() {
                 </div>
               </div>
             </div>
-            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, padding: "4px 10px", borderRadius: 6, background: T.surface, border: `1px solid ${T.border}` }}>
-              v{__APP_VERSION__}
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flexShrink: 0,
+            }}>
+              <BitcoinPricePill />
+              <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, padding: "4px 10px", borderRadius: 6, background: T.surface, border: `1px solid ${T.border}` }}>
+                v{__APP_VERSION__}
+              </div>
             </div>
           </div>
 

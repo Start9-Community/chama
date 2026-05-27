@@ -19,11 +19,9 @@
 //     cards for any drafts in localStorage, cap 3 visible (sorted by
 //     savedAt desc), older drafts behind "Show more drafts" expander.
 //
-//   Step 2 — Vertical-specific form. v0.2.0 ships description + amount
-//     + fiat + (marketplace: fulfillment) + (graduated: subscription).
-//     v0.2.1 will add direction toggle, premium %, payment-rail picker,
-//     photos, delivery method, lending terms — too much surface for the
-//     federation-follows-listing convergence release.
+//   Step 2 — Vertical-specific form. Ships description + amount + fiat,
+//     accepted payment rails, menu/bracket rows, marketplace fulfillment,
+//     and the future graduated subscription surface.
 //
 //     Item 7: subscription toggle is invisible unless canOfferSubscription
 //     === true. v0.2.0 universally false (no rating events yet) → toggle
@@ -47,6 +45,7 @@ import {
   MIN_REAL_ATOMIC_FUNDING_SATS,
   minimumAtomicFundingMessage,
 } from "../../payments/funding-limits.js";
+import { railsForCommunity } from "../../payments/rail-registry.js";
 import { isTestnetMode } from "../../fedimint/index.js";
 import { isSimModeOn } from "../../sim/simMode.js";
 import {
@@ -77,6 +76,7 @@ interface FormState {
   isSubscription: boolean;
   periods: string;
   intervalDays: string;
+  paymentMethods: string[];
   menuItems: MenuDraftItem[];
 }
 
@@ -210,6 +210,11 @@ function normalizeFormState(raw: any, currency = "USD"): FormState {
     ...raw,
     listingMode,
     cur: fallback.cur,
+    paymentMethods: Array.isArray(raw.paymentMethods)
+      ? raw.paymentMethods
+          .map((method: unknown) => typeof method === "string" ? method.trim() : "")
+          .filter(Boolean)
+      : fallback.paymentMethods,
     fulfillment: raw.fulfillment === "physical" || raw.fulfillment === "digital" || raw.fulfillment === "service"
       ? raw.fulfillment
       : fallback.fulfillment,
@@ -370,6 +375,7 @@ function hasDraftContent(form: FormState): boolean {
     form.desc.trim()
     || form.sats.trim()
     || form.fiat.trim()
+    || form.paymentMethods.length > 0
     || form.menuItems.some(item =>
       item.label.trim()
       || item.sats.trim()
@@ -590,6 +596,7 @@ export function emptyCreateFormState(currency = "USD"): FormState {
     isSubscription: false,
     periods: "3",
     intervalDays: "30",
+    paymentMethods: [],
     menuItems: [],
   };
 }
@@ -683,6 +690,7 @@ export function CreateForm({
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
         communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,
+        paymentMethods: form.paymentMethods.length > 0 ? form.paymentMethods : undefined,
         items: hasMenu ? menuItems : undefined,
       };
       if (!hasMenu && form.isSubscription) {
@@ -1161,6 +1169,20 @@ function Step2({
     !lendingCapExceeded;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
+  const paymentMethodOptions = railsForCommunity(homeCommunity?.slug)
+    .filter(rail => rail.key !== "phone-number")
+    .slice(0, 12);
+  const togglePaymentMethod = (method: string) => {
+    setForm(prev => {
+      const exists = prev.paymentMethods.some(value => value.toLowerCase() === method.toLowerCase());
+      return {
+        ...prev,
+        paymentMethods: exists
+          ? prev.paymentMethods.filter(value => value.toLowerCase() !== method.toLowerCase())
+          : [...prev.paymentMethods, method],
+      };
+    });
+  };
   const setListingMode = (listingMode: ListingMode) => {
     setForm(prev => {
       const nextItems = listingMode === "menu" && prev.menuItems.length === 0
@@ -1367,6 +1389,49 @@ function Step2({
               {menuCurrencyHint(vertical, form.cur)}
               {" "}Auto from {homeCommunity?.flagEmoji ?? "🌐"} Chama.
             </div>
+          </div>
+        </div>
+      )}
+
+      {paymentMethodOptions.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+            ACCEPTED PAYMENT
+          </div>
+          <div style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 7,
+            padding: 10,
+            borderRadius: T.rs,
+            background: T.surface,
+            border: `1px solid ${T.border}`,
+          }}>
+            {paymentMethodOptions.map(rail => {
+              const selected = form.paymentMethods.some(method =>
+                method.toLowerCase() === rail.displayName.toLowerCase()
+              );
+              return (
+                <button
+                  key={rail.key}
+                  type="button"
+                  onClick={() => togglePaymentMethod(rail.displayName)}
+                  style={{
+                    padding: "6px 9px",
+                    borderRadius: 999,
+                    border: `1px solid ${selected ? T.accent + "77" : T.border}`,
+                    background: selected ? T.accentDim : T.card,
+                    color: selected ? T.accent : T.muted,
+                    fontFamily: T.mono,
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: "pointer",
+                  }}
+                >
+                  {selected ? "✓ " : ""}{rail.displayName}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1863,6 +1928,32 @@ function Step3({
         <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, marginBottom: 8 }}>
           {listingDescription || <span style={{ color: T.muted, fontStyle: "italic" }}>(no description)</span>}
         </div>
+        {form.paymentMethods.length > 0 && (
+          <div style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 6,
+            marginBottom: 10,
+          }}>
+            {form.paymentMethods.slice(0, 5).map(method => (
+              <span
+                key={method}
+                style={{
+                  padding: "4px 7px",
+                  borderRadius: 999,
+                  background: T.surface,
+                  border: `1px solid ${T.border}`,
+                  color: T.muted,
+                  fontFamily: T.mono,
+                  fontSize: 9,
+                  fontWeight: 800,
+                }}
+              >
+                {method}
+              </span>
+            ))}
+          </div>
+        )}
         {hasMenu ? (
           <>
             <div style={{

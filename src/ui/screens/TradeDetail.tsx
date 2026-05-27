@@ -2,12 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import {
   type EscrowState,
   type ChatImageAttachment,
+  type JoinPayload,
   type SelectedMenuItem,
+  EscrowEventKind,
   Role,
   Outcome,
   EscrowStatus,
   getEffectiveParticipantsAt,
   getJoinHoldRemainingSeconds,
+  joinHoldExpiresAt,
   selectedMenuItemsTotalMsats,
 } from "../../escrow-engine/types.js";
 import { getWinner } from "../../escrow-engine/state-machine.js";
@@ -22,6 +25,8 @@ import {
   T, STATUS, ROLE_COLOR, CAT_LABEL, TRINITY_RING_ORDER,
   fmtSats, refundRecipientFor, inputStyle,
 } from "../theme.js";
+import { listingPremiumLine } from "../listing-metrics.js";
+import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import {
@@ -33,6 +38,7 @@ import { Dot } from "../components/Dot.js";
 import { CountdownTimer } from "../components/CountdownTimer.js";
 import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
+import { BitcoinPricePill } from "../components/BitcoinPricePill.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 
 const samePubkey = (a?: string | null, b?: string | null): boolean =>
@@ -88,6 +94,7 @@ export function TradeDetail({
   onReleasePeriod?: (periodIndex: number) => void | Promise<void>;
   onOpenSettings?: () => void;
 }) {
+  const btcPrice = useBitcoinPrice();
   // v0.2.0 item 1: State A/B framing for CREATED listings. By the time
   // the detail screen renders, the silent re-init has already landed
   // the user on the listing's fed (the openEscrow dispatch in
@@ -185,6 +192,7 @@ export function TradeDetail({
   const acceptedPaymentMethods = (state.paymentMethods ?? [])
     .map(method => method.trim())
     .filter(Boolean);
+  const premiumLine = listingPremiumLine(state, btcPrice.usd);
   const selectionMatchesSavedOrder = selectedOrderKey.length > 0 && selectedOrderKey === savedOrderKey;
   const savedOrderFinalizedAt = state.joinHolds?.[menuSelectorRole]?.orderFinalizedAt ?? null;
   const savedOrderFinalized = !!savedOrderFinalizedAt;
@@ -197,6 +205,8 @@ export function TradeDetail({
     participants.seller,
     participants.arbiter,
   ].filter((pk): pk is string => !!pk);
+  const sellerPubkey = participants.seller
+    ?? (state.initiator.role === Role.SELLER ? state.initiator.pubkey : null);
   const participantPubkeySet = new Set(participantPubkeys.map(pk => pk.toLowerCase()));
   const hasDuplicateParticipant = participantPubkeys.length !== participantPubkeySet.size;
   const currentKeyAlreadyPresent =
@@ -364,6 +374,42 @@ export function TradeDetail({
   const liveLockWindowRole = liveJoinHold
     ? expectedLocker ?? liveJoinHold.role
     : null;
+  const buyerJoinEvents = state.status === EscrowStatus.CREATED
+    ? state.eventChain.filter(event => event.kind === EscrowEventKind.JOIN
+        && (event.payload as JoinPayload).role === Role.BUYER)
+    : [];
+  const buyerAttemptRows = buyerJoinEvents
+    .map((event, index) => {
+      const payload = event.payload as JoinPayload;
+      const selectedItems = payload.selectedItems ?? [];
+      const amountMsats = payload.amountMsats
+        ?? selectedMenuItemsTotalMsats(selectedItems)
+        ?? 0;
+      const expiresAt = payload.holdExpiresAt ?? joinHoldExpiresAt(payload.joinedAt);
+      const isLatest = index === buyerJoinEvents.length - 1;
+      const isLive = isLatest && expiresAt > nowSec;
+      const finalized = !!payload.orderFinalizedAt;
+      const statusLabel = isLive
+        ? finalized ? "ready" : "holding"
+        : expiresAt <= nowSec ? "expired" : "updated";
+      return {
+        id: event.raw.id,
+        pubkey: event.pubkey,
+        joinedAt: payload.joinedAt,
+        expiresAt,
+        amountMsats,
+        selectedCount: selectedItems.length,
+        statusLabel,
+        isLive,
+      };
+    })
+    .sort((a, b) => b.joinedAt - a.joinedAt);
+  const showBuyerAttempts =
+    state.category === "p2p-trade"
+    && state.status === EscrowStatus.CREATED
+    && buyerAttemptRows.length > 0
+    && !!sellerPubkey
+    && samePubkey(sellerPubkey, pubkey);
   const nextStep = detailNextStep({
     state,
     myRole,
@@ -470,7 +516,16 @@ export function TradeDetail({
             {tradeRoomTitle}
           </div>
         </div>
-        <Badge status={statusKey} />
+        <div style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "flex-end",
+          gap: 6,
+          minWidth: 0,
+        }}>
+          <BitcoinPricePill compact />
+          <Badge status={statusKey} />
+        </div>
       </div>
 
       <div className="trade-detail-layout">
@@ -536,6 +591,24 @@ export function TradeDetail({
               {routeNote ? ` · ${routeNote}` : ""}
               {myRole ? ` · ${roleDisplayName(myRole)}` : ""}
             </div>
+            {state.category === "marketplace" && sellerPubkey && (
+              <div style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                marginTop: 10,
+                padding: "5px 9px",
+                borderRadius: 999,
+                background: T.greenDim,
+                border: `1px solid ${T.green}44`,
+                color: T.green,
+                fontFamily: T.mono,
+                fontSize: 10,
+                fontWeight: 900,
+              }}>
+                Store · {shortParticipantPubkey(sellerPubkey)}
+              </div>
+            )}
           </div>
 
           {hasMenu && (
@@ -903,6 +976,35 @@ export function TradeDetail({
         </div>
       )}
 
+      {premiumLine && (
+        <div style={{
+          background: T.card,
+          border: `1px solid ${T.amber}44`,
+          borderRadius: T.r,
+          padding: 12,
+          marginBottom: 12,
+        }}>
+          <div style={{
+            fontSize: 11,
+            fontWeight: 700,
+            color: T.muted,
+            fontFamily: T.mono,
+            letterSpacing: 1,
+            marginBottom: 8,
+          }}>
+            PREMIUM
+          </div>
+          <div style={{
+            color: T.amber,
+            fontFamily: T.mono,
+            fontSize: 14,
+            fontWeight: 900,
+          }}>
+            {premiumLine}
+          </div>
+        </div>
+      )}
+
       {/* v0.2.0 item 1: State A vs State B narration. Only fires on
           CREATED listings (the funding moment); LOCKED+ trades have
           a clearer status surface elsewhere and don't need the
@@ -1128,6 +1230,110 @@ export function TradeDetail({
             {nextStep.title}
           </div>
         </div>
+
+        {showBuyerAttempts && (
+          <div style={{
+            paddingTop: 14,
+            marginBottom: 16,
+            borderTop: `1px solid ${T.border}`,
+          }}>
+            <div style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 10,
+              marginBottom: 10,
+            }}>
+              <div style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: T.muted,
+                fontFamily: T.mono,
+                letterSpacing: 1,
+              }}>
+                BUYER ATTEMPTS
+              </div>
+              <div style={{
+                color: T.amber,
+                fontFamily: T.mono,
+                fontSize: 10,
+                fontWeight: 900,
+              }}>
+                {buyerAttemptRows.length} event{buyerAttemptRows.length === 1 ? "" : "s"}
+              </div>
+            </div>
+            <div style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}>
+              {buyerAttemptRows.slice(0, 5).map(attempt => (
+                <div key={attempt.id} style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1fr) auto",
+                  gap: 10,
+                  alignItems: "center",
+                  padding: "8px 0",
+                  borderBottom: `1px solid ${T.border}66`,
+                }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 7,
+                      minWidth: 0,
+                    }}>
+                      <span style={{
+                        color: attempt.isLive ? T.accent : T.muted,
+                        fontFamily: T.mono,
+                        fontSize: 10,
+                        fontWeight: 900,
+                        textTransform: "uppercase",
+                      }}>
+                        {attempt.statusLabel}
+                      </span>
+                      <span style={{
+                        color: T.text,
+                        fontFamily: T.mono,
+                        fontSize: 11,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}>
+                        {shortParticipantPubkey(attempt.pubkey)}
+                      </span>
+                    </div>
+                    <div style={{
+                      marginTop: 4,
+                      color: T.muted,
+                      fontFamily: T.mono,
+                      fontSize: 10,
+                      lineHeight: 1.4,
+                    }}>
+                      {attempt.selectedCount > 0
+                        ? `${attempt.selectedCount} option${attempt.selectedCount === 1 ? "" : "s"} selected`
+                        : "no order snapshot yet"}
+                      {" · "}
+                      {attempt.expiresAt > nowSec
+                        ? `${Math.ceil((attempt.expiresAt - nowSec) / 60)}m left`
+                        : `${Math.ceil((nowSec - attempt.expiresAt) / 60)}m expired`}
+                    </div>
+                  </div>
+                  {attempt.amountMsats > 0 && (
+                    <BitcoinAmount
+                      msats={attempt.amountMsats}
+                      size={12}
+                      gap={4}
+                      glyphScale={1.18}
+                      color={attempt.isLive ? T.accent : T.muted}
+                      glyphColor={attempt.isLive ? T.accent : T.muted}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div style={{
           display: "flex",
@@ -2152,6 +2358,10 @@ function menuHeaderTitle(category: string, isListing: boolean): string {
   if (category === "lending") return "LOAN OFFERS";
   if (category === "marketplace") return "STORE";
   return "MENU";
+}
+
+function shortParticipantPubkey(pubkey: string): string {
+  return pubkey.length > 13 ? `${pubkey.slice(0, 6)}...${pubkey.slice(-4)}` : pubkey;
 }
 
 function menuSelectionHint(category: string): string {
