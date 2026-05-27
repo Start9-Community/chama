@@ -1044,14 +1044,21 @@ export default function App() {
               gap: 6,
               flexShrink: 0,
             }}>
-              <BitcoinPricePill
-                amountMode={amountDisplayMode}
-                onAmountModeChange={setAmountDisplayMode}
-              />
               <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, padding: "4px 10px", borderRadius: 6, background: T.surface, border: `1px solid ${T.border}` }}>
                 v{__APP_VERSION__}
               </div>
             </div>
+          </div>
+
+          <div style={{
+            padding: "12px 16px",
+            borderBottom: `1px solid ${T.border}`,
+          }}>
+            <BitcoinPricePill
+              hero
+              amountMode={amountDisplayMode}
+              onAmountModeChange={setAmountDisplayMode}
+            />
           </div>
 
           {/* Identity bar (relays + npub). Sign out lives in Me → Settings. */}
