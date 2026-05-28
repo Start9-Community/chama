@@ -25,6 +25,7 @@
 // plaintext. Do not connect a real federation client to these strings.
 
 import type { IFedimintWallet } from "../fedimint/fedimint-client.js";
+import { randomId } from "../storage/random-id.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -238,7 +239,7 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
     lightning: {
       async createInvoice(amountMsats: number, description: string) {
         // No delay on invoice creation — real LN invoices are local.
-        const opId = `sim_op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const opId = `sim_op_${Date.now()}_${randomId(6)}`;
         const tag = description.replace(/\W/g, "").slice(0, 10) || "trade";
         // Encode msats in the BOLT11 amount field so parseBolt11Msats
         // can recover it later for refunds / accounting.

@@ -79,15 +79,22 @@ export class NIP07Signer implements Signer {
 
   async nip44Encrypt(plaintext: string, recipientPubkey: string): Promise<string> {
     const nostr = this.getNostr();
-    // NIP-44 encrypt via extension
-    if (nostr.nip44?.encrypt) {
-      return nostr.nip44.encrypt(recipientPubkey, plaintext);
+    // SECURITY: NIP-44 only. The previous build silently fell back to
+    // NIP-04 if the extension reported no nip44 support, which would
+    // have downgraded escrow payloads (SSS shares, votes, claim proofs)
+    // to a cipher without per-message authentication and with weaker
+    // properties overall. A hostile shim that returns
+    // `window.nostr.nip44 = undefined` could trigger the downgrade.
+    // Every modern signer (Alby, nos2x, nostr-keyx, Amber, NIP-46
+    // bunkers) supports NIP-44; if yours doesn't, please upgrade.
+    if (!nostr.nip44?.encrypt) {
+      throw new Error(
+        "Your Nostr signer does not support NIP-44 encryption. " +
+          "Please upgrade your extension (Alby, nos2x, nostr-keyx, Amber) " +
+          "or switch to a NIP-44-capable signer.",
+      );
     }
-    // Fallback to NIP-04 if NIP-44 not supported
-    if (nostr.nip04?.encrypt) {
-      return nostr.nip04.encrypt(recipientPubkey, plaintext);
-    }
-    throw new Error("Extension does not support NIP-44 or NIP-04 encryption");
+    return nostr.nip44.encrypt(recipientPubkey, plaintext);
   }
 
   async nip44Decrypt(ciphertext: string, senderPubkey: string): Promise<string> {
@@ -96,13 +103,14 @@ export class NIP07Signer implements Signer {
       `${senderPubkey}:${ciphertext}`,
       async () => {
         const nostr = this.getNostr();
-        if (nostr.nip44?.decrypt) {
-          return nostr.nip44.decrypt(senderPubkey, ciphertext);
+        // SECURITY: NIP-44 only. See encrypt-side note above.
+        if (!nostr.nip44?.decrypt) {
+          throw new Error(
+            "Your Nostr signer does not support NIP-44 decryption. " +
+              "Please upgrade your extension or switch to a NIP-44-capable signer.",
+          );
         }
-        if (nostr.nip04?.decrypt) {
-          return nostr.nip04.decrypt(senderPubkey, ciphertext);
-        }
-        throw new Error("Extension does not support NIP-44 or NIP-04 decryption");
+        return nostr.nip44.decrypt(senderPubkey, ciphertext);
       },
     );
   }

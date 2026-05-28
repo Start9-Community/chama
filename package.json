@@ -1,7 +1,7 @@
 {
   "name": "satoshi-nostr-app",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "description": "Chama — Nostr-native P2P escrow client. Non-custodial. No server.",
   "scripts": {
@@ -47,5 +47,9 @@
     "vite": "^5.4.0",
     "vite-plugin-top-level-await": "^1.4.0",
     "vite-plugin-wasm": "^3.3.0"
+  },
+  "//security_overrides": "SECURITY: vite 5 ships esbuild <= 0.24.2 with GHSA-67mh-4wv8-2f99 (any website can request from the dev server and read responses) — exploitable on a dev box running `npm run dev` while browsing untrusted sites. The override below forces the patched esbuild even on vite 5. Vite 8 would also fix it, but vite-plugin-top-level-await@1.6 (latest) still requires rollup and pulls uuid@10.0.0 — it isn't compatible with vite 8's rolldown pipeline yet. Drop the override and bump vite to 8 once that plugin ships a rolldown-compatible release.",
+  "overrides": {
+    "esbuild": "^0.25.0"
   }
 }

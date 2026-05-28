@@ -110,6 +110,22 @@ else
   exit 1
 fi
 
+# ── Deploy SSH key resolution ──────────────────────────────────────────
+# Override the private key used by `scp` to push dist/* to
+# satoshimarket.app. Defaults to ~/.ssh/.id_satoshi_market for the
+# original maintainer; any other user (or any CI environment that
+# inherits this script) should export CHAMA_DEPLOY_KEY beforehand
+# pointing at their own deploy key. Keeping the path out of the
+# committed bytes (no hardcoded "id_satoshi_market" in the deploy
+# command) means a third party who reads the script doesn't learn the
+# exact filename to look for on the maintainer's box.
+CHAMA_DEPLOY_KEY="${CHAMA_DEPLOY_KEY:-$HOME/.ssh/.id_satoshi_market}"
+if [ ! -f "$CHAMA_DEPLOY_KEY" ] && [ "${RELEASE_MODE:-bump}" != "current" ] && [ "${DEPLOY:-1}" = "1" ]; then
+  echo "❌ Deploy key not found at: $CHAMA_DEPLOY_KEY"
+  echo "   Set CHAMA_DEPLOY_KEY=/path/to/key (or pass --no-deploy)."
+  exit 1
+fi
+
 # ── Git safety checks ──────────────────────────────────────────────────
 CURRENT_BRANCH=$(git branch --show-current)
 if [ "$CURRENT_BRANCH" != "main" ]; then
@@ -247,7 +263,7 @@ if [ "$RELEASE_MODE" = "deploy-live" ]; then
 
   echo "🚀 Deploying origin/main@$COMMIT_SHA as v$NEW_VERSION..."
   npx cap sync android
-  scp -r -i ~/.ssh/.id_satoshi_market dist/* satoshi@satoshimarket.app:~/chama-dist/
+  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* satoshi@satoshimarket.app:~/chama-dist/
 
   echo "✅ Deployed v$NEW_VERSION from origin/main@$COMMIT_SHA"
   exit 0
@@ -302,7 +318,7 @@ if [ "$RELEASE_MODE" = "current" ]; then
   fi
 
   npx cap sync android
-  scp -r -i ~/.ssh/.id_satoshi_market dist/* satoshi@satoshimarket.app:~/chama-dist/
+  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* satoshi@satoshimarket.app:~/chama-dist/
 
   echo "✅ Deployed v$NEW_VERSION"
   exit 0
@@ -410,6 +426,6 @@ if [ "$DEPLOY" = "0" ]; then
 fi
 
 npx cap sync android
-scp -r -i ~/.ssh/.id_satoshi_market dist/* satoshi@satoshimarket.app:~/chama-dist/
+scp -r -i "$CHAMA_DEPLOY_KEY" dist/* satoshi@satoshimarket.app:~/chama-dist/
 
 echo "✅ Deployed v$NEW_VERSION"

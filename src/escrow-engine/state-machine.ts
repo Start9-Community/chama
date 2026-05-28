@@ -954,7 +954,10 @@ function handleClaim(state: EscrowState, event: ParsedEscrowEvent<ClaimPayload>)
 
   const next = cloneState(state);
   next.status = EscrowStatus.CLAIMED;
-  next.claim.claimerRole = p.claimerRole;
+  // SECURITY: store the role derived from the signing pubkey, not the
+  // self-attested role in the payload. A participant signing a CLAIM
+  // cannot lie about being someone else here.
+  next.claim.claimerRole = claimerRole;
   next.claim.claimedAt = p.claimedAt;
   next.eventChain.push(event);
 
@@ -1180,6 +1183,19 @@ export function applyEvent(
   // ── All other events require existing state ──
   if (state === null) {
     return err("NO_STATE", "Non-CREATE event received but no escrow state exists", event.raw.id);
+  }
+
+  // ── SECURITY: event-ID idempotency ──
+  // Nostr is eventual-consistency by design: the same signed event can
+  // arrive multiple times across relays, can be re-emitted on
+  // reconnect, or can be replayed by a misbehaving relay. Without this
+  // guard, the eventChain would accumulate duplicates and any handler
+  // side-effects (vote tallying, share consumption) would be evaluated
+  // more than once. Handler-level checks like ALREADY_VOTED catch some
+  // cases but not all; the cleanest defense is to short-circuit here
+  // on a duplicate event id and return the existing state unchanged.
+  if (state.eventChain.some((e) => e.raw.id === event.raw.id)) {
+    return { ok: true, state };
   }
 
   // ── Check terminal ──

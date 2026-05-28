@@ -15,6 +15,7 @@ import {
   LIGHTNING_RAIL,
   type SavedHandle,
 } from "./saved-handles.js";
+import { randomId } from "../storage/random-id.js";
 import {
   getScopedStorageItem,
   setScopedStorageItem,
@@ -53,7 +54,9 @@ function isLegacyLightningHandle(x: any): x is SavedHandle {
 }
 
 function generateId(): string {
-  return `pd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  // SECURITY: payout-destination IDs are opaque storage keys; use
+  // crypto randomness so they stay unguessable if ever exposed.
+  return `pd_${Date.now().toString(36)}_${randomId(8)}`;
 }
 
 function normalizeDestination(destination: PayoutDestination): PayoutDestination {

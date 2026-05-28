@@ -44,10 +44,15 @@ npm run typecheck && \
 npm test && \
 npm run build && \
 npx cap sync android && \
-scp -r -i ~/.ssh/.id_satoshi_market dist/* satoshi@satoshimarket.app:~/chama-dist/ && \
+scp -r -i "$CHAMA_DEPLOY_KEY" dist/* satoshi@satoshimarket.app:~/chama-dist/ && \
 git add -A && git commit -m "vX.Y.Z — message" && \
 git push
 ```
+
+`CHAMA_DEPLOY_KEY` should point at the SSH private key authorised for
+`satoshi@satoshimarket.app`. The maintainer keeps it at
+`~/.ssh/.id_satoshi_market`; any other releaser exports their own path
+before running the deploy.
 
 The typecheck step is non-negotiable. If `tsc --noEmit` reports any error,
 stop and fix it before proceeding. Shipping code that fails typecheck has

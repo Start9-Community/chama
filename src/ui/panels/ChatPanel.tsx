@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { type ChatImageAttachment, type EscrowState, Role } from "../../escrow-engine/types.js";
 import { T } from "../theme.js";
+import { randomId } from "../../storage/random-id.js";
 
 const MAX_CHAT_IMAGE_DATA_URL_CHARS = 120_000;
 const CHAT_IMAGE_MAX_EDGE_PX = 960;
@@ -50,7 +51,7 @@ async function loadImage(dataUrl: string): Promise<HTMLImageElement> {
 }
 
 function imageId(): string {
-  return `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  return `img_${Date.now().toString(36)}_${randomId(6)}`;
 }
 
 function inferChatImageMimeType(file: File): string | null {

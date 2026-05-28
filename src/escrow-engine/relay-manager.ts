@@ -14,6 +14,14 @@
 
 import { type NostrEvent, EscrowEventKind, TAGS } from "./types.js";
 
+// SECURITY: per-event content size cap. NIP-01 does not enforce a cap, so
+// a malicious relay can craft an EVENT message whose `content` is many
+// MB, and force the client into a slow JSON.parse or decrypt. 128 KiB is
+// generous for legitimate escrow events (LOCK with SSS shares is well
+// under 10 KiB; CHAT image attachments are inlined base64 but capped
+// elsewhere).
+const MAX_EVENT_CONTENT_BYTES = 128 * 1024;
+
 // ── Relay connection states ───────────────────────────────────────────────
 
 export enum RelayStatus {
@@ -54,6 +62,19 @@ export interface RelayCallbacks {
    * handleIncomingEvent filter alone misses the fetch-based paths.
    */
   shouldDropEvent?: (event: NostrEvent) => boolean;
+  /**
+   * SECURITY: signature verification predicate. When provided, every
+   * EVENT message received from a relay is passed through this function
+   * before it reaches any dispatch path (live onEvent, pending fetches,
+   * fetchOnce capture). If it returns false, the event is dropped.
+   *
+   * Relays are UNTRUSTED — they can forge any pubkey, kind, and content
+   * if the client does not check the schnorr signature locally. The
+   * escrow client wires this to nostr-tools' `verifyEvent`. Tests that
+   * use synthetic events with fake signatures simply omit this callback
+   * and continue to receive every event.
+   */
+  verifyEvent?: (event: NostrEvent) => boolean;
 }
 
 // ── Single relay connection ───────────────────────────────────────────────
@@ -205,6 +226,41 @@ export class RelayManager {
         const subId = data[1] as string;
         const event = data[2] as NostrEvent;
         if (!event?.id) return;
+
+        // SECURITY: drop oversized events before any work. A relay sending
+        // a multi-MB `content` would otherwise force the client into a
+        // slow JSON.parse or NIP-44 decrypt and degrade UI responsiveness.
+        if (
+          typeof event.content === "string" &&
+          event.content.length > MAX_EVENT_CONTENT_BYTES
+        ) {
+          console.warn(
+            `[relay] ${relayUrl} sent oversized event ${event.id?.slice(0, 8)} ` +
+              `(${event.content.length} bytes > ${MAX_EVENT_CONTENT_BYTES}); dropping`,
+          );
+          break;
+        }
+
+        // SECURITY: verify the schnorr signature locally before any
+        // dispatch. Without this, a malicious relay can inject events
+        // claiming any pubkey, forging votes / claims / cancels from
+        // people who never signed them. Verification is sync (noble
+        // schnorr) so this stays a cheap pre-filter.
+        if (this.callbacks.verifyEvent) {
+          let valid = false;
+          try {
+            valid = this.callbacks.verifyEvent(event);
+          } catch {
+            valid = false;
+          }
+          if (!valid) {
+            console.warn(
+              `[relay] ${relayUrl} sent event ${event.id?.slice(0, 8)} ` +
+                `with invalid signature; dropping`,
+            );
+            break;
+          }
+        }
 
         // v0.4.2 sim-mode chokepoint drop (hotfix round 2). Applied
         // before ALL dispatch paths (pending fetches, fetchOnce

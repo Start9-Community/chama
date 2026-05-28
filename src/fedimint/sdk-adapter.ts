@@ -33,6 +33,7 @@
 
 import type { IFedimintWallet } from "./fedimint-client.js";
 import type { ChamaOperationMeta } from "../payments/sats-trace.js";
+import { randomId } from "../storage/random-id.js";
 
 // ── Minimal structural types for the real SDK ────────────────────────────
 // We define these locally so that a consumer without @fedimint/core
@@ -2069,7 +2070,10 @@ function rememberFilename(scope: string | null | undefined, name: string): void 
 }
 
 function rotateFilename(scope?: string | null): string {
-  const suffix = Math.random().toString(36).slice(2, 10);
+  // SECURITY: OPFS filenames are origin-scoped; a same-origin script
+  // (XSS) could iterate them if predictable. Crypto randomness raises
+  // the cost of guessing the active wallet DB filename.
+  const suffix = randomId(8);
   const name = `chama-fedimint-${suffix}.db`;
   rememberFilename(scope, name);
   return name;

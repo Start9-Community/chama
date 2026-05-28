@@ -15,7 +15,20 @@
 import type { Signer, UnsignedEvent } from "./escrow-client.js";
 import type { NostrEvent } from "./types.js";
 
-// Storage keys
+// Storage keys.
+//
+// SECURITY: we deliberately do NOT persist the ephemeral NIP-46 client
+// secret key. An earlier version wrote it to localStorage on every
+// connect, where any script with DOM access (XSS, a hostile browser
+// extension, a sketchy npm dep that ships in a future build) could lift
+// it and impersonate this client to the bunker — i.e. trigger sign
+// requests against the user's real identity key.
+//
+// hasSavedNIP46Session / clearNIP46Session below are kept only as legacy
+// no-op shims for any caller that may still reference them; nothing in
+// the repo reads STORAGE_LOCAL_KEY back, so persisting it bought us
+// zero functionality and one footgun. Reconnecting just means scanning
+// the QR again.
 const STORAGE_LOCAL_KEY = "chama_nip46_local_key";
 const STORAGE_BUNKER_URI = "chama_nip46_bunker_uri";
 const STORAGE_USER_PUBKEY = "chama_nip46_user_pubkey";
@@ -60,22 +73,29 @@ export function adaptNIP46BunkerSigner(bunkerSigner: BunkerSignerLike): Signer {
     getPublicKey: () => bunkerSigner.getPublicKey(),
     signEvent: (event: UnsignedEvent) => bunkerSigner.signEvent(event),
     nip44Encrypt: async (plaintext: string, recipientPubkey: string) => {
-      if (bunkerSigner.nip44Encrypt) {
-        return bunkerSigner.nip44Encrypt(recipientPubkey, plaintext);
+      // SECURITY: NIP-44 only. The previous build silently downgraded
+      // to NIP-04 if the bunker didn't expose NIP-44, which weakened
+      // every escrow payload (SSS shares included) sent through that
+      // bunker. Modern bunkers (Amber, nsecBunker) all support NIP-44;
+      // if yours doesn't, please upgrade your signer app.
+      if (!bunkerSigner.nip44Encrypt) {
+        throw new Error(
+          "Your remote signer (NIP-46 bunker) does not support NIP-44 " +
+            "encryption. Please upgrade your signer app (e.g. Amber, " +
+            "nsecBunker) to a recent version.",
+        );
       }
-      if (bunkerSigner.nip04Encrypt) {
-        return bunkerSigner.nip04Encrypt(recipientPubkey, plaintext);
-      }
-      throw new Error("Signer app does not support encrypted Chama messages");
+      return bunkerSigner.nip44Encrypt(recipientPubkey, plaintext);
     },
     nip44Decrypt: async (ciphertext: string, senderPubkey: string) => {
-      if (bunkerSigner.nip44Decrypt) {
-        return bunkerSigner.nip44Decrypt(senderPubkey, ciphertext);
+      // SECURITY: NIP-44 only. See encrypt-side note above.
+      if (!bunkerSigner.nip44Decrypt) {
+        throw new Error(
+          "Your remote signer (NIP-46 bunker) does not support NIP-44 " +
+            "decryption. Please upgrade your signer app.",
+        );
       }
-      if (bunkerSigner.nip04Decrypt) {
-        return bunkerSigner.nip04Decrypt(senderPubkey, ciphertext);
-      }
-      throw new Error("Signer app does not support encrypted Chama messages");
+      return bunkerSigner.nip44Decrypt(senderPubkey, ciphertext);
     },
   };
 }
@@ -93,11 +113,18 @@ export async function createNostrConnectSession(): Promise<{
   const { BunkerSigner, createNostrConnectURI } = await import("nostr-tools/nip46");
   const { SimplePool } = await import("nostr-tools/pool");
 
+  // SECURITY: shed any NIP-46 secrets a pre-hardening build of Chama
+  // may have left in localStorage. This is the migration point — every
+  // new pairing flow starts from a clean slate.
+  clearNIP46Session();
+
   // Always generate a FRESH local keypair for new connections.
   // Reusing old keys causes relay noise from previous sessions,
   // making the first connection attempt unreliable.
+  //
+  // SECURITY: kept entirely in-memory. This key never touches
+  // localStorage / sessionStorage / IndexedDB.
   const localSecretKey = generateSecretKey();
-  localStorage.setItem(STORAGE_LOCAL_KEY, JSON.stringify(Array.from(localSecretKey)));
 
   const clientPubkey = getPublicKey(localSecretKey);
 
@@ -131,9 +158,11 @@ export async function createNostrConnectSession(): Promise<{
         // Get the user's actual pubkey (different from the bunker's key)
         const userPubkey = await bunkerSigner.getPublicKey();
 
-        // Save for session restoration
-        localStorage.setItem(STORAGE_USER_PUBKEY, userPubkey);
-        localStorage.setItem(STORAGE_BUNKER_URI, uri);
+        // SECURITY: do not persist the bunker URI (it embeds the pairing
+        // secret) or the local secret key. The user pubkey is fine to
+        // persist — it's public. Nothing else in the codebase actually
+        // reads these back to restore a session today, so writing them
+        // would only widen the blast radius of any XSS.
 
         console.debug("[chama] NIP-46 connected! User pubkey:", userPubkey.slice(0, 12) + "...");
 
@@ -153,19 +182,29 @@ export async function createNostrConnectSession(): Promise<{
 
 /**
  * Check if there's a saved NIP-46 session that can be restored.
+ *
+ * Always returns false now: we no longer persist any NIP-46 session
+ * material (see security note at the top of this file). Kept as an
+ * exported function so any old call sites compile; they will simply
+ * always take the "no saved session" branch and re-pair.
  */
 export function hasSavedNIP46Session(): boolean {
-  return !!(
-    localStorage.getItem(STORAGE_LOCAL_KEY) &&
-    localStorage.getItem(STORAGE_USER_PUBKEY)
-  );
+  return false;
 }
 
 /**
  * Clear saved NIP-46 session (logout).
+ *
+ * Also removes any stale entries left over from previous app versions
+ * that did persist these values, so an upgraded client sheds them on
+ * first call.
  */
 export function clearNIP46Session(): void {
-  localStorage.removeItem(STORAGE_LOCAL_KEY);
-  localStorage.removeItem(STORAGE_BUNKER_URI);
-  localStorage.removeItem(STORAGE_USER_PUBKEY);
+  try {
+    localStorage.removeItem(STORAGE_LOCAL_KEY);
+    localStorage.removeItem(STORAGE_BUNKER_URI);
+    localStorage.removeItem(STORAGE_USER_PUBKEY);
+  } catch {
+    // localStorage may be unavailable (private mode, SSR) — ignore.
+  }
 }

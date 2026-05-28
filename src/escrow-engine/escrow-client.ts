@@ -55,6 +55,8 @@ import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
 import { createEnvelope, decryptFromEnvelope } from "./envelope.js";
 import { RelayManager, type NostrFilter } from "./relay-manager.js";
 import { simTagOrNull, shouldDropForSimPolicy } from "../sim/simMode.js";
+import { verifyEvent as verifyNostrEventSignature } from "nostr-tools/pure";
+import { randomId } from "../storage/random-id.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // SIGNER INTERFACE — Injected dependency for key operations
@@ -153,6 +155,16 @@ function mergeRawEventsById(primary: NostrEvent[], secondary: NostrEvent[]): Nos
 // ESCROW CLIENT CONFIG
 // ══════════════════════════════════════════════════════════════════════════
 
+// SECURITY: how far into the future an incoming event's `created_at` is
+// allowed to be before we drop it. Generous enough for ordinary clock
+// skew (NTP drift, mobile sleep, phones in airplane mode for a bit) but
+// tight enough that no-one can claim their VOTE is from next week to
+// shift expiry windows around. The synthetic-event-based test suite
+// drives the same EscrowClient with `created_at = NOW + counter` and
+// can run past an hour of synthetic time on a slow CI box, so the
+// constant has to stay roomy enough for the test loop too.
+const MAX_FUTURE_TIMESTAMP_SLACK_SECS = 24 * 60 * 60; // 24 hours
+
 export interface EscrowClientConfig {
   /** Relay URLs to connect to */
   relays: string[];
@@ -164,6 +176,16 @@ export interface EscrowClientConfig {
   defaultExpirySeconds?: number;
   /** WebSocket implementation (for Node.js) */
   wsImpl?: typeof WebSocket;
+  /**
+   * SECURITY: schnorr signature verifier applied to every event the
+   * relay-manager receives, before it reaches any dispatch path. The
+   * production default is nostr-tools' `verifyEvent`, which rejects any
+   * event a relay tried to forge. Tests that build synthetic events
+   * with placeholder `sig` strings can opt out by passing
+   * `verifyEvent: () => true`. Do not pass a permissive verifier in
+   * production code.
+   */
+  verifyEvent?: (event: NostrEvent) => boolean;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -223,6 +245,13 @@ export class EscrowClient {
         // depth — handleIncomingEvent still has its own check, but this
         // catches paths that bypass it entirely.
         shouldDropEvent: (event) => shouldDropForSimPolicy(event),
+        // SECURITY: wire schnorr signature verification at the relay
+        // boundary. Without this, any relay can forge events from any
+        // pubkey (incl. participants of in-flight trades). Verification
+        // is sync via nostr-tools' verifyEvent. Tests can override with
+        // config.verifyEvent (e.g., `() => true`) when emitting events
+        // with placeholder signatures from a fake WebSocket.
+        verifyEvent: config.verifyEvent ?? verifyNostrEventSignature,
       },
       config.wsImpl
     );
@@ -1184,6 +1213,27 @@ export class EscrowClient {
     const validKinds = new Set(Object.values(EscrowEventKind).filter(v => typeof v === "number"));
     if (!validKinds.has(event.kind)) return;
 
+    // SECURITY: timestamp sanity bound. `created_at` is part of the
+    // signed event id (sig verification covers tampering), but a
+    // genuinely-signed event from a participant with a wrong clock or
+    // a deliberately-future timestamp could shift expiry windows or
+    // re-order the chain. Reject events claiming to be more than
+    // FUTURE_TIMESTAMP_SLACK_SECS ahead of wall-clock; past timestamps
+    // are always allowed because historical replay is required.
+    const nowSecs = Math.floor(Date.now() / 1000);
+    if (
+      typeof event.created_at === "number" &&
+      event.created_at > nowSecs + MAX_FUTURE_TIMESTAMP_SLACK_SECS
+    ) {
+      console.warn(
+        `[escrow] Dropping event ${event.id?.slice(0, 8)} from ${relayUrl}: ` +
+          `created_at ${event.created_at} is ` +
+          `${event.created_at - nowSecs}s in the future (max allowed: ` +
+          `${MAX_FUTURE_TIMESTAMP_SLACK_SECS}s)`,
+      );
+      return;
+    }
+
     // v0.4.2 sim mode: a sim-tagged event is only valid for a sim-mode
     // client, and vice versa. We can't filter at the relay-filter level
     // for the "drop sim in prod" direction (NIP-01 has no NOT-has-tag
@@ -1718,9 +1768,12 @@ export class EscrowClient {
   // ── Helpers ─────────────────────────────────────────────────────────────
 
   private generateEscrowId(): string {
-    // Deterministic-ish but unique: timestamp + random bytes
+    // SECURITY: escrow IDs flow into Nostr d-tags and are the primary
+    // join key across relays. Crypto randomness prevents an attacker
+    // from pre-allocating the same ID and forcing a collision on a
+    // shared relay (which would race the legitimate CREATE).
     const ts = Date.now().toString(36);
-    const rand = Math.random().toString(36).slice(2, 10);
+    const rand = randomId(8);
     return `sm_${ts}_${rand}`;
   }
 }

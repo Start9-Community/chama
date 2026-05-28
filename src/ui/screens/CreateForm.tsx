@@ -34,6 +34,7 @@
 
 import { useState, useEffect, type WheelEvent } from "react";
 import { type MenuItem } from "../../escrow-engine/types.js";
+import { randomId } from "../../storage/random-id.js";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
 import { getUserCommunitySlug } from "../../communities/storage.js";
@@ -137,7 +138,7 @@ const MAX_FEDIMINT_LENDING_SATS = LENDING_TIER_LIMITS[LENDING_TIER_LIMITS.length
 
 function newMenuDraftItem(): MenuDraftItem {
   return {
-    id: `mi_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    id: `mi_${Date.now().toString(36)}_${randomId(6)}`,
     label: "",
     sats: "",
     maxSats: "",

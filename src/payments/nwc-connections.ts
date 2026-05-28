@@ -11,6 +11,7 @@ import {
   getScopedStorageItem,
   setScopedStorageItem,
 } from "../storage/user-scope.js";
+import { randomId } from "../storage/random-id.js";
 import { parseNwcConnectionString } from "./nwc.js";
 
 export const NWC_CONNECTIONS_STORAGE_KEY = "chama_nwc_connections";
@@ -29,7 +30,10 @@ export interface SavedNwcConnection {
 }
 
 function generateId(): string {
-  return `nwc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  // SECURITY: NWC connection records are local bearer credentials. The
+  // ID itself is opaque, but cryptographic randomness ensures it stays
+  // unguessable if a future code path surfaces it.
+  return `nwc_${Date.now().toString(36)}_${randomId(8)}`;
 }
 
 function labelForConnection(connectionString: string): string {

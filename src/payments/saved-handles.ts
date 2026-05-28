@@ -31,6 +31,7 @@ import {
   getScopedStorageItem,
   setScopedStorageItem,
 } from "../storage/user-scope.js";
+import { randomId } from "../storage/random-id.js";
 
 export const SAVED_HANDLES_STORAGE_KEY = "chama_saved_handles";
 export const SAVED_HANDLES_BACKUP_STORAGE_KEY = "chama_saved_handles_backup";
@@ -168,8 +169,11 @@ function isSavedHandle(x: any): x is SavedHandle {
 }
 
 function generateId(): string {
-  // Same shape as escrow IDs — short, locally unique, no crypto needed.
-  return `h_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  // SECURITY: saved-handle IDs are opaque storage keys. They're not
+  // surfaced today, but if a future code path exposes them (via
+  // export, a sync URL, etc.) predictability becomes a deanonymization
+  // hook. Use crypto randomness so we don't have to revisit later.
+  return `h_${Date.now().toString(36)}_${randomId(8)}`;
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────────

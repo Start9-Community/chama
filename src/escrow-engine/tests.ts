@@ -9490,7 +9490,12 @@ console.log("\n── SIGN-IN OPTION ENVIRONMENT GATE ──");
   assert(nip46Calls.includes(`nip44_decrypt:${SELLER_PK}:cipher`),
     "NIP-46 adapter passes args as signer(pubkey, ciphertext), not reversed");
 
-  const nip04Fallback = adaptNIP46BunkerSigner({
+  // SECURITY: the NIP-46 adapter MUST refuse to silently downgrade to
+  // NIP-04. An earlier build had this fallback, which weakened every
+  // escrow payload (including SSS shares) sent through a bunker that
+  // didn't expose NIP-44. The fallback is gone; supplying only NIP-04
+  // methods now throws on both encrypt and decrypt.
+  const nip04Only = adaptNIP46BunkerSigner({
     async getPublicKey() { return BUYER_PK; },
     async signEvent(event: UnsignedEvent) {
       return { ...event, id: "nip46_signed", sig: "sig" } as NostrEvent;
@@ -9502,10 +9507,22 @@ console.log("\n── SIGN-IN OPTION ENVIRONMENT GATE ──");
       return `nip04:${pubkey}:${ciphertext}`;
     },
   });
-  assert(await nip04Fallback.nip44Encrypt("secret", SELLER_PK) === `nip04:${SELLER_PK}:secret`,
-    "NIP-46 adapter falls back to NIP-04 encryption when NIP-44 is unavailable");
-  assert(await nip04Fallback.nip44Decrypt("cipher", SELLER_PK) === `nip04:${SELLER_PK}:cipher`,
-    "NIP-46 adapter falls back to NIP-04 decryption when NIP-44 is unavailable");
+  let nip04EncryptRefused = false;
+  try {
+    await nip04Only.nip44Encrypt("secret", SELLER_PK);
+  } catch {
+    nip04EncryptRefused = true;
+  }
+  assert(nip04EncryptRefused,
+    "NIP-46 adapter refuses to downgrade encryption to NIP-04");
+  let nip04DecryptRefused = false;
+  try {
+    await nip04Only.nip44Decrypt("cipher", SELLER_PK);
+  } catch {
+    nip04DecryptRefused = true;
+  }
+  assert(nip04DecryptRefused,
+    "NIP-46 adapter refuses to downgrade decryption to NIP-04");
 
   const noEncryption = adaptNIP46BunkerSigner({
     async getPublicKey() { return BUYER_PK; },
@@ -11382,7 +11399,14 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
   const updates: EscrowState[] = [];
   const client = new EscrowClient(
     fakeSigner,
-    { relays: ["wss://relay.test"], wsImpl: FakeWebSocket as unknown as typeof WebSocket },
+    {
+      relays: ["wss://relay.test"],
+      wsImpl: FakeWebSocket as unknown as typeof WebSocket,
+      // Synthetic events in this test use placeholder `sig` strings;
+      // skip real schnorr verification here. Production wires the
+      // nostr-tools verifier by default.
+      verifyEvent: () => true,
+    },
     { onStateUpdate: (_id, state) => updates.push(state) },
   );
 
@@ -11437,7 +11461,13 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
   FakeWebSocket.instances = [];
   const orderClient = new EscrowClient(
     fakeSigner,
-    { relays: ["wss://relay.test"], wsImpl: FakeWebSocket as unknown as typeof WebSocket },
+    {
+      relays: ["wss://relay.test"],
+      wsImpl: FakeWebSocket as unknown as typeof WebSocket,
+      // Synthetic events in this test use placeholder `sig` strings;
+      // skip real schnorr verification here.
+      verifyEvent: () => true,
+    },
   );
   orderClient.connect();
   const orderSocket = FakeWebSocket.instances[0]!;

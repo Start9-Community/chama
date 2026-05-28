@@ -13,6 +13,7 @@ import {
   getScopedStorageItem,
   setScopedStorageItem,
 } from "../storage/user-scope.js";
+import { randomId } from "../storage/random-id.js";
 
 export const SATS_TRACE_STORAGE_KEY = "chama_sats_trace_v1";
 
@@ -75,7 +76,10 @@ function writeRaw(entries: SatsTraceEntry[]): void {
 }
 
 function makeTraceId(source: SatsTraceSource, escrowId?: string): string {
-  const basis = escrowId ? escrowId.slice(0, 18) : Math.random().toString(36).slice(2, 10);
+  // SECURITY: when there's no escrowId to scope the trace, use crypto
+  // randomness for the basis so a same-device script cannot predict
+  // trace IDs and read another user's trail off shared storage.
+  const basis = escrowId ? escrowId.slice(0, 18) : randomId(8);
   return `sat_${source}_${basis}_${Date.now().toString(36)}`;
 }
 
