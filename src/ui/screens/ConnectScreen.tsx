@@ -181,7 +181,7 @@ export function ConnectScreen({
               onSubmit={onConnectNsec}
               friendly
               friendlySecondary={!isNative ? {
-                label: loading ? "Connecting..." : "Use Fedi or another sign-in",
+                label: loading ? "Connecting..." : "I'm a returning Chama citizen",
                 onClick: onConnect,
                 disabled: loading,
                 tone: "accent",
@@ -213,9 +213,15 @@ export function ConnectScreen({
                     cursor: "pointer",
                   }}
                 >
-                  {showRecoveryKey ? "Hide recovery key entry" : "Use a Chama recovery key"}
+                  {showRecoveryKey ? "Hide recovery key entry" : "Use recovery key"}
                 </button>
-                {showRecoveryKey && <NsecLogin onSubmit={onConnectNsec} defaultOpen />}
+                {showRecoveryKey && (
+                  <NsecLogin
+                    onSubmit={onConnectNsec}
+                    defaultOpen
+                    allowCreate={false}
+                  />
+                )}
                 {offerNIP46Signer && !nip46Uri && (
                   <button
                     onClick={onConnectNIP46}

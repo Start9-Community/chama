@@ -8,6 +8,7 @@ export function NsecLogin({
   defaultOpen = false,
   friendly = false,
   friendlySecondary,
+  allowCreate = true,
 }: {
   onSubmit: (nsec: string, remember: boolean) => void;
   defaultOpen?: boolean;
@@ -18,6 +19,7 @@ export function NsecLogin({
     disabled?: boolean;
     tone?: "accent" | "neutral";
   };
+  allowCreate?: boolean;
 }) {
   const isNative = Capacitor.isNativePlatform();
   const [showNsec, setShowNsec] = useState(isNative || defaultOpen || friendly);
@@ -227,25 +229,30 @@ export function NsecLogin({
               marginBottom: 8,
             }}
           />
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <button
-              onClick={handleGenerate}
-              disabled={generating}
-              style={{
-                flex: 1, padding: "10px 12px",
-                background: T.surface, border: `1px solid ${T.border}`,
-                borderRadius: T.rs, color: T.text,
-                fontFamily: T.mono, fontSize: 10, fontWeight: 700,
-                cursor: generating ? "default" : "pointer",
-              }}
-            >
-              {generating ? "Creating..." : "Create new account"}
-            </button>
+          <div style={{
+            display: "flex", gap: 8, marginBottom: 8,
+            justifyContent: allowCreate ? "stretch" : "flex-end",
+          }}>
+            {allowCreate && (
+              <button
+                onClick={handleGenerate}
+                disabled={generating}
+                style={{
+                  flex: 1, padding: "10px 12px",
+                  background: T.surface, border: `1px solid ${T.border}`,
+                  borderRadius: T.rs, color: T.text,
+                  fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+                  cursor: generating ? "default" : "pointer",
+                }}
+              >
+                {generating ? "Creating..." : "Create new account"}
+              </button>
+            )}
             <button
               onClick={() => setShowKey(!showKey)}
               disabled={!nsecInput.trim()}
               style={{
-                width: 92, padding: "10px 12px",
+                width: allowCreate ? 92 : 120, padding: "10px 12px",
                 background: "transparent", border: `1px solid ${T.border}`,
                 borderRadius: T.rs, color: nsecInput.trim() ? T.muted : T.muted + "66",
                 fontFamily: T.mono, fontSize: 10, fontWeight: 700,
