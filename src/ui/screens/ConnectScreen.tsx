@@ -1,4 +1,4 @@
-import { useMemo, useState, lazy, Suspense, type ReactNode } from "react";
+import { useEffect, useMemo, useState, lazy, Suspense, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { T } from "../theme.js";
 import { NsecLogin } from "../panels/NsecLogin.js";
@@ -63,7 +63,20 @@ export function ConnectScreen({
   const [homeSlug, setHomeSlug] = useState<string | null>(() => getUserCommunitySlugRaw());
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showRecoveryKey, setShowRecoveryKey] = useState(false);
+  const [returningSignInAttempted, setReturningSignInAttempted] = useState(false);
+  const [recoveryHint, setRecoveryHint] = useState<string | null>(null);
   const homeCommunity = homeSlug ? getCommunityBySlug(homeSlug) : null;
+  const openRecoveryKeyHelp = () => {
+    setReturningSignInAttempted(false);
+    setShowAdvanced(true);
+    setShowRecoveryKey(true);
+    setRecoveryHint("No problem. If you meant to restore an existing Chama account, paste your recovery key below.");
+  };
+
+  useEffect(() => {
+    if (!returningSignInAttempted || loading || !error) return;
+    openRecoveryKeyHelp();
+  }, [returningSignInAttempted, loading, error]);
 
   if (!homeSlug || !homeCommunity) {
     return (
@@ -125,7 +138,7 @@ export function ConnectScreen({
         <span style={{ color: T.text }}>Trade locally with Bitcoin rails underneath.</span>
       </div>
 
-      {error && <ErrorBox>{error}</ErrorBox>}
+      {error && <ErrorBox>{friendlySignInError(error)}</ErrorBox>}
 
       {nip46Uri && (
         <div style={{
@@ -182,7 +195,15 @@ export function ConnectScreen({
               friendly
               friendlySecondary={!isNative ? {
                 label: loading ? "Connecting..." : "I'm a returning Chama citizen",
-                onClick: onConnect,
+                onClick: () => {
+                  if (typeof window !== "undefined" && !(window as any).nostr) {
+                    openRecoveryKeyHelp();
+                    return;
+                  }
+                  setReturningSignInAttempted(true);
+                  setRecoveryHint(null);
+                  onConnect();
+                },
                 disabled: loading,
                 tone: "accent",
               } : undefined}
@@ -197,11 +218,12 @@ export function ConnectScreen({
                 cursor: "pointer",
               }}
             >
-              {showAdvanced ? "▲ Hide power-user options" : "▼ Power-user options"}
+              {showAdvanced ? "▲ Hide more sign-in options" : "▼ More sign-in options"}
             </button>
 
             {showAdvanced && (
               <>
+                {recoveryHint && <InstructionBox>{recoveryHint}</InstructionBox>}
                 <button
                   onClick={() => setShowRecoveryKey(!showRecoveryKey)}
                   style={{
@@ -213,7 +235,7 @@ export function ConnectScreen({
                     cursor: "pointer",
                   }}
                 >
-                  {showRecoveryKey ? "Hide recovery key entry" : "Use recovery key"}
+                  {showRecoveryKey ? "Hide recovery key entry" : "I have a recovery key"}
                 </button>
                 {showRecoveryKey && (
                   <NsecLogin
@@ -741,6 +763,26 @@ function ErrorBox({ children }: { children: string }) {
       {children}
     </div>
   );
+}
+
+function InstructionBox({ children }: { children: string }) {
+  return (
+    <div style={{
+      padding: "12px 14px", borderRadius: T.rs, marginBottom: 2,
+      background: T.accentDim, border: `1px solid ${T.accent}55`,
+      color: T.text, fontSize: 12, fontFamily: T.sans,
+      lineHeight: 1.5,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function friendlySignInError(message: string): string {
+  if (/No Nostr signer|NIP-07|open in Fedi|Amber|browser signer|No browser environment/i.test(message)) {
+    return "We couldn't find a signer on this device. If you're returning with a recovery key, use More sign-in options below.";
+  }
+  return message;
 }
 
 function countryLabel(community: Community): string {
