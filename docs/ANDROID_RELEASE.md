@@ -82,3 +82,45 @@ adb install -r android/app/build/outputs/apk/release/app-release.apk
 1. Push the source commit and `vX.Y.Z` tag.
 2. Create the GitHub release with the APK and SHA-256.
 3. Publish the same APK through Zapstore with the Chama publisher identity.
+
+## 5. Publish to Zapstore
+
+Chama keeps Zapstore metadata in `zapstore.yaml`. The config points `zsp` at
+the local release APK, so build or reuse the APK before publishing.
+
+First-time setup needs one manual identity link between the Android signing
+certificate and the Chama Zapstore publisher npub:
+
+```sh
+# One-time helper file; delete it after linking.
+keytool -importkeystore \
+  -srckeystore android/keystore/chama-release.jks \
+  -destkeystore /private/tmp/chama-zapstore-release.p12 \
+  -deststoretype PKCS12 \
+  -srcalias chama-v1 \
+  -destalias chama-v1
+
+KEYSTORE_PASSWORD=... SIGN_WITH=browser \
+  zsp identity --link-key /private/tmp/chama-zapstore-release.p12 --link-key-expiry 2y
+```
+
+Before approving a browser signer prompt, confirm the signer pubkey is the
+publisher in `zapstore.yaml`. The Chama publisher is:
+
+```text
+npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6
+```
+
+For the current release, or any local manual publish:
+
+```sh
+SIGN_WITH=browser CHAMA_ZSP_BIN=/path/to/zsp \
+  ./scripts/android-release.sh --no-build --zapstore
+```
+
+For CI/CD, use a NIP-46 bunker URL stored in secret management rather than an
+`nsec` in shell history or repository files:
+
+```sh
+SIGN_WITH='bunker://...' ./scripts/release-all.sh --github-release --zapstore
+```

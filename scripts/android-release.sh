@@ -14,9 +14,13 @@ set -euo pipefail
 #   ./scripts/android-release.sh --no-sign-checksum
 #   ./scripts/android-release.sh --gpg-key <key-id-or-fingerprint>
 #   ./scripts/android-release.sh --pgp-public-key-url https://example.com/key.asc
+#   SIGN_WITH=browser ./scripts/android-release.sh --zapstore
+#   SIGN_WITH=bunker://... ./scripts/android-release.sh --github-release --zapstore
 #
 # Default mode builds the APK and prepares release assets in /private/tmp.
 # --github-release uploads those assets to the matching GitHub tag/release.
+# --zapstore publishes the APK through zsp after the APK and optional GitHub
+# release steps pass. Set CHAMA_ZSP_BIN to use a non-PATH zsp binary.
 # --skip-web-gate assumes npm predeploy/build already passed in this shell,
 # and only syncs Capacitor + builds/verifies the APK.
 # Checksum signing is automatic when gpg has a secret key available.
@@ -32,6 +36,8 @@ ANDROID_DIR="$ROOT_DIR/android"
 KEYSTORE_PROPS="$ANDROID_DIR/keystore.properties"
 APK_PATH="$ANDROID_DIR/app/build/outputs/apk/release/app-release.apk"
 UPLOAD_GITHUB=0
+PUBLISH_ZAPSTORE=0
+ZAPSTORE_OVERWRITE=0
 BUILD_APK=1
 RUN_WEB_GATE=1
 CLOBBER=0
@@ -42,6 +48,7 @@ NOTES_FILE=""
 SIGN_CHECKSUM="auto"
 RELEASE_PGP_KEY_ID="${CHAMA_RELEASE_GPG_KEY:-}"
 RELEASE_PGP_PUBLIC_KEY_URL="${CHAMA_RELEASE_PGP_PUBLIC_KEY_URL:-}"
+ZAPSTORE_CONFIG="${CHAMA_ZAPSTORE_CONFIG:-zapstore.yaml}"
 
 cd "$ROOT_DIR"
 
@@ -258,10 +265,70 @@ export_release_public_key() {
   fi
 }
 
+zsp_bin() {
+  if [ -n "${CHAMA_ZSP_BIN:-}" ]; then
+    echo "$CHAMA_ZSP_BIN"
+    return 0
+  fi
+
+  command -v zsp 2>/dev/null || true
+}
+
+publish_zapstore_release() {
+  local zsp
+  zsp=$(zsp_bin)
+  if [ -z "$zsp" ] || [ ! -x "$zsp" ]; then
+    cat <<'EOF'
+❌ zsp CLI is required for --zapstore.
+
+Install once:
+  go install github.com/zapstore/zsp@latest
+
+Or download a release binary and run with:
+  CHAMA_ZSP_BIN=/path/to/zsp ./scripts/android-release.sh --zapstore
+EOF
+    exit 1
+  fi
+
+  if [ ! -f "$ZAPSTORE_CONFIG" ]; then
+    echo "❌ Zapstore config not found: $ZAPSTORE_CONFIG"
+    exit 1
+  fi
+
+  if [ -z "${SIGN_WITH:-}" ]; then
+    cat <<EOF
+❌ SIGN_WITH is required for Zapstore publishing.
+
+For local release signing:
+  SIGN_WITH=browser ./scripts/android-release.sh --no-build --zapstore
+
+For CI/CD, prefer a NIP-46 bunker URL stored as a secret:
+  SIGN_WITH='bunker://...' ./scripts/android-release.sh --github-release --zapstore
+EOF
+    exit 1
+  fi
+
+  local zapstore_args=(publish "$ZAPSTORE_CONFIG")
+  if [ "$ZAPSTORE_OVERWRITE" = "1" ]; then
+    zapstore_args+=(--overwrite-release)
+  fi
+
+  echo "🚀 Publishing Android release to Zapstore..."
+  "$zsp" "${zapstore_args[@]}"
+}
+
 while [ $# -gt 0 ]; do
   case "${1:-}" in
     --github-release|--upload-github)
       UPLOAD_GITHUB=1
+      shift
+      ;;
+    --zapstore|--publish-zapstore)
+      PUBLISH_ZAPSTORE=1
+      shift
+      ;;
+    --zapstore-overwrite|--overwrite-zapstore)
+      ZAPSTORE_OVERWRITE=1
       shift
       ;;
     --no-build)
@@ -304,6 +371,14 @@ while [ $# -gt 0 ]; do
       NOTES_FILE="${2:-}"
       if [ -z "$NOTES_FILE" ] || [ ! -f "$NOTES_FILE" ]; then
         echo "❌ --notes-file requires an existing file"
+        exit 1
+      fi
+      shift 2
+      ;;
+    --zapstore-config)
+      ZAPSTORE_CONFIG="${2:-}"
+      if [ -z "$ZAPSTORE_CONFIG" ] || [ ! -f "$ZAPSTORE_CONFIG" ]; then
+        echo "❌ --zapstore-config requires an existing file"
         exit 1
       fi
       shift 2
@@ -491,6 +566,9 @@ fi
 
 if [ "$UPLOAD_GITHUB" = "0" ]; then
   echo "↷ Skipping GitHub upload. Pass --github-release to upload assets."
+  if [ "$PUBLISH_ZAPSTORE" = "1" ]; then
+    publish_zapstore_release
+  fi
   exit 0
 fi
 
@@ -590,3 +668,7 @@ fi
 gh "${UPLOAD_ARGS[@]}"
 
 echo "✅ GitHub Release $TAG has Android assets."
+
+if [ "$PUBLISH_ZAPSTORE" = "1" ]; then
+  publish_zapstore_release
+fi

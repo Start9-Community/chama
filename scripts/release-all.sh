@@ -9,6 +9,7 @@ set -euo pipefail
 # Usage:
 #   ./scripts/release-all.sh --github-release --clobber --gpg-key <key-id>
 #   ./scripts/release-all.sh --github-release --repo owner/repo
+#   SIGN_WITH=browser ./scripts/release-all.sh --no-web --no-build-apk --zapstore
 #   ./scripts/release-all.sh --deploy-live --no-android
 #   ./scripts/release-all.sh --no-web --github-release --clobber
 #
@@ -59,7 +60,7 @@ while [ $# -gt 0 ]; do
       RUN_ANDROID=0
       shift
       ;;
-    --github-release|--upload-github|--clobber|--sign-checksum|--no-sign-checksum)
+    --github-release|--upload-github|--clobber|--sign-checksum|--no-sign-checksum|--zapstore|--publish-zapstore|--zapstore-overwrite|--overwrite-zapstore)
       append_android_flag "$1"
       shift
       ;;
@@ -71,7 +72,7 @@ while [ $# -gt 0 ]; do
       append_android_flag "$1"
       shift
       ;;
-    --tag|--repo|--release-dir|--notes-file|--gpg-key|--pgp-public-key-url)
+    --tag|--repo|--release-dir|--notes-file|--gpg-key|--pgp-public-key-url|--zapstore-config)
       append_android_option "$1" "${2:-}"
       shift 2
       ;;

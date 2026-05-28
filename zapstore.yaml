@@ -1,0 +1,24 @@
+repository: https://github.com/jesuspirate/chama
+release_source: android/app/build/outputs/apk/release/app-release.apk
+pubkey: npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6
+
+name: Chama
+summary: Nostr-native P2P escrow client. Non-custodial. No server.
+description: |
+  Chama is a Nostr-native P2P escrow client for Bitcoin commerce.
+
+  It is non-custodial, serverless, and built on Nostr events, Fedimint ecash,
+  and 2-of-3 Shamir Secret Sharing.
+website: https://getchama.app
+icon: public/icons/chama-woven-trust-mark-transparent-512.png
+images:
+  - design/Browse View Updated.png
+  - design/Trade View + Chat.png
+  - design/QR-IN + QR-OUT + Receipt + Vote.png
+tags:
+  - bitcoin
+  - nostr
+  - fedimint
+  - escrow
+metadata_sources:
+  - github
