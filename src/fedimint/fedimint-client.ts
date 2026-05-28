@@ -790,9 +790,34 @@ export class FedimintClient {
       return { fed: this._federationId };
     }
 
+    // v1.2.2 claim-hang fix: bound the balance read so a stuck WASM
+    // state machine surfaces as a probe failure instead of returning
+    // ok and then hanging downstream in `reissueExternalNotes`. The
+    // probe is supposed to be the bridge's "is this federation
+    // actually responding" gate before we touch the mint module.
+    // Without a timeout, getBalance can return cached local state
+    // even when the federation is mid-stall — we'd report ok and the
+    // subsequent claim would silently hang for the user. 10 s is more
+    // than enough for a healthy local DB read; anything slower than
+    // that is a real problem.
+    const PROBE_BALANCE_TIMEOUT_MS = 10_000;
     let balance: number | undefined;
     try {
-      balance = await wallet.balance.getBalance();
+      balance = await Promise.race<number>([
+        wallet.balance.getBalance(),
+        new Promise<number>((_, reject) => {
+          const t = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `wallet.balance.getBalance() did not resolve within ${PROBE_BALANCE_TIMEOUT_MS / 1000}s`,
+                ),
+              ),
+            PROBE_BALANCE_TIMEOUT_MS,
+          );
+          (t as { unref?: () => void }).unref?.();
+        }),
+      ]);
     } catch (e) {
       mlog("FED-PROBE-REACHABLE", {
         fed: this._federationId,

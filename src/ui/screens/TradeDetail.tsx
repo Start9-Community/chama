@@ -91,7 +91,12 @@ export function TradeDetail({
   kind0Enabled?: boolean;
   profileNames?: NostrProfileNameMap;
   onBack: () => void;
-  onVote: (outcome: Outcome) => void;
+  // v1.2.2 vote-freeze fix: typed as Promise<void> so handleVote can
+  // await the publish-and-toast chain wired in App. The previous `void`
+  // return type encouraged a fire-and-forget call that re-enabled the
+  // button on a 1 s setTimeout even though the real publish takes
+  // 8–16 s, making the screen look frozen.
+  onVote: (outcome: Outcome) => Promise<void>;
   onClaim: () => Promise<void>;
   onJoin: (
     role: Role,
@@ -491,8 +496,20 @@ export function TradeDetail({
     : null;
 
   const handleVote = async (outcome: Outcome) => {
+    // v1.2.2 vote-freeze fix: await the wired publish-and-toast
+    // chain so the button reflects the REAL flight duration
+    // (8–16 s typical) instead of resetting after 1 s. With the
+    // previous fire-and-forget pattern, sellers would tap, see no
+    // visible change, tap again, and the second tap hit the
+    // VOTE_SUPPRESSED swallow path with no UI feedback at all.
+    // Now: button stays "publishing" until the toast fires.
+    if (voting) return;
     setVoting(true);
-    try { onVote(outcome); } finally { setTimeout(() => setVoting(false), 1000); }
+    try {
+      await onVote(outcome);
+    } finally {
+      setVoting(false);
+    }
   };
 
   return (

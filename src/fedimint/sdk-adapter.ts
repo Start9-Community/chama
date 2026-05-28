@@ -210,6 +210,17 @@ export interface RealFedimintWallet {
 const RECEIVE_WATCH_TIMEOUT_MS = 16 * 60 * 1000;
 const PAY_WATCH_TIMEOUT_MS = 60 * 1000;
 const REISSUE_WATCH_TIMEOUT_MS = 90 * 1000;
+// v1.2.2 claim-hang fix: submitting `reissueExternalNotes` to the WASM
+// mint module can silently hang when the federation is unreachable
+// mid-RPC — the wasm-side state machine waits forever for a guardian
+// reply and the JS Promise never resolves nor rejects. waitForMintReissue
+// has its own 90 s subscription timeout, but only if we got an
+// operationId first. We never did, so the modal sat on "RECOVERING
+// YOUR SHARE…" indefinitely. Bound the submit step so a stuck submit
+// surfaces as a transient error and falls into the redeemWithRetry
+// retry loop (which the federation will deduplicate via
+// resumeMintReissueFromHistory if the WASM call eventually lands).
+const REISSUE_SUBMIT_TIMEOUT_MS = 30 * 1000;
 
 const CURATED_LIGHTNING_GATEWAY_TRUST: Record<string, string[]> = {
   // Bitcoin Life Federation. The guardian admin UI exposes this gateway in
@@ -1146,6 +1157,17 @@ export function adaptRealWallet(
   const activeReceiveWatches = new Set<() => void>();
   const armedReceiveOperationIds = new Set<string>();
   const armedMintReissueOperationIds = new Set<string>();
+  // v1.2.2 claim-hang fix: coalesce concurrent redeems of the same OOB
+  // notes string. drainPendingRedemptions (useEscrow init) fires
+  // fire-and-forget, and the user can press RETRY CLAIM before the
+  // drain finishes. Without this guard, two `reissueExternalNotes`
+  // calls for the same notes can both hit the WASM mint state machine
+  // in parallel — and at best the second is rejected as a double-spend,
+  // at worst both hang waiting for guardian replies. We key on the
+  // full notes string (already unique per token; long string keys are
+  // fine for a Map). The first caller wins; later callers await the
+  // same Promise.
+  const inFlightMintReissuesByNotes = new Map<string, Promise<string>>();
 
   const summarizeGateway = (
     gateway: RealLightningGateway,
@@ -1669,50 +1691,88 @@ export function adaptRealWallet(
         return result.notes;
       },
       async redeemEcash(oobNotes: string, meta?: ChamaOperationMeta) {
-        let expectedMsats: number | null = null;
-        try { expectedMsats = await real.mint.parseNotes(oobNotes); } catch {}
-
-        let operationId: string;
-        try {
-          operationId = real.mint.reissueExternalNotes
-            ? await real.mint.reissueExternalNotes(oobNotes, meta ?? {})
-            : await real.mint.redeemEcash(oobNotes);
-          console.info(`[chama] mint redeem ${operationId}: submitted`);
-          await waitForMintReissue(operationId);
-        } catch (e) {
-          if (!isAlreadyReissuedError(e)) throw e;
-          console.warn(
-            `[chama] mint redeem: notes already reissued; searching local operation history ` +
-              `expected=${expectedMsats ?? "unknown"}`,
-            e,
+        // v1.2.2 claim-hang fix: coalesce concurrent redeems for the
+        // same notes. See comment on inFlightMintReissuesByNotes above.
+        const existing = inFlightMintReissuesByNotes.get(oobNotes);
+        if (existing) {
+          console.info(
+            `[chama] mint redeem: coalescing with in-flight reissue (notes prefix=${oobNotes.slice(0, 12)}…)`,
           );
-	          const historicalOperationId = await resumeMintReissueFromHistory(
-	            expectedMsats,
-	            "already-reissued",
-	          );
-	          if (!historicalOperationId) {
-	            const err: any = new Error(
-	              "Mint notes were consumed by the federation, but no local reissue operation was found to confirm wallet credit."
-	            );
-	            err.code = "MINT_REISSUE_UNKNOWN";
-	            err.cause = e;
-	            throw err;
-	          }
-	          operationId = historicalOperationId;
-	        }
-
-        try {
-          await real.recovery.waitForAllRecoveries();
-        } catch (e) {
-          console.debug(`[chama] mint redeem ${operationId}: recovery wait after reissue failed`, e);
+          return existing;
         }
+        const promise = (async (): Promise<string> => {
+          let expectedMsats: number | null = null;
+          try { expectedMsats = await real.mint.parseNotes(oobNotes); } catch {}
 
-        let balanceAfter: number | undefined;
-        try { balanceAfter = await real.balance.getBalance(); } catch {}
-        console.info(
-          `[chama] mint redeem ${operationId}: confirmed balance=${balanceAfter ?? "unknown"}`,
-        );
-        return operationId;
+          let operationId: string;
+          try {
+            // v1.2.2 claim-hang fix: bound the submit step in a
+            // Promise.race so a stuck WASM `reissueExternalNotes`
+            // surfaces as a transient error instead of hanging the
+            // claim modal forever. If the WASM call eventually does
+            // land after we time out here, the next retry's
+            // `isAlreadyReissuedError` branch will pick it up via
+            // `resumeMintReissueFromHistory`.
+            const submitPromise: Promise<string> = real.mint.reissueExternalNotes
+              ? real.mint.reissueExternalNotes(oobNotes, meta ?? {})
+              : real.mint.redeemEcash(oobNotes);
+            operationId = await Promise.race<string>([
+              submitPromise,
+              new Promise<string>((_, reject) => {
+                const t = setTimeout(() => {
+                  reject(
+                    new Error(
+                      `Mint reissue submit timed out after ${REISSUE_SUBMIT_TIMEOUT_MS / 1000}s ` +
+                        `— federation may be unreachable. Will retry.`,
+                    ),
+                  );
+                }, REISSUE_SUBMIT_TIMEOUT_MS);
+                (t as { unref?: () => void }).unref?.();
+              }),
+            ]);
+            console.info(`[chama] mint redeem ${operationId}: submitted`);
+            await waitForMintReissue(operationId);
+          } catch (e) {
+            if (!isAlreadyReissuedError(e)) throw e;
+            console.warn(
+              `[chama] mint redeem: notes already reissued; searching local operation history ` +
+                `expected=${expectedMsats ?? "unknown"}`,
+              e,
+            );
+            const historicalOperationId = await resumeMintReissueFromHistory(
+              expectedMsats,
+              "already-reissued",
+            );
+            if (!historicalOperationId) {
+              const err: any = new Error(
+                "Mint notes were consumed by the federation, but no local reissue operation was found to confirm wallet credit."
+              );
+              err.code = "MINT_REISSUE_UNKNOWN";
+              err.cause = e;
+              throw err;
+            }
+            operationId = historicalOperationId;
+          }
+
+          try {
+            await real.recovery.waitForAllRecoveries();
+          } catch (e) {
+            console.debug(`[chama] mint redeem ${operationId}: recovery wait after reissue failed`, e);
+          }
+
+          let balanceAfter: number | undefined;
+          try { balanceAfter = await real.balance.getBalance(); } catch {}
+          console.info(
+            `[chama] mint redeem ${operationId}: confirmed balance=${balanceAfter ?? "unknown"}`,
+          );
+          return operationId;
+        })();
+        inFlightMintReissuesByNotes.set(oobNotes, promise);
+        try {
+          return await promise;
+        } finally {
+          inFlightMintReissuesByNotes.delete(oobNotes);
+        }
       },
       async parseNotes(oobNotes: string) {
         const total = await real.mint.parseNotes(oobNotes);

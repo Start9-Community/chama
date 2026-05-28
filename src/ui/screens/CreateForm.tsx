@@ -887,7 +887,21 @@ export function CreateForm({
             : amountMsats,
         fiatAmount: !hasMenu && form.fiat ? parseFloat(form.fiat) : undefined,
         fiatCurrency: !hasMenu && form.fiat ? form.cur : undefined,
-        premiumBps: parsePremiumBps(form.premium),
+        // v1.2.2 premium-display fix: when the seller leaves the
+        // premium field blank on an Exchange / bill-pay listing,
+        // persist an explicit 0 so the listing reads "0% premium"
+        // instead of falling through to listing-metrics' implied-spot
+        // calculation (which displays a moving "-X% premium" anchored
+        // off the listed fiat amount vs current BTC spot, and reads
+        // like a seller-chosen discount). Lending verticals stay on
+        // undefined because they encode APR via the menu's aprBps and
+        // we don't want to override that with a flat zero.
+        premiumBps: (() => {
+          const parsed = parsePremiumBps(form.premium);
+          if (parsed !== undefined) return parsed;
+          if (vertical === "p2p-trade" || vertical === "bill-pay") return 0;
+          return undefined;
+        })(),
         category: vertical,
         community,
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,

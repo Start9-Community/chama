@@ -1307,12 +1307,33 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       vibrate(outcome === Outcome.RELEASE ? [80, 40, 80] : [60, 30, 60, 30, 60]);
       return result;
     } catch (e: any) {
-      // Swallow known duplicate/stale errors — they're from relay echoes
+      // v1.2.2 vote-freeze fix: previously this branch silently
+      // returned the current state on duplicate/stale errors, which
+      // fired the App's success toast as if the tap had published
+      // a vote — leaving sellers staring at the same screen wondering
+      // if anything happened. Now we re-throw a typed error so the
+      // App's onVote handler can show an info toast distinct from a
+      // real publish error. State-machine semantics are unchanged:
+      // the duplicate/stale event was rejected, and the caller can
+      // still recover the current state via getState if needed.
       const msg = e?.message || "";
       if (msg.includes("already voted") || msg.includes("Cannot vote") ||
           msg.includes("TERMINAL") || msg.includes("not LOCKED")) {
         console.debug("[chama] Vote suppressed:", msg);
-        return client.getState(escrowId)!;
+        const swallowed = new Error(
+          msg.includes("already voted")
+            ? "Vote already recorded for this trade."
+            : msg.includes("not LOCKED")
+              ? "Trade is no longer accepting votes."
+              : msg.includes("TERMINAL")
+                ? "Trade has already settled — no further votes accepted."
+                : "This vote can no longer be cast.",
+        ) as Error & { voteSuppressed?: true; code?: string; originalMessage?: string; currentState?: EscrowState | null };
+        swallowed.voteSuppressed = true;
+        swallowed.code = "VOTE_SUPPRESSED";
+        swallowed.originalMessage = msg;
+        swallowed.currentState = client.getState(escrowId);
+        throw swallowed;
       }
       throw e;
     }

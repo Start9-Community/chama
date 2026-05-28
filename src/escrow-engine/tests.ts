@@ -3805,6 +3805,241 @@ console.log("\n── PROD ENCRYPTION CYCLE (config flip) ──");
   }
 }
 
+// ── 26b. ENVELOPE PUBLISH + RECEIVE (v1.2.2 PROD encryption fix) ──────────
+console.log("\n── ENVELOPE PUBLISH + RECEIVE (v1.2.2 PROD encryption) ──");
+{
+  // The v1.2.1 PROD encryption attempt encrypted VOTE / CLAIM /
+  // RESOLVE single-recipient (to the SENDER's own pubkey only), which
+  // broke multi-party visibility: the other two participants got
+  // "invalid MAC" and silently dropped the event, so consensus never
+  // formed. v1.2.2 replaces that with the per-recipient envelope
+  // pattern that LOCK's SSS shares already use — every event carries
+  // three ciphertexts, one per participant, all readable to the local
+  // viewer if-and-only-if their pubkey is one of the three.
+  //
+  // This block exercises both halves of the fix in isolation:
+  //   (publish) encryptToParticipants wraps a payload in an envelope
+  //     decryptable by buyer + seller + arbiter, with no slot for
+  //     non-participants and distinct ciphertext per slot.
+  //   (receive) decryptEventContent correctly dispatches across the
+  //     three wire shapes (plaintext / per-recipient envelope / raw
+  //     NIP-44 legacy) and returns null in the silent-skip cases
+  //     (envelope-not-for-me, malformed JSON, decrypt failure).
+
+  const buyerPriv    = generateSecretKey();
+  const sellerPriv   = generateSecretKey();
+  const arbiterPriv  = generateSecretKey();
+  const strangerPriv = generateSecretKey();
+  const buyerPub_    = getPublicKey(buyerPriv);
+  const sellerPub_   = getPublicKey(sellerPriv);
+  const arbiterPub_  = getPublicKey(arbiterPriv);
+  const strangerPub_ = getPublicKey(strangerPriv);
+
+  const buyerCrypto   = makeNip44(buyerPriv);
+  const sellerCrypto  = makeNip44(sellerPriv);
+  const arbiterCrypto = makeNip44(arbiterPriv);
+
+  // Fake signer wearing the buyer's hat. The EscrowClient under test
+  // is "the buyer's client" — it signs as buyer and decrypts envelope
+  // slots addressed to the buyer's pubkey.
+  const buyerSigner: any = {
+    getPublicKey: async () => buyerPub_,
+    signEvent: async (e: any) => ({
+      ...e,
+      id: "test_signed_event",
+      sig: "test_sig",
+      pubkey: buyerPub_,
+    }),
+    nip44Encrypt: buyerCrypto.encrypt,
+    nip44Decrypt: buyerCrypto.decrypt,
+  };
+
+  const client = new EscrowClient(
+    buyerSigner,
+    {
+      relays: ["wss://test-envelope.invalid"],
+      // No wsImpl + no .connect() call → RelayManager stays inert,
+      // we just exercise the in-memory helpers.
+      verifyEvent: () => true,
+    },
+  );
+
+  // ── publish side: encryptToParticipants ──────────────────────────
+
+  const fakeState: any = {
+    participants: {
+      [Role.BUYER]: buyerPub_,
+      [Role.SELLER]: sellerPub_,
+      [Role.ARBITER]: arbiterPub_,
+    },
+  };
+
+  const votePayload = {
+    type: "escrow:vote",
+    outcome: Outcome.RELEASE,
+    role: Role.BUYER,
+    votedAt: 1_700_000_000,
+  };
+
+  const envContent: string = await (client as any).encryptToParticipants(
+    votePayload,
+    fakeState,
+  );
+
+  const envObj = JSON.parse(envContent);
+  assert(envObj && typeof envObj.encryptedFor === "object",
+    "(publish) encryptToParticipants output is a JSON envelope shape");
+  assert(Object.keys(envObj.encryptedFor).length === 3,
+    "(publish) Envelope has exactly 3 recipient slots");
+  assert(typeof envObj.encryptedFor[buyerPub_] === "string" &&
+         envObj.encryptedFor[buyerPub_].length > 0,
+    "(publish) Buyer slot is non-empty ciphertext");
+  assert(typeof envObj.encryptedFor[sellerPub_] === "string" &&
+         envObj.encryptedFor[sellerPub_].length > 0,
+    "(publish) Seller slot is non-empty ciphertext");
+  assert(typeof envObj.encryptedFor[arbiterPub_] === "string" &&
+         envObj.encryptedFor[arbiterPub_].length > 0,
+    "(publish) Arbiter slot is non-empty ciphertext");
+  assert(envObj.encryptedFor[buyerPub_] !== envObj.encryptedFor[sellerPub_] &&
+         envObj.encryptedFor[sellerPub_] !== envObj.encryptedFor[arbiterPub_],
+    "(publish) Each slot is a distinct ciphertext (per-recipient ECDH)");
+  assert(envObj.encryptedFor[strangerPub_] === undefined,
+    "(publish) Non-participants get no slot");
+
+  // Each participant decrypts their slot back to the original payload.
+  // The sender pubkey to use for ECDH is the buyer (the publishing
+  // client). Buyer decrypting their own slot is self-ECDH and works
+  // by NIP-44 design.
+  for (const viewer of [
+    { name: "buyer",   pub: buyerPub_,   crypto: buyerCrypto },
+    { name: "seller",  pub: sellerPub_,  crypto: sellerCrypto },
+    { name: "arbiter", pub: arbiterPub_, crypto: arbiterCrypto },
+  ]) {
+    const ct = envObj.encryptedFor[viewer.pub];
+    const pt = await viewer.crypto.decrypt(ct, buyerPub_);
+    const decoded = JSON.parse(pt);
+    assert(decoded.type === "escrow:vote" &&
+           decoded.outcome === Outcome.RELEASE &&
+           decoded.role === Role.BUYER &&
+           decoded.votedAt === 1_700_000_000,
+      `(publish) ${viewer.name} decrypts their slot to the original VOTE payload`);
+  }
+
+  // ── receive side: decryptEventContent ────────────────────────────
+
+  // Shape 1: plaintext escrow payload → returned as-is.
+  const shape1Event: any = {
+    id: "shape1",
+    pubkey: sellerPub_,
+    created_at: 1,
+    kind: EscrowEventKind.CREATE,
+    tags: [],
+    content: JSON.stringify({ type: "escrow:create", x: 1 }),
+    sig: "x",
+  };
+  const r1 = await (client as any).decryptEventContent(shape1Event);
+  assert(r1 === shape1Event.content,
+    "(receive) Shape 1: plaintext escrow payload returned as-is");
+
+  // Shape 2: envelope-for-me → decrypts to cleartext payload.
+  // Sender is the buyer (their own client signing & publishing); buyer
+  // decrypting buyer's slot is self-ECDH.
+  const shape2Event: any = {
+    id: "shape2",
+    pubkey: buyerPub_,
+    created_at: 2,
+    kind: EscrowEventKind.VOTE,
+    tags: [],
+    content: envContent,
+    sig: "x",
+  };
+  const r2 = await (client as any).decryptEventContent(shape2Event);
+  assert(r2 !== null,
+    "(receive) Shape 2: envelope-for-me does not return null");
+  const r2obj = JSON.parse(r2);
+  assert(r2obj.type === "escrow:vote" && r2obj.role === Role.BUYER,
+    "(receive) Shape 2: envelope-for-me decrypts to original VOTE payload");
+
+  // Shape 2b: envelope where I'm NOT a recipient → null (silent skip).
+  const envWithoutBuyer = await createEnvelope(
+    JSON.stringify(votePayload),
+    [sellerPub_, arbiterPub_],
+    sellerCrypto.encrypt,
+  );
+  const shape2bEvent: any = {
+    id: "shape2b",
+    pubkey: sellerPub_,
+    created_at: 3,
+    kind: EscrowEventKind.VOTE,
+    tags: [],
+    content: JSON.stringify(envWithoutBuyer),
+    sig: "x",
+  };
+  const r2b = await (client as any).decryptEventContent(shape2bEvent);
+  assert(r2b === null,
+    "(receive) Shape 2b: envelope-not-for-me returns null (silent skip)");
+
+  // Shape 2c: envelope where my slot exists but ciphertext is garbage
+  // → null (MAC fails cleanly, no throw).
+  const shape2cEvent: any = {
+    id: "shape2c",
+    pubkey: sellerPub_,
+    created_at: 4,
+    kind: EscrowEventKind.VOTE,
+    tags: [],
+    content: JSON.stringify({ encryptedFor: { [buyerPub_]: "not-real-ciphertext" } }),
+    sig: "x",
+  };
+  const r2c = await (client as any).decryptEventContent(shape2cEvent);
+  assert(r2c === null,
+    "(receive) Shape 2c: malformed envelope slot returns null without throwing");
+
+  // Shape 3: legacy raw NIP-44 ciphertext (no JSON wrapper) → decrypts.
+  const rawCt = await sellerCrypto.encrypt("legacy plaintext blob", buyerPub_);
+  const shape3Event: any = {
+    id: "shape3",
+    pubkey: sellerPub_,
+    created_at: 5,
+    kind: EscrowEventKind.VOTE,
+    tags: [],
+    content: rawCt,
+    sig: "x",
+  };
+  const r3 = await (client as any).decryptEventContent(shape3Event);
+  assert(r3 === "legacy plaintext blob",
+    "(receive) Shape 3: legacy raw NIP-44 ciphertext decrypts");
+
+  // Edge: JSON object that's neither plaintext payload nor envelope
+  // → null (don't fall through to NIP-44 path; that would just waste
+  // a decrypt call on noise).
+  const noiseEvent: any = {
+    id: "noise",
+    pubkey: sellerPub_,
+    created_at: 6,
+    kind: EscrowEventKind.VOTE,
+    tags: [],
+    content: JSON.stringify({ random: "stuff", no_known_fields: true }),
+    sig: "x",
+  };
+  const rNoise = await (client as any).decryptEventContent(noiseEvent);
+  assert(rNoise === null,
+    "(receive) Edge: JSON without type or encryptedFor returns null");
+
+  // Edge: empty content → null.
+  const emptyEvent: any = {
+    id: "empty",
+    pubkey: sellerPub_,
+    created_at: 7,
+    kind: EscrowEventKind.VOTE,
+    tags: [],
+    content: "",
+    sig: "x",
+  };
+  const rEmpty = await (client as any).decryptEventContent(emptyEvent);
+  assert(rEmpty === null,
+    "(receive) Edge: empty content returns null");
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // PR — UI shell decisions (v0.1.85 hotfix: picker gate + community-tap)
 // ══════════════════════════════════════════════════════════════════════════

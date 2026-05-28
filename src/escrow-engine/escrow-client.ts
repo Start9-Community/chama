@@ -50,7 +50,7 @@ import {
 
 import { applyEvent, replayEventChain, canVote, getWinner, type TransitionResult } from "./state-machine.js";
 import { EscrowNotifier } from "./notifier.js";
-import { ENCRYPTION_CONFIG, maybeEncrypt } from "./encryption-config.js";
+import { ENCRYPTION_CONFIG } from "./encryption-config.js";
 import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
 import { createEnvelope, decryptFromEnvelope } from "./envelope.js";
 import { RelayManager, type NostrFilter } from "./relay-manager.js";
@@ -717,12 +717,14 @@ export class EscrowClient {
       votedAt: now,
     };
 
-    // Conditionally encrypt VOTE content
-    const content = await maybeEncrypt(
-      payload, pubkey,
-      (pt, pk) => this.signer.nip44Encrypt(pt, pk),
-      ENCRYPTION_CONFIG.encryptVote,
-    );
+    // SECURITY: VOTE outcome is private to the three participants.
+    // When encryptVote is on, wrap the payload in a per-recipient
+    // envelope so buyer/seller/arbiter can each decrypt their slot
+    // and no relay operator can read the cleartext. When off (DEV),
+    // ship the JSON in the clear for easy debugging.
+    const content = ENCRYPTION_CONFIG.encryptVote
+      ? await this.encryptToParticipants(payload, state)
+      : JSON.stringify(payload);
 
     const unsigned: UnsignedEvent = {
       kind: EscrowEventKind.VOTE,
@@ -781,8 +783,13 @@ export class EscrowClient {
       claimedAt: now,
     };
 
-    // Plaintext for testing. TODO: NIP-44 encrypt for production
-    const content = JSON.stringify(payload);
+    // SECURITY: CLAIM carries the notes-hash verification — a
+    // commitment that only the winner could produce. Wrap in the
+    // per-recipient envelope so the three participants can audit it
+    // while no relay operator can read it.
+    const content = ENCRYPTION_CONFIG.encryptClaim
+      ? await this.encryptToParticipants(payload, state)
+      : JSON.stringify(payload);
 
     const unsigned: UnsignedEvent = {
       kind: EscrowEventKind.CLAIM,
@@ -1070,42 +1077,18 @@ export class EscrowClient {
     );
     if (rawEvents.length === 0) return null;
 
-    // Parse all events — try plaintext JSON first, then NIP-44 decrypt.
-    // CREATE and JOIN are plaintext; LOCK/VOTE/CLAIM/CHAT are encrypted.
+    // Parse all events. decryptEventContent handles the three wire
+    // shapes (plaintext escrow payload, per-recipient envelope, legacy
+    // raw NIP-44) and returns null for "not for me / malformed / not
+    // recognised" cases. Skip those silently so a stale or wrong-
+    // recipient event in a relay's cache doesn't blow up the load.
     const parsed: ParsedEscrowEvent[] = [];
     for (const raw of rawEvents) {
-      let content: string | null = null;
-
-      // Try 1: plaintext JSON — accept any valid JSON with a type field
-      // The event parser will validate the specific type later.
-      try {
-        const test = JSON.parse(raw.content);
-        if (test && typeof test.type === "string") {
-          content = raw.content;
-        }
-      } catch {
-        // Not valid JSON — likely NIP-44 encrypted
+      const content = await this.decryptEventContent(raw);
+      if (content === null) {
+        console.debug(`[escrow] Skipping event ${raw.id.slice(0, 8)} (not for me / malformed)`);
+        continue;
       }
-
-      // Try 2: NIP-44 decrypt — only if content looks like actual ciphertext
-      if (!content) {
-        const looksEncrypted = raw.content.length > 0 
-          && !raw.content.startsWith("{") 
-          && !raw.content.startsWith("[");
-        if (looksEncrypted) {
-          try {
-            content = await this.signer.nip44Decrypt(raw.content, raw.pubkey);
-          } catch {
-            console.debug(`[escrow] Decrypt failed for ${raw.id.slice(0, 8)}, skipping`);
-            continue;
-          }
-        } else {
-          // Looks like JSON but didn't pass the type check — skip
-          console.debug(`[escrow] Skipping non-escrow JSON event ${raw.id.slice(0, 8)}`);
-          continue;
-        }
-      }
-
       const result = parseEscrowEvent(raw, content, true);
       if (result.ok) parsed.push(result.event);
     }
@@ -1246,34 +1229,12 @@ export class EscrowClient {
     if (!dTag?.[1]) return;
     const escrowId = dTag[1];
 
-    // Try plaintext JSON first (CREATE, JOIN), then NIP-44 decrypt (LOCK, VOTE, etc.)
-    let decrypted: string | null = null;
-    try {
-      const test = JSON.parse(event.content);
-      if (test && typeof test.type === "string" && test.type.startsWith("escrow:")) {
-        decrypted = event.content;
-      }
-    } catch {
-      // Not plaintext JSON — try NIP-44
-    }
-    if (!decrypted) {
-      // Only attempt NIP-44 decrypt if content looks like actual ciphertext
-      // (base64-ish string, not plaintext JSON that failed the type check)
-      const looksEncrypted = event.content.length > 0 
-        && !event.content.startsWith("{") 
-        && !event.content.startsWith("[");
-      if (looksEncrypted) {
-        try {
-          decrypted = await this.signer.nip44Decrypt(event.content, event.pubkey);
-        } catch {
-          // Can't decrypt — encrypted to another participant, ignore
-          return;
-        }
-      } else {
-        // Plaintext but didn't pass the type check — skip
-        return;
-      }
-    }
+    // Decrypt the event content into a cleartext escrow payload
+    // string. Handles plaintext / per-recipient envelope / legacy raw
+    // NIP-44 ciphertext via decryptEventContent. A null here means
+    // "not for me, malformed, or unrecognised shape" — silently skip.
+    const decrypted = await this.decryptEventContent(event);
+    if (decrypted === null) return;
 
     // Parse
     const parseResult = parseEscrowEvent(event, decrypted, true);
@@ -1576,6 +1537,128 @@ export class EscrowClient {
     };
   }
 
+  /**
+   * SECURITY: decrypt an event's content into a cleartext payload
+   * string. Handles three wire shapes in order:
+   *
+   *   1. Plaintext escrow payload (`{type: "escrow:..."}`). Used by
+   *      CREATE, JOIN, COMPLETE, CANCEL, and any DEV-mode event. The
+   *      raw JSON string is returned as-is.
+   *   2. Per-recipient envelope (`{encryptedFor: {pk: ct, ...}}`).
+   *      Used for VOTE, CLAIM, RESOLVE, PERIOD_RELEASE under PROD
+   *      encryption. The slot keyed by the local pubkey is decrypted
+   *      with NIP-44, using the event signer as the sender.
+   *   3. Raw NIP-44 ciphertext (legacy compat). Anything else that
+   *      doesn't look like JSON falls through here so any pre-envelope
+   *      events still on relays continue to load.
+   *
+   * Returns null in the silent-skip cases:
+   *   - JSON parses but doesn't match any known shape
+   *   - Local user is not a recipient of the envelope (not for me)
+   *   - NIP-44 decryption fails (wrong key, malformed, tampered)
+   *
+   * Never throws. The caller decides whether a null means "skip this
+   * event" or "surface an error to the UI"; almost all current
+   * callers just `return` and let the next event arrive.
+   */
+  private async decryptEventContent(event: NostrEvent): Promise<string | null> {
+    // Shapes 1 + 2: structured JSON. Try parsing first; if it works,
+    // dispatch on which field is present.
+    let parsedObj: Record<string, unknown> | null = null;
+    try {
+      const parsed = JSON.parse(event.content);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        parsedObj = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Not JSON; will fall through to Shape 3.
+    }
+
+    if (parsedObj) {
+      // Shape 1: plaintext escrow payload.
+      const type = parsedObj.type;
+      if (typeof type === "string" && type.startsWith("escrow:")) {
+        return event.content;
+      }
+      // Shape 2: per-recipient envelope.
+      const envelopeFor = parsedObj.encryptedFor;
+      if (envelopeFor && typeof envelopeFor === "object" && !Array.isArray(envelopeFor)) {
+        const myPubkey = await this.getPubkey();
+        const ct = (envelopeFor as Record<string, unknown>)[myPubkey];
+        if (typeof ct !== "string" || ct.length === 0) {
+          // Not a recipient — silently skip.
+          return null;
+        }
+        try {
+          return await this.signer.nip44Decrypt(ct, event.pubkey);
+        } catch {
+          // Malformed envelope, wrong sender pubkey, etc.
+          return null;
+        }
+      }
+      // JSON object but neither shape — silently skip.
+      return null;
+    }
+
+    // Shape 3 (legacy): raw NIP-44 ciphertext. Only attempt if it
+    // doesn't look like JSON that simply failed validation above —
+    // otherwise we'd waste a decrypt call on every malformed payload.
+    const looksEncrypted = event.content.length > 0
+      && !event.content.startsWith("{")
+      && !event.content.startsWith("[");
+    if (!looksEncrypted) return null;
+    try {
+      return await this.signer.nip44Decrypt(event.content, event.pubkey);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * SECURITY: encrypt a payload to all three trade participants using
+   * the per-recipient envelope helper from envelope.ts. The resulting
+   * wire content is a JSON-stringified
+   *   {encryptedFor: {pk1: ct1, pk2: ct2, pk3: ct3}}
+   * so any participant can decrypt their own slot while no relay
+   * operator (and no non-participant client) can read the cleartext.
+   *
+   * This is the publish-side counterpart to the receive-path envelope
+   * detection in handleIncomingEvent / loadEscrow. Used for VOTE,
+   * CLAIM, RESOLVE, and PERIOD_RELEASE — events that carry private
+   * trade outcomes. LOCK already uses the envelope pattern via its
+   * SSS-share handling in createEnvelope; COMPLETE / CANCEL carry no
+   * sensitive content and stay plaintext for replay simplicity.
+   *
+   * Participants are derived from `state.participants`. Duplicate or
+   * missing pubkeys are skipped (createEnvelope dedupes by pubkey).
+   * Throws if no participant pubkeys are known yet — caller should
+   * not be publishing an encrypted event in that case.
+   */
+  private async encryptToParticipants(
+    payload: unknown,
+    state: EscrowState,
+  ): Promise<string> {
+    const recipients = [
+      state.participants[Role.BUYER],
+      state.participants[Role.SELLER],
+      state.participants[Role.ARBITER],
+    ].filter((pk): pk is string => typeof pk === "string" && pk.length > 0);
+
+    if (recipients.length === 0) {
+      throw new Error(
+        "encryptToParticipants: no participant pubkeys in state — " +
+          "cannot envelope-encrypt before LOCK fills in buyer/seller/arbiter.",
+      );
+    }
+
+    const envelope = await createEnvelope(
+      JSON.stringify(payload),
+      recipients,
+      (pt, pk) => this.signer.nip44Encrypt(pt, pk),
+    );
+    return JSON.stringify(envelope);
+  }
+
   private applyLocally(escrowId: string, signed: NostrEvent, payload: EscrowPayload): EscrowState {
     const parsed = parseEscrowEvent(signed, JSON.stringify(payload), true);
     if (!parsed.ok) throw new Error(`Local parse failed: ${parsed.error.message}`);
@@ -1697,7 +1780,12 @@ export class EscrowClient {
       resolvedAt: now,
     };
 
-    const content = JSON.stringify(payload);
+    // SECURITY: RESOLVE reveals the winning outcome and which two
+    // participants formed the majority. Wrap in the per-recipient
+    // envelope so the relay sees only ciphertext.
+    const content = ENCRYPTION_CONFIG.encryptResolve
+      ? await this.encryptToParticipants(payload, state)
+      : JSON.stringify(payload);
 
     const unsigned: UnsignedEvent = {
       kind: EscrowEventKind.RESOLVE,
@@ -1746,7 +1834,14 @@ export class EscrowClient {
       releasedAt: now,
     };
 
-    const content = JSON.stringify(payload);
+    // SECURITY: PERIOD_RELEASE exposes subscription cadence + amount.
+    // Wrap in the per-recipient envelope along with the rest of the
+    // sensitive event kinds. encryptResolve is reused as the gate
+    // because PERIOD_RELEASE is a subscription-flavoured RESOLVE —
+    // adding a dedicated flag would be cosmetic.
+    const content = ENCRYPTION_CONFIG.encryptResolve
+      ? await this.encryptToParticipants(payload, state)
+      : JSON.stringify(payload);
 
     const unsigned: UnsignedEvent = {
       kind: EscrowEventKind.PERIOD_RELEASE,

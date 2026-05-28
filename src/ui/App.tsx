@@ -1389,7 +1389,22 @@ export default function App() {
             onBack={() => { setView(detailBackView); setSelectedId(null); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
-              (e: any) => setToast({ message: e.message, type: "error" })
+              (e: any) => {
+                // v1.2.2 vote-freeze fix: distinguish "your vote was
+                // already on chain" (info, neutral) from "the publish
+                // actually failed" (error, red). Without this branch
+                // both used to render as red toasts, and worse, the
+                // useEscrow swallow returned silently — sellers would
+                // tap, see nothing, tap again, see nothing again.
+                if (e?.voteSuppressed) {
+                  setToast({
+                    message: e?.message || "Vote already recorded for this trade.",
+                    type: "info",
+                  });
+                  return;
+                }
+                setToast({ message: e?.message || "Vote failed.", type: "error" });
+              },
             )}
             onClaim={async () => {
               // v0.3.0 Phase 3: open ClaimPayoutModal instead of

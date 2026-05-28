@@ -39,31 +39,58 @@ export const PROD_ENCRYPTION: EncryptionConfig = {
 
 /** Current active config.
  *
- *  KNOWN GAP — v1.2.1 ships with DEV_ENCRYPTION, not PROD.
+ *  v1.2.2: PROD_ENCRYPTION is on. VOTE, CLAIM, RESOLVE, and
+ *  PERIOD_RELEASE are now wrapped in the per-recipient envelope
+ *  pattern from envelope.ts — the same shape LOCK uses for its SSS
+ *  shares — so any of the three participants can decrypt and no
+ *  relay operator can read the cleartext.
  *
- *  PROD_ENCRYPTION currently calls `maybeEncrypt(payload, selfPubkey, …)`
- *  for VOTE / CLAIM / RESOLVE in escrow-client.ts. That encrypts each
- *  event to the SENDER's own pubkey only — the other two participants
- *  get "invalid MAC" and silently drop the event, so trades never reach
- *  consensus. LOCK's SSS shares already use the per-recipient envelope
- *  pattern in envelope.ts (`encryptedFor: { pk → ciphertext }`); the
- *  fix is to extend that pattern to VOTE / CLAIM / RESOLVE so each
- *  event carries three ciphertexts, one per participant, and to teach
- *  the receive path in handleIncomingEvent / loadEscrow to detect an
- *  envelope wrapper before falling through to NIP-44.
+ *  The v1.2.1 attempt at PROD shipped a single-recipient
+ *  `nip44Encrypt(payload, selfPubkey)` for VOTE, which only the
+ *  sender could decrypt; trades stalled at "invalid MAC" for the
+ *  other two participants. We rolled back to DEV for that release
+ *  and rebuilt the publish path on top of envelope.ts in v1.2.2.
  *
- *  Tracking that work as the v1.2.2 followup. Until then, DEV is the
- *  only config that lets trades complete end-to-end.
+ *  Flipping back to DEV is a temporary debugging tool only. The
+ *  assertProductionEncryption() guard below makes shipping DEV in a
+ *  production build a hard runtime failure at boot, so any local
+ *  flip stays local. */
+export const ENCRYPTION_CONFIG: EncryptionConfig = PROD_ENCRYPTION;
+
+/**
+ * SECURITY: hard runtime assertion. Call this once at app boot. If a
+ * production build ever ships with DEV_ENCRYPTION (LOCK/VOTE/CLAIM/
+ * RESOLVE payloads in cleartext on relays), this throws on startup
+ * and refuses to render the app. The error is loud so a maintainer
+ * notices before any user-visible event hits the wire.
  *
- *  THE PRIVACY COST while DEV is active: any relay operator can read
- *  the cleartext contents of LOCK, VOTE, CLAIM, RESOLVE events,
- *  including SSS shares, vote outcomes, and claim verification data.
- *  Funds are still non-custodial (the signer still holds the keys and
- *  the state machine still requires 2-of-3 signatures), but trade
- *  details are NOT private from relays. Users with strict privacy
- *  needs should self-host a relay and use only that relay in their
- *  relay list until v1.2.2 ships. */
-export const ENCRYPTION_CONFIG: EncryptionConfig = DEV_ENCRYPTION;
+ * `isProductionBuild` is a small abstraction — passing it in keeps
+ * this module free of Vite-specific globals like `import.meta.env`
+ * so the unit tests can still flip the config back to DEV temporarily
+ * (e.g., the tests at line ~3614 in tests.ts) without tripping the
+ * assertion under Node.
+ */
+export function assertProductionEncryption(isProductionBuild: boolean): void {
+  if (!isProductionBuild) return;
+  if (ENCRYPTION_CONFIG !== PROD_ENCRYPTION) {
+    throw new Error(
+      "FATAL: production build is shipping with non-PROD encryption " +
+        "config. LOCK / VOTE / CLAIM / RESOLVE payloads would be " +
+        "world-readable on relays. Refusing to start.",
+    );
+  }
+  if (
+    !ENCRYPTION_CONFIG.enabled ||
+    !ENCRYPTION_CONFIG.encryptVote ||
+    !ENCRYPTION_CONFIG.encryptClaim ||
+    !ENCRYPTION_CONFIG.encryptResolve
+  ) {
+    throw new Error(
+      "FATAL: production build is shipping with one or more encryption " +
+        "flags disabled. Refusing to start.",
+    );
+  }
+}
 
 /**
  * Helper: encrypt content if the config says so, otherwise return plaintext JSON.
