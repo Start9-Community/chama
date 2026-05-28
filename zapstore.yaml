@@ -12,9 +12,9 @@ description: |
 website: https://getchama.app
 icon: public/icons/chama-woven-trust-mark-transparent-512.png
 images:
-  - design/Browse View Updated.png
-  - design/Trade View + Chat.png
-  - design/QR-IN + QR-OUT + Receipt + Vote.png
+  - zapstore/screenshots/login-kenya.png
+  - zapstore/screenshots/market-east-africa.png
+  - zapstore/screenshots/trade-dashboard.png
 tags:
   - bitcoin
   - nostr
