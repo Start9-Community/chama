@@ -59,6 +59,12 @@ export function TradeCard({
   const sellerPubkey = state.participants[Role.SELLER]
     ?? (state.initiator.role === Role.SELLER ? state.initiator.pubkey : null);
   const sellerName = profileNameFor(profileNames, sellerPubkey, kind0Enabled);
+  const communityChipLabel = listingCommunity
+    ? (listingCommunity.disambiguator ?? listingCommunity.displayName)
+    : null;
+  const sellerContextLine = sellerPubkey && state.category !== "marketplace"
+    ? `Seller · ${sellerName ?? shortPubkey(sellerPubkey)}`
+    : null;
   const status = STATUS[state.status] ?? STATUS.CREATED;
   const timeLine = compactJoinHoldRemaining(state, nowSec) ?? compactTimeRemaining(state, nowSec);
   const fiatLine = state.fiatAmount != null && state.fiatCurrency
@@ -197,16 +203,19 @@ export function TradeCard({
                 </span>
               </span>
             )}
-            {isAmber && listingCommunity && (
+            {listingCommunity && (
               <span style={{
                 fontSize: 10, padding: "3px 8px", borderRadius: 999,
-                background: T.surface, color: T.amber,
-                border: `1px solid ${T.amber}33`,
+                background: T.surface, color: isAmber ? T.amber : T.muted,
+                border: `1px solid ${isAmber ? T.amber + "33" : T.border}`,
                 fontFamily: T.mono, fontWeight: 700,
                 display: "inline-flex", alignItems: "center", gap: 3,
+                maxWidth: "100%",
               }}>
                 <span style={{ fontSize: 10, lineHeight: 1 }}>{listingCommunity.flagEmoji}</span>
-                {listingCommunity.disambiguator ?? listingCommunity.displayName}
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {communityChipLabel}
+                </span>
               </span>
             )}
           </div>
@@ -219,6 +228,22 @@ export function TradeCard({
           }}>
             {state.description}
           </div>
+
+          {sellerContextLine && (
+            <div style={{
+              marginTop: -4,
+              marginBottom: 9,
+              color: T.muted,
+              fontFamily: T.mono,
+              fontSize: 10,
+              lineHeight: 1.4,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap" as const,
+            }}>
+              {sellerContextLine}
+            </div>
+          )}
 
           <div style={{
             display: "flex", alignItems: "baseline", gap: 7,

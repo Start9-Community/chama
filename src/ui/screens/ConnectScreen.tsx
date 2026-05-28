@@ -181,7 +181,7 @@ export function ConnectScreen({
               onSubmit={onConnectNsec}
               friendly
               friendlySecondary={!isNative ? {
-                label: loading ? "Connecting..." : "Use Fedi or browser signer",
+                label: loading ? "Connecting..." : "Use Fedi or another sign-in",
                 onClick: onConnect,
                 disabled: loading,
                 tone: "accent",
@@ -241,9 +241,9 @@ export function ConnectScreen({
         marginTop: 34, fontSize: 9, color: T.muted + "66", fontFamily: T.mono,
         lineHeight: 1.8, maxWidth: 280,
       }}>
-        Your keys, your coins. No custodian.
+        Chama does not hold your funds.
         <br />
-        Community trust + Bitcoin settlement.
+        Trade, save, and exchange locally with Bitcoin rails.
       </div>
     </OnboardingShell>
   );
@@ -370,13 +370,14 @@ function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
         fontSize: 28, lineHeight: 1.1, color: T.text,
         fontFamily: T.sans, fontWeight: 900, marginBottom: 10,
       }}>
-        Where is your Chama?
+        Choose your local market
       </div>
       <div style={{
         maxWidth: 350, color: T.muted, fontFamily: T.sans,
         fontSize: 14, lineHeight: 1.7, marginBottom: 20,
       }}>
-        Send money home. Earn with Community Bill Pay. Trade locally.
+        See offers in your currency, with local payment methods and
+        community backup.
       </div>
 
       <div style={{

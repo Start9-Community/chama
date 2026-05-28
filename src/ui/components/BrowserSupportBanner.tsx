@@ -17,17 +17,30 @@ export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
         fontSize: 11, fontWeight: 700, color: T.amber, fontFamily: T.mono,
         letterSpacing: 1,
       }}>
-        CHAMA SUPPORT NOTE
+        REAL MONEY TRADES
       </div>
       <div style={{
         fontSize: 13, color: T.text, fontFamily: T.sans,
         lineHeight: 1.55,
       }}>
-        Safe to use directly with Fedi, Tauri desktop, and the Android APK.
-        These routes use Chama's supported Fedimint paths for real sats.
-        Browser mode is fine for browsing and testing; for production money
-        movement, use one of the supported shells.
+        Safe to use directly in Fedi, the desktop app, and the Android app.
+        Browser mode is best for browsing, demos, and testing. For live sats,
+        use one of the supported apps.
       </div>
+      <details style={{
+        color: T.muted, fontFamily: T.sans, fontSize: 12, lineHeight: 1.55,
+      }}>
+        <summary style={{
+          cursor: "pointer", color: T.amber, fontFamily: T.mono,
+          fontSize: 10, fontWeight: 800, letterSpacing: 0.6,
+        }}>
+          Technical details
+        </summary>
+        <div style={{ marginTop: 8 }}>
+          Fedi, desktop, and Android include Chama's supported wallet path.
+          Browser support depends on wallet APIs that can vary by device.
+        </div>
+      </details>
       <button
         onClick={onDismiss}
         style={{

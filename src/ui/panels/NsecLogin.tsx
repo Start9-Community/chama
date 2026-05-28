@@ -114,7 +114,7 @@ export function NsecLogin({
         onMouseEnter={(e) => (e.currentTarget.style.color = T.text)}
         onMouseLeave={(e) => (e.currentTarget.style.color = T.muted)}
       >
-        Create or use a Chama recovery key
+        Use an existing account
       </div>
     );
   }
@@ -134,7 +134,7 @@ export function NsecLogin({
             marginBottom: 10,
           }}
         >
-          {generating ? "Creating..." : "Create my Chama key"}
+          {generating ? "Creating..." : "Create my account"}
         </button>
         <button
           onClick={friendlySecondary
@@ -162,7 +162,8 @@ export function NsecLogin({
           fontSize: 10, color: T.muted, fontFamily: T.sans,
           textAlign: "center", marginTop: 12, lineHeight: 1.5,
         }}>
-          Chama uses this key to recover your trades and wallet on this device.
+          Chama creates a private recovery key on this device. Save it once
+          so you can restore your account later.
         </div>
         {generateError && <InlineError>{generateError}</InlineError>}
       </div>
@@ -176,7 +177,7 @@ export function NsecLogin({
           fontSize: 10, color: T.muted, fontFamily: T.mono,
           letterSpacing: 1, marginBottom: 8, textAlign: "center",
         }}>
-          SIGN IN WITH YOUR CHAMA KEY
+          SIGN IN
         </div>
       )}
 
@@ -212,7 +213,7 @@ export function NsecLogin({
               }
             }}
             onKeyDown={(e) => e.key === "Enter" && void handleSubmit()}
-            placeholder="Chama recovery key"
+            placeholder="Paste recovery key"
             type={showKey ? "text" : "password"}
             autoComplete="off"
             autoCapitalize="off"
@@ -238,7 +239,7 @@ export function NsecLogin({
                 cursor: generating ? "default" : "pointer",
               }}
             >
-              {generating ? "Creating..." : "Create my Chama key"}
+              {generating ? "Creating..." : "Create new account"}
             </button>
             <button
               onClick={() => setShowKey(!showKey)}
@@ -270,7 +271,7 @@ export function NsecLogin({
             fontSize: 10, color: T.amber, fontFamily: T.mono,
             fontWeight: 800, letterSpacing: 0.8, marginBottom: 8,
           }}>
-            CHAMA RECOVERY KEY
+            SAVE THIS RECOVERY KEY
           </div>
           <div style={{
             fontSize: 10, color: T.text, fontFamily: T.mono,
@@ -290,7 +291,7 @@ export function NsecLogin({
                 fontWeight: 700, cursor: "pointer",
               }}
             >
-              Copy key
+              Copy
             </button>
             <label style={{
               display: "flex", alignItems: "center", gap: 7,
@@ -303,7 +304,7 @@ export function NsecLogin({
                 onChange={(e) => setBackupConfirmed(e.target.checked)}
                 style={{ accentColor: T.accent, width: 14, height: 14, cursor: "pointer" }}
               />
-              I saved this key
+              I saved it
             </label>
           </div>
         </div>
@@ -347,8 +348,8 @@ export function NsecLogin({
         textAlign: "center", marginTop: 10, lineHeight: 1.5,
       }}>
         {isNative
-          ? "Your key stays on this device, encrypted in secure storage."
-          : "Your key never leaves this browser."}
+          ? "Your recovery key stays on this device, encrypted in secure storage."
+          : "Your recovery key stays in this browser."}
       </div>
     </div>
   );

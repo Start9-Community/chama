@@ -78,7 +78,7 @@ export function ChamaBar({
 
   let displayName: string;
   if (!fedimint.joined) {
-    displayName = fedimint.busy ? "Connecting Chama..." : "No Chama";
+    displayName = fedimint.busy ? "Connecting..." : "Choose your Chama";
   } else {
     const community = communitySlug ? getCommunityBySlug(communitySlug) : null;
     const matched = fedimint.federationId

@@ -1034,7 +1034,7 @@ export default function App() {
               <div>
                 <div style={{ fontSize: 16, fontWeight: 700, fontFamily: T.mono, letterSpacing: -0.5 }}>Chama</div>
                 <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1.5, textTransform: "uppercase" }}>
-                  Nostr · Fedimint · SSS
+                  Local money · Bitcoin rails
                 </div>
               </div>
             </div>

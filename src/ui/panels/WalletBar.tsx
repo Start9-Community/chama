@@ -10,10 +10,12 @@ export function WalletBar({ pubkey, connectedRelays, relayStatuses }: {
   relayStatuses: Map<string, string>;
 }) {
   const [showRelays, setShowRelays] = useState(false);
+  const networkLabel = connectedRelays > 0 ? "Online" : "Offline";
   return (
     <>
       <div
         onClick={() => setShowRelays(!showRelays)}
+        title={`${connectedRelays} network connection${connectedRelays !== 1 ? "s" : ""}`}
         style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "10px 16px", background: T.surface,
@@ -28,7 +30,7 @@ export function WalletBar({ pubkey, connectedRelays, relayStatuses }: {
             boxShadow: `0 0 8px ${connectedRelays > 0 ? T.green : T.red}66`,
           }} />
           <span style={{ fontSize: 10, color: T.muted }}>
-            {connectedRelays} relay{connectedRelays !== 1 ? "s" : ""}
+            {networkLabel}
           </span>
           <span style={{ color: T.border }}>·</span>
           <span style={{ fontSize: 10, color: T.muted }}>
