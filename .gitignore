@@ -9,3 +9,8 @@ dist/
 native/fedimint-bridge/target/
 src-tauri/target/
 src-tauri/binaries/chama-fedimint-bridge-*
+
+# Per-release short notes shown in the Zapstore app card. Written by
+# scripts/android-release.sh from --zapstore-notes-file before zsp
+# publishes; treated as a build artifact, not source.
+/zapstore/release-notes.md

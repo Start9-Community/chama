@@ -72,7 +72,7 @@ while [ $# -gt 0 ]; do
       append_android_flag "$1"
       shift
       ;;
-    --tag|--repo|--release-dir|--notes-file|--gpg-key|--pgp-public-key-url|--zapstore-config)
+    --tag|--repo|--release-dir|--notes-file|--gpg-key|--pgp-public-key-url|--zapstore-config|--zapstore-notes-file)
       append_android_option "$1" "${2:-}"
       shift 2
       ;;

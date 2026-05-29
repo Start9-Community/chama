@@ -49,6 +49,14 @@ SIGN_CHECKSUM="auto"
 RELEASE_PGP_KEY_ID="${CHAMA_RELEASE_GPG_KEY:-}"
 RELEASE_PGP_PUBLIC_KEY_URL="${CHAMA_RELEASE_PGP_PUBLIC_KEY_URL:-}"
 ZAPSTORE_CONFIG="${CHAMA_ZAPSTORE_CONFIG:-zapstore.yaml}"
+# Optional: short user-facing notes shown in the Zapstore app card.
+# Different audience from the long engineering NOTES_FILE that feeds
+# the GitHub Release body. When unset, publish_zapstore_release
+# writes a placeholder pointing readers at the GitHub release.
+ZAPSTORE_NOTES_FILE=""
+# Path the populated short-notes file must live at — this matches the
+# `release_notes:` value in zapstore.yaml so zsp picks it up.
+ZAPSTORE_NOTES_TARGET="$ROOT_DIR/zapstore/release-notes.md"
 
 cd "$ROOT_DIR"
 
@@ -308,6 +316,36 @@ EOF
     exit 1
   fi
 
+  # Populate the release-notes file referenced by `release_notes:` in
+  # zapstore.yaml. zsp reads metadata from GitHub via metadata_sources,
+  # but its GitHub fetch pulls repo-level metadata only — not the
+  # release-specific body — so without this step the Zapstore app
+  # card shows "No release notes." for every release. The user-facing
+  # short notes are intentionally separate from the long engineering
+  # notes that feed the GitHub Release body.
+  mkdir -p "$(dirname "$ZAPSTORE_NOTES_TARGET")"
+  if [ -n "$ZAPSTORE_NOTES_FILE" ]; then
+    cp "$ZAPSTORE_NOTES_FILE" "$ZAPSTORE_NOTES_TARGET"
+    echo "📝 Zapstore notes: $ZAPSTORE_NOTES_FILE → $ZAPSTORE_NOTES_TARGET"
+  else
+    # No short notes provided — write a placeholder pointing at the
+    # GitHub Release where the full engineering notes live, so the
+    # Zapstore card never falls through to "No release notes." Pick
+    # the best repo URL we know (CLI arg, env var, or origin remote).
+    local notes_repo="${REPO:-}"
+    if [ -z "$notes_repo" ]; then
+      notes_repo=$(default_repo)
+    fi
+    local notes_url="https://github.com/${notes_repo:-jesuspirate/chama}/releases/tag/$TAG"
+    cat > "$ZAPSTORE_NOTES_TARGET" <<EOF
+$TAG
+
+For full release notes, see:
+$notes_url
+EOF
+    echo "📝 Zapstore notes: placeholder written (pass --zapstore-notes-file for custom notes)"
+  fi
+
   local zapstore_args=(publish "$ZAPSTORE_CONFIG")
   if [ "$ZAPSTORE_OVERWRITE" = "1" ]; then
     zapstore_args+=(--overwrite-release)
@@ -379,6 +417,14 @@ while [ $# -gt 0 ]; do
       ZAPSTORE_CONFIG="${2:-}"
       if [ -z "$ZAPSTORE_CONFIG" ] || [ ! -f "$ZAPSTORE_CONFIG" ]; then
         echo "❌ --zapstore-config requires an existing file"
+        exit 1
+      fi
+      shift 2
+      ;;
+    --zapstore-notes-file)
+      ZAPSTORE_NOTES_FILE="${2:-}"
+      if [ -z "$ZAPSTORE_NOTES_FILE" ] || [ ! -f "$ZAPSTORE_NOTES_FILE" ]; then
+        echo "❌ --zapstore-notes-file requires an existing file"
         exit 1
       fi
       shift 2
