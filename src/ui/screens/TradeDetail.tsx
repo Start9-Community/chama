@@ -41,7 +41,12 @@ import { CountdownTimer } from "../components/CountdownTimer.js";
 import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { BitcoinPricePill } from "../components/BitcoinPricePill.js";
+import { NwcStatusBanner } from "../components/NwcStatusBanner.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
+import {
+  listSavedNwcConnections,
+  type SavedNwcConnection,
+} from "../../payments/nwc-connections.js";
 import { profileNameFor, type NostrProfileNameMap } from "../nostr-profiles.js";
 import {
   estimateFiatForMsats,
@@ -56,7 +61,8 @@ const samePubkey = (a?: string | null, b?: string | null): boolean =>
 export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
-  onBack, onVote, onClaim, onJoin, onLock, onSendChat, onReleasePeriod, onOpenSettings,
+  onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
+  onSendChat, onReleasePeriod, onOpenSettings,
   onPrewarmFunding,
 }: {
   state: EscrowState; pubkey: string;
@@ -107,6 +113,32 @@ export function TradeDetail({
     selectedItems?: SelectedMenuItem[];
     amountMsats?: number;
   }) => Promise<void>;
+  /**
+   * v1.2.4: direct-NWC fund path. When a user has a saved NWC wallet,
+   * the Fund button bypasses the AtomicFundingModal chooser and calls
+   * this prop, which routes straight to actions.fundAndLock with
+   * fundingMethod=nwc. Phase updates flow through onPhase so the
+   * button can render inline progress ("Funding via Alby…",
+   * "Locking…"). Returns the terminal so the button can show
+   * success/failure copy after the action resolves.
+   */
+  onLockDirectNwc?: (opts: {
+    nwcConnectionString: string;
+    savedHandleId?: string;
+    selectedItems?: SelectedMenuItem[];
+    amountMsats: number;
+    onPhase?: (label: string) => void;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * v1.2.4: direct-NWC claim path. Mirror of onLockDirectNwc — when
+   * the winner has a saved NWC wallet, Claim resolves a destination
+   * invoice via NWC make_invoice and dispatches the claim in one
+   * shot, no modal.
+   */
+  onClaimDirectNwc?: (opts: {
+    nwcConnectionString: string;
+    onPhase?: (label: string) => void;
+  }) => Promise<{ ok: boolean; error?: string }>;
   onPrewarmFunding?: () => void | Promise<void>;
   onSendChat: (message: string | { message: string; attachments?: ChatImageAttachment[] }) => void;
   onReleasePeriod?: (periodIndex: number) => void | Promise<void>;
@@ -128,6 +160,22 @@ export function TradeDetail({
   const [voting, setVoting] = useState(false);
   const [joining, setJoining] = useState(false);
   const [locking, setLocking] = useState(false);
+
+  // v1.2.4: direct-NWC paths for Fund + Claim. When the user has a
+  // saved NWC wallet, the action buttons skip the chooser modal and
+  // route straight to actions.fundAndLock / claimAndPayout with NWC
+  // auto-pay. The banner above each button surfaces connection state
+  // and lets the user paste a wallet inline. directNwcFundPhase and
+  // directNwcClaimPhase carry the current phase label for inline
+  // progress on the button while the action is in flight; null means
+  // the action is idle.
+  const [savedNwcs, setSavedNwcs] = useState<SavedNwcConnection[]>(
+    () => listSavedNwcConnections(),
+  );
+  const activeNwc = savedNwcs.length > 0 ? savedNwcs[0] : null;
+  const [directNwcFundPhase, setDirectNwcFundPhase] = useState<string | null>(null);
+  const [directNwcClaimPhase, setDirectNwcClaimPhase] = useState<string | null>(null);
+  const refreshSavedNwcs = () => setSavedNwcs(listSavedNwcConnections());
   // v0.3.0 Phase 3: claiming flag survives the ClaimPayoutModal lifetime
   // via the promise-based onClaim contract (mirrors Phase 2's onLock).
   // Disables the Claim button while the modal is open so re-taps can't
@@ -1664,15 +1712,19 @@ export function TradeDetail({
             </div>
           )}
 
-          {/* v0.3.1 Phase 3 + v0.6.5: Fund disables on bootProbeFailed
-              (federation unreachable), receiveUnavailable (gateway trust /
-              receive watcher failure), and fundingInProgress (another
-              runFundAndLock flow holds the shared OPFS wallet), in addition
-              to its existing locking/buyer guards. When mid-funding or
-              receive-blocked, the button label changes to "{lockLabel}
-              unavailable" so the disabled state reads as intentional. */}
+          {/* v1.2.4: NWC status banner + direct-NWC Fund path. If the
+              user has a saved NWC wallet, the Fund button bypasses the
+              AtomicFundingModal chooser and dispatches straight via
+              actions.fundAndLock. The banner above lets the user
+              switch / add wallets without leaving the trade page. */}
+          <NwcStatusBanner
+            activeConnection={activeNwc}
+            onSaved={refreshSavedNwcs}
+            onManage={onOpenSettings}
+          />
+
           <button
-            disabled={locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal}
+            disabled={locking || directNwcFundPhase !== null || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal}
             title={fundingInProgress
               ? "Another funding operation is in progress. Complete it first."
               : receiveUnavailable
@@ -1685,6 +1737,30 @@ export function TradeDetail({
                 ? menuSelectionTitle(state.category)
                 : undefined}
             onClick={async () => {
+              // v1.2.4: when the user has a saved NWC and the parent
+              // wired the direct path, skip the modal entirely. The
+              // direct path threads phase labels back via onPhase so
+              // the button itself becomes the progress indicator.
+              if (activeNwc && onLockDirectNwc) {
+                setDirectNwcFundPhase("Starting…");
+                try {
+                  const result = await onLockDirectNwc({
+                    nwcConnectionString: activeNwc.connectionString,
+                    savedHandleId: selectedHandleId || undefined,
+                    selectedItems: hasMenu ? lockMenuItems : undefined,
+                    amountMsats: lockAmountMsats,
+                    onPhase: (label) => setDirectNwcFundPhase(label),
+                  });
+                  if (!result.ok) {
+                    // Failure path: parent has already surfaced the
+                    // humanized toast. The "Try other method" link
+                    // below offers the modal as a fallback.
+                  }
+                } finally {
+                  setDirectNwcFundPhase(null);
+                }
+                return;
+              }
               setLocking(true);
               try {
                 await onLock({
@@ -1712,7 +1788,9 @@ export function TradeDetail({
               letterSpacing: 0.5, transition: "all 0.2s",
             }}
           >
-            {locking
+            {directNwcFundPhase
+              ? `${directNwcFundPhase}`
+              : locking
               ? "Funding…"
               : fundingInProgress || receiveUnavailable || lockBlockedByNoArbiter
                 ? lockLabel + " unavailable"
@@ -1720,12 +1798,74 @@ export function TradeDetail({
                 ? `Waiting for ${roleDisplayName(menuSelectorRole)} Ready`
               : menuSelectionMissing
                 ? menuSelectionButtonLabel(state.category)
-                : (
-                  <>
-                    ⚡ {lockLabel} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
-                  </>
-                )}
+                : activeNwc && onLockDirectNwc
+                  ? (
+                      <>
+                        ⚡ {lockLabel} via {activeNwc.label} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                      </>
+                    )
+                  : (
+                      <>
+                        ⚡ {lockLabel} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                      </>
+                    )}
           </button>
+          {/* v1.2.4: indeterminate progress strip under the Fund
+              button while the direct-NWC path is mid-action.
+              Cosmetic — the button label already shows the phase
+              text; this gives a continuous visual that something is
+              moving during NWC round-trips. */}
+          {directNwcFundPhase && (
+            <div style={{
+              marginTop: 8,
+              height: 3,
+              borderRadius: 999,
+              background: `${T.accent}1f`,
+              overflow: "hidden",
+              position: "relative",
+            }}>
+              <div style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "30%",
+                height: "100%",
+                borderRadius: 999,
+                background: `linear-gradient(90deg, ${T.accent}00, ${T.accent}, ${T.amber}, ${T.amber}00)`,
+                animation: "nwcProgressSweep 1.4s ease-in-out infinite",
+              }} />
+            </div>
+          )}
+          {/* v1.2.4: "Try other method" fallback when the direct-NWC
+              path is the default and the user wants the chooser
+              modal instead (different wallet, Onchain, external swap,
+              etc.). Hidden when no NWC is set up — the regular button
+              already routes through the modal in that case. */}
+          {activeNwc && onLockDirectNwc && !directNwcFundPhase && !locking && (
+            <button
+              onClick={async () => {
+                setLocking(true);
+                try {
+                  await onLock({
+                    savedHandleId: selectedHandleId || undefined,
+                    selectedItems: hasMenu ? lockMenuItems : undefined,
+                    amountMsats: lockAmountMsats,
+                  });
+                } finally {
+                  setLocking(false);
+                }
+              }}
+              style={{
+                background: "none", border: "none",
+                color: T.muted, fontFamily: T.mono, fontSize: 10,
+                cursor: "pointer", padding: "8px 0",
+                width: "100%", textAlign: "center",
+                textDecoration: "underline",
+              }}
+            >
+              Use a different funding method
+            </button>
+          )}
           {fundingInProgress && (
             <div style={{
               textAlign: "center", marginTop: 8,
@@ -1952,9 +2092,34 @@ export function TradeDetail({
           marginBottom: 18,
           borderTop: `1px solid ${T.border}`,
         }}>
+          {/* v1.2.4: NWC status banner + direct-NWC Claim path.
+              Mirror of the Fund button treatment — saved NWC wallet
+              → one-tap claim straight to that wallet, banner above
+              for context + paste-to-add. */}
+          <NwcStatusBanner
+            activeConnection={activeNwc}
+            onSaved={refreshSavedNwcs}
+            onManage={onOpenSettings}
+          />
+
           <button
-            disabled={claiming || bootProbeFailed || claimRetryBlocked}
+            disabled={claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked}
             onClick={async () => {
+              // v1.2.4: direct-NWC claim path. Saved NWC wallet skips
+              // the ClaimPayoutModal chooser → resolveNwcConnectionToInvoice
+              // → claimAndPayout in one shot, all from the button.
+              if (activeNwc && onClaimDirectNwc) {
+                setDirectNwcClaimPhase("Starting…");
+                try {
+                  await onClaimDirectNwc({
+                    nwcConnectionString: activeNwc.connectionString,
+                    onPhase: (label) => setDirectNwcClaimPhase(label),
+                  });
+                } finally {
+                  setDirectNwcClaimPhase(null);
+                }
+                return;
+              }
               setClaiming(true);
               try {
                 await onClaim();
@@ -1966,21 +2131,76 @@ export function TradeDetail({
               width: "100%", padding: "18px", borderRadius: T.rs,
               background: claimRetryBlocked
                 ? T.redDim
-                : claiming || bootProbeFailed
+                : claiming || directNwcClaimPhase !== null || bootProbeFailed
                 ? T.surface
                 : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
               border: claimRetryBlocked ? `1px solid ${T.red}55` : "none",
-              color: claimRetryBlocked ? T.red : claiming || bootProbeFailed ? T.muted : T.bg,
+              color: claimRetryBlocked ? T.red : claiming || directNwcClaimPhase !== null || bootProbeFailed ? T.muted : T.bg,
               fontFamily: T.mono, fontSize: 15, fontWeight: 800,
-              cursor: claiming || bootProbeFailed || claimRetryBlocked ? "default" : "pointer", letterSpacing: 1,
-              animation: (claiming || bootProbeFailed || claimRetryBlocked) ? "none" : "pulse 2s ease-in-out infinite",
+              cursor: claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked ? "default" : "pointer", letterSpacing: 1,
+              animation: (claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked) ? "none" : "pulse 2s ease-in-out infinite",
             }}>
-            {claimRetryBlocked
+            {directNwcClaimPhase
+              ? directNwcClaimPhase
+              : claimRetryBlocked
               ? "✕ CLAIM DID NOT SETTLE"
               : claiming
               ? state.status === EscrowStatus.CLAIMED ? "Retrying claim…" : "Claiming…"
-              : state.status === EscrowStatus.CLAIMED ? "⚡ RETRY CLAIM" : "⚡ CLAIM YOUR SATS"}
+              : activeNwc && onClaimDirectNwc
+                ? (state.status === EscrowStatus.CLAIMED
+                    ? `⚡ RETRY CLAIM via ${activeNwc.label}`
+                    : `⚡ CLAIM YOUR SATS via ${activeNwc.label}`)
+                : state.status === EscrowStatus.CLAIMED ? "⚡ RETRY CLAIM" : "⚡ CLAIM YOUR SATS"}
           </button>
+          {/* v1.2.4: same indeterminate progress strip under the
+              Claim button while the direct-NWC claim is mid-action.
+              Mirror of the Fund strip — purely cosmetic, since the
+              button label is already showing the phase text. */}
+          {directNwcClaimPhase && (
+            <div style={{
+              marginTop: 8,
+              height: 3,
+              borderRadius: 999,
+              background: `${T.accent}1f`,
+              overflow: "hidden",
+              position: "relative",
+            }}>
+              <div style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "30%",
+                height: "100%",
+                borderRadius: 999,
+                background: `linear-gradient(90deg, ${T.accent}00, ${T.accent}, ${T.amber}, ${T.amber}00)`,
+                animation: "nwcProgressSweep 1.4s ease-in-out infinite",
+              }} />
+            </div>
+          )}
+          {/* "Try other method" fallback link — same pattern as the
+              Fund button. Opens ClaimPayoutModal with the full
+              chooser when the user wants a different destination. */}
+          {activeNwc && onClaimDirectNwc && !directNwcClaimPhase && !claiming && (
+            <button
+              onClick={async () => {
+                setClaiming(true);
+                try {
+                  await onClaim();
+                } finally {
+                  setClaiming(false);
+                }
+              }}
+              style={{
+                background: "none", border: "none",
+                color: T.muted, fontFamily: T.mono, fontSize: 10,
+                cursor: "pointer", padding: "8px 0",
+                width: "100%", textAlign: "center",
+                textDecoration: "underline",
+              }}
+            >
+              Use a different payout method
+            </button>
+          )}
           {bootProbeFailed && (
             <div style={{
               textAlign: "center", marginTop: 8,
@@ -2338,12 +2558,19 @@ function voteActionButtonStyle({
   border: string;
   color: string;
 }): React.CSSProperties {
+  // v1.2.5: dropped the borderRadius: 999 pill shape in favour of the
+  // standard T.r (12px) card radius so the vote buttons sit in the
+  // same visual vocabulary as the rest of the TradeDetail surface
+  // (participants pill, chama bar, advanced-event-chain card, etc.).
+  // Left-aligned content + larger icon/label gap reads less like a
+  // toggle and more like a deliberate "pick one of these actions"
+  // card pair.
   return {
     width: "100%",
     minWidth: 0,
-    minHeight: 54,
-    padding: "11px 12px",
-    borderRadius: 999,
+    minHeight: 60,
+    padding: "14px 16px",
+    borderRadius: T.r,
     background: disabled ? T.surface : background,
     border: `1px solid ${border}`,
     color,
@@ -2352,18 +2579,22 @@ function voteActionButtonStyle({
     transition: "transform 0.2s, border-color 0.2s, background 0.2s",
     display: "flex",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
+    justifyContent: "flex-start",
+    gap: 12,
     boxShadow: disabled ? "none" : `inset 0 1px 0 ${color}24`,
     overflow: "hidden",
+    textAlign: "left",
   };
 }
 
 function voteActionIconStyle(color: string): React.CSSProperties {
+  // Matching: rounded-square icon chip (T.rs = 8px) instead of a
+  // circular badge. Stays small enough to feel like a glyph rather
+  // than a competing UI element.
   return {
-    width: 26,
-    height: 26,
-    borderRadius: 999,
+    width: 28,
+    height: 28,
+    borderRadius: T.rs,
     border: `1px solid ${color}55`,
     background: `${color}18`,
     color,
@@ -2371,7 +2602,7 @@ function voteActionIconStyle(color: string): React.CSSProperties {
     alignItems: "center",
     justifyContent: "center",
     flex: "0 0 auto",
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: 900,
     lineHeight: 1,
   };
@@ -2383,7 +2614,7 @@ function voteActionLabelStyle(): React.CSSProperties {
     color: "inherit",
     fontSize: 12,
     fontWeight: 800,
-    lineHeight: 1.14,
+    lineHeight: 1.2,
     letterSpacing: 0,
     textAlign: "left",
     overflowWrap: "anywhere",

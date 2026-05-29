@@ -186,7 +186,6 @@ import {
 } from "../payments/payout-destinations.js";
 import {
   CHAPSMART_PAYOUT_PROFILE_STORAGE_KEY,
-  createChapsmartPayoutInvoice,
   getChapsmartPayoutProfile,
   isChapsmartPayoutEligible,
   saveChapsmartPayoutProfile,
@@ -197,6 +196,11 @@ import {
   BANXAAS_SWAP_URL,
   getBanxaasPayoutAvailability,
 } from "../payments/banxaas-payout.js";
+import {
+  EXTERNAL_SWAP_PROVIDERS,
+  getExternalSwapsForContext,
+  getBidirectionalSwapsForContext,
+} from "../payments/external-swap-registry.js";
 
 // v0.3.0 Phase 1 — LNURL + DestinationPicker logic
 import {
@@ -218,6 +222,7 @@ import {
   buildNwcPayInvoiceRequest,
   extractInvoiceFromNwcResponse,
   extractPreimageFromNwcPayResponse,
+  humanizeNwcError,
   NwcError,
 } from "../payments/nwc.js";
 import {
@@ -6710,6 +6715,67 @@ console.log("\n── NWC MAKE_INVOICE HELPER ──");
     "NWC wallet errors are typed distinctly");
 }
 
+// ── 34a. NWC ERROR HUMANISATION (v1.2.5) ────────────────────────────────
+//
+// `humanizeNwcError` turns NIP-47 / BOLT-spec error codes into copy a
+// user can read on a phone. Critical because the failures it
+// translates ("FAILURE_REASON_NO_ROUTE", etc.) are the ones that
+// stall trades in flight — the message has to say what to do next, not
+// just what code was returned.
+console.log("\n── NWC ERROR HUMANISATION ──");
+{
+  // BOLT failure reasons embedded in INTERNAL / PAYMENT_FAILED messages
+  // — the v1.2.4 / 1.2.5 production reproducer.
+  const noRoute = humanizeNwcError("INTERNAL: FAILURE_REASON_NO_ROUTE");
+  assert(noRoute.includes("route") && noRoute.includes("channel"),
+    "FAILURE_REASON_NO_ROUTE explains the routing/channel cause");
+
+  const timeout = humanizeNwcError("PAYMENT_FAILED: FAILURE_REASON_TIMEOUT");
+  assert(timeout.toLowerCase().includes("timeout") || timeout.toLowerCase().includes("deadline"),
+    "FAILURE_REASON_TIMEOUT explains the deadline cause");
+
+  const insufficient = humanizeNwcError("PAYMENT_FAILED: FAILURE_REASON_INSUFFICIENT_BALANCE");
+  assert(insufficient.toLowerCase().includes("channel") && insufficient.toLowerCase().includes("liquidity"),
+    "FAILURE_REASON_INSUFFICIENT_BALANCE distinguishes channel liquidity from wallet balance");
+
+  // NIP-47 top-level error codes
+  const rateLimited = humanizeNwcError("RATE_LIMITED: too many requests");
+  assert(rateLimited.toLowerCase().includes("throttling") || rateLimited.toLowerCase().includes("wait"),
+    "RATE_LIMITED suggests waiting");
+
+  const insufficientWallet = humanizeNwcError("INSUFFICIENT_BALANCE: not enough sats");
+  assert(insufficientWallet.toLowerCase().includes("wallet") && insufficientWallet.toLowerCase().includes("sats"),
+    "INSUFFICIENT_BALANCE (wallet-level) names the wallet, not the channel");
+
+  const restricted = humanizeNwcError("RESTRICTED: payments not permitted");
+  assert(restricted.toLowerCase().includes("permission") || restricted.toLowerCase().includes("re-pair"),
+    "RESTRICTED suggests permissions / re-pairing");
+
+  // Bare BOLT reason without an outer NIP-47 code prefix
+  const bareReason = humanizeNwcError("FAILURE_REASON_NO_ROUTE");
+  assert(bareReason.includes("route"),
+    "Bare FAILURE_REASON_NO_ROUTE still translates");
+
+  // Unknown code with a useful tail message — should preserve the
+  // wallet's own message in a parenthetical
+  const unknown = humanizeNwcError("WEIRD_CODE: something specific went wrong");
+  assert(unknown.includes("WEIRD_CODE") || unknown.includes("something specific"),
+    "Unknown codes fall back to passing through the original text");
+
+  // Empty / nullish input
+  assert(humanizeNwcError("").length > 0,
+    "Empty input still returns a non-empty fallback message");
+  assert(humanizeNwcError(null).length > 0,
+    "Null input still returns a non-empty fallback message");
+  assert(humanizeNwcError(undefined).length > 0,
+    "Undefined input still returns a non-empty fallback message");
+
+  // Error object — should grab the .message
+  const fromError = humanizeNwcError(new Error("INTERNAL: FAILURE_REASON_NO_ROUTE"));
+  assert(fromError.includes("route"),
+    "humanizeNwcError unwraps Error objects via .message");
+}
+
 // ── 34b2. BOLT11 PAYOUT AMOUNT ROUTING ──────────────────────────────────
 console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
 {
@@ -10268,53 +10334,11 @@ console.log("\n── CHAPSMART PAYOUT PROFILE + ADAPTER ──");
   assert(!isChapsmartPayoutEligible({ homeCommunity: "ke-kes", fiatCurrency: "KES" }),
     "Chapsmart hidden for non-Tanzania/non-TZS context");
 
-  const okFetch = async (_url: RequestInfo | URL, init?: RequestInit) => {
-    const body = JSON.parse(String(init?.body));
-    assert(body.phoneNumber === "0712345678",
-      "Chapsmart adapter sends domestic TZ phone to endpoint");
-    assert(body.amountSatsMax === 12_345,
-      "Chapsmart adapter sends sats budget");
-    return new Response(JSON.stringify({
-      success: true,
-      invoiceId: "cs_inv_1",
-      bolt11: "lnbc123n1pchapsmart",
-      amountSats: 12_000,
-      amountTZS: 25_000,
-      feeSats: 345,
-      expiresAt: 123456,
-    }), { status: 200, headers: { "Content-Type": "application/json" } });
-  };
-  const invoice = await createChapsmartPayoutInvoice({
-    phoneNumber: "+255 71 234 5678",
-    recipientName: "Asha Mushi",
-    amountSatsMax: 12_345,
-    escrowId: "escrow_cs",
-  }, {
-    endpoint: "https://example.test/chapsmart",
-    fetchImpl: okFetch as typeof fetch,
-  });
-  assert(invoice.amountSats === 12_000 && invoice.amountTZS === 25_000,
-    "Chapsmart adapter returns validated sats/TZS invoice");
-
-  const overBudgetFetch = async () => new Response(JSON.stringify({
-    success: true,
-    invoiceId: "cs_inv_2",
-    bolt11: "lnbc999n1pchapsmart",
-    amountSats: 99_999,
-    amountTZS: 1_000,
-  }), { status: 200, headers: { "Content-Type": "application/json" } });
-  let overBudget = false;
-  try {
-    await createChapsmartPayoutInvoice({
-      phoneNumber: "+255 71 234 5678",
-      recipientName: "Asha Mushi",
-      amountSatsMax: 10_000,
-    }, {
-      endpoint: "https://example.test/chapsmart",
-      fetchImpl: overBudgetFetch as typeof fetch,
-    });
-  } catch { overBudget = true; }
-  assert(overBudget, "Chapsmart adapter rejects invoices above sats budget");
+  // v1.2.4: the createChapsmartPayoutInvoice API integration is gone
+  // (Chapsmart now lives in external-swap-registry.ts as a redirect).
+  // The adapter-level tests that used to live here have been deleted;
+  // the unified registry's tests below cover Chapsmart's presence
+  // alongside every other external swap provider.
 }
 
 console.log("\n── BANXAAS PAYOUT HANDOFF ──");
@@ -10353,6 +10377,151 @@ console.log("\n── BANXAAS PAYOUT HANDOFF ──");
 
   assert(getBanxaasPayoutAvailability({ homeCommunity: "ke-kes", fiatCurrency: "KES" }) === null,
     "Banxaas payout hidden outside supported countries");
+}
+
+// ── EXTERNAL SWAP REGISTRY (v1.2.4 unified providers) ────────────────────
+//
+// The v1.2.4 unified registry hosts Banxaas, Chapsmart, Bitika, Tando,
+// Pilot, and Bitzed as guided-redirect providers. Banxaas is the only
+// bidirectional entry (single URL handles onramp + offramp) and is the
+// only one safe to surface pre-LOCK. Everyone else is offramp-only and
+// must stay claim-modal-only with a post-CLAIMED gate enforced by the
+// caller. This block verifies the registry's resolution + sort
+// behaviour. The picker component is dumb — these guarantees are what
+// it relies on.
+console.log("\n── EXTERNAL SWAP REGISTRY (v1.2.4) ──");
+{
+  // Registry coverage — every provider promised in the v1.2.4 brief.
+  const providerIds = new Set(EXTERNAL_SWAP_PROVIDERS.map((p) => p.id));
+  for (const expectedId of ["banxaas", "chapsmart", "bitika", "tando", "minmo", "bitzed"]) {
+    assert(providerIds.has(expectedId as any),
+      `Registry covers ${expectedId}`);
+  }
+
+  // Banxaas is the only bidirectional + recommended entry. If a future
+  // provider gets promoted to that lane, this assertion catches the
+  // change so we revisit the pre-LOCK CTA placement.
+  const bidirectional = EXTERNAL_SWAP_PROVIDERS.filter((p) => p.bidirectional === true);
+  assert(bidirectional.every((p) => p.id === "banxaas"),
+    "Only Banxaas is marked bidirectional today");
+  const recommended = EXTERNAL_SWAP_PROVIDERS.filter((p) => p.recommended === true);
+  assert(recommended.every((p) => p.id === "banxaas"),
+    "Only Banxaas is marked recommended today");
+
+  // Single-country trade contexts resolve to the right provider(s).
+  const tz = getExternalSwapsForContext({ tradeCommunity: "tz-tzs" });
+  assert(tz.length === 1 && tz[0].provider.id === "chapsmart",
+    "Tanzania trade resolves to Chapsmart");
+  assert(tz[0].reason === "trade-community",
+    "Tanzania resolution reason is trade-community");
+
+  const sn = getExternalSwapsForContext({ tradeCommunity: "sn-cfa" });
+  assert(sn.length === 1 && sn[0].provider.id === "banxaas" && sn[0].provider.status === "enabled",
+    "Senegal trade resolves to Banxaas (enabled)");
+
+  const ci = getExternalSwapsForContext({ tradeCommunity: "ci-xof" });
+  assert(ci.length === 1 && ci[0].provider.id === "banxaas" && ci[0].provider.status === "coming-soon",
+    "Côte d'Ivoire trade resolves to Banxaas (coming-soon)");
+
+  const zm = getExternalSwapsForContext({ tradeCommunity: "zm-zmw" });
+  assert(zm.length === 1 && zm[0].provider.id === "bitzed",
+    "Zambia trade resolves to Bitzed");
+
+  // Kenya has three providers and all three should surface together
+  // in registry order (Bitika → Tando → Pilot), with no provider
+  // floating to the top because none of them are recommended or
+  // bidirectional.
+  const ke = getExternalSwapsForContext({ tradeCommunity: "ke-kes" });
+  assert(ke.length === 3,
+    "Kenya trade surfaces all three KES providers");
+  assert(
+    ke[0].provider.id === "bitika" &&
+    ke[1].provider.id === "tando" &&
+    ke[2].provider.id === "minmo",
+    "Kenya providers preserve registry order: Bitika → Tando → Minmo",
+  );
+  const keBitsacco = getExternalSwapsForContext({ tradeCommunity: "ke-kes-bitsacco" });
+  assert(keBitsacco.length === 3,
+    "Kenya Bitsacco route surfaces the same three KES providers");
+
+  // Trade-community wins over home-community (most precise context).
+  const tradeBeatsHome = getExternalSwapsForContext({
+    homeCommunity: "tz-tzs",
+    tradeCommunity: "sn-cfa",
+  });
+  assert(tradeBeatsHome.some((m) => m.provider.id === "banxaas" && m.reason === "trade-community"),
+    "Trade-community match beats home-community match");
+
+  // Currency-only matches act as the legacy fallback for older trades
+  // without a community slug.
+  const xofOnly = getExternalSwapsForContext({ fiatCurrency: "XOF" });
+  assert(xofOnly.some((m) => m.provider.id === "banxaas" && m.reason === "fiat-currency"),
+    "Currency-only XOF surfaces Banxaas as fiat-currency reason");
+  const kesOnly = getExternalSwapsForContext({ fiatCurrency: "KES" });
+  assert(kesOnly.length === 6 && kesOnly.every((m) => m.reason === "fiat-currency"),
+    "Currency-only KES surfaces both ke-kes and ke-kes-bitsacco entries (3 + 3)");
+
+  // No matches for unsupported markets — picker should render nothing.
+  const usd = getExternalSwapsForContext({ fiatCurrency: "USD" });
+  assert(usd.length === 0,
+    "USD trade surfaces no external-swap providers");
+  const empty = getExternalSwapsForContext({});
+  assert(empty.length === 0,
+    "Empty context surfaces no providers");
+
+  // Reason priority dominates sort order: trade-community beats
+  // home-community beats fiat-currency. In a mixed context, the
+  // more-specific reason always wins regardless of which provider
+  // is recommended.
+  const mixed = getExternalSwapsForContext({
+    homeCommunity: "tz-tzs",
+    fiatCurrency: "XOF",
+  });
+  assert(mixed.length >= 2,
+    "Mixed context returns multiple providers");
+  assert(mixed[0].provider.id === "chapsmart" && mixed[0].reason === "home-community",
+    "Home-community match beats fiat-currency match even when the latter is the recommended provider");
+
+  // Recommended floats WITHIN a tier — when two providers tie on
+  // reason, the recommended one comes first. fiat-currency KES ties
+  // three providers (none recommended), so registry order wins; if a
+  // recommended provider ever joins KES, this is where it'd float up.
+  const kesTie = getExternalSwapsForContext({ fiatCurrency: "KES" });
+  assert(kesTie.every((m) => m.reason === "fiat-currency"),
+    "KES fiat-currency matches all share the same reason tier");
+  assert(kesTie[0].provider.id === "bitika",
+    "Within a tie, registry order is preserved");
+
+  // Bidirectional-only filter — the pre-LOCK CTA driver.
+  const bidiSn = getBidirectionalSwapsForContext({ tradeCommunity: "sn-cfa" });
+  assert(bidiSn.length === 1 && bidiSn[0].provider.id === "banxaas",
+    "Bidirectional filter surfaces Banxaas pre-LOCK for Senegal");
+  const bidiKe = getBidirectionalSwapsForContext({ tradeCommunity: "ke-kes" });
+  assert(bidiKe.length === 0,
+    "Bidirectional filter hides offramp-only providers pre-LOCK (Kenya: 0)");
+  const bidiTz = getBidirectionalSwapsForContext({ tradeCommunity: "tz-tzs" });
+  assert(bidiTz.length === 0,
+    "Bidirectional filter hides Chapsmart pre-LOCK (offramp-only)");
+
+  // Each registry entry has the fields the picker reads. Cheap shape
+  // assertion to catch future entries that forget a flag.
+  for (const provider of EXTERNAL_SWAP_PROVIDERS) {
+    assert(typeof provider.id === "string" && provider.id.length > 0,
+      `Registry entry ${provider.communitySlug} has id`);
+    assert(provider.swapUrl.startsWith("https://"),
+      `Registry entry ${provider.id}/${provider.communitySlug} swap URL is https`);
+    assert(provider.flagEmoji.length > 0,
+      `Registry entry ${provider.id}/${provider.communitySlug} has flag`);
+    assert(provider.currency.length === 3,
+      `Registry entry ${provider.id}/${provider.communitySlug} has ISO-4217 currency`);
+  }
+
+  // Back-compat: the legacy Banxaas shim still returns the same shape
+  // tested in the Banxaas block above. This re-asserts after the unified
+  // registry took over to catch any future drift.
+  const sgViaShim = getBanxaasPayoutAvailability({ homeCommunity: "sn-cfa" });
+  assert(sgViaShim?.country.countryCode === "SN" && sgViaShim.status === "enabled",
+    "Banxaas back-compat shim still resolves Senegal after registry migration");
 }
 
 // ── SIM WALLET — balance subscription end-to-end ─────────────────────────

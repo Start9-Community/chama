@@ -25,6 +25,11 @@ import {
   listSavedNwcConnections,
   type SavedNwcConnection,
 } from "../../payments/nwc-connections.js";
+import {
+  getBidirectionalSwapsForContext,
+  openExternalSwap,
+  type ExternalSwapMatch,
+} from "../../payments/external-swap-registry.js";
 import type {
   FundAndLockPhase,
   FundAndLockTerminal,
@@ -45,6 +50,15 @@ export interface AtomicFundingModalProps {
   savedHandleId?: string;
   /** Optional menu basket snapshot to attach to LOCK. */
   selectedItems?: SelectedMenuItem[];
+  /** User's home community (e.g. "sn-cfa"). Used to surface the
+   *  bidirectional swap CTA (Banxaas) pre-LOCK when the user is in a
+   *  supported market and could on-ramp fiat -> sats before funding. */
+  homeCommunity?: string | null;
+  /** Active trade community (most specific context). */
+  tradeCommunity?: string | null;
+  /** Active trade fiat currency. Legacy fallback for trades without
+   *  a community slug. */
+  fiatCurrency?: string | null;
   /** Bound to actions.fundAndLock from useEscrow. */
   fundAndLock: (
     escrowId: string,
@@ -110,6 +124,9 @@ export function AtomicFundingModal({
   ctaLabel,
   savedHandleId,
   selectedItems,
+  homeCommunity,
+  tradeCommunity,
+  fiatCurrency,
   fundAndLock,
   getOnchainInfo,
   lockAndPublish,
@@ -426,6 +443,11 @@ export function AtomicFundingModal({
             onNwcInputChange={setNwcInput}
             onRememberNwcChange={setRememberNwc}
             onSelectNwc={handleSelectNwc}
+            bidirectionalSwaps={getBidirectionalSwapsForContext({
+              homeCommunity,
+              tradeCommunity,
+              fiatCurrency,
+            })}
           />
         )}
 
@@ -550,6 +572,7 @@ function FundingMethodChooser({
   onNwcInputChange,
   onRememberNwcChange,
   onSelectNwc,
+  bidirectionalSwaps,
 }: {
   amountSats: number;
   onchainInfoState:
@@ -563,6 +586,14 @@ function FundingMethodChooser({
   onNwcInputChange: (value: string) => void;
   onRememberNwcChange: (value: boolean) => void;
   onSelectNwc: (connectionString: string, remember: boolean) => void;
+  /** v1.2.4: bidirectional external-swap providers (currently Banxaas
+   *  only) that apply to this trade's context. Surfaced as an
+   *  on/offramp CTA above the regular funding methods because the
+   *  same link handles fiat -> sats AND sats -> fiat — users without
+   *  sats yet can on-ramp before funding, returning users can offramp
+   *  after claiming. Empty array = no provider available for this
+   *  market; CTA is hidden. */
+  bidirectionalSwaps: ExternalSwapMatch[];
 }) {
   const onchainGate = (() => {
     if (onchainInfoState.kind === "loading") {
@@ -613,6 +644,107 @@ function FundingMethodChooser({
         Choose how the external wallet funds this trade. Chama locks the
         credited ecash into SSS automatically after funding lands.
       </div>
+
+      {/* v1.2.4: pre-LOCK bidirectional on/offramp CTA. When a swap
+          provider like Banxaas serves this trade's country and
+          handles both onramp and offramp from the same URL, surface
+          it ABOVE the funding methods. Users who don't have sats yet
+          can on-ramp fiat into sats on the partner's site, then come
+          back and use Lightning (or any other method) to fund. We
+          don't redirect-and-replace the funding flow because the
+          handoff is asynchronous — the user pays at Banxaas, sats
+          arrive in their wallet, then they return to Chama. */}
+      {bidirectionalSwaps.length > 0 && (
+        <div style={{
+          marginBottom: 12, padding: 12, borderRadius: T.r,
+          background: T.tealDim, border: `1px solid ${T.teal}66`,
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 10, marginBottom: 6,
+          }}>
+            <div style={{
+              fontSize: 9, color: T.teal, fontFamily: T.mono,
+              letterSpacing: 1, fontWeight: 800,
+            }}>
+              {bidirectionalSwaps[0].provider.flagEmoji} NEED SATS? · {bidirectionalSwaps[0].provider.displayName.toUpperCase()} ON/OFFRAMP
+            </div>
+            <span style={{
+              fontSize: 8, fontFamily: T.mono, color: T.teal,
+              border: `1px solid ${T.teal}55`, borderRadius: 4,
+              padding: "2px 6px", textTransform: "uppercase",
+            }}>
+              {bidirectionalSwaps[0].provider.status === "enabled" ? "live" : "soon"}
+            </span>
+          </div>
+          <div style={{
+            fontSize: 10, color: T.muted, fontFamily: T.mono,
+            lineHeight: 1.5, marginBottom: 10,
+          }}>
+            {bidirectionalSwaps[0].provider.blurb ||
+              "Bring sats in or cash out — same link, both ways."} Open
+            {" "}{bidirectionalSwaps[0].provider.displayName}, get sats to your
+            Lightning wallet, then come back and fund the trade.
+          </div>
+          <button
+            onClick={() => openExternalSwap(bidirectionalSwaps[0].provider)}
+            style={{
+              width: "100%", padding: "10px 12px", borderRadius: T.rs,
+              background: T.teal, border: `1px solid ${T.teal}`,
+              color: T.bg, fontFamily: T.mono, fontSize: 11,
+              fontWeight: 900, cursor: "pointer",
+            }}
+          >
+            Open {bidirectionalSwaps[0].provider.displayName} swap
+          </button>
+        </div>
+      )}
+
+      {/* v1.2.4: saved NWC connections promoted out of the "More
+          options" disclosure to top-level quick-pick buttons. The
+          paste-new-NWC textarea stays behind the disclosure since
+          it's a rare-path setup step; returning users with a known
+          wallet should fund a trade in one tap. */}
+      {savedNwcConnections.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{
+            fontSize: 9, color: T.accent, fontFamily: T.mono,
+            letterSpacing: 1, marginBottom: 6, fontWeight: 800,
+          }}>
+            ⚡ FASTEST · AUTO-PAY FROM SAVED NWC WALLET
+          </div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {savedNwcConnections.map((connection) => (
+              <button
+                key={connection.id}
+                onClick={() => onSelectNwc(connection.connectionString, true)}
+                style={{
+                  width: "100%", padding: "12px 14px", borderRadius: T.r,
+                  background: T.accentDim, border: `1px solid ${T.accent}66`,
+                  color: T.text, fontFamily: T.mono, fontSize: 12,
+                  cursor: "pointer", display: "flex",
+                  justifyContent: "space-between", alignItems: "center",
+                  gap: 12,
+                }}
+              >
+                <span style={{
+                  overflow: "hidden", textOverflow: "ellipsis",
+                  whiteSpace: "nowrap", fontWeight: 600,
+                }}>
+                  {connection.label}
+                </span>
+                <span style={{
+                  color: T.accent, flexShrink: 0, fontSize: 9,
+                  fontWeight: 800, letterSpacing: 1,
+                }}>
+                  AUTO-PAY →
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         <button
           onClick={() => onSelect("lightning")}
@@ -673,40 +805,17 @@ function FundingMethodChooser({
           color: T.muted, fontFamily: T.mono, fontSize: 10,
           cursor: "pointer", listStyle: "none",
         }}>
-          More options · NWC auto-pay
+          {savedNwcConnections.length > 0
+            ? "Add another NWC wallet"
+            : "More options · NWC auto-pay"}
         </summary>
         <div style={{
           marginTop: 10, padding: 12, borderRadius: T.rs,
           background: T.surface, border: `1px solid ${T.border}`,
         }}>
-          {savedNwcConnections.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={{
-                fontSize: 9, color: T.muted, fontFamily: T.mono,
-                letterSpacing: 1, marginBottom: 6,
-              }}>
-                SAVED NWC WALLETS
-              </div>
-              {savedNwcConnections.map((connection) => (
-                <button
-                  key={connection.id}
-                  onClick={() => onSelectNwc(connection.connectionString, true)}
-                  style={{
-                    width: "100%", padding: "10px 12px", marginBottom: 6,
-                    borderRadius: T.rs, background: T.card,
-                    border: `1px solid ${T.border}`, color: T.text,
-                    fontFamily: T.mono, fontSize: 11, cursor: "pointer",
-                    display: "flex", justifyContent: "space-between", gap: 10,
-                  }}
-                >
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {connection.label}
-                  </span>
-                  <span style={{ color: T.accent, flexShrink: 0 }}>AUTO</span>
-                </button>
-              ))}
-            </div>
-          )}
+          {/* v1.2.4: saved-wallet list moved up to top-level. This
+              disclosure is now only for the paste-new-NWC setup
+              path, which is uncommon enough to keep collapsed. */}
           <div style={{
             fontSize: 9, color: T.muted, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 6,

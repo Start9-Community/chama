@@ -1,6 +1,28 @@
 // ══════════════════════════════════════════════════════════════════════════
-// Chama — ChapSmart TZS payout adapter
+// Chama — Chapsmart TZS payout helpers
 // ══════════════════════════════════════════════════════════════════════════
+//
+// v1.2.4 — the inline API integration with Chapsmart's payout endpoint
+// (`https://nwc.chapsmart.com/chama/payout-invoice`) has been retired.
+// The endpoint was unreliable in production and the partner prefers a
+// fiat-first redirect flow on their own site. Chapsmart now lives in
+// `external-swap-registry.ts` as a guided redirect alongside Banxaas
+// and the rest. The `ClaimPayoutModal` renders it via the shared
+// external-swap picker, gated on the trade being CLAIMED first.
+//
+// What's still here is the small amount of locally-useful logic that
+// has nothing to do with the dead endpoint:
+//
+//   * Profile storage (`getChapsmartPayoutProfile`,
+//     `saveChapsmartPayoutProfile`, `clearChapsmartPayoutProfile`):
+//     the user's phone + name, stored per-npub via the user-scope
+//     storage helpers. Other surfaces (settings, future onramp UI)
+//     still want this profile to pre-fill forms.
+//   * Tanzania phone normalisation (`toChapsmartTanzaniaPhone`): used
+//     by the saved-handle network picker to format pasted numbers.
+//   * Eligibility check (`isChapsmartPayoutEligible`): retained for
+//     any caller that wants to surface a Tanzania-specific affordance
+//     even though the modal now drives off the unified registry.
 
 import {
   getScopedStorageItem,
@@ -16,29 +38,6 @@ export interface ChapsmartPayoutProfile {
   createdAt: number;
   lastUsedAt?: number;
 }
-
-export interface ChapsmartPayoutInvoiceRequest {
-  phoneNumber: string;
-  recipientName: string;
-  amountSatsMax: number;
-  escrowId?: string;
-}
-
-export interface ChapsmartPayoutInvoice {
-  invoiceId: string;
-  bolt11: string;
-  amountSats: number;
-  amountTZS: number;
-  feeSats?: number;
-  expiresAt?: number;
-}
-
-export interface CreateChapsmartPayoutInvoiceOpts {
-  endpoint?: string;
-  fetchImpl?: typeof fetch;
-}
-
-const DEFAULT_CHAPSMART_PAYOUT_ENDPOINT = "https://nwc.chapsmart.com/chama/payout-invoice";
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
@@ -113,70 +112,4 @@ export function isChapsmartPayoutEligible(input: {
     input.homeCommunity === "tz-tzs" ||
     (input.fiatCurrency ?? "").toUpperCase() === "TZS"
   );
-}
-
-export async function createChapsmartPayoutInvoice(
-  request: ChapsmartPayoutInvoiceRequest,
-  opts: CreateChapsmartPayoutInvoiceOpts = {},
-): Promise<ChapsmartPayoutInvoice> {
-  if (!Number.isFinite(request.amountSatsMax) || request.amountSatsMax <= 0) {
-    throw new Error("No claimable sats available for Chapsmart payout");
-  }
-
-  const endpoint = opts.endpoint ?? DEFAULT_CHAPSMART_PAYOUT_ENDPOINT;
-  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-  if (!fetchImpl) throw new Error("Chapsmart payout needs network access");
-
-  const phoneNumber = toChapsmartTanzaniaPhone(request.phoneNumber);
-  const recipientName = request.recipientName.trim();
-  if (!recipientName || recipientName.split(/\s+/).length < 2) {
-    throw new Error("Enter the recipient's first and last name");
-  }
-
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      phoneNumber,
-      recipientName,
-      amountSatsMax: Math.floor(request.amountSatsMax),
-      escrowId: request.escrowId,
-    }),
-  });
-
-  let data: any = null;
-  try {
-    data = await response.json();
-  } catch {
-    // handled below
-  }
-
-  if (!response.ok || !data?.success) {
-    throw new Error(data?.error || "Chapsmart could not create a payout invoice yet");
-  }
-
-  const invoice: ChapsmartPayoutInvoice = {
-    invoiceId: String(data.invoiceId || ""),
-    bolt11: String(data.bolt11 || ""),
-    amountSats: Number(data.amountSats),
-    amountTZS: Number(data.amountTZS),
-    feeSats: data.feeSats === undefined ? undefined : Number(data.feeSats),
-    expiresAt: data.expiresAt === undefined ? undefined : Number(data.expiresAt),
-  };
-
-  if (!invoice.invoiceId) throw new Error("Chapsmart response was missing invoiceId");
-  if (!/^ln(bc|bcrt|tb)/i.test(invoice.bolt11)) {
-    throw new Error("Chapsmart response was missing a Lightning invoice");
-  }
-  if (!Number.isFinite(invoice.amountSats) || invoice.amountSats <= 0) {
-    throw new Error("Chapsmart response was missing amountSats");
-  }
-  if (invoice.amountSats > request.amountSatsMax) {
-    throw new Error("Chapsmart invoice exceeds the claim payout budget");
-  }
-  if (!Number.isFinite(invoice.amountTZS) || invoice.amountTZS <= 0) {
-    throw new Error("Chapsmart response was missing amountTZS");
-  }
-
-  return invoice;
 }

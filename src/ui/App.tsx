@@ -11,6 +11,7 @@ import {
   getEffectiveParticipantsAt,
 } from "../escrow-engine/types.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
+import { getWinner } from "../escrow-engine/state-machine.js";
 import {
   getActiveInvite,
   getConfiguredNativeBridgeCommunitySlug,
@@ -65,7 +66,11 @@ import { AtomicFundingModal } from "./panels/AtomicFundingModal.js";
 import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
 import { addOrTouchPayoutDestination, listPayoutDestinations } from "../payments/payout-destinations.js";
-import { listSavedNwcConnections } from "../payments/nwc-connections.js";
+import {
+  addOrTouchSavedNwcConnection,
+  listSavedNwcConnections,
+} from "../payments/nwc-connections.js";
+import { humanizeNwcError } from "../payments/nwc.js";
 import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
 import {
   buildChamaOperationMeta,
@@ -231,6 +236,11 @@ export default function App() {
     ctaLabel: string;
     savedHandleId?: string;
     selectedItems?: SelectedMenuItem[];
+    // v1.2.4: trade context for the pre-LOCK bidirectional swap CTA
+    // (Banxaas today). Mirrors the same fields ClaimPayoutModal
+    // already threads through for the post-CLAIM swap picker.
+    tradeCommunity?: string | null;
+    fiatCurrency?: string | null;
     resolve: () => void;
   } | null>(null);
   // v0.3.0 Phase 3: ClaimPayoutModal mount state. Same shape as
@@ -1159,6 +1169,9 @@ export default function App() {
           ctaLabel={pendingFundAndLock.ctaLabel}
           savedHandleId={pendingFundAndLock.savedHandleId}
           selectedItems={pendingFundAndLock.selectedItems}
+          homeCommunity={getUserCommunitySlugRaw()}
+          tradeCommunity={pendingFundAndLock.tradeCommunity}
+          fiatCurrency={pendingFundAndLock.fiatCurrency}
           fundAndLock={actions.fundAndLock}
           getOnchainInfo={actions.getOnchainInfo}
           lockAndPublish={actions.lockAndPublish}
@@ -1168,7 +1181,11 @@ export default function App() {
             if (terminal.kind === "locked") {
               setToast({ message: "Locked! Vote buttons are live.", type: "success" });
             } else if (terminal.kind === "lock-failed") {
-              setToast({ message: terminal.error, type: "error" });
+              // v1.2.5: translate NWC FAILURE_REASON_* / NIP-47 codes
+              // into human-readable copy so the user knows what to do
+              // (retry, rebalance, switch wallet) instead of seeing
+              // "INTERNAL: FAILURE_REASON_NO_ROUTE".
+              setToast({ message: humanizeNwcError(terminal.error), type: "error" });
             } else if (terminal.kind === "expired") {
               setToast({ message: "Invoice expired — no payment received.", type: "info" });
             } else if (terminal.kind === "mint-timeout") {
@@ -1221,7 +1238,7 @@ export default function App() {
                   [pendingClaim.escrowId]: terminal.error,
                 }));
               }
-              setToast({ message: terminal.error, type: "error" });
+              setToast({ message: humanizeNwcError(terminal.error), type: "error" });
             } else if (terminal.kind === "claim-bridge-threw") {
               // v0.3.1 Phase 1: structural failure (FED_PROBE_FAILED /
               // FED_MISMATCH). Modal surfaced the actual error +
@@ -1329,7 +1346,7 @@ export default function App() {
               // useEffect (line ~187) which dispatches the queued
               // switch automatically. No extra wiring needed here.
             } else if (terminal.kind === "payout-failed") {
-              setToast({ message: terminal.error, type: "error" });
+              setToast({ message: humanizeNwcError(terminal.error), type: "error" });
               // Payout failed — drop any queued switch since the
               // balance never drained.
               setPendingSwitchAfterWithdraw(null);
@@ -1462,6 +1479,155 @@ export default function App() {
                 setToast({ message: e.message || "Failed to send", type: "error" })
               );
             }}
+            // v1.2.4: direct-NWC Fund. Saved-NWC users skip the
+            // AtomicFundingModal chooser entirely; the button on
+            // TradeDetail dispatches fundAndLock with NWC params and
+            // renders the phase inline. Falls back to the regular
+            // onLock (modal flow) on failure via the "Try other
+            // method" link.
+            onLockDirectNwc={async (opts) => {
+              if (!fedimint.joined) {
+                setToast({ message: "Join a Chama first — tap a community pill.", type: "error" });
+                return { ok: false, error: "Join a Chama first" };
+              }
+              if (midFunding) {
+                setToast({
+                  message: "Another funding operation is in progress. Complete it first.",
+                  type: "error",
+                });
+                return { ok: false, error: "Mid-funding" };
+              }
+              if (!selected) return { ok: false, error: "No selected trade" };
+              if (
+                !simOn &&
+                !isTestnetMode() &&
+                opts.amountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
+              ) {
+                setToast({
+                  message: `${minimumAtomicFundingMessage()} Enter a positive amount for a real Lightning escrow.`,
+                  type: "error",
+                });
+                return { ok: false, error: "Amount too small" };
+              }
+              const probe = await actions.probeFederation();
+              if (!probe.ok) {
+                setToast({
+                  message: probe.error || "Chama wallet disconnected. Tap Reconnect and try again.",
+                  type: "error",
+                });
+                return { ok: false, error: probe.error || "Probe failed" };
+              }
+              const description = (selected.category === "marketplace" ? "Pay for Item"
+                : selected.category === "lending" ? "Fund Loan"
+                : selected.category === "bill-pay" ? "Lock Sats"
+                : selected.category === "p2p-trade" ? "Fund Escrow"
+                : "Lock Sats");
+              try {
+                const terminal = await actions.fundAndLock(selectedId!, {
+                  amountMsats: opts.amountMsats,
+                  description,
+                  fundingMethod: "nwc",
+                  nwcConnectionString: opts.nwcConnectionString,
+                  rememberNwc: false, // already saved
+                  savedHandleId: opts.savedHandleId,
+                  selectedItems: opts.selectedItems,
+                  onPhase: (phase) => {
+                    // Map engine phase kinds to compact button labels.
+                    const label =
+                      phase.kind === "creating-invoice" ? "Creating invoice…"
+                      : phase.kind === "creating-invoice-slow" ? "Still creating invoice…"
+                      : phase.kind === "awaiting-payment" ? "Waiting for payment…"
+                      : phase.kind === "paying-with-nwc" ? "Paying via NWC…"
+                      : phase.kind === "mint-confirming" ? "Confirming with federation…"
+                      : phase.kind === "mint-confirming-slow" ? "Federation slow to confirm…"
+                      : phase.kind === "payment-confirmed" ? "Locking…"
+                      : phase.kind === "locking" ? "Locking…"
+                      : phase.kind === "locked" ? "Locked!"
+                      : phase.kind === "invoice-created" ? "Invoice ready…"
+                      : "Funding…";
+                    opts.onPhase?.(label);
+                  },
+                });
+                if (terminal.kind === "locked") {
+                  setToast({ message: "Locked! Vote buttons are live.", type: "success" });
+                  return { ok: true };
+                }
+                if (terminal.kind === "lock-failed") {
+                  setToast({ message: humanizeNwcError(terminal.error), type: "error" });
+                  return { ok: false, error: terminal.error };
+                }
+                if (terminal.kind === "expired") {
+                  setToast({ message: "Invoice expired — no payment received.", type: "info" });
+                  return { ok: false, error: "Invoice expired" };
+                }
+                if (terminal.kind === "mint-timeout") {
+                  setToast({
+                    message: "Mint stalled. If sats need recovery, use Me or the Browse recovery prompt.",
+                    type: "info",
+                  });
+                  return { ok: false, error: "Mint timeout" };
+                }
+                // aborted = silent
+                return { ok: false, error: "Aborted" };
+              } catch (e: any) {
+                const msg = humanizeNwcError(e?.message || "Funding failed");
+                setToast({ message: msg, type: "error" });
+                return { ok: false, error: msg };
+              }
+            }}
+            // v1.2.4: direct-NWC Claim. Resolves a destination
+            // invoice via NWC make_invoice, then dispatches the
+            // claim-and-payout flow. Skips ClaimPayoutModal entirely.
+            onClaimDirectNwc={async (opts) => {
+              if (!selected) return { ok: false, error: "No selected trade" };
+              const winner = getWinner(selected);
+              if (!winner) return { ok: false, error: "No winner yet" };
+              const payoutMsats = selected.amountMsats;
+              const { resolveNwcConnectionToInvoice } = await import("../payments/nwc.js");
+              const { claimPayoutSats } = await import("../payments/lightning-fees.js");
+              const payoutSats = claimPayoutSats(payoutMsats, "lightning");
+              opts.onPhase?.("Asking your NWC wallet for an invoice…");
+              let invoice: string;
+              try {
+                invoice = await resolveNwcConnectionToInvoice(
+                  opts.nwcConnectionString,
+                  payoutSats,
+                  { description: "Chama claim payout" },
+                );
+              } catch (e: any) {
+                const msg = humanizeNwcError(e?.message || "NWC wallet refused");
+                setToast({ message: msg, type: "error" });
+                return { ok: false, error: msg };
+              }
+              opts.onPhase?.("Claiming…");
+              try {
+                const terminal = await actions.claimAndPayout(selectedId!, {
+                  bolt11: invoice,
+                  expectedDeltaMsats: payoutMsats,
+                  saveAfter: false,
+                  onPhase: (phase) => {
+                    const label =
+                      phase.kind === "claiming" ? "Recovering your share…"
+                      : phase.kind === "confirming" ? "Confirming with federation…"
+                      : phase.kind === "paying-invoice" ? "Sending to NWC…"
+                      : "Claiming…";
+                    opts.onPhase?.(label);
+                  },
+                });
+                if (terminal.kind === "done") {
+                  setToast({ message: "Payout sent!", type: "success" });
+                  try { addOrTouchSavedNwcConnection(opts.nwcConnectionString); } catch {}
+                  return { ok: true };
+                }
+                const msg = humanizeNwcError(terminal.error || "Claim failed");
+                setToast({ message: msg, type: "error" });
+                return { ok: false, error: msg };
+              } catch (e: any) {
+                const msg = humanizeNwcError(e?.message || "Claim failed");
+                setToast({ message: msg, type: "error" });
+                return { ok: false, error: msg };
+              }
+            }}
             onLock={async (lockOpts = {}) => {
               const savedHandleId = lockOpts.savedHandleId;
               const selectedItems = lockOpts.selectedItems;
@@ -1516,6 +1682,8 @@ export default function App() {
                   ctaLabel: lockLabel,
                   savedHandleId,
                   selectedItems,
+                  tradeCommunity: selected.community,
+                  fiatCurrency: selected.fiatCurrency,
                   resolve,
                 });
               });
@@ -1758,6 +1926,12 @@ const globalCss = `
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
   @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes slideInDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+  /* v1.2.4: indeterminate progress strip used under the direct-NWC
+     Fund / Claim buttons during action. A short bright bar sweeps
+     left-to-right on a dim track, giving live feedback during the
+     ~3-8s NWC pay window without forcing a percentage estimate. */
+  @keyframes nwcProgressSweep{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
   *{box-sizing:border-box;margin:0;padding:0}
   input::placeholder{color:${T.muted}88}
   input:focus,select:focus{border-color:${T.accent}66!important}

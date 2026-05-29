@@ -35,20 +35,16 @@ import {
   type SavedNwcConnection,
 } from "../../payments/nwc-connections.js";
 import {
-  createChapsmartPayoutInvoice,
-  getChapsmartPayoutProfile,
-  isChapsmartPayoutEligible,
-  saveChapsmartPayoutProfile,
-} from "../../payments/chapsmart-payout.js";
-import {
   claimPayoutReserveSats,
   claimPayoutSats,
 } from "../../payments/lightning-fees.js";
 import {
-  BANXAAS_SWAP_URL,
-  getBanxaasPayoutAvailability,
-  type BanxaasPayoutAvailability,
-} from "../../payments/banxaas-payout.js";
+  getExternalSwapsForContext,
+  openExternalSwap,
+  type ExternalSwapMatch,
+  type ExternalSwapProvider,
+} from "../../payments/external-swap-registry.js";
+import { humanizeNwcError, resolveNwcConnectionToInvoice } from "../../payments/nwc.js";
 import type {
   ClaimAndPayoutPhase,
   ClaimAndPayoutTerminal,
@@ -109,7 +105,16 @@ type Stage =
   | { kind: "running"; phase: ClaimAndPayoutPhase }
   | { kind: "terminal"; terminal: ClaimAndPayoutTerminal };
 
-type PayoutMethod = "lightning" | "onchain" | "banxaas";
+// v1.2.4: the picker dispatches into Lightning (direct payout), Onchain
+// (onchain payout), or an external swap provider drawn from the unified
+// `external-swap-registry.ts`. Banxaas / Chapsmart / Bitika / Tando /
+// Pilot / Bitzed are no longer special-cased — each is one entry in the
+// registry, surfaced as a button in the chooser when the trade context
+// matches.
+type PayoutMethod =
+  | { kind: "lightning" }
+  | { kind: "onchain" }
+  | { kind: "external"; match: ExternalSwapMatch };
 
 /** Stashed dispatch arguments from the initial picker resolve. Used by
  *  retry paths to re-dispatch with the same destination after a
@@ -147,8 +152,15 @@ export function ClaimPayoutModal({
   // Try-again so the retry uses the exact same destination/save
   // semantics as the original attempt.
   const lastDispatchRef = useRef<DispatchArgs | null>(null);
-  const chapsmartEligible = isChapsmartPayoutEligible({ homeCommunity, fiatCurrency });
-  const banxaasAvailability = getBanxaasPayoutAvailability({
+  // v1.2.4: all external swap providers resolve through the unified
+  // registry. Banxaas / Chapsmart / Bitika / Tando / Pilot / Bitzed
+  // each have one or more entries; the picker surfaces every match
+  // for the current trade context and the user picks which to use.
+  // Hard-gating on post-CLAIM state happens at the dispatching modal's
+  // mount boundary (this modal only opens after a CLAIM is in flight),
+  // so by the time we render here the user already has authority over
+  // the sats and external offramps are safe to offer.
+  const externalSwaps = getExternalSwapsForContext({
     homeCommunity,
     tradeCommunity,
     fiatCurrency,
@@ -214,6 +226,43 @@ export function ClaimPayoutModal({
     void dispatchClaim(lastDispatchRef.current);
   };
 
+  // v1.2.5: claim-side NWC quick-pick. Mirrors the funding modal's
+  // saved-NWC top-level button — one tap on a saved wallet, the
+  // chooser resolves an invoice via NWC's make_invoice, then dispatches
+  // the claim. The spinner appears immediately so the user sees that
+  // something is happening during the relay round-trip.
+  const dispatchSavedNwcClaim = async (connection: SavedNwcConnection) => {
+    setStage({ kind: "running", phase: { kind: "claiming" } });
+    let invoice: string;
+    try {
+      invoice = await resolveNwcConnectionToInvoice(
+        connection.connectionString,
+        payoutSats,
+        { description: "Chama claim payout" },
+      );
+    } catch (e: any) {
+      // NWC wallet refused or couldn't issue the invoice — surface
+      // through the standard terminal panel so the user can retry or
+      // pick a different destination.
+      setStage({
+        kind: "terminal",
+        terminal: {
+          kind: "claim-failed",
+          error: e?.message || "NWC wallet couldn't create a destination invoice",
+        },
+      });
+      return;
+    }
+    // Touch the saved row (bumps lastUsedAt) — same UX as
+    // DestinationPicker's saved-NWC branch.
+    try { addOrTouchSavedNwcConnection(connection.connectionString); } catch {}
+    resolveDestination(invoice, {
+      saveAfter: false,
+      nwcConnectionString: connection.connectionString,
+      saveNwcAfter: false,
+    });
+  };
+
   const resolveOnchainAddress = (address: string) => {
     lastDispatchRef.current = {
       onchainAddress: address,
@@ -269,17 +318,19 @@ export function ClaimPayoutModal({
       return (
         <ClaimMethodChooser
           payoutSats={payoutSats}
-          banxaasAvailability={banxaasAvailability}
+          externalSwaps={externalSwaps}
+          savedNwcConnections={savedNwcConnections}
           onSelect={setPayoutMethod}
+          onSelectSavedNwc={dispatchSavedNwcClaim}
           onCancel={() => onClose(undefined)}
         />
       );
     }
 
-    if (payoutMethod === "banxaas" && banxaasAvailability) {
+    if (payoutMethod.kind === "external") {
       return (
-        <BanxaasPayoutPicker
-          availability={banxaasAvailability}
+        <ExternalSwapRedirectPicker
+          match={payoutMethod.match}
           payoutSats={payoutSats}
           reserveSats={reserveSats}
           onResolve={(bolt11) => resolveDestination(bolt11, { saveAfter: false })}
@@ -289,7 +340,7 @@ export function ClaimPayoutModal({
       );
     }
 
-    if (payoutMethod === "onchain") {
+    if (payoutMethod.kind === "onchain") {
       return (
         <OnchainPayoutPicker
           payoutSats={payoutSats}
@@ -300,6 +351,7 @@ export function ClaimPayoutModal({
       );
     }
 
+    // payoutMethod.kind === "lightning"
     return (
       <DestinationPicker
         amountSats={payoutSats}
@@ -316,13 +368,6 @@ export function ClaimPayoutModal({
             )}
           </>
         )}
-        topSlot={chapsmartEligible ? (
-          <ChapsmartPayoutOption
-            escrowId={escrowId}
-            amountSats={payoutSats}
-            onResolve={(bolt11) => resolveDestination(bolt11, { saveAfter: false })}
-          />
-        ) : undefined}
         onResolve={resolveDestination}
         onCancel={() => onClose(undefined)}
       />
@@ -387,17 +432,28 @@ export function ClaimPayoutModal({
 
 function ClaimMethodChooser({
   payoutSats,
-  banxaasAvailability,
+  externalSwaps,
+  savedNwcConnections,
   onSelect,
+  onSelectSavedNwc,
   onCancel,
 }: {
   payoutSats: number;
-  banxaasAvailability: BanxaasPayoutAvailability | null;
+  externalSwaps: ExternalSwapMatch[];
+  /** v1.2.5: saved NWC connections, promoted to top-level quick-pick
+   *  buttons here just like AtomicFundingModal does on the funding
+   *  side. A returning user with a saved wallet can claim straight
+   *  to it in one tap — no detour through LN → DestinationPicker. */
+  savedNwcConnections: SavedNwcConnection[];
   onSelect: (method: PayoutMethod) => void;
+  onSelectSavedNwc: (connection: SavedNwcConnection) => void;
   onCancel: () => void;
 }) {
-  const methodGridColumns = banxaasAvailability ? "1fr" : "1fr 1fr";
-  const methodMinHeight = banxaasAvailability ? 92 : 118;
+  // Single-column layout once external swaps are surfaced (they have
+  // taller cards with flag + status badge); two-column when only the
+  // built-in Lightning + Onchain methods are available.
+  const methodGridColumns = externalSwaps.length > 0 ? "1fr" : "1fr 1fr";
+  const methodMinHeight = externalSwaps.length > 0 ? 92 : 118;
 
   return (
     <div
@@ -435,9 +491,56 @@ function ClaimMethodChooser({
         }}>
           Choose where Chama sends the rebuilt ecash after your claim settles.
         </div>
+
+        {/* v1.2.5: saved NWC connections promoted to top-level quick-
+            pick buttons here, matching the AtomicFundingModal pattern
+            for funding. A returning user with a saved NWC wallet
+            claims straight to it in one tap; the LN button below
+            still routes through DestinationPicker for first-time
+            paste-an-address flow and Lightning-Address use cases. */}
+        {savedNwcConnections.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{
+              fontSize: 9, color: T.accent, fontFamily: T.mono,
+              letterSpacing: 1, marginBottom: 6, fontWeight: 800,
+            }}>
+              ⚡ FASTEST · CLAIM STRAIGHT TO SAVED NWC WALLET
+            </div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {savedNwcConnections.map((connection) => (
+                <button
+                  key={connection.id}
+                  onClick={() => onSelectSavedNwc(connection)}
+                  style={{
+                    width: "100%", padding: "12px 14px", borderRadius: T.r,
+                    background: T.accentDim, border: `1px solid ${T.accent}66`,
+                    color: T.text, fontFamily: T.mono, fontSize: 12,
+                    cursor: "pointer", display: "flex",
+                    justifyContent: "space-between", alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <span style={{
+                    overflow: "hidden", textOverflow: "ellipsis",
+                    whiteSpace: "nowrap", fontWeight: 600,
+                  }}>
+                    {connection.label}
+                  </span>
+                  <span style={{
+                    color: T.accent, flexShrink: 0, fontSize: 9,
+                    fontWeight: 800, letterSpacing: 1,
+                  }}>
+                    CLAIM →
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div style={{ display: "grid", gridTemplateColumns: methodGridColumns, gap: 10 }}>
           <button
-            onClick={() => onSelect("lightning")}
+            onClick={() => onSelect({ kind: "lightning" })}
             style={{
               minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
               background: T.accentDim, border: `1px solid ${T.accent}66`,
@@ -452,38 +555,61 @@ function ClaimMethodChooser({
               Best path. Send to a Lightning address, invoice, or NWC.
             </div>
           </button>
-          {banxaasAvailability && (
-            <button
-              onClick={() => onSelect("banxaas")}
-              style={{
-                minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
-                background: T.tealDim, border: `1px solid ${T.teal}66`,
-                color: T.text, cursor: "pointer", textAlign: "left",
-              }}
-            >
-              <div style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-                gap: 10, marginBottom: 8,
-              }}>
-                <span style={{ fontSize: 20 }}>{banxaasAvailability.country.flagEmoji}</span>
-                <span style={{
-                  fontSize: 8, fontFamily: T.mono, color: T.teal,
-                  border: `1px solid ${T.teal}55`, borderRadius: 4,
-                  padding: "2px 6px", textTransform: "uppercase",
+          {externalSwaps.map((match) => {
+            const provider = match.provider;
+            const isLive = provider.status === "enabled";
+            const recommended = provider.recommended === true;
+            // Recommended providers (Banxaas today) get a stronger
+            // teal pill + "TOP PICK" badge. The rest use a neutral
+            // teal border to stay consistent with the chooser's
+            // colour vocabulary.
+            const accentBg = recommended ? T.tealDim : T.surface;
+            const accentBorder = recommended ? `${T.teal}66` : T.border;
+            const titleColor = recommended ? T.teal : T.text;
+            return (
+              <button
+                key={`${provider.id}|${provider.communitySlug}`}
+                onClick={() => onSelect({ kind: "external", match })}
+                style={{
+                  minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
+                  background: accentBg, border: `1px solid ${accentBorder}`,
+                  color: T.text, cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <div style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  gap: 10, marginBottom: 8,
                 }}>
-                  {banxaasAvailability.status === "enabled" ? "live" : "soon"}
-                </span>
-              </div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: T.teal, fontFamily: T.mono, marginBottom: 6 }}>
-                BANXAAS · MOMO
-              </div>
-              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
-                Cash out to mobile money through a Lightning invoice.
-              </div>
-            </button>
-          )}
+                  <span style={{ fontSize: 20 }}>{provider.flagEmoji}</span>
+                  <span style={{
+                    fontSize: 8, fontFamily: T.mono,
+                    color: isLive ? T.teal : T.amber,
+                    border: `1px solid ${isLive ? T.teal : T.amber}55`,
+                    borderRadius: 4, padding: "2px 6px",
+                    textTransform: "uppercase",
+                  }}>
+                    {recommended ? "top pick" : (isLive ? "live" : "soon")}
+                  </span>
+                </div>
+                <div style={{
+                  fontSize: 12, fontWeight: 800, color: titleColor,
+                  fontFamily: T.mono, marginBottom: 6,
+                  textTransform: "uppercase",
+                }}>
+                  {provider.displayName} · {provider.currency}
+                </div>
+                <div style={{
+                  fontSize: 10, color: T.muted, fontFamily: T.mono,
+                  lineHeight: 1.45,
+                }}>
+                  {provider.blurb ||
+                    `Cash out to ${provider.countryName} ${provider.currency} via a Lightning invoice.`}
+                </div>
+              </button>
+            );
+          })}
           <button
-            onClick={() => onSelect("onchain")}
+            onClick={() => onSelect({ kind: "onchain" })}
             style={{
               minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
               background: T.amberDim, border: `1px solid ${T.amber}66`,
@@ -511,26 +637,31 @@ function normalizeBolt11Input(input: string): string {
     : trimmed;
 }
 
-function openBanxaasSwap() {
-  if (typeof window === "undefined") return;
-  window.open(BANXAAS_SWAP_URL, "_blank", "noopener,noreferrer");
-}
-
-function BanxaasPayoutPicker({
-  availability,
+function ExternalSwapRedirectPicker({
+  match,
   payoutSats,
   reserveSats,
   onResolve,
   onBack,
   onCancel,
 }: {
-  availability: BanxaasPayoutAvailability;
+  match: ExternalSwapMatch;
   payoutSats: number;
   reserveSats: number;
   onResolve: (bolt11: string) => void;
   onBack: () => void;
   onCancel: () => void;
 }) {
+  // Generic guided-redirect picker: open the provider's swap page,
+  // let the user create a Lightning invoice on their side, paste it
+  // back here, and route it through the normal claim+payout path.
+  // Behaviour is identical for every entry in the registry; provider
+  // identity only affects the copy and the URL.
+  const provider: ExternalSwapProvider = match.provider;
+  const availability: { country: { displayName: string; flagEmoji: string }; status: typeof provider.status } = {
+    country: { displayName: provider.countryName, flagEmoji: provider.flagEmoji },
+    status: provider.status,
+  };
   const [invoice, setInvoice] = useState("");
   const normalizedInvoice = normalizeBolt11Input(invoice);
   const looksLikeBolt11 = /^ln(bc|bcrt|tb)[a-z0-9]+$/i.test(normalizedInvoice);
@@ -555,7 +686,7 @@ function BanxaasPayoutPicker({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
-              BANXAAS CLAIM
+              {provider.displayName.toUpperCase()} CLAIM
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
               <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -604,7 +735,7 @@ function BanxaasPayoutPicker({
             {isLive
               ? (
                   <>
-                    Open Banxaas, choose Bitcoin Lightning to Mobile Money,
+                    Open {provider.displayName}, choose Lightning &rarr; {provider.currency} {provider.bidirectional ? "(or the other direction)" : "mobile money"},
                     make an invoice up to <BitcoinAmount sats={payoutSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />,
                     then paste it below.
                     {reserveSats > 0 && (
@@ -616,15 +747,15 @@ function BanxaasPayoutPicker({
                 )
               : (
                   <>
-                    Banxaas lists this country as coming soon. Use Lightning
-                    or onchain for this claim today.
+                    {provider.displayName} lists this country as coming soon.
+                    Use Lightning or onchain for this claim today.
                   </>
                 )}
           </div>
         </div>
 
         <button
-          onClick={openBanxaasSwap}
+          onClick={() => openExternalSwap(provider)}
           style={{
             width: "100%", padding: "12px 16px", borderRadius: T.rs,
             background: T.teal, border: `1px solid ${T.teal}`,
@@ -632,7 +763,7 @@ function BanxaasPayoutPicker({
             fontWeight: 900, cursor: "pointer", marginBottom: 10,
           }}
         >
-          {isLive ? "Open Banxaas swap" : "Check Banxaas"}
+          {isLive ? `Open ${provider.displayName} swap` : `Check ${provider.displayName}`}
         </button>
 
         {isLive && (
@@ -663,7 +794,7 @@ function BanxaasPayoutPicker({
                 marginBottom: 8,
               }}
             >
-              Claim via Banxaas invoice
+              Claim via {provider.displayName} invoice
             </button>
           </>
         )}
@@ -783,120 +914,14 @@ function OnchainPayoutPicker({
   );
 }
 
-function ChapsmartPayoutOption({
-  escrowId,
-  amountSats,
-  onResolve,
-}: {
-  escrowId: string;
-  amountSats: number;
-  onResolve: (bolt11: string) => void;
-}) {
-  const profile = getChapsmartPayoutProfile();
-  const [phoneNumber, setPhoneNumber] = useState(profile?.phoneNumber ?? "");
-  const [recipientName, setRecipientName] = useState(profile?.recipientName ?? "");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const handleChapsmart = async () => {
-    setErr(null);
-    setBusy(true);
-    try {
-      const saved = saveChapsmartPayoutProfile({ phoneNumber, recipientName });
-      const invoice = await createChapsmartPayoutInvoice({
-        phoneNumber: saved.phoneNumber,
-        recipientName: saved.recipientName,
-        amountSatsMax: amountSats,
-        escrowId,
-      });
-      onResolve(invoice.bolt11);
-    } catch (e: any) {
-      setErr(e?.message || "Chapsmart payout is not ready yet");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div style={{
-      padding: 12, borderRadius: T.r,
-      background: T.tealDim, border: `1px solid ${T.teal}44`,
-    }}>
-      <div style={{
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-        gap: 10, marginBottom: 10,
-      }}>
-        <div style={{ textAlign: "left" }}>
-          <div style={{
-            fontSize: 11, color: T.teal, fontFamily: T.mono,
-            fontWeight: 900, letterSpacing: 0.4,
-          }}>
-            M-PESA VIA CHAPSMART
-          </div>
-          <div style={{
-            fontSize: 10, color: T.muted, fontFamily: T.sans,
-            marginTop: 2,
-          }}>
-            Send up to <BitcoinAmount sats={amountSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> as TZS
-          </div>
-        </div>
-        <span style={{ fontSize: 22, lineHeight: 1 }}>🇹🇿</span>
-      </div>
-      <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
-        <input
-          value={phoneNumber}
-          onChange={(e) => { setPhoneNumber(e.target.value); setErr(null); }}
-          placeholder="+255 71 234 5678"
-          type="tel"
-          disabled={busy}
-          style={{
-            width: "100%", padding: "10px 12px", boxSizing: "border-box",
-            background: T.bg, border: `1px solid ${T.border}`,
-            borderRadius: T.rs, color: T.text,
-            fontFamily: T.sans, fontSize: 13, outline: "none",
-          }}
-        />
-        <input
-          value={recipientName}
-          onChange={(e) => { setRecipientName(e.target.value); setErr(null); }}
-          placeholder="Recipient full name"
-          type="text"
-          disabled={busy}
-          style={{
-            width: "100%", padding: "10px 12px", boxSizing: "border-box",
-            background: T.bg, border: `1px solid ${T.border}`,
-            borderRadius: T.rs, color: T.text,
-            fontFamily: T.sans, fontSize: 13, outline: "none",
-          }}
-        />
-      </div>
-      {err && (
-        <div style={{
-          marginBottom: 8, padding: "8px 10px",
-          background: T.redDim, border: `1px solid ${T.red}33`,
-          borderRadius: T.rs, color: T.red,
-          fontSize: 10, fontFamily: T.mono,
-        }}>
-          {err}
-        </div>
-      )}
-      <button
-        onClick={handleChapsmart}
-        disabled={busy || !phoneNumber.trim() || !recipientName.trim()}
-        style={{
-          width: "100%", padding: "11px 12px", borderRadius: T.rs,
-          background: busy || !phoneNumber.trim() || !recipientName.trim() ? T.surface : T.teal,
-          border: `1px solid ${busy || !phoneNumber.trim() || !recipientName.trim() ? T.border : T.teal}`,
-          color: busy || !phoneNumber.trim() || !recipientName.trim() ? T.muted : T.bg,
-          fontFamily: T.mono, fontSize: 11, fontWeight: 900,
-          cursor: busy || !phoneNumber.trim() || !recipientName.trim() ? "default" : "pointer",
-        }}
-      >
-        {busy ? "Getting Chapsmart invoice..." : "Send to M-Pesa"}
-      </button>
-    </div>
-  );
-}
+// v1.2.4: the inline ChapsmartPayoutOption (phone + name form that
+// POSTed to the now-dead nwc.chapsmart.com endpoint) was deleted.
+// Chapsmart now lives in external-swap-registry.ts as a guided
+// redirect alongside Banxaas / Bitika / Tando / Minmo / Bitzed, and
+// surfaces through the shared ExternalSwapRedirectPicker. The
+// per-user profile helpers (phone + name) remain in
+// chapsmart-payout.ts for any future on-Chapsmart pre-fill but no
+// longer hit the network from Chama itself.
 
 // ── Sub-panels ──────────────────────────────────────────────────────────
 
@@ -911,8 +936,9 @@ function RunningPanel({
     phase.kind === "claiming" ? "Recovering your share…" :
     phase.kind === "confirming" ? "Confirming with the federation…" :
     phase.kind === "paying-onchain" ? "Broadcasting onchain payout…" :
-    phase.kind === "paying-invoice" && payoutMethod === "banxaas" ? "Sending to Banxaas…" :
-    phase.kind === "paying-invoice" ? "Sending to your wallet…" :
+    phase.kind === "paying-invoice" && payoutMethod?.kind === "external"
+      ? `Sending to ${payoutMethod.match.provider.displayName}…`
+      : phase.kind === "paying-invoice" ? "Sending to your wallet…" :
     "Working…";
   const tone =
     phase.kind === "paying-onchain" ? T.amber :
@@ -960,7 +986,9 @@ function TerminalPanel({
       }}>
         <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
         <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
-          {payoutMethod === "banxaas" ? "Sent to Banxaas" : "Sent to your wallet"}
+          {payoutMethod?.kind === "external"
+            ? `Sent to ${payoutMethod.match.provider.displayName}`
+            : "Sent to your wallet"}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
           Closing…
@@ -979,10 +1007,16 @@ function TerminalPanel({
   let showRetry = false;
   const showRecoveryCta = terminal.kind === "payout-failed";
 
+  // v1.2.5: translate NWC / BOLT error codes into human copy here too
+  // (in addition to the App-level toast wrapper) so the in-modal
+  // terminal panel reads cleanly even on the brief beat before the
+  // modal closes and the toast takes over.
+  const humanizedError = humanizeNwcError(terminal.error);
+
   if (terminal.kind === "claim-failed") {
     const settlementFailed = /reissue|consumed|settle/i.test(terminal.error);
     title = settlementFailed ? "Claim did not settle" : "Couldn't recover your share";
-    subtitle = terminal.error;
+    subtitle = humanizedError;
     tone = T.red;
     toneDim = T.redDim;
     icon = "✕";
@@ -991,14 +1025,14 @@ function TerminalPanel({
     // / FED_MISMATCH). Surface the actual underlying error and offer
     // Try again. No sats moved — safe to retry.
     title = "Couldn't reach your Chama";
-    subtitle = terminal.error;
+    subtitle = humanizedError;
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⚠";
     showRetry = true;
   } else if (terminal.kind === "claim-pending") {
     title = "Your sats are still arriving";
-    subtitle = terminal.error;
+    subtitle = humanizedError;
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⏳";
@@ -1006,7 +1040,7 @@ function TerminalPanel({
   } else {
     // payout-failed
     title = "Payout couldn't be sent";
-    subtitle = `${terminal.error}\n\nYour sats are safe in your Chama. Tap Show recovery now to retry the payout only.`;
+    subtitle = `${humanizedError}\n\nYour sats are safe in your Chama. Tap Show recovery now to retry the payout only.`;
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⏳";

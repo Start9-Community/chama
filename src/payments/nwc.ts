@@ -202,6 +202,98 @@ function parseNwcResponsePayload(raw: string, method: string): any {
   return parsed?.result ?? {};
 }
 
+// ── Error humanisation (v1.2.5) ─────────────────────────────────────────
+//
+// Raw NWC error strings look like "INTERNAL: FAILURE_REASON_NO_ROUTE" —
+// useful in logs, useless in a toast a user has to read on their phone
+// at 2am. `humanizeNwcError` maps the two common shapes — NIP-47
+// error codes and BOLT-level FAILURE_REASON_* codes embedded in their
+// messages — into copy that says what happened in plain words and
+// suggests what to try next.
+//
+// The function is permissive: pass any error string (or Error.message)
+// and it'll return the most-helpful translation it can find, falling
+// back to the original string when nothing matches. Cheap to call
+// from every error toast site; safe to leave wrapping things that
+// aren't NWC errors at all.
+
+const NWC_CODE_COPY: Record<string, string> = {
+  // NIP-47 error codes (the prefix before the colon in raw messages).
+  RATE_LIMITED:
+    "Your Lightning wallet is throttling requests. Wait a moment and try again.",
+  NOT_IMPLEMENTED:
+    "Your Lightning wallet doesn't support this NWC method. Try a different wallet or update yours.",
+  INSUFFICIENT_BALANCE:
+    "Your Lightning wallet doesn't have enough sats to pay this invoice.",
+  QUOTA_EXCEEDED:
+    "Your NWC connection's spending budget is used up. Top it up in your wallet's NWC settings.",
+  RESTRICTED:
+    "Your NWC connection isn't permitted to pay invoices. Re-pair with payment permission enabled.",
+  UNAUTHORIZED:
+    "Your NWC connection was rejected by the wallet. Re-pair it.",
+  INTERNAL:
+    "Your Lightning wallet hit an internal error. Try again, or check the wallet's logs.",
+  OTHER:
+    "Your Lightning wallet refused the payment. Try again, or check your wallet's logs.",
+  PAYMENT_FAILED:
+    "The Lightning payment failed. Your sats stay in your wallet — try again.",
+  NOT_FOUND:
+    "Your Lightning wallet couldn't find the invoice or operation. It may have expired.",
+};
+
+// BOLT-spec payment-failure reason codes, often embedded in
+// PAYMENT_FAILED / INTERNAL messages from LND-backed wallets.
+const NWC_FAILURE_REASON_COPY: Record<string, string> = {
+  FAILURE_REASON_NONE:
+    "The payment failed but the wallet didn't say why. Try again.",
+  FAILURE_REASON_TIMEOUT:
+    "Your Lightning node gave up trying to find a route before the deadline. Network congestion or an unresponsive intermediate node. Retry usually works.",
+  FAILURE_REASON_NO_ROUTE:
+    "Your Lightning node couldn't find a route to the trade's federation gateway. Usually a channel-liquidity or peer-connectivity issue. Retry, or open a bigger / better-connected channel (Zeus LSP is one good option).",
+  FAILURE_REASON_ERROR:
+    "Your Lightning node hit an error while paying. Check the wallet's logs.",
+  FAILURE_REASON_INCORRECT_PAYMENT_DETAILS:
+    "The federation gateway rejected the invoice details. The invoice may have already been paid or expired — try again with a fresh one.",
+  FAILURE_REASON_INSUFFICIENT_BALANCE:
+    "Your Lightning channel doesn't have enough outbound capacity for this payment, even though your balance shows enough total. Rebalance your channels, or open another channel with more outbound liquidity.",
+};
+
+export function humanizeNwcError(input: unknown): string {
+  const raw =
+    typeof input === "string"
+      ? input
+      : (input as any)?.message
+        ? String((input as any).message)
+        : String(input ?? "");
+  if (!raw) return "Lightning payment failed for an unknown reason.";
+
+  // Most NWC errors come through as `${code}: ${message}` per nwc.ts
+  // line 197 — split on the first colon and look the code up.
+  const colonIdx = raw.indexOf(":");
+  const candidateCode = colonIdx > 0 ? raw.slice(0, colonIdx).trim() : raw.trim();
+  const tail = colonIdx > 0 ? raw.slice(colonIdx + 1).trim() : "";
+
+  // BOLT FAILURE_REASON_* often sits in the tail. Check that first so
+  // "INTERNAL: FAILURE_REASON_NO_ROUTE" surfaces the routing copy
+  // rather than the generic INTERNAL copy.
+  const failureReasonMatch = raw.match(/FAILURE_REASON_[A-Z_]+/);
+  if (failureReasonMatch) {
+    const reasonCopy = NWC_FAILURE_REASON_COPY[failureReasonMatch[0]];
+    if (reasonCopy) return reasonCopy;
+  }
+
+  if (candidateCode in NWC_CODE_COPY) {
+    const codeCopy = NWC_CODE_COPY[candidateCode];
+    // If the wallet attached a useful detail in the tail, append it
+    // in a parenthetical so the underlying message isn't lost.
+    return tail && tail !== candidateCode
+      ? `${codeCopy} (wallet said: ${tail})`
+      : codeCopy;
+  }
+
+  return raw;
+}
+
 export function extractInvoiceFromNwcResponse(raw: string): string {
   const result = parseNwcResponsePayload(raw, "make_invoice");
   const invoice = result?.invoice;
