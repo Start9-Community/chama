@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { type FedimintState } from "../../hooks/useEscrow.js";
 import { T, inputStyle } from "../theme.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
@@ -34,11 +34,15 @@ export function SettingsAdvanced({
   onSwitchFederation,
   onResetLocalWallet,
   onSandboxFund,
+  focusNwc = false,
 }: {
   fedimint: FedimintState;
   onBack: () => void;
   onSwitchFederation: (inviteCode: string, opts?: { force?: boolean }) => Promise<void>;
   onResetLocalWallet: () => Promise<void>;
+  /** When true (arrived via the "Change" link on the trade-page NWC banner),
+   *  open expanded on the NWC wallets section and scroll it into view. */
+  focusNwc?: boolean;
   /** v0.3.0 Phase 5: opens FundWalletModal — the only remaining
    *  callsite of that surface in production. Reachable only when
    *  Power-user mode is on. The label on the button below carries the
@@ -66,13 +70,25 @@ export function SettingsAdvanced({
   const recoverableSats = maxLightningPayoutSats(balanceMsats);
   const reserveSats = lightningPayoutReserveSats(balanceMsats);
   const routeLabel = fedimint.federationName || (fedimint.joined ? "Joined route" : "No Chama");
-  const [nwcManagerOpen, setNwcManagerOpen] = useState(false);
+  const [nwcManagerOpen, setNwcManagerOpen] = useState(focusNwc);
   const [savedNwcConnections, setSavedNwcConnections] = useState<SavedNwcConnection[]>(
     () => listSavedNwcConnections(),
   );
   const [nwcInput, setNwcInput] = useState("");
   const [nwcError, setNwcError] = useState<string | null>(null);
   const nwcInputReady = isNwcConnectionString(nwcInput);
+
+  // Arrived from the trade-page NWC "Change" link → land on the NWC wallets
+  // section: expand it and scroll it into view once layout settles.
+  const nwcSectionRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!focusNwc) return;
+    setNwcManagerOpen(true);
+    const t = setTimeout(() => {
+      nwcSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 60);
+    return () => clearTimeout(t);
+  }, [focusNwc]);
 
   const refreshNwcConnections = () => setSavedNwcConnections(listSavedNwcConnections());
   const handleSaveNwc = () => {
@@ -149,7 +165,7 @@ export function SettingsAdvanced({
         )}
       </div>
 
-      <div style={{
+      <div ref={nwcSectionRef} style={{
         background: T.card, border: `1px solid ${T.border}`,
         borderRadius: T.r, padding: 16, marginBottom: 16,
       }}>

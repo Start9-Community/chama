@@ -136,6 +136,24 @@ else
   [ "$HAVE_ZAP" = "1" ] && RELEASE_FLAGS+=(--zapstore-notes-file "$ZAP_NOTES")
 fi
 
+# ── Pre-flight: catch a missing zsp / SIGN_WITH BEFORE we bump & commit ────
+# release:all only reaches the Zapstore publish at the very end — after the
+# commit, push, web deploy and GitHub release have already run. A missing zsp
+# there leaves a half-published release (everything but Zapstore). Detect it
+# now so it shows in the plan, before anything is mutated.
+PREFLIGHT_WARN=""
+if [ "$DO_RELEASE" = "1" ] && [ "${#RELEASE_FLAGS[@]}" -gt 0 ] && \
+   printf '%s\n' "${RELEASE_FLAGS[@]}" | grep -qx -- "--zapstore"; then
+  if { [ -n "${CHAMA_ZSP_BIN:-}" ] && [ -x "${CHAMA_ZSP_BIN:-}" ]; } || command -v zsp >/dev/null 2>&1; then
+    :
+  else
+    PREFLIGHT_WARN="${PREFLIGHT_WARN}    - no zsp binary found — set CHAMA_ZSP_BIN=/path/to/zsp (or install zsp)\n"
+  fi
+  if [ -z "${SIGN_WITH:-}" ]; then
+    PREFLIGHT_WARN="${PREFLIGHT_WARN}    - SIGN_WITH is unset — Zapstore publish needs it (e.g. SIGN_WITH=browser)\n"
+  fi
+fi
+
 # ── Show the plan ─────────────────────────────────────────────────────────
 if [ -n "$SET_VERSION" ]; then BUMP_LABEL="--set-version $SET_VERSION"; else BUMP_LABEL="--$BUMP"; fi
 echo "── Chama ship plan ─────────────────────────────────────────────"
@@ -149,6 +167,10 @@ echo "  steps:"
 echo "    1) npm version $([ -n "$SET_VERSION" ] && echo "$SET_VERSION" || echo "$BUMP") --no-git-tag-version"
 echo "    2) git add -A && git commit -F \"$REL_NOTES\"$([ "$DO_PUSH" = 1 ] && echo " && git push origin main")"
 [ "$DO_RELEASE" = 1 ] && echo "    3) npm run release:all -- ${RELEASE_FLAGS[*]}"
+if [ -n "$PREFLIGHT_WARN" ]; then
+  echo "  ⚠️  zapstore pre-flight (commit/push/web/GitHub still succeed — only the Zapstore step would fail at the end):"
+  printf '%b' "$PREFLIGHT_WARN"
+fi
 echo "────────────────────────────────────────────────────────────────"
 
 if [ "$DRY" = "1" ]; then

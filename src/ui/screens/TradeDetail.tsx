@@ -64,7 +64,7 @@ export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
   onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
-  onSendChat, onReleasePeriod, onOpenSettings,
+  onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
   onPrewarmFunding,
 }: {
   state: EscrowState; pubkey: string;
@@ -145,6 +145,9 @@ export function TradeDetail({
   onSendChat: (message: string | { message: string; attachments?: ChatImageAttachment[] }) => void;
   onReleasePeriod?: (periodIndex: number) => void | Promise<void>;
   onOpenSettings?: () => void;
+  /** Opens Me › Advanced Settings focused on the NWC wallets section.
+   *  Distinct from onOpenSettings (which opens saved Payment Handles). */
+  onOpenNwcSettings?: () => void;
 }) {
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
@@ -1734,7 +1737,7 @@ export function TradeDetail({
           <NwcStatusBanner
             activeConnection={activeNwc}
             onSaved={refreshSavedNwcs}
-            onManage={onOpenSettings}
+            onManage={onOpenNwcSettings}
           />
 
           <button
@@ -2113,7 +2116,7 @@ export function TradeDetail({
           <NwcStatusBanner
             activeConnection={activeNwc}
             onSaved={refreshSavedNwcs}
-            onManage={onOpenSettings}
+            onManage={onOpenNwcSettings}
           />
 
           <button

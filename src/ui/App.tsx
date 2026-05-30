@@ -185,6 +185,9 @@ export default function App() {
   });
 
   const [view, setView] = useState<View>("browse");
+  // When the Advanced screen is opened from the trade-page NWC "Change" link,
+  // land focused on the NWC wallets section instead of the top of the page.
+  const [advancedFocusNwc, setAdvancedFocusNwc] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const urlEscrowOpenAttemptedRef = useRef(false);
   const [detailBackView, setDetailBackView] = useState<View>("browse");
@@ -1692,6 +1695,7 @@ export default function App() {
               void actions.prewarmFunding();
             }}
             onOpenSettings={() => setView("saved-handles")}
+            onOpenNwcSettings={() => { setAdvancedFocusNwc(true); setView("advanced"); }}
           />
         </div>
       ) : view === "create" ? (
@@ -1782,7 +1786,7 @@ export default function App() {
             }}
             onOpenSavedHandles={() => setView("saved-handles")}
             onOpenPayoutDestinations={() => setView("payout-destinations")}
-            onOpenAdvanced={() => setView("advanced")}
+            onOpenAdvanced={() => { setAdvancedFocusNwc(false); setView("advanced"); }}
             onSignOut={handleSignOut}
           />
         </div>
@@ -1827,6 +1831,7 @@ export default function App() {
           )}
           <SettingsAdvanced
             fedimint={fedimint}
+            focusNwc={advancedFocusNwc}
             onBack={() => setView("me")}
             onSandboxFund={() => setShowFundModal(true)}
             onSwitchFederation={async (inviteCode, opts) => {
