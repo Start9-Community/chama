@@ -543,7 +543,7 @@ export function TradeDetail({
     ? T.green
     : state.resolvedOutcome === Outcome.REFUND
       ? T.amber
-      : T.muted;
+      : T.teal; // pending: tie the "awaiting decision" chip to the teal Arbiter above it
   const decisionLabel = state.resolvedOutcome ? "final decision" : "awaiting decision";
   const decisionValue = state.resolvedOutcome ?? "pending";
   const heroImages = [
@@ -1525,17 +1525,20 @@ export function TradeDetail({
             marginBottom: 18,
             borderTop: `1px solid ${T.border}`,
           }}>
+            {/* Tally reads left→right like the Trinity ring above it: green
+                release under the Buyer · the arbiter's pending/final decision
+                centered under the teal Arbiter · amber refund under the Seller. */}
             <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.green)}>
               <strong style={voteDecisionValueStyle()}>{releaseVoteCount}</strong>
               <span style={voteDecisionLabelStyle()}>release votes</span>
             </div>
-            <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.amber)}>
-              <strong style={voteDecisionValueStyle()}>{refundVoteCount}</strong>
-              <span style={voteDecisionLabelStyle()}>refund votes</span>
-            </div>
             <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(decisionTone)}>
               <strong style={voteDecisionValueStyle()}>{decisionValue}</strong>
               <span style={voteDecisionLabelStyle()}>{decisionLabel}</span>
+            </div>
+            <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.amber)}>
+              <strong style={voteDecisionValueStyle()}>{refundVoteCount}</strong>
+              <span style={voteDecisionLabelStyle()}>refund votes</span>
             </div>
           </div>
         )}
