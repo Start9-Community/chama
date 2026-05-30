@@ -52,6 +52,8 @@ import {
   estimateFiatForMsats,
   formatFiatAmount,
   normalizeFiatCurrency,
+  resolveEstimatedFiatCurrency,
+  shouldQuoteEstimatedFiat,
   type AmountDisplayMode,
 } from "../amount-display.js";
 
@@ -146,6 +148,7 @@ export function TradeDetail({
 }) {
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
+  const homeQuoteCurrency = homeCommunity ? getCommunityBySlug(homeCommunity)?.currency ?? null : null;
   // v0.2.0 item 1: State A/B framing for CREATED listings. By the time
   // the detail screen renders, the silent re-init has already landed
   // the user on the listing's fed (the openEscrow dispatch in
@@ -496,17 +499,28 @@ export function TradeDetail({
     canJoinTrade,
   });
   const heroAmountMsats = nextStep.amountMsats ?? (menuDisplayAmountMsats || state.amountMsats);
-  const heroFiat = detailHeroFiatAmount({
+  const exactHeroFiat = detailHeroFiatAmount({
     state,
     selectedMenuItems,
     savedOrderItems,
     menuItems,
-  }) ?? detailEstimatedHeroFiatAmount({
+  });
+  const estimatedHeroFiat = detailEstimatedHeroFiatAmount({
     state,
     amountMsats: heroAmountMsats,
+    quoteCurrency: homeQuoteCurrency,
     usdPerBtc: btcPrice.usd,
     usdFiatRates: fiatRates.rates,
   });
+  const quoteViewerFiat = shouldQuoteEstimatedFiat({
+    viewerCurrency: homeQuoteCurrency,
+    listingCurrency: exactHeroFiat?.currency
+      ?? state.fiatCurrency
+      ?? (state.community ? getCommunityBySlug(state.community)?.currency : null),
+  });
+  const heroFiat = quoteViewerFiat
+    ? estimatedHeroFiat ?? exactHeroFiat
+    : exactHeroFiat ?? estimatedHeroFiat;
   const heroFiatLabel = heroFiat ? formatFiatAmount(heroFiat.amount, heroFiat.currency) : null;
   const premiumCheckoutLine = detailPremiumCheckoutLine(state, heroFiat);
   const showHeroFiat = amountDisplayMode === "fiat" && !!heroFiatLabel;
@@ -2672,16 +2686,21 @@ function detailHeroFiatAmount({
 function detailEstimatedHeroFiatAmount({
   state,
   amountMsats,
+  quoteCurrency,
   usdPerBtc,
   usdFiatRates,
 }: {
   state: EscrowState;
   amountMsats: number;
+  quoteCurrency: string | null | undefined;
   usdPerBtc: number | null;
   usdFiatRates: Record<string, number>;
 }): { amount: number; currency: string } | null {
-  const currency = normalizeFiatCurrency(state.fiatCurrency)
-    ?? normalizeFiatCurrency(state.community ? getCommunityBySlug(state.community)?.currency : null);
+  const currency = resolveEstimatedFiatCurrency({
+    viewerCurrency: quoteCurrency,
+    listingCurrency: normalizeFiatCurrency(state.fiatCurrency)
+      ?? normalizeFiatCurrency(state.community ? getCommunityBySlug(state.community)?.currency : null),
+  });
   if (!currency) return null;
   const amount = estimateFiatForMsats({
     amountMsats,

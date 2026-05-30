@@ -565,9 +565,11 @@ function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
                 community = choice;
               } else {
                 countryChoice = choice;
-                community = choice.communities[0]!;
+                community = defaultCommunityForCountryChoice(choice);
               }
-              const hasRoutes = countryChoice !== null && countryChoice.communities.length > 1;
+              const hasRoutes = countryChoice !== null
+                && countryChoice.communities.length > 1
+                && countryChoice.key !== "KE";
               const title = countryChoice === null
                 ? community.disambiguator ?? countryLabel(community)
                 : countryChoice.label;
@@ -667,6 +669,14 @@ function compareCommunityRoutes(a: Community, b: Community): number {
   );
   if (byLabel !== 0) return byLabel;
   return a.slug.localeCompare(b.slug, undefined, { sensitivity: "base" });
+}
+
+function defaultCommunityForCountryChoice(choice: CountryChoice): Community {
+  if (choice.key === "KE") {
+    return choice.communities.find((community) => community.slug === "ke-kes")
+      ?? choice.communities[0]!;
+  }
+  return choice.communities[0]!;
 }
 
 function isCommunityChoice(choice: Community | CountryChoice): choice is Community {

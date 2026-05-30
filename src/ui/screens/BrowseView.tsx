@@ -79,6 +79,7 @@ export function BrowseView({
   const browseSummary = totalListings === 0
     ? "No open offers yet"
     : `${filteredTotal.toLocaleString()} of ${totalListings.toLocaleString()} open offer${totalListings === 1 ? "" : "s"}`;
+  const quoteCurrency = homeCommunity?.currency ?? null;
 
   return (
     <div style={{ padding: 16 }}>
@@ -272,6 +273,7 @@ export function BrowseView({
                     kind0Enabled={kind0Enabled}
                     profileNames={profileNames}
                     amountDisplayMode={amountDisplayMode}
+                    quoteCurrency={quoteCurrency}
                   />
                 ))
               ) : (
@@ -285,6 +287,7 @@ export function BrowseView({
                         kind0Enabled={kind0Enabled}
                         profileNames={profileNames}
                         amountDisplayMode={amountDisplayMode}
+                        quoteCurrency={quoteCurrency}
                       />
                     </div>
                   ))}
@@ -323,6 +326,7 @@ export function BrowseView({
                     kind0Enabled={kind0Enabled}
                     profileNames={profileNames}
                     amountDisplayMode={amountDisplayMode}
+                    quoteCurrency={quoteCurrency}
                   />
                 ))
               ) : (
@@ -337,6 +341,7 @@ export function BrowseView({
                         kind0Enabled={kind0Enabled}
                         profileNames={profileNames}
                         amountDisplayMode={amountDisplayMode}
+                        quoteCurrency={quoteCurrency}
                       />
                     </div>
                   ))}
@@ -502,6 +507,7 @@ function BrowseSection({
   kind0Enabled = false,
   profileNames,
   amountDisplayMode,
+  quoteCurrency,
 }: {
   section: BrowseListingSection;
   pubkey: string;
@@ -510,6 +516,7 @@ function BrowseSection({
   kind0Enabled?: boolean;
   profileNames?: NostrProfileNameMap;
   amountDisplayMode: AmountDisplayMode;
+  quoteCurrency?: string | null;
 }) {
   return (
     <section style={{ marginBottom: 16 }}>
@@ -553,6 +560,7 @@ function BrowseSection({
               kind0Enabled={kind0Enabled}
               profileNames={profileNames}
               amountDisplayMode={amountDisplayMode}
+              quoteCurrency={quoteCurrency}
             />
           </div>
         ))}

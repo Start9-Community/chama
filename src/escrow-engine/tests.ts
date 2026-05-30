@@ -118,7 +118,7 @@ import {
   setCustomFederationInvite,
   shouldReconcileFederation,
   expectedFederationIdForInvite,
-  PUBLIC_FEDI_OBSERVER_FEDERATIONS,
+  PUBLIC_FEDI_APPROVED_FEDERATIONS,
   BP_FEDERATION_ID,
   AFRIBIT_KIBERA_FEDERATION_ID,
   BITSACCO_FEDERATION_ID,
@@ -169,7 +169,10 @@ import {
   maskHandle,
   formatPhoneNumber,
   formatPhoneNumberForDisplay,
+  formatPhoneNumberRevealed,
+  getPhoneNumberSaveError,
   getPhoneNumberDisplayParts,
+  sanitizePhoneNumberForSave,
   publicHandleDisplay,
   handleDisplayForViewer,
   LIGHTNING_RAIL,
@@ -326,6 +329,8 @@ import {
   estimateFiatForMsats,
   estimateSatsForFiat,
   normalizeFiatCurrency,
+  resolveEstimatedFiatCurrency,
+  shouldQuoteEstimatedFiat,
 } from "../ui/amount-display.js";
 import {
   isFediWebViewSignInEnvironment,
@@ -1803,8 +1808,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   // v0.7.0: the visible USD default keeps the stable us-blf slug but
   // presents as Global · USD; legacy global-usd is hidden with BP.
   // Permissionless additions live in localStorage and are not counted here.
-  assert(COMMUNITY_REGISTRY.length === 64,
-    "Registry has 64 pre-seeds: Global, GBF, public Fedi routes, Kenya routes, East/West/Central Africa, plus hidden legacy entries");
+  assert(COMMUNITY_REGISTRY.length === 58,
+    "Registry has 58 pre-seeds: Global, GBF, Fedi-approved public routes, Kenya routes, South Africa, East/West/Central Africa, plus hidden legacy entries");
   assert(getCommunityBySlug("sn-cfa")?.currency === "XOF", "sn-cfa is XOF");
   assert(getCommunityBySlug("ke-kes")?.currency === "KES", "ke-kes is KES");
   assert(getCommunityBySlug("ke-kes-bitsacco")?.currency === "KES", "ke-kes-bitsacco is KES");
@@ -1824,6 +1829,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug("st-stn")?.currency === "STN", "st-stn is STN");
   assert(getCommunityBySlug("ug-ugx")?.currency === "UGX", "ug-ugx is UGX");
   assert(getCommunityBySlug("zw-zwg")?.currency === "ZWG", "zw-zwg uses Zimbabwe Gold");
+  assert(getCommunityBySlug("za-zar")?.currency === "ZAR", "za-zar is ZAR");
+  assert(getCommunityBySlug("za-zar")?.country === "ZA", "za-zar country is South Africa");
   assert(getCommunityBySlug("sv-usd")?.currency === "USD", "sv-usd is USD");
   assert(getCommunityBySlug("global-usd")?.currency === "USD", "global-usd is USD");
   assert(getCommunityBySlug("us-blf")?.currency === "USD", "us-blf is USD");
@@ -1837,28 +1844,26 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Global · USD uses the Africa-facing globe emoji");
   assert(getCommunityBySlug("us-blf")?.disambiguator === "BLF",
     "Global USD shows BLF as its backing route in onboarding");
-  assert(PUBLIC_FEDI_OBSERVER_FEDERATIONS.length === 16,
-    "Baked public Fedi observer list carries 16 public wallet services beyond GBF's existing route");
-  assert(getCommunityBySlug("fedi-victoria-btc")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-victoria-btc")?.invite,
-    "Victoria BTC public Fedi route is wired from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-orange-club-africa")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-orange-club-africa")?.invite,
-    "Orange Club Africa public Fedi route is wired from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-latnet")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-latnet")?.invite,
-    "LatNet public Fedi route is wired from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-marigold-trust-network")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-marigold-trust-network")?.invite,
-    "Marigold Trust Network public Fedi route is wired from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-e-cash-club")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-e-cash-club")?.invite,
-    "E-Cash Club public Fedi route is wired from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-bitcoin-principles")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-bitcoin-principles")?.invite,
-    "Bitcoin Principles public Fedi route is visible from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-bitcoinomad")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-bitcoinomad")?.invite,
-    "Bitcoinomad public Fedi route is wired from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-btc-brasil")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-btc-brasil")?.invite,
-    "BTC Brasil public Fedi route is wired from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-odin-federation")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-odin-federation")?.invite,
-    "Odin Federation public Fedi route is wired from Fedimint Observer");
-  assert(getCommunityBySlug("fedi-freedom-one-lowercase")?.federationInvite === PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(r => r.slug === "fedi-freedom-one-lowercase")?.invite,
-    "lowercase freedom one public Fedi route is wired from Fedimint Observer");
+  assert(PUBLIC_FEDI_APPROVED_FEDERATIONS.length === 9,
+    "Baked public Fedi-approved list carries the screenshot wallet services beyond GBF's existing route");
+  assert(getCommunityBySlug("fedi-victoria-btc")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-victoria-btc")?.invite,
+    "Victoria BTC public Fedi-approved route is wired");
+  assert(getCommunityBySlug("fedi-orange-club-africa")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-orange-club-africa")?.invite,
+    "Orange Club Africa public Fedi-approved route is wired");
+  assert(getCommunityBySlug("fedi-latnet")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-latnet")?.invite,
+    "LatNet public Fedi-approved route is wired");
+  assert(getCommunityBySlug("fedi-marigold-trust-network")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-marigold-trust-network")?.invite,
+    "Marigold Trust Network public Fedi-approved route is wired");
+  assert(getCommunityBySlug("fedi-e-cash-club")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-e-cash-club")?.invite,
+    "E-Cash Club public Fedi-approved route is wired");
+  assert(getCommunityBySlug("fedi-bitcoin-principles")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-bitcoin-principles")?.invite,
+    "Bitcoin Principles public Fedi-approved route is visible");
+  assert(getCommunityBySlug("fedi-bitcoinomad")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-bitcoinomad")?.invite,
+    "Bitcoinomad public Fedi-approved route is wired");
+  assert(getCommunityBySlug("fedi-btc-brasil")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-btc-brasil")?.invite,
+    "BTC Brasil public Fedi-approved route is wired");
+  assert(getCommunityBySlug("fedi-freedom-one")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-freedom-one")?.invite,
+    "Freedom One public Fedi-approved route uses the live uppercase entry");
   assert(DEFAULT_COMMUNITY_SLUG === "us-blf", "Default community is us-blf (BLF, v0.5.0)");
   assert(DEFAULT_RELAYS.length >= 5, "Default relay pool has at least 5 stable relays");
   (globalThis as any).localStorage.clear();
@@ -1951,8 +1956,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
-  assert(picker.length === 62,
-    "Picker shows Global, GBF, public Fedi wallet services, two Kenya routes, plus every East/West/Central Africa country Chama");
+  assert(picker.length === 56,
+    "Picker shows Global, GBF, Fedi-approved wallet services, South Africa, two Kenya routes, plus every East/West/Central Africa country Chama");
   assert(picker[0]?.slug === DEFAULT_COMMUNITY_SLUG,
     "Picker starts with Global USD on BLF (active pill visible first)");
   assert(!picker.some(c => c.slug === "sv-usd"),
@@ -1963,8 +1968,10 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Picker includes us-blf as the Global USD route");
   assert(picker.some(c => c.slug === "fedi-bitcoin-principles"),
     "Picker includes Bitcoin Principles as a public Fedi wallet service");
-  assert(PUBLIC_FEDI_OBSERVER_FEDERATIONS.every(route => picker.some(c => c.slug === route.slug)),
-    "Picker includes every baked public Fedi wallet service route");
+  assert(PUBLIC_FEDI_APPROVED_FEDERATIONS.every(route => picker.some(c => c.slug === route.slug)),
+    "Picker includes every baked Fedi-approved wallet service route");
+  assert(picker.some(c => c.slug === "za-zar"),
+    "Picker includes South Africa ZAR under Global");
   assert(picker.some(c => c.slug === "tz-tzs"),
     "Picker includes Tanzania TZS for first-run country selection");
   assert(picker.some(c => c.slug === "ke-kes" && c.country === "KE" && c.disambiguator === "Afribit"),
@@ -2227,15 +2234,15 @@ console.log("\n── BP / BLF RESOLVER ──");
   assert(expectedFederationIdForInvite(bitsaccoInvite) === BITSACCO_FEDERATION_ID,
     "Bitsacco federation ID stays null until verified locally");
 
-  const victoriaBtcRoute = PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(route => route.slug === "fedi-victoria-btc")!;
+  const victoriaBtcRoute = PUBLIC_FEDI_APPROVED_FEDERATIONS.find(route => route.slug === "fedi-victoria-btc")!;
   assert(resolveFederationForCommunity(victoriaBtcRoute.slug) === victoriaBtcRoute.invite,
-    "Public Fedi wallet service slug resolves to its observer invite");
+    "Public Fedi wallet service slug resolves to its approved invite");
   assert(expectedFederationIdForInvite(victoriaBtcRoute.invite) === victoriaBtcRoute.federationId,
-    "Public Fedi wallet service invite resolves to its observer federation ID");
-  assert(PUBLIC_FEDI_OBSERVER_FEDERATIONS.every(route =>
+    "Public Fedi wallet service invite resolves to its approved federation ID");
+  assert(PUBLIC_FEDI_APPROVED_FEDERATIONS.every(route =>
     resolveFederationForCommunity(route.slug) === route.invite &&
     expectedFederationIdForInvite(route.invite) === route.federationId
-  ), "Every baked public Fedi route resolves to its observer invite and federation ID");
+  ), "Every baked public Fedi route resolves to its approved invite and federation ID");
 
   const globalUsdInvite = getCommunityBySlug("global-usd")!.federationInvite!;
   assert(resolveFederationForCommunity("global-usd") === globalUsdInvite,
@@ -3079,12 +3086,50 @@ console.log("\n── SAVED HANDLES — phone-network tagging (v0.6.5) ──");
     ghana.handle === "+233 24-123-4567",
     "3-digit CC for Ghana (starts with 2) detected",
   );
+  const southAfrica = addSavedHandle("phone-number", "+27711234567");
+  assert(
+    southAfrica.handle === "+27 711-234-567",
+    "Known 2-digit +27 country code beats the old +2xx heuristic",
+  );
   const domestic = addSavedHandle("phone-number", "0712345678");
   assert(
     domestic.handle.replace(/-/g, "") === "0712345678"
     && domestic.handle.includes("-"),
     "Domestic-format number (no +) is dashed",
   );
+  assert(
+    sanitizePhoneNumberForSave("+254712345678") === "+254 712-345-678",
+    "Phone save sanitizer accepts complete Kenya numbers",
+  );
+  assert(
+    getPhoneNumberSaveError("+254712345678") === null,
+    "Complete phone number has no save-time validation error",
+  );
+  assert(
+    getPhoneNumberSaveError("+25471234567")?.includes("missing digits") === true,
+    "Save-time validator catches a Kenya number missing one digit",
+  );
+  assert(
+    getPhoneNumberSaveError("+22177555123")?.includes("missing digits") === true,
+    "Save-time validator catches a Senegal number missing one digit",
+  );
+  assert(
+    getPhoneNumberSaveError("071234567")?.includes("looks short") === true,
+    "Save-time validator catches a local number missing one digit",
+  );
+  let rejectedShortPhone = false;
+  try { addSavedHandle("phone-number", "+25471234567"); } catch { rejectedShortPhone = true; }
+  assert(rejectedShortPhone,
+    "addSavedHandle rejects incomplete saved phone numbers");
+  const wavePhone = addSavedHandle("wave", "+221775551234");
+  assert(
+    wavePhone.handle === "+221 77-555-1234",
+    "Phone-based payment rails canonicalize numbers too",
+  );
+  let rejectedShortWave = false;
+  try { addSavedHandle("wave", "+22177555123"); } catch { rejectedShortWave = true; }
+  assert(rejectedShortWave,
+    "Phone-based payment rails reject incomplete numbers");
   assert(formatPhoneNumber("+2") === "+2",
     "Partial +2 country code stays visible while typing");
   const kenyaParts = getPhoneNumberDisplayParts("+254712345678");
@@ -3096,6 +3141,32 @@ console.log("\n── SAVED HANDLES — phone-network tagging (v0.6.5) ──");
   assert(
     formatPhoneNumberForDisplay("+254712345678") === "🇰🇪 712-345-678",
     "Phone display replaces +254 with the Kenya flag",
+  );
+
+  // #1 (v1.3.0): the REVEALED phone — settings reveal toggle + active-trade
+  // reveal to the three participants — shows the ENTIRE international number:
+  // country code visible (not just the flag) and dash-grouped for
+  // readability in EVERY country. Distinct from formatPhoneNumberForDisplay
+  // above, which is flag-led and hides the +CC digits.
+  assert(
+    formatPhoneNumberRevealed("+254712345678") === "🇰🇪 +254 712-345-678",
+    "Revealed phone: flag + explicit +254 + dashes",
+  );
+  assert(
+    formatPhoneNumberRevealed("+15551234567") === "🇺🇸 +1 555-123-4567",
+    "Revealed phone: NANP keeps +1 and dash grouping",
+  );
+  assert(
+    formatPhoneNumberRevealed("+221775551234") === "🇸🇳 +221 77-555-1234",
+    "Revealed phone: Senegal keeps explicit +221",
+  );
+  assert(
+    formatPhoneNumberRevealed("+255712345678") === "🇹🇿 +255 71-234-5678",
+    "Revealed phone: Tanzania — country code + dashes for another country",
+  );
+  assert(
+    formatPhoneNumberRevealed("0712345678") === "071-234-5678",
+    "Revealed phone: domestic number still dash-grouped (no CC to show)",
   );
 
   // Non-phone rails store the user's input verbatim — no formatter
@@ -3149,8 +3220,8 @@ console.log("\n── MASKING + viewer-aware display ──");
     "Generic handle gets masked");
 
   // handleDisplayForViewer — viewer-context decides everything
-  assert(handleDisplayForViewer("+221 77 555 1234", true) === "🇸🇳 77-555-1234",
-    "Participant viewer sees flag-led phone display");
+  assert(handleDisplayForViewer("+221 77 555 1234", true) === "🇸🇳 +221 77-555-1234",
+    "Participant viewer sees full international phone (flag + country code + dashes)");
   assert(handleDisplayForViewer("123456789", true) === "123456789",
     "Participant viewer keeps non-plus numeric handles verbatim");
   assert(handleDisplayForViewer("+221 77 555 1234", false).includes("•••"),
@@ -3236,8 +3307,8 @@ console.log("\n── LOCK HANDLE PROPAGATION (atomic-funding flow) ──");
   // sees masked output regardless of what's in state.lock.handle.value.
   if (r.ok && r.state.lock.handle) {
     const cleartext = r.state.lock.handle.value;
-    assert(handleDisplayForViewer(cleartext, true) === "🇸🇳 77-555-1234",
-      "Participant view: flag-led display from LOCK cleartext");
+    assert(handleDisplayForViewer(cleartext, true) === "🇸🇳 +221 77-555-1234",
+      "Participant view: full international phone from LOCK cleartext");
     assert(handleDisplayForViewer(cleartext, false).includes("•••"),
       "Non-participant view: masked even though cleartext sits in state");
   }
@@ -4343,7 +4414,7 @@ console.log("\n── AUTO-INIT TARGET ──");
       "Bitsacco active-without-home repair is labeled");
   }
 
-  const publicFediRoute = PUBLIC_FEDI_OBSERVER_FEDERATIONS.find(route => route.slug === "fedi-victoria-btc")!;
+  const publicFediRoute = PUBLIC_FEDI_APPROVED_FEDERATIONS.find(route => route.slug === "fedi-victoria-btc")!;
   const publicFediNoHome = decideAutoInitTarget({
     activeInvite: publicFediRoute.invite,
     homeCommunity: null,
@@ -9674,6 +9745,22 @@ console.log("\n── AMOUNT DISPLAY MODE ──");
     "BTC Chamas stay sats-native instead of showing BTC-as-fiat",
   );
   assert(
+    resolveEstimatedFiatCurrency({ viewerCurrency: "ZAR", listingCurrency: "TZS" }) === "ZAR",
+    "Browse estimates prefer the viewer's selected Chama fiat over the listing's route fiat",
+  );
+  assert(
+    resolveEstimatedFiatCurrency({ viewerCurrency: "BTC", listingCurrency: "TZS" }) === "TZS",
+    "BTC-native public wallet services fall back to the listing route fiat for estimates",
+  );
+  assert(
+    shouldQuoteEstimatedFiat({ viewerCurrency: "XOF", listingCurrency: "TZS" }),
+    "Selected Chama fiat overrides stored listing fiat anchors for display quotes",
+  );
+  assert(
+    !shouldQuoteEstimatedFiat({ viewerCurrency: "TZS", listingCurrency: "TZS" }),
+    "Matching listing fiat anchors remain exact when the selected Chama uses the same fiat",
+  );
+  assert(
     estimateSatsForFiat({
       fiatAmount: 13,
       currency: "KES",
@@ -10326,6 +10413,18 @@ console.log("\n── CHAPSMART PAYOUT PROFILE + ADAPTER ──");
   let badPhone = false;
   try { toChapsmartTanzaniaPhone("+254 712 345 678"); } catch { badPhone = true; }
   assert(badPhone, "Chapsmart phone rejects non-Tanzania numbers");
+  let shortTanzaniaPhone = false;
+  try { toChapsmartTanzaniaPhone("+255 71 234 567"); } catch { shortTanzaniaPhone = true; }
+  assert(shortTanzaniaPhone, "Chapsmart phone rejects Tanzania numbers missing a digit");
+  let shortProfilePhone = false;
+  try {
+    saveChapsmartPayoutProfile({
+      phoneNumber: "+255 71 234 567",
+      recipientName: "Asha Mushi",
+    });
+  } catch { shortProfilePhone = true; }
+  assert(shortProfilePhone,
+    "Chapsmart profile save rejects incomplete phone numbers");
 
   assert(isChapsmartPayoutEligible({ homeCommunity: "tz-tzs" }),
     "Chapsmart eligible from Tanzania home Chama");

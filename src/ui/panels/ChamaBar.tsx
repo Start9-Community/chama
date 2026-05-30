@@ -18,13 +18,9 @@
 // RecoveryPayoutModal directly via onTapStranded; same flow as the
 // banner's primary CTA, just reachable from anywhere in the app.
 
-import { useState, useEffect } from "react";
 import { type FedimintState } from "../../hooks/useEscrow.js";
 import {
-  type FederationPreset,
   CURATED_PRESETS,
-  fetchObserverFederations,
-  mergePresets,
 } from "../../fedimint/federation-config.js";
 import { getCommunityBySlug, type Community } from "../../communities/registry.js";
 import type { ChamaBarLabel } from "../decisions.js";
@@ -65,24 +61,13 @@ export function ChamaBar({
    *  fallback federation. */
   communitySlug?: string | null;
 }) {
-  const [pillPresets, setPillPresets] = useState<FederationPreset[]>(CURATED_PRESETS);
-  useEffect(() => {
-    let cancelled = false;
-    const ctrl = new AbortController();
-    fetchObserverFederations(ctrl.signal).then((observerList) => {
-      if (cancelled || observerList.length === 0) return;
-      setPillPresets(mergePresets(CURATED_PRESETS, observerList));
-    });
-    return () => { cancelled = true; ctrl.abort(); };
-  }, []);
-
   let displayName: string;
   if (!fedimint.joined) {
     displayName = fedimint.busy ? "Connecting..." : "Choose your Chama";
   } else {
     const community = communitySlug ? getCommunityBySlug(communitySlug) : null;
     const matched = fedimint.federationId
-      ? pillPresets.find((p) => p.federationId === fedimint.federationId)
+      ? CURATED_PRESETS.find((p) => p.federationId === fedimint.federationId)
       : null;
     if (community) {
       displayName = communityChamaBarLabel(community);

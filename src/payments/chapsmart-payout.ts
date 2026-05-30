@@ -69,13 +69,15 @@ export function saveChapsmartPayoutProfile(input: {
   recipientName: string;
 }): ChapsmartPayoutProfile {
   const existing = getChapsmartPayoutProfile();
+  const phoneNumber = input.phoneNumber.trim();
+  if (!phoneNumber) throw new Error("Enter a Tanzanian mobile number");
+  toChapsmartTanzaniaPhone(phoneNumber);
   const profile: ChapsmartPayoutProfile = {
-    phoneNumber: input.phoneNumber.trim(),
+    phoneNumber,
     recipientName: input.recipientName.trim(),
     createdAt: existing?.createdAt ?? nowSec(),
     lastUsedAt: nowSec(),
   };
-  if (!profile.phoneNumber) throw new Error("Enter a Tanzanian mobile number");
   if (!profile.recipientName || profile.recipientName.split(/\s+/).length < 2) {
     throw new Error("Enter the recipient's first and last name");
   }

@@ -1,7 +1,7 @@
 {
   "name": "satoshi-nostr-app",
   "private": true,
-  "version": "1.2.4",
+  "version": "1.2.5",
   "type": "module",
   "description": "Chama — Nostr-native P2P escrow client. Non-custodial. No server.",
   "scripts": {
@@ -11,6 +11,7 @@
     "test": "npx tsx src/escrow-engine/tests.ts",
     "typecheck": "tsc --noEmit",
     "predeploy": "npm run typecheck && npm test",
+    "ship": "./scripts/ship.sh",
     "deploy:live": "./scripts/release.sh --deploy-live",
     "release:current": "./scripts/release.sh --current",
     "release:all": "./scripts/release-all.sh",

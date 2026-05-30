@@ -26,7 +26,7 @@
 // don't share the ID space; that's fine, the cleartext `handle` flowing
 // alongside is what receivers use.
 
-import { railAllowsPublicHandle } from "./rail-registry.js";
+import { getRailByKey, railAllowsPublicHandle } from "./rail-registry.js";
 import {
   getScopedStorageItem,
   setScopedStorageItem,
@@ -206,8 +206,8 @@ export function addSavedHandle(
   // v0.7.0: phone numbers get canonicalized to "+CC XXX-XXX-XXXX" on
   // save. Other rails store the user's input verbatim — formatting a
   // Revtag or email wouldn't help and could break a literal handle.
-  const normalized = rail === "phone-number"
-    ? formatPhoneNumber(trimmed)
+  const normalized = shouldSanitizeHandleAsPhone(rail, trimmed)
+    ? sanitizePhoneNumberForSave(trimmed)
     : trimmed;
   const existing = readAll();
   const networks = opts?.networks?.filter(n => typeof n === "string" && n.length > 0);
@@ -237,14 +237,18 @@ export function updateSavedHandle(
   const handles = readAll();
   const idx = handles.findIndex(h => h.id === id);
   if (idx === -1) return null;
+  const nextRail = patch.rail ?? handles[idx].rail;
+  const nextHandle = patch.handle !== undefined
+    ? normalizeHandleForRail(nextRail, patch.handle)
+    : handles[idx].handle;
   // Drop the networks field entirely when the patch sets it to an
   // empty array — keeps the stored object minimal for non-phone rails.
   const nextNetworks = patch.networks
     ?.filter(n => typeof n === "string" && n.length > 0);
   const next: SavedHandle = {
     ...handles[idx],
-    ...(patch.rail   !== undefined ? { rail:   patch.rail   } : {}),
-    ...(patch.handle !== undefined ? { handle: patch.handle.trim() } : {}),
+    ...(patch.rail !== undefined ? { rail: nextRail } : {}),
+    ...(patch.handle !== undefined ? { handle: nextHandle } : {}),
     ...(patch.networks !== undefined
       ? (nextNetworks && nextNetworks.length > 0
           ? { networks: nextNetworks }
@@ -374,6 +378,54 @@ const PHONE_CC_TO_ISO: Record<string, string> = {
   "880": "BD",
 };
 
+const PHONE_CC_TO_COUNTRY: Record<string, string> = {
+  "1": "US/Canada",
+  "7": "Russia/Kazakhstan",
+  "20": "Egypt",
+  "27": "South Africa",
+  "30": "Greece",
+  "31": "Netherlands",
+  "32": "Belgium",
+  "33": "France",
+  "34": "Spain",
+  "39": "Italy",
+  "44": "United Kingdom",
+  "49": "Germany",
+  "54": "Argentina",
+  "55": "Brazil",
+  "57": "Colombia",
+  "61": "Australia",
+  "63": "Philippines",
+  "81": "Japan",
+  "82": "South Korea",
+  "86": "China",
+  "91": "India",
+  "92": "Pakistan",
+  "212": "Morocco",
+  "213": "Algeria",
+  "216": "Tunisia",
+  "218": "Libya",
+  "221": "Senegal",
+  "223": "Mali",
+  "225": "Côte d'Ivoire",
+  "226": "Burkina Faso",
+  "229": "Benin",
+  "233": "Ghana",
+  "234": "Nigeria",
+  "237": "Cameroon",
+  "243": "DR Congo",
+  "250": "Rwanda",
+  "251": "Ethiopia",
+  "254": "Kenya",
+  "255": "Tanzania",
+  "256": "Uganda",
+  "260": "Zambia",
+  "263": "Zimbabwe",
+  "265": "Malawi",
+  "503": "El Salvador",
+  "880": "Bangladesh",
+};
+
 const PHONE_NATIONAL_GROUPS: Record<string, number[]> = {
   "1": [3, 3, 4],
   "7": [3, 3, 4],
@@ -391,6 +443,79 @@ const PHONE_NATIONAL_GROUPS: Record<string, number[]> = {
   "880": [4, 6],
 };
 
+interface PhoneLengthRule {
+  lengths?: number[];
+  min?: number;
+  max?: number;
+  example: string;
+}
+
+const PHONE_LENGTH_RULES: Record<string, PhoneLengthRule> = {
+  "1": { lengths: [10], example: "+1 555 123 4567" },
+  "7": { lengths: [10], example: "+7 916 123 4567" },
+  "20": { lengths: [10], example: "+20 100 123 4567" },
+  "27": { lengths: [9], example: "+27 71 123 4567" },
+  "30": { lengths: [10], example: "+30 691 234 5678" },
+  "31": { lengths: [9], example: "+31 6 1234 5678" },
+  "32": { lengths: [9], example: "+32 470 12 34 56" },
+  "33": { lengths: [9], example: "+33 6 12 34 56 78" },
+  "34": { lengths: [9], example: "+34 612 34 56 78" },
+  "39": { min: 9, max: 10, example: "+39 312 345 6789" },
+  "44": { lengths: [10], example: "+44 7700 900123" },
+  "49": { min: 10, max: 11, example: "+49 1512 3456789" },
+  "54": { lengths: [11], example: "+54 9 11 1234 5678" },
+  "55": { lengths: [11], example: "+55 11 91234 5678" },
+  "57": { lengths: [10], example: "+57 300 123 4567" },
+  "61": { lengths: [9], example: "+61 412 345 678" },
+  "63": { lengths: [10], example: "+63 917 123 4567" },
+  "81": { min: 10, max: 11, example: "+81 90 1234 5678" },
+  "82": { min: 9, max: 10, example: "+82 10 1234 5678" },
+  "86": { lengths: [11], example: "+86 131 2345 6789" },
+  "91": { lengths: [10], example: "+91 98765 43210" },
+  "92": { lengths: [10], example: "+92 300 1234567" },
+  "212": { lengths: [9], example: "+212 612 345678" },
+  "213": { lengths: [9], example: "+213 551 234 567" },
+  "216": { lengths: [8], example: "+216 20 123 456" },
+  "218": { lengths: [9], example: "+218 91 234 5678" },
+  "221": { lengths: [9], example: "+221 77 123 4567" },
+  "223": { lengths: [8], example: "+223 76 12 34 56" },
+  "225": { lengths: [10], example: "+225 07 12 34 5678" },
+  "226": { lengths: [8], example: "+226 70 12 34 56" },
+  "229": { lengths: [8], example: "+229 91 234 567" },
+  "233": { lengths: [9], example: "+233 24 123 4567" },
+  "234": { lengths: [10], example: "+234 801 234 5678" },
+  "237": { lengths: [9], example: "+237 6 71 23 45 67" },
+  "243": { lengths: [9], example: "+243 81 234 5678" },
+  "250": { lengths: [9], example: "+250 78 123 4567" },
+  "251": { lengths: [9], example: "+251 91 234 5678" },
+  "254": { lengths: [9], example: "+254 712 345 678" },
+  "255": { lengths: [9], example: "+255 71 234 5678" },
+  "256": { lengths: [9], example: "+256 70 123 4567" },
+  "260": { lengths: [9], example: "+260 97 123 4567" },
+  "263": { lengths: [9], example: "+263 77 123 4567" },
+  "265": { lengths: [9], example: "+265 99 123 4567" },
+  "503": { lengths: [8], example: "+503 7123 4567" },
+  "880": { lengths: [10], example: "+880 1700 123456" },
+};
+
+function normalizeHandleForRail(rail: string, handle: string): string {
+  const trimmed = handle.trim();
+  if (!trimmed) throw new Error("Handle cannot be empty");
+  return shouldSanitizeHandleAsPhone(rail, trimmed)
+    ? sanitizePhoneNumberForSave(trimmed)
+    : trimmed;
+}
+
+function railLooksPhoneBased(rail: string): boolean {
+  if (rail === "phone-number") return true;
+  const meta = getRailByKey(rail);
+  return meta?.allowPublicHandle === false && meta.placeholder?.trim().startsWith("+") === true;
+}
+
+function shouldSanitizeHandleAsPhone(rail: string, handle: string): boolean {
+  return railLooksPhoneBased(rail) || handle.trim().startsWith("+");
+}
+
 function isoToFlagEmoji(iso: string): string {
   const codePoints = iso.toUpperCase().split("")
     .map(char => 127397 + char.charCodeAt(0));
@@ -405,6 +530,10 @@ function phoneFlagForCountryCode(countryCode: string | null): string | null {
 
 function detectCountryCodeLength(digits: string): number {
   if (digits.length === 0) return 0;
+  const known = [3, 2, 1].find(len =>
+    digits.length >= len && PHONE_CC_TO_ISO[digits.slice(0, len)]
+  );
+  if (known) return known;
   // NANP (+1) and Russia/Kazakhstan (+7) are the well-known 1-digit CCs.
   if (digits[0] === "1" || digits[0] === "7") return 1;
   // Most African dial codes are 3 digits and start with "2":
@@ -419,6 +548,88 @@ function detectCountryCodeLength(digits: string): number {
   if (digits[0] === "2") return digits.length >= 3 ? 3 : 0;
   // Default: 2-digit CC covers most of Europe, Asia, Oceania.
   return digits.length >= 2 ? 2 : 0;
+}
+
+function expectedLengthText(rule: PhoneLengthRule): string {
+  if (rule.lengths && rule.lengths.length > 0) {
+    return rule.lengths.length === 1
+      ? `${rule.lengths[0]} digits`
+      : `${rule.lengths.join(" or ")} digits`;
+  }
+  return `${rule.min ?? 4}-${rule.max ?? 12} digits`;
+}
+
+function phoneLengthBounds(rule: PhoneLengthRule): { min: number; max: number } {
+  if (rule.lengths && rule.lengths.length > 0) {
+    return {
+      min: Math.min(...rule.lengths),
+      max: Math.max(...rule.lengths),
+    };
+  }
+  return {
+    min: rule.min ?? 4,
+    max: rule.max ?? 12,
+  };
+}
+
+function phoneLengthMatches(rule: PhoneLengthRule, length: number): boolean {
+  if (rule.lengths && rule.lengths.length > 0) return rule.lengths.includes(length);
+  return length >= (rule.min ?? 0) && length <= (rule.max ?? Number.POSITIVE_INFINITY);
+}
+
+export function getPhoneNumberSaveError(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return "Enter a phone number";
+  const hasPlus = trimmed.startsWith("+");
+  const digits = trimmed.replace(/\D/g, "");
+  if (!digits) return "Enter a phone number with digits";
+
+  if (!hasPlus) {
+    if (!digits.startsWith("0")) {
+      return "Add the country code so nobody has to guess the missing prefix, for example +254 712 345 678.";
+    }
+    if (digits.length !== 10) {
+      return digits.length < 10
+        ? "This local phone number looks short. Include all 10 local digits, for example 0712 345 678."
+        : "This local phone number looks too long. Use 10 local digits, for example 0712 345 678.";
+    }
+    return null;
+  }
+
+  const ccLen = detectCountryCodeLength(digits);
+  if (ccLen === 0 || digits.length <= ccLen) {
+    return "Enter the full phone number after the country code, for example +254 712 345 678.";
+  }
+
+  const countryCode = digits.slice(0, ccLen);
+  const nationalLength = digits.length - ccLen;
+  const rule = PHONE_LENGTH_RULES[countryCode];
+  if (!rule) {
+    if (digits.length < 8) {
+      return "This phone number looks short. Include the full country code and national number.";
+    }
+    if (digits.length > 15) {
+      return "This phone number looks too long. International phone numbers can be at most 15 digits.";
+    }
+    return null;
+  }
+
+  if (phoneLengthMatches(rule, nationalLength)) return null;
+
+  const { min, max } = phoneLengthBounds(rule);
+  const country = PHONE_CC_TO_COUNTRY[countryCode] ?? `+${countryCode}`;
+  const direction = nationalLength < min ? "missing digits" : nationalLength > max ? "too many digits" : "the wrong length";
+  return `This +${countryCode} ${country} number has ${direction}. It should have ${expectedLengthText(rule)} after +${countryCode}, for example ${rule.example}.`;
+}
+
+/** Strict save-time phone sanitizer. Keep formatPhoneNumber() lenient for
+ *  typing, but refuse persistence when a known-country number is missing
+ *  digits. This is the guardrail that keeps a seller from saving
+ *  "+25471234567" when they meant "+254712345678". */
+export function sanitizePhoneNumberForSave(value: string): string {
+  const error = getPhoneNumberSaveError(value);
+  if (error) throw new Error(error);
+  return formatPhoneNumber(value);
 }
 
 /** Group a string of digits into "XXX-XXX-XXXX" chunks. Final chunk
@@ -545,6 +756,41 @@ export function formatPhoneNumberForDisplay(value: string): string {
   return getPhoneNumberDisplayParts(value).display;
 }
 
+/** Fully revealed phone number — for the settings reveal toggle and the
+ *  active-trade reveal shown to the three participants. Unlike
+ *  formatPhoneNumberForDisplay (flag-led, which drops the explicit +CC
+ *  digits), this always shows the ENTIRE international number with the
+ *  country code visible, and dash-groups the national part for
+ *  readability in EVERY country — including ones whose dial code we
+ *  don't recognise, where we still group the run rather than printing an
+ *  unreadable string of digits. Flag-led when the country is known, so a
+ *  participant about to send fiat sees e.g. "🇰🇪 +254 712-345-678".
+ *    "+254712345678" → "🇰🇪 +254 712-345-678"
+ *    "+15551234567"  → "🇺🇸 +1 555-123-4567"
+ *    "+9991234567"   → "+999-123-4567"   (unknown CC: still grouped)
+ *    "0712345678"    → "071-234-5678"    (domestic, no CC)            */
+export function formatPhoneNumberRevealed(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const hasPlus = trimmed.startsWith("+");
+  const digits = trimmed.replace(/\D/g, "");
+  if (!digits) return hasPlus ? "+" : "";
+
+  // Domestic (no +): group the national digits, no country code to show.
+  if (!hasPlus) return groupPhoneDigits(digits);
+
+  const ccLen = detectCountryCodeLength(digits);
+  // Unknown dial code: keep it readable anyway — group the whole run so
+  // the user never sees a bare "+999123456789" wall of digits.
+  if (ccLen === 0) return `+${groupPhoneDigits(digits)}`;
+
+  const cc = digits.slice(0, ccLen);
+  const national = groupPhoneDigits(digits.slice(ccLen), cc);
+  const withCc = national ? `+${cc} ${national}` : `+${cc}`;
+  const flag = phoneFlagForCountryCode(cc);
+  return flag ? `${flag} ${withCc}` : withCc;
+}
+
 /** Mask a handle for public display. Heuristics:
  *   - Very short handles (<= 4 chars): full mask "•••"
  *   - Phone-shaped (starts with + or digit): keep the country flag
@@ -609,7 +855,7 @@ export function handleDisplayForViewer(
 ): string {
   if (viewerIsParticipant) {
     return handle.startsWith("+")
-      ? formatPhoneNumberForDisplay(handle)
+      ? formatPhoneNumberRevealed(handle)
       : handle;
   }
   return maskHandle(handle);

@@ -30,7 +30,7 @@ import {
   BP_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
   GBF_FEDERATION_INVITE,
-  PUBLIC_FEDI_OBSERVER_FEDERATIONS,
+  PUBLIC_FEDI_APPROVED_FEDERATIONS,
   type PublicFediFederation,
 } from "../fedimint/federation-invites.js";
 
@@ -183,14 +183,21 @@ function publicFediWalletServiceChama(route: PublicFediFederation): Community {
     flagEmoji: route.flagEmoji,
     country: route.country,
     browserReliable: true,
-    notes: `${IROH_LIMITATION_NOTE} Public Fedi wallet service from Fedimint Observer.`,
+    notes: `${IROH_LIMITATION_NOTE} Public Fedi-approved wallet service.`,
     disambiguator: null,
     hiddenFromPicker: false,
   };
 }
 
 const PUBLIC_FEDI_WALLET_SERVICE_CHAMAS: Community[] =
-  PUBLIC_FEDI_OBSERVER_FEDERATIONS.map(publicFediWalletServiceChama);
+  PUBLIC_FEDI_APPROVED_FEDERATIONS.map(publicFediWalletServiceChama);
+
+const SOUTH_AFRICA_GLOBAL_CHAMA: Community = blfCountryChama({
+  country: "ZA",
+  name: "South Africa",
+  currency: "ZAR",
+  languages: ["en", "af", "zu", "xh"],
+});
 
 const EAST_AFRICA_COUNTRY_CHAMAS: Community[] = [
   blfCountryChama({ country: "BI", name: "Burundi", currency: "BIF", languages: ["rn", "fr", "en"] }),
@@ -284,6 +291,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     hiddenFromPicker: false,
   },
   ...PUBLIC_FEDI_WALLET_SERVICE_CHAMAS,
+  SOUTH_AFRICA_GLOBAL_CHAMA,
   {
     slug: "sn-cfa",
     displayName: "Senegal · CFA",

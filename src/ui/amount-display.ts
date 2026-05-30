@@ -101,6 +101,29 @@ export function estimateSatsForFiat({
   return Number.isFinite(sats) && sats > 0 ? sats : null;
 }
 
+export function resolveEstimatedFiatCurrency({
+  viewerCurrency,
+  listingCurrency,
+}: {
+  viewerCurrency: string | null | undefined;
+  listingCurrency: string | null | undefined;
+}): string | null {
+  return normalizeFiatCurrency(viewerCurrency)
+    ?? normalizeFiatCurrency(listingCurrency);
+}
+
+export function shouldQuoteEstimatedFiat({
+  viewerCurrency,
+  listingCurrency,
+}: {
+  viewerCurrency: string | null | undefined;
+  listingCurrency: string | null | undefined;
+}): boolean {
+  const viewer = normalizeFiatCurrency(viewerCurrency);
+  if (!viewer) return false;
+  return viewer !== normalizeFiatCurrency(listingCurrency);
+}
+
 export function normalizeFiatCurrency(currency: string | null | undefined): string | null {
   const normalized = currency?.trim().toUpperCase();
   if (!normalized || normalized === "BTC" || normalized.length < 3) return null;

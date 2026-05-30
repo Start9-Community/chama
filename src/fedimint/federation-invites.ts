@@ -64,7 +64,7 @@ export const BLF_FEDERATION_ID =
   "888b70ec351c67dcbb0ae655d7b8b6fb26c0fc9e865ee5918af11dc6f53e2b9e";
 
 /**
- * GBF / Global Bitcoin Federation — public observer-listed federation used
+ * GBF / Global Bitcoin Federation — Fedi-approved public wallet service used
  * to prove Chama's native Rust Fedimint path. This federation exposes
  * reachable public gateways from the native client even though they are
  * announced as `vetted=false` to the SDK.
@@ -87,13 +87,13 @@ export interface PublicFediFederation {
 }
 
 /**
- * Public Fedi wallet services mirrored from Fedimint Observer on
- * 2026-05-26. GBF is already a first-class visible Chama route, so this
- * list carries the remaining public services from the same feed. Bitcoin
- * Principles is included here as a visible public Fedi choice while the
- * older `global-usd` BP community stays hidden for legacy listings.
+ * Public wallet services shown in Fedi Discover as of the 2026-05-29
+ * product pass. GBF is already a first-class visible Chama route, so this
+ * list carries the remaining approved public services from that screen.
+ * Bitcoin Principles is included here as a visible public Fedi choice while
+ * the older `global-usd` BP community stays hidden for legacy listings.
  */
-export const PUBLIC_FEDI_OBSERVER_FEDERATIONS: PublicFediFederation[] = [
+export const PUBLIC_FEDI_APPROVED_FEDERATIONS: PublicFediFederation[] = [
   {
     slug: "fedi-victoria-btc",
     name: "Victoria BTC",
@@ -159,66 +159,10 @@ export const PUBLIC_FEDI_OBSERVER_FEDERATIONS: PublicFediFederation[] = [
     country: "BR",
   },
   {
-    slug: "fedi-school-of-sats",
-    name: "School of Sats",
-    federationId: "e9a3a03fb399029340c0e8d39c12c6b79768926e028860dc6701abab8cb864de",
-    invite: "fed11qgqpw9thwden5te0v9sjuctnvcczummjvuhhwue0qqqjp6dr5qlm8xgzjdqvp6xnnsfvdduhdzfxuq5gvrwxwqdt4wxtsex7587vs9",
-    flagEmoji: "🌐",
-    country: null,
-  },
-  {
-    slug: "fedi-liberty-tree-network",
-    name: "Liberty Tree Network",
-    federationId: "3694b086bf3d7f5e64e2cbe44de9e6c4247e6c9d29e3d3c4625a79798f5f8d38",
-    invite: "fed11qgqrcwnhwden5te0v9cxjtnpd3cxscfwd35kyetjw3uj6arjv4jj6mn9w3mk7unt95erqv34xqurzdpwvch8vctfx9nzummjvuhsqqfqx62tpp4l84l4ue8ze0jym60xcsj8umya983a83rztfuhnr6l35uqv7daky",
-    flagEmoji: "🌐",
-    country: null,
-  },
-  {
-    slug: "fedi-alianza-btc",
-    name: "Alianza BTC",
-    federationId: "08ff9119365a7e36316cfdd2692705486df1fb1f923d7320a2448dd8326f9b40",
-    invite: "fed11qgqrvdrhwden5te0v9cxjtnpd3cxscfwvekj6v3sxg6nqwf3xykkzmrfv9h85cfdvf6xxtnx9emxz6f3vchx7un89uqqzgqgl7g3jdj60cmrzm8a6f5jwp2gdhclk8uj84ejpgjy3hvrymumgqzefpgm",
-    flagEmoji: "🌎",
-    country: null,
-  },
-  {
-    slug: "fedi-island-bitcoin-community",
-    name: "Island Bitcoin Community",
-    federationId: "9dc886ab35c45c162b27fa3da6fe356375b074b5496c7e9afa5b1c8e7fd61288",
-    invite: "fed11qgqyj3mfwfhksw309uekyvesvenrzdpjx93xvdf4xcex2d33xajxycmzxf3nzdn9x9jxyctpxy6k2vnpv56nwvtpvsmxgepnx93kvvnzvscnjefn8qurxc3eqqqjp8wgs64nt3zuzc4j073a5mlr2cm4kp6t2jtv06d05kcu3elavy5g5h4kwl",
-    flagEmoji: "🌐",
-    country: null,
-  },
-  {
-    slug: "fedi-odin-federation",
-    name: "Odin Federation",
-    federationId: "4b13a146ee4ba732b2b8914a72a0a2e5873e3e942da2d4eeefd85a5fe41f27ba",
-    invite: "fed11qgqzutrhwden5te0vejkg6tdd9h8gepwvejkg6tdd9h8gtn0v35kuen9v3jhyct5d9hkutnc09az7qqpyp938g2xae96wv4jhzg55u4q5tjcw037jsk6948walv95hlyrunm5tyfcdy",
-    flagEmoji: "🌐",
-    country: null,
-  },
-  {
-    slug: "fedi-freedom-one-lowercase",
-    name: "freedom one",
-    federationId: "c944b2fd1e7fe04ca87f9a57d7894cb69116cec6264cb52faa71228f4ec54cd6",
-    invite: "fed11qgqzwfthwden5te0vejkg6tdd9h8gepwvejkg6tdd9h8gtnnwpskxetfvchxuet59uqqzgxfgje068nlupx2slu62ltcjn9kjytva33xfj6jl2n3y285a32v6cug2kgw",
-    flagEmoji: "🌐",
-    country: null,
-  },
-  {
     slug: "fedi-freedom-one",
     name: "Freedom One",
     federationId: "5a0ca072cffcdfe5ce2ce8a04f728e073ce179221dc2f88ca0ee39ffa607513b",
     invite: "fed11qgqyj3mfwfhksw309u6nqvej8p3rgc33xcmk2dp5vvckzvf4xfnxvef3xfskxces8q6nyvmrvc6nzdr9xcmkvdf5v93rjd3sxc6nwvrxvc6r2c3jxd3xve3sqqqjqksv5pevllxluh8ze69qfaegupeuu9ujy8wzlzx2pm3el7nqw5fmsvtkxf",
-    flagEmoji: "🌐",
-    country: null,
-  },
-  {
-    slug: "fedi-code-orange",
-    name: "Code Orange",
-    federationId: "713d9b889b5e207a85d8632e2e5f6926cf74c532299bc313a5fc105534007fce",
-    invite: "fed11qgqyj3mfwfhksw309uunxer9xajk2dpsv9jx2en98qeryef48yexyerpxcenjceev5crqvmyxqckgvp4ve3rwdmyxpjrzwfkvy6nqvtpxq6rwdehv3jnsvfhqqqjqufanwyfkh3q02zascew9e0kjfk0wnzny2vmcvf6tlqs256qql7wtlwuvj",
     flagEmoji: "🌐",
     country: null,
   },

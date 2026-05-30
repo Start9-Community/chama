@@ -9,8 +9,10 @@ import {
   setHandleVisibility,
   maskHandle,
   formatPhoneNumber,
-  formatPhoneNumberForDisplay,
+  formatPhoneNumberRevealed,
+  getPhoneNumberSaveError,
   getPhoneNumberDisplayParts,
+  sanitizePhoneNumberForSave,
 } from "../../payments/saved-handles.js";
 import {
   getRailByKey,
@@ -61,6 +63,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
     || "+254 712-345-678";
   const phoneParts = getPhoneNumberDisplayParts(phoneValue);
   const phonePlaceholderParts = getPhoneNumberDisplayParts(phonePlaceholder);
+  const phoneSaveError = phoneValue.trim() ? getPhoneNumberSaveError(phoneValue) : null;
   const phonePrefix = phoneValue && phoneParts.flagEmoji ? phoneParts.flagEmoji : "+";
   const phoneInputValue = phoneValue
     ? (phoneParts.flagEmoji ? phoneParts.inputValue : phoneParts.normalized)
@@ -98,7 +101,8 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
       return;
     }
     try {
-      addSavedHandle(PHONE_NUMBER_RAIL, phoneValue.trim(), {
+      const normalized = sanitizePhoneNumberForSave(phoneValue.trim());
+      addSavedHandle(PHONE_NUMBER_RAIL, normalized, {
         networks: [...phoneNetworks],
       });
       setPhoneValue("");
@@ -252,20 +256,28 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
           </div>
           <button
             onClick={handleAddPhone}
-            disabled={!phoneValue.trim()}
+            disabled={!phoneValue.trim() || !!phoneSaveError}
             style={{
               padding: "0 14px", borderRadius: T.rs,
-              background: !phoneValue.trim() ? T.surface : T.tealDim,
-              border: `1px solid ${!phoneValue.trim() ? T.border : T.teal + "66"}`,
-              color: !phoneValue.trim() ? T.muted : T.teal,
+              background: !phoneValue.trim() || phoneSaveError ? T.surface : T.tealDim,
+              border: `1px solid ${!phoneValue.trim() || phoneSaveError ? T.border : T.teal + "66"}`,
+              color: !phoneValue.trim() || phoneSaveError ? T.muted : T.teal,
               fontFamily: T.mono, fontSize: 11, fontWeight: 800,
-              cursor: !phoneValue.trim() ? "default" : "pointer",
+              cursor: !phoneValue.trim() || phoneSaveError ? "default" : "pointer",
               whiteSpace: "nowrap" as const,
             }}
           >
             Save
           </button>
         </div>
+        {phoneSaveError && (
+          <div style={{
+            marginTop: 8, color: T.red, fontFamily: T.mono,
+            fontSize: 10, lineHeight: 1.45,
+          }}>
+            {phoneSaveError}
+          </div>
+        )}
 
         {/* v0.6.5 network chips. Optional tags so a counterparty sees
             "+254 ••• 5678 · M-Pesa" instead of just a number with no
@@ -329,7 +341,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
             const allowsPublic = railAllowsPublicHandle(h.rail);
             const revealed = revealedIds.has(h.id);
             const display = revealed
-              ? (h.rail === PHONE_NUMBER_RAIL ? formatPhoneNumberForDisplay(h.handle) : h.handle)
+              ? (h.handle.startsWith("+") ? formatPhoneNumberRevealed(h.handle) : h.handle)
               : maskHandle(h.handle);
             return (
               <div key={h.id} style={{

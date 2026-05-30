@@ -19,6 +19,8 @@ import {
   formatEstimatedFiatForMsats,
   formatFiatAmount,
   normalizeFiatCurrency,
+  resolveEstimatedFiatCurrency,
+  shouldQuoteEstimatedFiat,
   type AmountDisplayMode,
 } from "../amount-display.js";
 
@@ -37,6 +39,7 @@ export function TradeCard({
   kind0Enabled = false,
   profileNames,
   amountDisplayMode = "sats",
+  quoteCurrency,
 }: {
   state: EscrowState;
   pubkey: string;
@@ -45,6 +48,7 @@ export function TradeCard({
   kind0Enabled?: boolean;
   profileNames?: NostrProfileNameMap;
   amountDisplayMode?: AmountDisplayMode;
+  quoteCurrency?: string | null;
 }) {
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
@@ -83,12 +87,20 @@ export function TradeCard({
   const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null) : null;
   const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, fiatFloor) : null;
   const listingCurrency = listingFiatCurrency(state, fiatFloor, listingCommunity?.currency);
+  const estimatedCurrency = resolveEstimatedFiatCurrency({
+    viewerCurrency: quoteCurrency,
+    listingCurrency,
+  });
+  const quoteViewerFiat = shouldQuoteEstimatedFiat({
+    viewerCurrency: quoteCurrency,
+    listingCurrency,
+  });
   const fiatPrimary = fiatLine
     ?? (fiatFloor ? `${hasMenu ? "from " : ""}${formatFiatAmount(fiatFloor.amount, fiatFloor.currency)}` : null);
-  const estimatedFiatPrimary = !fiatPrimary && listingCurrency
+  const estimatedFiatPrimary = (quoteViewerFiat || !fiatPrimary) && estimatedCurrency
     ? estimatedFiatPrimaryLabel({
         amountMsats: state.amountMsats,
-        currency: listingCurrency,
+        currency: estimatedCurrency,
         exchangeRange,
         menuItems,
         hasMenu,
@@ -96,7 +108,9 @@ export function TradeCard({
         usdFiatRates: fiatRates.rates,
       })
     : null;
-  const displayFiatPrimary = fiatPrimary ?? estimatedFiatPrimary;
+  const displayFiatPrimary = quoteViewerFiat
+    ? estimatedFiatPrimary ?? fiatPrimary
+    : fiatPrimary ?? estimatedFiatPrimary;
   const showFiatPrimary = amountDisplayMode === "fiat" && !!displayFiatPrimary;
   const paymentMethodsLine = paymentMethodsSummary(state.paymentMethods);
   const premiumLine = listingPremiumLine(state, btcPrice.usd);

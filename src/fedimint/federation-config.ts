@@ -35,7 +35,7 @@ import {
   GBF_FEDERATION_NAME,
   GBF_FEDERATION_INVITE,
   GBF_FEDERATION_ID,
-  PUBLIC_FEDI_OBSERVER_FEDERATIONS,
+  PUBLIC_FEDI_APPROVED_FEDERATIONS,
 } from "./federation-invites.js";
 import {
   getScopedStorageItem,
@@ -59,7 +59,7 @@ export {
   GBF_FEDERATION_NAME,
   GBF_FEDERATION_INVITE,
   GBF_FEDERATION_ID,
-  PUBLIC_FEDI_OBSERVER_FEDERATIONS,
+  PUBLIC_FEDI_APPROVED_FEDERATIONS,
 };
 
 /**
@@ -171,7 +171,7 @@ export function expectedFederationIdForInvite(invite: string | null | undefined)
   if (trimmed === BITSACCO_FEDERATION_INVITE) return BITSACCO_FEDERATION_ID;
   if (trimmed === BLF_FEDERATION_INVITE) return BLF_FEDERATION_ID;
   if (trimmed === GBF_FEDERATION_INVITE) return GBF_FEDERATION_ID;
-  const publicFedi = PUBLIC_FEDI_OBSERVER_FEDERATIONS.find((route) => route.invite === trimmed);
+  const publicFedi = PUBLIC_FEDI_APPROVED_FEDERATIONS.find((route) => route.invite === trimmed);
   if (publicFedi) return publicFedi.federationId;
   return null;
 }
@@ -271,15 +271,13 @@ export function resolveFederationForCommunity(slug: string | null | undefined): 
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// FEDERATION PRESETS — Curated + dynamic list for the dropdown picker
+// FEDERATION PRESETS — Curated list for the dropdown picker
 // ══════════════════════════════════════════════════════════════════════════
 
 /**
  * Metadata describing a single Fedimint federation option in the picker.
- * Chama combines three sources at runtime:
- *   1. CURATED_PRESETS (this file) — Chama-backed routes baked in
- *   2. fetchObserverFederations() — live list from observer.fedimint.org
- *   3. User's own custom invite (advanced field)
+ * Chama exposes routes we intentionally curate here, plus the user's own
+ * custom invite in the advanced field.
  */
 export interface FederationPreset {
   /** Display name shown in the picker */
@@ -290,8 +288,8 @@ export interface FederationPreset {
   inviteCode: string;
   /** Short description or tagline for the picker row */
   description?: string;
-  /** Origin: "curated" = baked into this file, "observer" = live fetch */
-  source: "curated" | "observer";
+  /** Origin: baked into this file. */
+  source: "curated";
   /** Community arbiter pool — npubs designated by community leader */
   arbiters?: {
     /** Primary arbiter — auto-selected for new trades */
@@ -308,15 +306,12 @@ export interface FederationPreset {
 }
 
 /**
- * Curated federation list. Intentionally minimal: BP (the universal
- * browser-friendly fallback) and BLF (an explicit opt-in option). New
+ * Curated federation list. It includes Chama-operated/private routes plus
+ * the Fedi-approved public wallet services from the Discover screen. New
  * community-led federations should still enter through the permissionless
  * community-add primitive (see addCustomCommunity in
  * src/communities/registry.ts; v1.5 will publish kind:38112 community
  * claims to Nostr for cross-client discovery).
- *
- * The wider public federation list is fetched live from
- * observer.fedimint.org at runtime — see `fetchObserverFederations()`.
  */
 export const CURATED_PRESETS: FederationPreset[] = [
   {
@@ -355,13 +350,13 @@ export const CURATED_PRESETS: FederationPreset[] = [
     description: "Native Rust sidecar test route. Public gateways reachable.",
     source: "curated",
   },
-  ...PUBLIC_FEDI_OBSERVER_FEDERATIONS
+  ...PUBLIC_FEDI_APPROVED_FEDERATIONS
     .filter((route) => route.invite !== BP_FEDERATION_INVITE)
     .map((route): FederationPreset => ({
       name: route.name,
       federationId: route.federationId,
       inviteCode: route.invite,
-      description: "Public Fedi wallet service from Fedimint Observer.",
+      description: "Public Fedi-approved wallet service.",
       source: "curated",
       region: route.country ?? undefined,
     })),
@@ -371,111 +366,6 @@ export function federationNameForInvite(invite: string | null | undefined): stri
   const trimmed = invite?.trim();
   if (!trimmed) return null;
   return CURATED_PRESETS.find((preset) => preset.inviteCode === trimmed)?.name ?? null;
-}
-
-/**
- * Fetch the live public federation list from Fedimint Observer.
- *
- * The observer API returns an array of federations with fields like
- * `federation_id`, `federation_name`, `invite_code`, `nickname`, etc.
- * We normalize into FederationPreset[].
- *
- * Returns [] on any network/CORS/JSON error — the UI falls back to the
- * curated list, so failure is silent and non-blocking.
- */
-export async function fetchObserverFederations(
-  signal?: AbortSignal
-): Promise<FederationPreset[]> {
-  const OBSERVER_URL = "https://observer.fedimint.org/api/federations";
-  try {
-    const resp = await fetch(OBSERVER_URL, {
-      signal,
-      headers: { accept: "application/json" },
-    });
-    if (!resp.ok) {
-      console.warn(`[chama] observer fetch failed: HTTP ${resp.status}`);
-      return [];
-    }
-    const data = await resp.json();
-    if (!Array.isArray(data)) {
-      console.warn("[chama] observer returned non-array payload");
-      return [];
-    }
-
-    const presets: FederationPreset[] = [];
-    for (const entry of data) {
-      // The observer schema has shifted over versions. Defensively pull
-      // whatever fields look relevant and skip entries without an invite.
-      const inviteCode =
-        entry?.invite ||
-        entry?.invite_code ||
-        entry?.inviteCode ||
-        entry?.config?.invite_code ||
-        null;
-      if (typeof inviteCode !== "string" || !inviteCode.startsWith("fed1")) {
-        continue;
-      }
-      const name =
-        entry?.meta?.federation_name ||
-        entry?.federation_name ||
-        entry?.nickname ||
-        entry?.name ||
-        "Unnamed federation";
-      const federationId =
-        entry?.federation_id || entry?.federationId || undefined;
-      const description =
-        entry?.meta?.welcome_message ||
-        entry?.description ||
-        undefined;
-
-      // Extract health + activity for display
-      const health = entry?.health || "unknown";
-      const deposits = entry?.deposits ? Math.floor(entry.deposits / 1000) : 0;
-      const depositsSats = deposits > 0
-        ? deposits > 1_000_000 ? `${(deposits / 1_000_000).toFixed(1)}M sats`
-        : deposits > 1_000 ? `${(deposits / 1_000).toFixed(0)}k sats`
-        : `${deposits} sats`
-        : "";
-      const descParts = [];
-      if (health === "online") descParts.push("Online");
-      else if (health === "offline") descParts.push("Offline");
-      if (depositsSats) descParts.push(depositsSats + " deposits");
-      if (description) descParts.push(description);
-
-      presets.push({
-        name: String(name).slice(0, 60),
-        federationId: federationId ? String(federationId) : undefined,
-        inviteCode,
-        description: descParts.join(" · ").slice(0, 160) || undefined,
-        source: "observer",
-      });
-    }
-    return presets;
-  } catch (e) {
-    if ((e as Error).name !== "AbortError") {
-      console.warn("[chama] observer fetch error:", e);
-    }
-    return [];
-  }
-}
-
-/**
- * Merge curated + observer presets, deduplicating by federation ID or
- * invite code. Curated always wins over observer for the same federation.
- */
-export function mergePresets(
-  curated: FederationPreset[],
-  observer: FederationPreset[]
-): FederationPreset[] {
-  const byKey = new Map<string, FederationPreset>();
-  const keyFor = (p: FederationPreset) =>
-    p.federationId || p.inviteCode.slice(0, 64);
-  for (const p of curated) byKey.set(keyFor(p), p);
-  for (const p of observer) {
-    const k = keyFor(p);
-    if (!byKey.has(k)) byKey.set(k, p);
-  }
-  return [...byKey.values()];
 }
 
 /**

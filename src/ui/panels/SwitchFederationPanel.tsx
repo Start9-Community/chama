@@ -1,18 +1,15 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { type FedimintState } from "../../hooks/useEscrow.js";
 import {
-  type FederationPreset,
   CURATED_PRESETS,
-  fetchObserverFederations,
-  mergePresets,
   BP_FEDERATION_INVITE,
 } from "../../fedimint/federation-config.js";
 import { T, inputStyle } from "../theme.js";
 
 // Renders inside Sandbox mode (Settings → Advanced) when the user is
 // already joined to a federation. Lets the user pick a different
-// route (curated, observer, or pasted invite) and commit the
-// switch. v0.1.85: relocated out of the home screen — too dangerous
+// route (curated or pasted invite) and commit the switch.
+// v0.1.85: relocated out of the home screen — too dangerous
 // for normie users to encounter incidentally.
 export function SwitchFederationPanel({
   fedimint,
@@ -21,24 +18,12 @@ export function SwitchFederationPanel({
   fedimint: FedimintState;
   onSwitch: (inviteCode: string, opts?: { force?: boolean }) => Promise<void>;
 }) {
-  const [presets, setPresets] = useState<FederationPreset[]>(CURATED_PRESETS);
+  const presets = CURATED_PRESETS;
   const [selectedInvite, setSelectedInvite] = useState<string>(BP_FEDERATION_INVITE);
   const [customInvite, setCustomInvite] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<{ name: string; invite: string } | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const ctrl = new AbortController();
-    fetchObserverFederations(ctrl.signal).then((observerList) => {
-      if (cancelled) return;
-      if (observerList.length > 0) {
-        setPresets(mergePresets(CURATED_PRESETS, observerList));
-      }
-    });
-    return () => { cancelled = true; ctrl.abort(); };
-  }, []);
 
   const selectedPreset = presets.find((p) => p.inviteCode === selectedInvite) || presets[0];
   const customTrimmed = customInvite.trim();
@@ -103,13 +88,6 @@ export function SwitchFederationPanel({
               <option key={p.inviteCode} value={p.inviteCode}>{p.name}</option>
             ))}
           </optgroup>
-          {presets.some((p) => p.source === "observer") && (
-            <optgroup label="Public routes">
-              {presets.filter((p) => p.source === "observer").map((p) => (
-                <option key={p.inviteCode} value={p.inviteCode}>{p.name}</option>
-              ))}
-            </optgroup>
-          )}
         </select>
         <button
           disabled={busy || !selectedPreset || selectedPreset.inviteCode === fedimint.federationId}
