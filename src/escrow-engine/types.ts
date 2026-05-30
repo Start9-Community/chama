@@ -302,6 +302,12 @@ export interface MenuItem {
   termDays?: number;
   aprBps?: number;
   trustTier?: number;
+  /** Max units of this menu button a single order may take (anti-drain cap,
+   *  v1.2.9 / #6). Undefined = unbounded (legacy items behave as before).
+   *  In v1.3.0 / #7 this becomes the stock that decrements as buyers take
+   *  units; for now the reducer enforces selected.quantity <= maxQuantity at
+   *  LOCK so no order can drain a seller by requesting an absurd quantity. */
+  maxQuantity?: number;
 }
 
 export interface SelectedMenuItem {

@@ -131,6 +131,7 @@ function cloneMenuItem(item: MenuItem): MenuItem {
     ...(item.termDays !== undefined ? { termDays: item.termDays } : {}),
     ...(item.aprBps !== undefined ? { aprBps: item.aprBps } : {}),
     ...(item.trustTier !== undefined ? { trustTier: item.trustTier } : {}),
+    ...(item.maxQuantity !== undefined ? { maxQuantity: item.maxQuantity } : {}),
   };
 }
 
@@ -640,6 +641,24 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
         return err(
           "MENU_ITEM_MISMATCH",
           "LOCK selectedItems must snapshot the listing menu item label",
+          event.raw.id,
+        );
+      }
+      // Anti-drain (#6): a selected quantity must be a whole number >= 1, and
+      // may not exceed the seller's per-button cap. Without this a malicious
+      // LOCK could carry quantity 0 / negative / absurdly large and drain the
+      // seller's locked liquidity. Undefined maxQuantity stays unbounded.
+      if (!Number.isInteger(selected.quantity) || selected.quantity < 1) {
+        return err(
+          "QUANTITY_INVALID",
+          `LOCK quantity for ${menuItem.label} must be a whole number of at least 1`,
+          event.raw.id,
+        );
+      }
+      if (menuItem.maxQuantity !== undefined && selected.quantity > menuItem.maxQuantity) {
+        return err(
+          "QUANTITY_EXCEEDED",
+          `LOCK quantity ${selected.quantity} exceeds the ${menuItem.maxQuantity}-unit limit on ${menuItem.label}`,
           event.raw.id,
         );
       }

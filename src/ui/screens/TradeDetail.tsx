@@ -850,6 +850,13 @@ export function TradeDetail({
               const exactAmountValid = exactMsats >= minMsats && exactMsats <= maxMsats;
               const metaLine = menuMetaLine(item);
               const allowsQuantity = state.category === "marketplace";
+              // Anti-drain (#6): clamp the buyer's stepper to the seller's
+              // per-item cap (and the global 99 ceiling). The reducer rejects
+              // over-cap LOCKs regardless; this just stops the buyer building
+              // an order the seller could never lock.
+              const itemQtyCap = "maxQuantity" in item && typeof item.maxQuantity === "number"
+                ? Math.min(99, item.maxQuantity)
+                : 99;
               const selected = hasExchangeMenu
                 ? interactive
                   ? exactSats > 0 && exactAmountValid
@@ -899,6 +906,7 @@ export function TradeDetail({
                     }}>
                       {menuAmountLabel(item)}
                       {"quantity" in item && item.quantity > 1 ? ` × ${item.quantity}` : ""}
+                      {allowsQuantity && itemQtyCap < 99 ? ` · max ${itemQtyCap}` : ""}
                     </div>
                     {metaLine && (
                       <div style={{
@@ -964,7 +972,7 @@ export function TradeDetail({
                       <button
                         onClick={() => setMenuQuantities(prev => ({
                           ...prev,
-                          [itemId]: Math.min(99, (prev[itemId] ?? 0) + 1),
+                          [itemId]: Math.min(itemQtyCap, (prev[itemId] ?? 0) + 1),
                         }))}
                         style={menuQtyButtonStyle()}
                       >

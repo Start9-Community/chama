@@ -104,7 +104,9 @@ function validateMenuItem(data: unknown): boolean {
     isOptionalPositiveNumber(d.dueAt) &&
     isOptionalPositiveNumber(d.termDays) &&
     isOptionalPositiveNumber(d.aprBps) &&
-    isOptionalPositiveNumber(d.trustTier)
+    isOptionalPositiveNumber(d.trustTier) &&
+    (d.maxQuantity === undefined ||
+      (isPositiveNumber(d.maxQuantity) && Number.isInteger(d.maxQuantity)))
   );
 }
 

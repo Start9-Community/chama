@@ -109,6 +109,7 @@ interface MenuDraftItem {
   termDays: string;
   apr: string;
   trustTier: string;
+  maxQty: string;
 }
 
 const DRAFT_KEY_PREFIX = "chama_create_draft_";
@@ -150,6 +151,7 @@ function newMenuDraftItem(): MenuDraftItem {
     termDays: "",
     apr: "",
     trustTier: "",
+    maxQty: "",
   };
 }
 
@@ -172,6 +174,7 @@ function normalizeMenuDraftItem(raw: any): MenuDraftItem | null {
     termDays: typeof raw.termDays === "string" || typeof raw.termDays === "number" ? String(raw.termDays) : "",
     apr: typeof raw.apr === "string" || typeof raw.apr === "number" ? String(raw.apr) : "",
     trustTier: typeof raw.trustTier === "string" || typeof raw.trustTier === "number" ? String(raw.trustTier) : "",
+    maxQty: typeof raw.maxQty === "string" || typeof raw.maxQty === "number" ? String(raw.maxQty) : "",
   };
 }
 
@@ -339,6 +342,7 @@ function normalizeMenuItems(form: FormState, vertical: Vertical): MenuItem[] {
           })()
         : undefined,
       trustTier: vertical === "lending" ? lendingTierForSats(minSats) : undefined,
+      maxQuantity: vertical === "marketplace" ? parseOptionalPositiveInt(item.maxQty) : undefined,
     }];
   });
 }
@@ -2131,6 +2135,38 @@ function Step2({
                         </button>
                       </>
                     )}
+                    <label
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        marginLeft: "auto",
+                        fontFamily: T.mono,
+                        fontSize: 10,
+                        fontWeight: 800,
+                        color: item.maxQty.trim() ? T.accent : T.muted,
+                      }}
+                      title="Max units of this item one order can take. Blank = unlimited."
+                    >
+                      Max / order
+                      <input
+                        type="number"
+                        min={1}
+                        inputMode="numeric"
+                        placeholder="∞"
+                        value={item.maxQty}
+                        onChange={e => updateMenuItem(item.id, { maxQty: e.target.value })}
+                        style={{
+                          ...inputStyle,
+                          width: 56,
+                          padding: "8px 8px",
+                          fontSize: 11,
+                          textAlign: "center",
+                          color: T.text,
+                          background: T.card,
+                        }}
+                      />
+                    </label>
                   </div>
                 )}
               </div>

@@ -1140,6 +1140,68 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
   }
 }
 
+// 3k.1. Quantity cap (#6): a selected quantity may not exceed the menu item's
+// maxQuantity. Anti-drain money-gate enforced at LOCK; uncapped items unbounded.
+{
+  const items: MenuItem[] = [
+    { id: "capped", label: "Capped item", amountMsats: 10_000, maxQuantity: 3 },
+    { id: "uncapped", label: "Uncapped item", amountMsats: 10_000 },
+  ];
+  const create = createEvent({ amountMsats: 10_000, items });
+  const r1 = applyEvent(null, create);
+  if (r1.ok) {
+    // At the cap (3 of 3) → accepted.
+    const atCap: LockPayload["selectedItems"] = [
+      { itemId: "capped", label: "Capped item", amountMsats: 10_000, quantity: 3 },
+    ];
+    const joinAtCap = joinEvent(Role.BUYER, BUYER_PK, create.raw.id, {
+      selectedItems: atCap, amountMsats: 30_000, orderFinalized: true,
+    });
+    const joinedAtCap = applyEvent(r1.state, joinAtCap);
+    if (assertOk(joinedAtCap, "Buyer can finalize an order at the quantity cap")) {
+      const lockAtCap = lockEvent(joinAtCap.raw.id, {
+        selectedItems: atCap, sellerReceivesMsats: 29_000, arbiterFeeMsats: 1_000,
+      });
+      assertOk(applyEvent(joinedAtCap.state, lockAtCap),
+        "LOCK at the quantity cap (3 of 3) is accepted");
+    }
+
+    // Over the cap (4 > 3) → QUANTITY_EXCEEDED at LOCK, even if the order was
+    // drafted: no funds move on an over-cap order.
+    const overCap: LockPayload["selectedItems"] = [
+      { itemId: "capped", label: "Capped item", amountMsats: 10_000, quantity: 4 },
+    ];
+    const joinOver = joinEvent(Role.BUYER, BUYER_PK, create.raw.id, {
+      selectedItems: overCap, amountMsats: 40_000, orderFinalized: true,
+    });
+    const joinedOver = applyEvent(r1.state, joinOver);
+    if (assertOk(joinedOver, "Over-cap order can be drafted but never locked")) {
+      const lockOver = lockEvent(joinOver.raw.id, {
+        selectedItems: overCap, sellerReceivesMsats: 39_000, arbiterFeeMsats: 1_000,
+      });
+      assertErr(applyEvent(joinedOver.state, lockOver), "QUANTITY_EXCEEDED",
+        "LOCK quantity above the menu item maxQuantity is rejected (anti-drain)");
+    }
+
+    // Uncapped (legacy) item accepts a large quantity, bounded only by the
+    // global parser ceiling — not by maxQuantity.
+    const bigUncapped: LockPayload["selectedItems"] = [
+      { itemId: "uncapped", label: "Uncapped item", amountMsats: 10_000, quantity: 20 },
+    ];
+    const joinBig = joinEvent(Role.BUYER, BUYER_PK, create.raw.id, {
+      selectedItems: bigUncapped, amountMsats: 200_000, orderFinalized: true,
+    });
+    const joinedBig = applyEvent(r1.state, joinBig);
+    if (assertOk(joinedBig, "Buyer can finalize a large order on an uncapped item")) {
+      const lockBig = lockEvent(joinBig.raw.id, {
+        selectedItems: bigUncapped, sellerReceivesMsats: 199_000, arbiterFeeMsats: 1_000,
+      });
+      assertOk(applyEvent(joinedBig.state, lockBig),
+        "LOCK on an uncapped legacy item accepts any in-range quantity");
+    }
+  }
+}
+
 // 3k.0. Legacy menu JOINs that carried a cart before orderFinalizedAt replay as final
 {
   const items: MenuItem[] = [
