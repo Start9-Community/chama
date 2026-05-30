@@ -448,6 +448,17 @@ export function TradeDetail({
   const liveLockWindowRole = liveJoinHold
     ? expectedLocker ?? liveJoinHold.role
     : null;
+  // #7 Stage 0 — contention visibility. When the viewer is NOT a participant
+  // (a would-be second buyer / observer) and the live hold belongs to someone
+  // else, surface it honestly so they aren't stranded thinking they joined:
+  // "reserved — being viewed by another buyer, Ns left." Frees on expiry,
+  // taken on lock. The reducer already rejects their JOIN (ROLE_TAKEN); this
+  // just makes that truth visible instead of a phantom lock window.
+  const reservedByOther = (!myRole && liveJoinHold
+    && state.joinHolds?.[liveJoinHold.role]
+    && !samePubkey(state.joinHolds[liveJoinHold.role]!.pubkey, pubkey))
+    ? liveJoinHold
+    : null;
   const buyerJoinEvents = state.status === EscrowStatus.CREATED
     ? state.eventChain.filter(event => event.kind === EscrowEventKind.JOIN
         && (event.payload as JoinPayload).role === Role.BUYER)
@@ -1312,7 +1323,35 @@ export function TradeDetail({
         );
       })()}
 
+      {reservedByOther && (
+        <div style={{
+          marginBottom: 16,
+          padding: 14,
+          borderRadius: T.r,
+          background: T.amberDim,
+          border: `1px solid ${T.amber}55`,
+        }}>
+          <div style={{
+            fontSize: 11, fontWeight: 800, color: T.amber, fontFamily: T.mono,
+            letterSpacing: 1, marginBottom: 8,
+          }}>
+            ⏳ RESERVED · BEING VIEWED BY ANOTHER {roleDisplayName(reservedByOther.role).toUpperCase()}
+          </div>
+          <CountdownTimer
+            expiresAt={reservedByOther.expiresAt}
+            label="FREES UP IN (IF THEY DON'T LOCK)"
+          />
+          <div style={{
+            marginTop: 8, fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
+          }}>
+            Someone is on this order. If their hold expires you can grab it; if they
+            lock, it's taken. None of your sats have moved.
+          </div>
+        </div>
+      )}
+
       {state.expiresAt
+        && !reservedByOther
         && state.status !== "COMPLETED"
         && state.status !== "CANCELLED"
         && state.status !== "EXPIRED"
