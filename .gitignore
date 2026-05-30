@@ -6,6 +6,13 @@ dist/
 .env
 .DS_Store
 .claude/
+
+# Vite transpiles vite.config.ts to a transient .mjs next to it while loading,
+# then deletes it. If `git add -A` races that delete it aborts with
+# "fatal: unable to stat '...timestamp-...mjs'". Ignore so add never sees them.
+vite.config.ts.timestamp-*.mjs
+*.timestamp-*.mjs
+
 native/fedimint-bridge/target/
 src-tauri/target/
 src-tauri/binaries/chama-fedimint-bridge-*

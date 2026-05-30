@@ -272,6 +272,16 @@ export interface ExternalSwapMatch {
  * Recommended and bidirectional providers float to the top of the
  * returned array so the picker renders them first.
  */
+/** Master switch for the external on/off-ramp integrations (Banxaas,
+ *  Chapsmart, Bitika, Tando, Minmo, Bitzed). OFF as of v1.2.8: none of them
+ *  drop in as a real in-app Chama funding/payout step the way we'd hoped —
+ *  Banxaas, for one, is NWC-only end to end — so surfacing them only sends
+ *  users to a dead end. The registry data + resolver helpers stay intact and
+ *  unit-tested behind this flag; flip it back on (globally, or per provider)
+ *  once a genuine integration lands. The two UI call sites gate on this:
+ *  AtomicFundingModal (pre-LOCK CTA) and ClaimPayoutModal (claim picker). */
+export const EXTERNAL_SWAPS_ENABLED = false;
+
 export function getExternalSwapsForContext(input: {
   homeCommunity?: string | null;
   tradeCommunity?: string | null;

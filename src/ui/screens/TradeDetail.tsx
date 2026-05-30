@@ -521,10 +521,22 @@ export function TradeDetail({
       ?? state.fiatCurrency
       ?? (state.community ? getCommunityBySlug(state.community)?.currency : null),
   });
-  const heroFiat = quoteViewerFiat
-    ? estimatedHeroFiat ?? exactHeroFiat
-    : exactHeroFiat ?? estimatedHeroFiat;
+  // Always anchor the headline on the seller's NATIVE listing price. Never
+  // swap it for the viewer's converted estimate — a cross-country buyer (e.g.
+  // a KES Chama viewing a TZS listing, same fed) would otherwise see a number
+  // in their own currency and assume that IS the price. The viewer-currency
+  // estimate rides alongside as a secondary "≈" line whenever the viewer's
+  // Chama currency differs from the listing's. (Browse/TradeCard does the same.)
+  const heroFiat = exactHeroFiat ?? estimatedHeroFiat;
   const heroFiatLabel = heroFiat ? formatFiatAmount(heroFiat.amount, heroFiat.currency) : null;
+  const viewerEstimate = quoteViewerFiat
+    && estimatedHeroFiat
+    && (!heroFiat || normalizeFiatCurrency(estimatedHeroFiat.currency) !== normalizeFiatCurrency(heroFiat.currency))
+      ? estimatedHeroFiat
+      : null;
+  const viewerEstimateLabel = viewerEstimate
+    ? `≈ ${formatFiatAmount(viewerEstimate.amount, viewerEstimate.currency)}`
+    : null;
   const premiumCheckoutLine = detailPremiumCheckoutLine(state, heroFiat);
   const showHeroFiat = amountDisplayMode === "fiat" && !!heroFiatLabel;
   const shortTradeId = state.id.length > 18 ? `${state.id.slice(0, 10)}…${state.id.slice(-6)}` : state.id;
@@ -717,9 +729,10 @@ export function TradeDetail({
               {state.description}
               {showHeroFiat
                 ? ` · ₿ ${fmtSats(heroAmountMsats)}`
-                : state.fiatAmount && state.fiatCurrency
-                  ? ` · ${formatFiatAmount(state.fiatAmount, state.fiatCurrency)}`
+                : heroFiatLabel
+                  ? ` · ${heroFiatLabel}`
                   : ""}
+              {viewerEstimateLabel ? ` · ${viewerEstimateLabel}` : ""}
               {routeNote ? ` · ${routeNote}` : ""}
               {myRole ? ` · ${roleDisplayName(myRole)}` : ""}
             </div>

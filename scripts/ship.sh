@@ -62,6 +62,20 @@ CHAMA_COMMIT_DIR="${CHAMA_COMMIT_DIR:-/tmp}"
 # signed tag), so defaulting it is safe; any other releaser overrides it.
 CHAMA_GPG_KEY="${CHAMA_GPG_KEY:-0CCF412F47859431BDB2C1F1489728C34DF7C33D}"
 
+# Zapstore publishing needs SIGN_WITH (the Nostr signer for the release event)
+# and a zsp binary. Default + export them so `npm run ship` just works without
+# remembering to set them each run; export anything yourself to override.
+# These propagate to the `npm run release:all` child process below.
+export SIGN_WITH="${SIGN_WITH:-browser}"
+if [ -z "${CHAMA_ZSP_BIN:-}" ]; then
+  if [ -x /private/tmp/zsp ]; then
+    CHAMA_ZSP_BIN=/private/tmp/zsp
+  elif command -v zsp >/dev/null 2>&1; then
+    CHAMA_ZSP_BIN="$(command -v zsp)"
+  fi
+fi
+export CHAMA_ZSP_BIN
+
 while [ $# -gt 0 ]; do
   case "${1:-}" in
     --patch|--minor|--major) BUMP="${1#--}"; shift ;;

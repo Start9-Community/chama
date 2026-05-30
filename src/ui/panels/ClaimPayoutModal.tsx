@@ -39,6 +39,7 @@ import {
   claimPayoutSats,
 } from "../../payments/lightning-fees.js";
 import {
+  EXTERNAL_SWAPS_ENABLED,
   getExternalSwapsForContext,
   openExternalSwap,
   type ExternalSwapMatch,
@@ -160,11 +161,11 @@ export function ClaimPayoutModal({
   // mount boundary (this modal only opens after a CLAIM is in flight),
   // so by the time we render here the user already has authority over
   // the sats and external offramps are safe to offer.
-  const externalSwaps = getExternalSwapsForContext({
+  const externalSwaps = EXTERNAL_SWAPS_ENABLED ? getExternalSwapsForContext({
     homeCommunity,
     tradeCommunity,
     fiatCurrency,
-  });
+  }) : [];
 
   // Common dispatch helper — used by both the picker's first resolve
   // and the terminal retry path. Updates stage transitions and

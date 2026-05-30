@@ -26,6 +26,7 @@ import {
   type SavedNwcConnection,
 } from "../../payments/nwc-connections.js";
 import {
+  EXTERNAL_SWAPS_ENABLED,
   getBidirectionalSwapsForContext,
   openExternalSwap,
   type ExternalSwapMatch,
@@ -443,11 +444,11 @@ export function AtomicFundingModal({
             onNwcInputChange={setNwcInput}
             onRememberNwcChange={setRememberNwc}
             onSelectNwc={handleSelectNwc}
-            bidirectionalSwaps={getBidirectionalSwapsForContext({
+            bidirectionalSwaps={EXTERNAL_SWAPS_ENABLED ? getBidirectionalSwapsForContext({
               homeCommunity,
               tradeCommunity,
               fiatCurrency,
-            })}
+            }) : []}
           />
         )}
 
