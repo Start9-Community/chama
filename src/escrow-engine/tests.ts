@@ -444,6 +444,9 @@ function createEvent(opts: {
   amountMsats?: number;
   premiumBps?: number;
   items?: MenuItem[];
+  stock?: number;
+  parent?: string;
+  claimedQuantity?: number;
 } = {}): ParsedEscrowEvent<CreatePayload> {
   return makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
     type: "escrow:create",
@@ -462,6 +465,9 @@ function createEvent(opts: {
     expirySeconds: 86400,
     communityArbiters: opts.communityArbiters,
     items: opts.items,
+    ...(opts.stock !== undefined ? { stock: opts.stock } : {}),
+    ...(opts.parent !== undefined ? { parent: opts.parent } : {}),
+    ...(opts.claimedQuantity !== undefined ? { claimedQuantity: opts.claimedQuantity } : {}),
     createdAt: NOW,
   });
 }
@@ -1782,6 +1788,62 @@ console.log("\n── EVENT PARSER ──");
     assert(result.event.kind === EscrowEventKind.CREATE, "Kind parsed");
     assert((result.event.payload as CreatePayload).description === "Test listing", "Payload parsed");
     assert((result.event.payload as CreatePayload).premiumBps === 350, "Premium BPS parsed");
+  }
+
+  // #7 Stage 1 — multi-unit storefront schema (additive): stock on a parent
+  // listing, parent + claimedQuantity on a child purchase escrow.
+  const okStock = parseEscrowEvent(raw, JSON.stringify({
+    type: "escrow:create", description: "Stocked listing", amountMsats: 50_000_000,
+    category: "marketplace", mintUrl: "fed://test", platformFeeBps: 50,
+    platformFeePubkey: PLATFORM_PK, expirySeconds: 3600, createdAt: NOW, stock: 5,
+  }), true);
+  assert(okStock.ok && (okStock.event.payload as CreatePayload).stock === 5,
+    "Parser preserves a parent listing's stock");
+  const okChild = parseEscrowEvent(raw, JSON.stringify({
+    type: "escrow:create", description: "Child purchase", amountMsats: 10_000_000,
+    category: "marketplace", mintUrl: "fed://test", platformFeeBps: 50,
+    platformFeePubkey: PLATFORM_PK, expirySeconds: 3600, createdAt: NOW,
+    parent: "parent-listing-id", claimedQuantity: 2,
+  }), true);
+  assert(okChild.ok
+    && (okChild.event.payload as CreatePayload).parent === "parent-listing-id"
+    && (okChild.event.payload as CreatePayload).claimedQuantity === 2,
+    "Parser preserves a child escrow's parent + claimedQuantity");
+  {
+    const baseCreate = {
+      type: "escrow:create", description: "x", amountMsats: 10_000_000,
+      category: "marketplace", mintUrl: "fed://test", platformFeeBps: 50,
+      platformFeePubkey: PLATFORM_PK, expirySeconds: 3600, createdAt: NOW,
+    };
+    assert(!parseEscrowEvent(raw, JSON.stringify({ ...baseCreate, stock: 0 }), true).ok,
+      "Parser rejects stock of 0");
+    assert(!parseEscrowEvent(raw, JSON.stringify({ ...baseCreate, stock: 2.5 }), true).ok,
+      "Parser rejects non-integer stock");
+    assert(!parseEscrowEvent(raw, JSON.stringify({ ...baseCreate, parent: "" }), true).ok,
+      "Parser rejects an empty parent id");
+    assert(!parseEscrowEvent(raw, JSON.stringify({ ...baseCreate, claimedQuantity: 0 }), true).ok,
+      "Parser rejects claimedQuantity of 0");
+  }
+  // Reducer carries the fields onto state; legacy listings stay untouched.
+  {
+    const rp = applyEvent(null, createEvent({ stock: 5 }));
+    if (assertOk(rp, "Parent listing with stock applies")) {
+      assert(rp.state.stock === 5, "Parent listing preserves stock on state");
+      assert(rp.state.parent === undefined, "Parent listing has no parent ref");
+    }
+    const rc = applyEvent(null, createEvent({ amountMsats: 10_000_000, parent: "parent-id", claimedQuantity: 2 }));
+    if (assertOk(rc, "Child purchase escrow applies")) {
+      assert(rc.state.parent === "parent-id", "Child preserves parent ref");
+      assert(rc.state.claimedQuantity === 2, "Child preserves claimedQuantity");
+      assert(rc.state.stock === undefined, "Child carries no stock of its own");
+    }
+    const rl = applyEvent(null, createEvent({}));
+    if (assertOk(rl, "Legacy single-unit listing applies")) {
+      assert(
+        rl.state.stock === undefined && rl.state.parent === undefined && rl.state.claimedQuantity === undefined,
+        "Legacy listing leaves all storefront fields undefined (back-compat)",
+      );
+    }
   }
 
   // Bad kind

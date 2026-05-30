@@ -292,6 +292,10 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
     fulfillment,
     community: p.community ?? null,
     mintUrl: p.mintUrl,
+    // #7 multi-unit storefront (Stage 1): carried through, no behavior yet.
+    ...(p.stock !== undefined ? { stock: p.stock } : {}),
+    ...(p.parent !== undefined ? { parent: p.parent } : {}),
+    ...(p.claimedQuantity !== undefined ? { claimedQuantity: p.claimedQuantity } : {}),
     participants,
     joinHolds: {},
     initiator: { pubkey: event.pubkey, role: initiatorRole },

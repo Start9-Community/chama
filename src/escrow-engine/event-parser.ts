@@ -214,6 +214,11 @@ function validateCreatePayload(data: unknown): data is CreatePayload {
     return false;
   }
   if (!validateMenuItems(d.items)) return false;
+  // #7 multi-unit storefront (Stage 1): optional, additive. stock on a
+  // parent listing; parent (parent escrow id) + claimedQuantity on a child.
+  if (d.stock !== undefined && (!isPositiveNumber(d.stock) || !Number.isInteger(d.stock))) return false;
+  if (d.parent !== undefined && (typeof d.parent !== "string" || d.parent.length === 0)) return false;
+  if (d.claimedQuantity !== undefined && (!isPositiveNumber(d.claimedQuantity) || !Number.isInteger(d.claimedQuantity))) return false;
   return (
     d.type === "escrow:create" &&
     typeof d.description === "string" &&

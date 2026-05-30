@@ -182,6 +182,10 @@ export const TAGS = {
   FED_PREFIX: "fedPrefix",
   /** Full federation ID (hex). Canonical record. */
   FED: "fed",
+  /** #7 multi-unit storefront: parent listing escrow id, present on a
+   *  child purchase escrow. Lets Browse fan out a `#parent` relay filter
+   *  to count a storefront's children for derived remaining stock. */
+  PARENT: "parent",
 } as const;
 
 // ── Encrypted Content Payloads ────────────────────────────────────────────
@@ -245,6 +249,20 @@ export interface CreatePayload {
   /** Full federation ID (hex). Same probe captures both. Used for
    *  display and registry matching. Optional for pre-.72 trades. */
   fed?: string;
+  // ── #7 multi-unit storefront (Stage 1, additive; no behavior yet) ──────
+  /** Total units offered by a multi-unit PARENT listing. Absent / 1 means a
+   *  single-unit listing (legacy). The parent is a perpetual offer; each
+   *  buyer's purchase is a child escrow that decrements derived remaining
+   *  stock. */
+  stock?: number;
+  /** Parent listing's escrow id. Present only on a CHILD escrow — a buyer
+   *  purchasing `claimedQuantity` units from a multi-unit parent. Absent on
+   *  standalone / parent listings. Also emitted as a `parent` tag so
+   *  children are relay-filterable. */
+  parent?: string;
+  /** Units this child escrow claims from the parent listing's stock.
+   *  Present only on child escrows. */
+  claimedQuantity?: number;
   /** Timestamp */
   createdAt: number;
 }
@@ -625,6 +643,19 @@ export interface EscrowState {
   community: string | null;
   /** Fedimint mint URL / invite code */
   mintUrl: string;
+
+  // ── #7 multi-unit storefront (Stage 1, additive; no behavior yet) ──────
+  /** Total units offered by a multi-unit PARENT listing. Undefined / 1 =
+   *  single-unit (legacy). The parent is a perpetual offer; each buyer's
+   *  purchase is a child escrow that decrements derived remaining stock. */
+  stock?: number;
+  /** Parent listing's escrow id — set only on a CHILD escrow (a buyer's
+   *  purchase from a multi-unit parent). Undefined on standalone / parent
+   *  listings. */
+  parent?: string;
+  /** Units this child escrow claims from the parent's stock. Set only on
+   *  child escrows. */
+  claimedQuantity?: number;
 
   /** Participants — pubkeys mapped to roles */
   participants: {
