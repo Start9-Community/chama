@@ -1358,11 +1358,10 @@ export default function App() {
         />
       )}
 
-      {/* v0.2.0 item 1: switching overlay during silent re-init when
-          user taps a non-matching listing. Sub-second on a healthy
-          fed; the overlay just covers the WASM tearDown + init gap
-          so the listing detail's Fund button doesn't fire against
-          the wrong client. */}
+      {/* Switching overlay during silent re-init when a user taps a
+          listing on another Chama route. The native bridge now caps
+          slow federation RPC, but the copy stays honest while the
+          target route is opening. */}
       {switchingToCommunity && (
         <div style={{
           position: "fixed", inset: 0, zIndex: 9990,
@@ -1381,7 +1380,7 @@ export default function App() {
             Switching to <strong>{switchingToCommunity.displayName}</strong>…
           </div>
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5 }}>
-            no Lightning round-trip · sub-second
+            no sats move while switching
           </div>
         </div>
       )}

@@ -44,6 +44,11 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
+const FEDERATION_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+const FEDERATION_JOIN_TIMEOUT: Duration = Duration::from_secs(45);
+const GATEWAY_CACHE_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
+const GATEWAY_SELECT_TIMEOUT: Duration = Duration::from_secs(12);
+
 #[derive(Debug, Parser)]
 #[command(name = "chama-fedimint-bridge")]
 #[command(about = "Native Fedimint harness for Chama federation tests")]
@@ -489,14 +494,20 @@ impl Bridge {
             InviteCode::from_str(invite_code).context("invalid federation invite code")?;
         let (builder, db) = self.client_builder().await?;
         let mnemonic = load_or_generate_mnemonic(&db).await?;
+        let connectors = self.connectors().await?;
+        let root_secret = root_secret_from_mnemonic(&mnemonic);
 
-        let client = builder
-            .preview(self.connectors().await?, &invite_code)
-            .await
-            .context("failed to preview federation invite")?
-            .join(db, root_secret_from_mnemonic(&mnemonic))
-            .await
-            .context("failed to join federation")?;
+        let client = tokio::time::timeout(FEDERATION_JOIN_TIMEOUT, async move {
+            builder
+                .preview(connectors, &invite_code)
+                .await
+                .context("failed to preview federation invite")?
+                .join(db, root_secret)
+                .await
+                .context("failed to join federation")
+        })
+        .await
+        .context("timed out joining federation")??;
 
         let client = Arc::new(client);
         self.warm_gateway_cache(&client).await;
@@ -511,15 +522,16 @@ impl Bridge {
             .context("client secret is not present; run join first")?;
         let mnemonic =
             Mnemonic::from_entropy(&entropy).context("invalid stored mnemonic entropy")?;
+        let connectors = self.connectors().await?;
+        let root_secret = root_secret_from_mnemonic(&mnemonic);
 
-        let client = builder
-            .open(
-                self.connectors().await?,
-                db,
-                root_secret_from_mnemonic(&mnemonic),
-            )
-            .await
-            .context("failed to open Fedimint client")?;
+        let client = tokio::time::timeout(
+            FEDERATION_OPEN_TIMEOUT,
+            builder.open(connectors, db, root_secret),
+        )
+        .await
+        .context("timed out opening Fedimint client")?
+        .context("failed to open Fedimint client")?;
 
         let client = Arc::new(client);
         self.warm_gateway_cache(&client).await;
@@ -572,6 +584,12 @@ impl Bridge {
         Ok(())
     }
 
+    async fn local_client_db_present(&self) -> bool {
+        tokio::fs::metadata(self.data_dir.join("client.db"))
+            .await
+            .is_ok()
+    }
+
     /// Best-effort: refresh the gateway cache right after a successful
     /// open/join, while the guardians are known-reachable, so funding-time
     /// gateway selection can hit a warm cache instead of forcing a live
@@ -580,10 +598,21 @@ impl Bridge {
     async fn warm_gateway_cache(&self, client: &ClientHandleArc) {
         match client.get_first_module::<LightningClientModule>() {
             Ok(ln) => {
-                if let Err(error) = ln.update_gateway_cache().await {
-                    eprintln!(
-                        "warm_gateway_cache: best-effort gateway cache refresh failed (continuing): {error:#}"
-                    );
+                match tokio::time::timeout(GATEWAY_CACHE_REFRESH_TIMEOUT, ln.update_gateway_cache())
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        eprintln!(
+                            "warm_gateway_cache: best-effort gateway cache refresh failed (continuing): {error:#}"
+                        );
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "warm_gateway_cache: timed out after {:?} (continuing)",
+                            GATEWAY_CACHE_REFRESH_TIMEOUT
+                        );
+                    }
                 }
             }
             Err(error) => {
@@ -599,8 +628,9 @@ impl Bridge {
     ) -> Result<Vec<fedimint_ln_client::common::LightningGatewayAnnouncement>> {
         let ln = client.get_first_module::<LightningClientModule>()?;
         if !no_update {
-            ln.update_gateway_cache()
+            tokio::time::timeout(GATEWAY_CACHE_REFRESH_TIMEOUT, ln.update_gateway_cache())
                 .await
+                .context("timed out updating gateway cache")?
                 .context("failed to update gateway cache")?;
         }
         Ok(ln.list_gateways().await)
@@ -608,8 +638,9 @@ impl Bridge {
 
     async fn probe_gateways(&self, client: &ClientHandleArc) -> Result<Vec<GatewayProbe>> {
         let ln = client.get_first_module::<LightningClientModule>()?;
-        ln.update_gateway_cache()
+        tokio::time::timeout(GATEWAY_CACHE_REFRESH_TIMEOUT, ln.update_gateway_cache())
             .await
+            .context("timed out updating gateway cache")?
             .context("failed to update gateway cache")?;
 
         let gateways = ln.list_gateways().await;
@@ -618,16 +649,21 @@ impl Bridge {
             let gateway = announcement.info.clone();
             let gateway_id = gateway.gateway_id.to_string();
             let api = gateway.api.to_string();
-            let result = ln.select_available_gateway(Some(gateway), None).await;
+            let result = tokio::time::timeout(
+                GATEWAY_SELECT_TIMEOUT,
+                ln.select_available_gateway(Some(gateway), None),
+            )
+            .await
+            .context("timed out selecting gateway");
             probes.push(match result {
-                Ok(_) => GatewayProbe {
+                Ok(Ok(_)) => GatewayProbe {
                     gateway_id,
                     vetted: announcement.vetted,
                     api,
                     available: true,
                     error: None,
                 },
-                Err(error) => GatewayProbe {
+                Ok(Err(error)) | Err(error) => GatewayProbe {
                     gateway_id,
                     vetted: announcement.vetted,
                     api,
@@ -689,12 +725,14 @@ impl Bridge {
 
         let mut refresh_error: Option<String> = None;
         for attempt in 1..=3 {
-            match ln.update_gateway_cache().await {
-                Ok(()) => {
+            match tokio::time::timeout(GATEWAY_CACHE_REFRESH_TIMEOUT, ln.update_gateway_cache())
+                .await
+            {
+                Ok(Ok(())) => {
                     refresh_error = None;
                     break;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     refresh_error = Some(format!("{error:#}"));
                     if attempt < 3 {
                         eprintln!(
@@ -703,16 +741,31 @@ impl Bridge {
                         tokio::time::sleep(Duration::from_millis(1200)).await;
                     }
                 }
+                Err(_) => {
+                    refresh_error = Some(format!(
+                        "timed out after {:?}",
+                        GATEWAY_CACHE_REFRESH_TIMEOUT
+                    ));
+                    if attempt < 3 {
+                        eprintln!("invoice: gateway cache refresh retry {attempt} after timeout");
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                    }
+                }
             }
         }
 
-        match ln.select_available_gateway(None, None).await {
-            Ok(gateway) => {
+        match tokio::time::timeout(
+            GATEWAY_SELECT_TIMEOUT,
+            ln.select_available_gateway(None, None),
+        )
+        .await
+        {
+            Ok(Ok(gateway)) => {
                 let gateway_id = gateway.gateway_id;
                 eprintln!("invoice: selected reachable cached gateway {gateway_id}");
                 Ok(Some(gateway))
             }
-            Err(select_error) => {
+            Ok(Err(select_error)) => {
                 if let Some(refresh_error) = refresh_error {
                     bail!(
                         "Couldn't reach the federation's Lightning gateway to create a receive invoice - \
@@ -726,6 +779,22 @@ impl Bridge {
                      no invoice was created and no sats moved.",
                 )
             }
+            Err(_) => {
+                if let Some(refresh_error) = refresh_error {
+                    bail!(
+                        "Couldn't reach the federation's Lightning gateway to create a receive invoice - \
+                         no invoice was created and no sats moved. Gateway cache refresh failed: {refresh_error}; \
+                         cached gateway selection timed out after {:?}",
+                        GATEWAY_SELECT_TIMEOUT
+                    );
+                }
+
+                bail!(
+                    "Couldn't find a reachable federation Lightning gateway to create a receive invoice - \
+                     no invoice was created and no sats moved. Gateway selection timed out after {:?}",
+                    GATEWAY_SELECT_TIMEOUT
+                )
+            }
         }
     }
 
@@ -736,12 +805,22 @@ impl Bridge {
         force_internal: bool,
         operation: &str,
     ) -> Result<Option<LightningGateway>> {
-        let mut gateway_result = ln.get_gateway(gateway_id, force_internal).await;
+        let mut gateway_result = tokio::time::timeout(
+            GATEWAY_SELECT_TIMEOUT,
+            ln.get_gateway(gateway_id, force_internal),
+        )
+        .await
+        .context("timed out selecting gateway")?;
         let mut attempt = 1u32;
         while gateway_result.is_err() && attempt < 3 {
             eprintln!("{operation}: gateway selection retry {attempt} after a transient failure");
             tokio::time::sleep(Duration::from_millis(1200)).await;
-            gateway_result = ln.get_gateway(gateway_id, force_internal).await;
+            gateway_result = tokio::time::timeout(
+                GATEWAY_SELECT_TIMEOUT,
+                ln.get_gateway(gateway_id, force_internal),
+            )
+            .await
+            .context("timed out selecting gateway")?;
             attempt += 1;
         }
         gateway_result
@@ -1263,7 +1342,8 @@ impl AppState {
 }
 
 async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let joined = state.client.lock().await.is_some() || state.bridge.open().await.is_ok();
+    let joined =
+        state.client.lock().await.is_some() || state.bridge.local_client_db_present().await;
     Json(json!({
         "ok": true,
         "joined": joined,

@@ -27,9 +27,14 @@ export const DEFAULT_NATIVE_BRIDGE_COMMUNITY = "us-blf";
 const TRUE_SETTING_VALUES = new Set(["1", "true", "yes", "on"]);
 const REQUIRED_NATIVE_BRIDGE_CAPABILITIES = ["reset"];
 const NATIVE_BRIDGE_READY_RETRY_DELAYS_MS = [0, 250, 500, 1000, 1500, 2500];
+const NATIVE_BRIDGE_HEALTH_TIMEOUT_MS = 5_000;
+const NATIVE_BRIDGE_RESET_TIMEOUT_MS = 10_000;
+const NATIVE_BRIDGE_INFO_TIMEOUT_MS = 20_000;
+const NATIVE_BRIDGE_JOIN_TIMEOUT_MS = 50_000;
 
 interface NativeBridgeFetchInit extends Omit<RequestInit, "body"> {
   body?: unknown;
+  timeoutMs?: number;
 }
 
 interface NativeInfoResponse {
@@ -300,6 +305,31 @@ function nativeBridgeUnavailableError(
   return error;
 }
 
+function nativeBridgeTimeoutError(
+  baseUrl: string,
+  path: string,
+  timeoutMs: number,
+): Error {
+  const diagnostic = {
+    issue: "native_fedimint_bridge_timeout",
+    adapter: "native-rust-sidecar",
+    bridgeUrl: baseUrl,
+    path,
+    timeoutMs,
+    interpretation:
+      "The local Rust bridge answered slowly enough that Chama stopped waiting. " +
+      "No sats move during federation switching. Try again or reconnect the app if the target Chama route is slow.",
+  };
+  const error = new Error(
+    `Native Fedimint bridge ${path} did not answer within ${Math.ceil(timeoutMs / 1000)}s. ` +
+      `No sats moved. Try again or tap Reconnect if the route stays slow.\n\n` +
+      `Chama diagnostics:\n${JSON.stringify(diagnostic, null, 2)}`,
+  );
+  (error as Error & { chamaDiagnostics?: Record<string, unknown> }).chamaDiagnostics =
+    diagnostic;
+  return error;
+}
+
 function hasChamaDiagnostics(
   error: unknown,
 ): error is Error & { chamaDiagnostics: Record<string, unknown> } {
@@ -387,13 +417,16 @@ export async function resetNativeBridgeWallet(baseUrl = getNativeBridgeUrl()): P
   await assertNativeBridgeCompatible(normalized);
   await nativeBridgeFetch<NativeResetResponse>(normalized, "/reset", {
     method: "POST",
+    timeoutMs: NATIVE_BRIDGE_RESET_TIMEOUT_MS,
   });
 }
 
 async function assertNativeBridgeCompatible(baseUrl: string): Promise<void> {
   let health: NativeHealthResponse;
   try {
-    health = await nativeBridgeFetch<NativeHealthResponse>(baseUrl, "/health");
+    health = await nativeBridgeFetch<NativeHealthResponse>(baseUrl, "/health", {
+      timeoutMs: NATIVE_BRIDGE_HEALTH_TIMEOUT_MS,
+    });
   } catch (error) {
     if (hasChamaDiagnostics(error)) throw error;
     throw nativeBridgeCompatibilityError(baseUrl, asErrorMessage(error));
@@ -420,9 +453,33 @@ async function nativeBridgeFetch<T>(
   path: string,
   init: NativeBridgeFetchInit = {},
 ): Promise<T> {
-  const { body: jsonBody, headers: rawHeaders, ...rest } = init;
+  const {
+    body: jsonBody,
+    headers: rawHeaders,
+    timeoutMs,
+    signal: callerSignal,
+    ...rest
+  } = init;
   const headers = new Headers(rawHeaders);
   const requestInit: RequestInit = { ...rest, headers };
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let controller: AbortController | null = null;
+  let removeCallerAbort: (() => void) | null = null;
+
+  if (timeoutMs !== undefined && timeoutMs > 0) {
+    controller = new AbortController();
+    if (callerSignal?.aborted) {
+      controller.abort();
+    } else if (callerSignal) {
+      const onAbort = () => controller?.abort();
+      callerSignal.addEventListener("abort", onAbort, { once: true });
+      removeCallerAbort = () => callerSignal.removeEventListener("abort", onAbort);
+    }
+    timeoutId = setTimeout(() => controller?.abort(), timeoutMs);
+    requestInit.signal = controller.signal;
+  } else if (callerSignal) {
+    requestInit.signal = callerSignal;
+  }
 
   if (jsonBody !== undefined) {
     headers.set("content-type", "application/json");
@@ -433,7 +490,13 @@ async function nativeBridgeFetch<T>(
   try {
     response = await fetch(`${baseUrl}${path}`, requestInit);
   } catch (error) {
+    if (controller?.signal.aborted && timeoutMs !== undefined && timeoutMs > 0) {
+      throw nativeBridgeTimeoutError(baseUrl, path, timeoutMs);
+    }
     throw nativeBridgeUnavailableError(baseUrl, path, error);
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    removeCallerAbort?.();
   }
   const text = await response.text();
   let json: unknown = null;
@@ -475,7 +538,9 @@ export class NativeBridgeWallet implements IFedimintWallet {
 
   async open(): Promise<void> {
     await assertNativeBridgeCompatible(this.baseUrl);
-    const info = await this.request<NativeInfoResponse>("/info");
+    const info = await this.request<NativeInfoResponse>("/info", {
+      timeoutMs: NATIVE_BRIDGE_INFO_TIMEOUT_MS,
+    });
     this.applyInfo(info);
     this.loadCachedInvite();
   }
@@ -489,6 +554,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
     const joined = await this.request<NativeJoinResponse>("/join", {
       method: "POST",
       body: { inviteCode },
+      timeoutMs: NATIVE_BRIDGE_JOIN_TIMEOUT_MS,
     });
     this.openState = true;
     this.federationId = joined.federation_id;
@@ -742,7 +808,9 @@ export class NativeBridgeWallet implements IFedimintWallet {
   federation = {
     getFederationId: async (): Promise<string> => {
       if (this.federationId) return this.federationId;
-      const info = await this.request<NativeInfoResponse>("/info");
+      const info = await this.request<NativeInfoResponse>("/info", {
+        timeoutMs: NATIVE_BRIDGE_INFO_TIMEOUT_MS,
+      });
       this.applyInfo(info);
       return info.federation_id;
     },
@@ -804,7 +872,9 @@ export class NativeBridgeWallet implements IFedimintWallet {
   }
 
   private async refreshBalance(): Promise<number> {
-    const info = await this.request<NativeInfoResponse>("/info");
+    const info = await this.request<NativeInfoResponse>("/info", {
+      timeoutMs: NATIVE_BRIDGE_INFO_TIMEOUT_MS,
+    });
     this.applyInfo(info);
     return info.total_amount_msat;
   }
