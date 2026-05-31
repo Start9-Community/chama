@@ -26,6 +26,7 @@ export const DEFAULT_NATIVE_BRIDGE_COMMUNITY = "us-blf";
 
 const TRUE_SETTING_VALUES = new Set(["1", "true", "yes", "on"]);
 const REQUIRED_NATIVE_BRIDGE_CAPABILITIES = ["reset"];
+const NATIVE_BRIDGE_READY_RETRY_DELAYS_MS = [0, 250, 500, 1000, 1500, 2500];
 
 interface NativeBridgeFetchInit extends Omit<RequestInit, "body"> {
   body?: unknown;
@@ -153,6 +154,10 @@ function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function getImportEnv(key: string): string | null {
   const env = (import.meta as unknown as { env?: Record<string, unknown> }).env;
   const value = env?.[key];
@@ -205,6 +210,10 @@ function isTauriNativePlatform(): boolean {
     __TAURI_INTERNALS__?: unknown;
   };
   return Boolean(global.__TAURI__ || global.__TAURI_INTERNALS__);
+}
+
+function isShellManagedNativeBridge(): boolean {
+  return isCapacitorNativePlatform() || isTauriNativePlatform();
 }
 
 function getInjectedNativeBridgeUrl(): string | null {
@@ -295,6 +304,13 @@ function hasChamaDiagnostics(
   error: unknown,
 ): error is Error & { chamaDiagnostics: Record<string, unknown> } {
   return error instanceof Error && isRecord((error as any).chamaDiagnostics);
+}
+
+function isNativeBridgeUnavailable(error: unknown): boolean {
+  return (
+    hasChamaDiagnostics(error) &&
+    error.chamaDiagnostics.issue === "native_fedimint_bridge_unavailable"
+  );
 }
 
 function nativeBridgeCompatibilityError(
@@ -505,6 +521,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
       amountMsats: number,
       _meta?: ChamaOperationMeta,
     ): Promise<string> => {
+      await this.ensureBridgeReady();
       const result = await this.request<NativeSpendNotesResponse>("/spend-notes", {
         method: "POST",
         body: {
@@ -522,6 +539,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
       oobNotes: string,
       _meta?: ChamaOperationMeta,
     ): Promise<string> => {
+      await this.ensureBridgeReady();
       const result = await this.request<NativeReissueNotesResponse>("/reissue-notes", {
         method: "POST",
         body: {
@@ -552,6 +570,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
       _meta?: ChamaOperationMeta,
     ): Promise<{ invoice: string; operationId: string }> => {
       onReceiveState?.("created");
+      await this.ensureBridgeReady();
       const result = await this.request<NativeInvoiceResponse>("/invoice", {
         method: "POST",
         body: {
@@ -572,6 +591,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
       bolt11: string,
       meta?: ChamaOperationMeta,
     ): Promise<{ operationId: string }> => {
+      await this.ensureBridgeReady();
       const amountMsats = typeof meta?.chama_amount_msats === "number"
         ? Math.floor(meta.chama_amount_msats)
         : undefined;
@@ -691,6 +711,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
       amountSats: number,
       options?: { wait?: boolean; meta?: ChamaOperationMeta },
     ): Promise<OnchainWithdrawResult> => {
+      await this.ensureBridgeReady();
       const result = await this.request<NativeOnchainWithdrawResponse>(
         "/onchain/withdraw",
         {
@@ -747,6 +768,27 @@ export class NativeBridgeWallet implements IFedimintWallet {
 
   private request<T>(path: string, init: NativeBridgeFetchInit = {}): Promise<T> {
     return nativeBridgeFetch<T>(this.baseUrl, path, init);
+  }
+
+  private async ensureBridgeReady(): Promise<void> {
+    if (!isShellManagedNativeBridge()) return;
+
+    let lastError: unknown = null;
+
+    for (const delayMs of NATIVE_BRIDGE_READY_RETRY_DELAYS_MS) {
+      if (delayMs > 0) await sleepMs(delayMs);
+      try {
+        await assertNativeBridgeCompatible(this.baseUrl);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!isNativeBridgeUnavailable(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
   }
 
   private applyInfo(info: NativeInfoResponse): void {

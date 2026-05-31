@@ -5,6 +5,8 @@ import android.content.pm.PackageInfo;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Window;
 import android.webkit.WebView;
@@ -23,8 +25,14 @@ public class MainActivity extends BridgeActivity {
     private static final String ASSET_VERSION_KEY = "web_asset_version";
     private static final String FEDIMINT_BRIDGE_BINARY = "libchama_fedimint_bridge.so";
     private static final String FEDIMINT_BRIDGE_BIND = "127.0.0.1:8787";
+    private static final long FEDIMINT_BRIDGE_STABLE_MS = 30_000L;
+    private static final long FEDIMINT_BRIDGE_MAX_RESTART_DELAY_MS = 30_000L;
 
     private Process fedimintBridgeProcess;
+    private final Handler fedimintBridgeHandler = new Handler(Looper.getMainLooper());
+    private int fedimintBridgeRestartAttempts = 0;
+    private boolean fedimintBridgeStopping = false;
+    private final Runnable fedimintBridgeRestartRunnable = this::startFedimintBridge;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -38,12 +46,14 @@ public class MainActivity extends BridgeActivity {
         if (getSupportActionBar() != null) {
             getSupportActionBar().hide();
         }
+        fedimintBridgeStopping = false;
         startFedimintBridge();
     }
 
     @Override
     public void onResume() {
         super.onResume();
+        fedimintBridgeStopping = false;
         startFedimintBridge();
     }
 
@@ -54,6 +64,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private synchronized void startFedimintBridge() {
+        fedimintBridgeHandler.removeCallbacks(fedimintBridgeRestartRunnable);
         if (fedimintBridgeProcess != null && fedimintBridgeProcess.isAlive()) {
             return;
         }
@@ -86,10 +97,12 @@ public class MainActivity extends BridgeActivity {
         try {
             fedimintBridgeProcess = builder.start();
             streamFedimintBridgeLogs(fedimintBridgeProcess);
+            scheduleFedimintBridgeStableReset(fedimintBridgeProcess);
             Log.i(TAG, "Native Fedimint bridge launching on http://" + FEDIMINT_BRIDGE_BIND);
         } catch (Exception e) {
             fedimintBridgeProcess = null;
             Log.e(TAG, "Failed to start native Fedimint bridge", e);
+            scheduleFedimintBridgeRestart("start failure");
         }
     }
 
@@ -107,10 +120,17 @@ public class MainActivity extends BridgeActivity {
                 synchronized (MainActivity.this) {
                     if (fedimintBridgeProcess == process) {
                         fedimintBridgeProcess = null;
+                        scheduleFedimintBridgeRestart("exit code " + exitCode);
                     }
                 }
             } catch (Exception e) {
                 Log.w(TAG, "Fedimint bridge log stream ended", e);
+                synchronized (MainActivity.this) {
+                    if (fedimintBridgeProcess == process) {
+                        fedimintBridgeProcess = null;
+                        scheduleFedimintBridgeRestart("log stream ended");
+                    }
+                }
             }
         }, "chama-fedimint-bridge-log");
         thread.setDaemon(true);
@@ -118,11 +138,41 @@ public class MainActivity extends BridgeActivity {
     }
 
     private synchronized void stopFedimintBridge() {
+        fedimintBridgeStopping = true;
+        fedimintBridgeHandler.removeCallbacks(fedimintBridgeRestartRunnable);
         if (fedimintBridgeProcess == null) {
             return;
         }
         fedimintBridgeProcess.destroy();
         fedimintBridgeProcess = null;
+    }
+
+    private synchronized void scheduleFedimintBridgeRestart(String reason) {
+        if (fedimintBridgeStopping) {
+            return;
+        }
+
+        fedimintBridgeRestartAttempts += 1;
+        long delayMs = Math.min(
+            FEDIMINT_BRIDGE_MAX_RESTART_DELAY_MS,
+            1_000L << Math.min(fedimintBridgeRestartAttempts - 1, 5)
+        );
+        Log.w(
+            TAG,
+            "Scheduling Native Fedimint bridge restart in " + delayMs + "ms after " + reason
+        );
+        fedimintBridgeHandler.removeCallbacks(fedimintBridgeRestartRunnable);
+        fedimintBridgeHandler.postDelayed(fedimintBridgeRestartRunnable, delayMs);
+    }
+
+    private void scheduleFedimintBridgeStableReset(Process process) {
+        fedimintBridgeHandler.postDelayed(() -> {
+            synchronized (MainActivity.this) {
+                if (fedimintBridgeProcess == process && process.isAlive()) {
+                    fedimintBridgeRestartAttempts = 0;
+                }
+            }
+        }, FEDIMINT_BRIDGE_STABLE_MS);
     }
 
     private void clearWebViewCacheAfterAppUpdate() {

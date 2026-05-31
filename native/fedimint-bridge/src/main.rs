@@ -25,6 +25,7 @@ use fedimint_core::core::OperationId;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::secp256k1::PublicKey;
+use fedimint_ln_client::common::LightningGateway;
 use fedimint_ln_client::{
     LightningClientInit, LightningClientModule, LnReceiveState, OutgoingLightningPayment,
 };
@@ -497,7 +498,9 @@ impl Bridge {
             .await
             .context("failed to join federation")?;
 
-        Ok(Arc::new(client))
+        let client = Arc::new(client);
+        self.warm_gateway_cache(&client).await;
+        Ok(client)
     }
 
     async fn open(&self) -> Result<ClientHandleArc> {
@@ -518,7 +521,9 @@ impl Bridge {
             .await
             .context("failed to open Fedimint client")?;
 
-        Ok(Arc::new(client))
+        let client = Arc::new(client);
+        self.warm_gateway_cache(&client).await;
+        Ok(client)
     }
 
     async fn open_or_join(&self, invite_code: &str) -> Result<ClientHandleArc> {
@@ -565,6 +570,26 @@ impl Bridge {
         }
 
         Ok(())
+    }
+
+    /// Best-effort: refresh the gateway cache right after a successful
+    /// open/join, while the guardians are known-reachable, so funding-time
+    /// gateway selection can hit a warm cache instead of forcing a live
+    /// guardian RPC at the worst possible moment. Never fails the caller -
+    /// a transient warm failure is logged and ignored.
+    async fn warm_gateway_cache(&self, client: &ClientHandleArc) {
+        match client.get_first_module::<LightningClientModule>() {
+            Ok(ln) => {
+                if let Err(error) = ln.update_gateway_cache().await {
+                    eprintln!(
+                        "warm_gateway_cache: best-effort gateway cache refresh failed (continuing): {error:#}"
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("warm_gateway_cache: no Lightning module to warm: {error:#}");
+            }
+        }
     }
 
     async fn list_gateways(
@@ -625,10 +650,9 @@ impl Bridge {
         force_internal: bool,
     ) -> Result<InvoiceOutput> {
         let ln = client.get_first_module::<LightningClientModule>()?;
-        let gateway = ln
-            .get_gateway(gateway_id, force_internal)
-            .await
-            .context("failed to select gateway")?;
+        let gateway = self
+            .select_receive_gateway(&ln, gateway_id, force_internal)
+            .await?;
         let description = Description::new(description).context("invalid invoice description")?;
         let (operation_id, invoice, _) = ln
             .create_bolt11_invoice(
@@ -645,6 +669,82 @@ impl Bridge {
             operation_id,
             invoice: invoice.to_string(),
         })
+    }
+
+    async fn select_receive_gateway(
+        &self,
+        ln: &LightningClientModule,
+        gateway_id: Option<PublicKey>,
+        force_internal: bool,
+    ) -> Result<Option<LightningGateway>> {
+        if gateway_id.is_some() || force_internal {
+            return self
+                .get_gateway_with_retries(ln, gateway_id, force_internal, "invoice")
+                .await
+                .context(
+                    "Couldn't reach the requested federation Lightning gateway to create a receive invoice - \
+                     no invoice was created and no sats moved.",
+                );
+        }
+
+        let mut refresh_error: Option<String> = None;
+        for attempt in 1..=3 {
+            match ln.update_gateway_cache().await {
+                Ok(()) => {
+                    refresh_error = None;
+                    break;
+                }
+                Err(error) => {
+                    refresh_error = Some(format!("{error:#}"));
+                    if attempt < 3 {
+                        eprintln!(
+                            "invoice: gateway cache refresh retry {attempt} after a transient failure: {error:#}"
+                        );
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                    }
+                }
+            }
+        }
+
+        match ln.select_available_gateway(None, None).await {
+            Ok(gateway) => {
+                let gateway_id = gateway.gateway_id;
+                eprintln!("invoice: selected reachable cached gateway {gateway_id}");
+                Ok(Some(gateway))
+            }
+            Err(select_error) => {
+                if let Some(refresh_error) = refresh_error {
+                    bail!(
+                        "Couldn't reach the federation's Lightning gateway to create a receive invoice - \
+                         no invoice was created and no sats moved. Gateway cache refresh failed: {refresh_error}; \
+                         cached gateway selection also failed: {select_error:#}"
+                    );
+                }
+
+                Err(select_error).context(
+                    "Couldn't find a reachable federation Lightning gateway to create a receive invoice - \
+                     no invoice was created and no sats moved.",
+                )
+            }
+        }
+    }
+
+    async fn get_gateway_with_retries(
+        &self,
+        ln: &LightningClientModule,
+        gateway_id: Option<PublicKey>,
+        force_internal: bool,
+        operation: &str,
+    ) -> Result<Option<LightningGateway>> {
+        let mut gateway_result = ln.get_gateway(gateway_id, force_internal).await;
+        let mut attempt = 1u32;
+        while gateway_result.is_err() && attempt < 3 {
+            eprintln!("{operation}: gateway selection retry {attempt} after a transient failure");
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            gateway_result = ln.get_gateway(gateway_id, force_internal).await;
+            attempt += 1;
+        }
+        gateway_result
     }
 
     async fn await_invoice(
