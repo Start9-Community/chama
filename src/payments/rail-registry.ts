@@ -446,8 +446,20 @@ export function phoneNetworksForCommunity(slug: string | null | undefined): Rail
   return railsForCommunity(slug).filter(isPhoneShaped);
 }
 
+// #1: US-leaning Chamas (GBF, and Global USD / us-blf) almost certainly mean a
+// US user, so Create's payment picker should lead with US rails rather than the
+// global/Africa tail. These are ranked ahead of everything (including the
+// phone-number meta rail) for just these community slugs; every other community
+// is completely unaffected.
+const US_LEANING_COMMUNITY_SLUGS = new Set(["us-gbf", "us-blf", "global-usd"]);
+const US_FIRST_RAIL_KEYS = ["strike", "cashtag", "zelle", "bank-transfer"];
+
 function railCommunityRank(rail: Rail, slug: string | null | undefined): number {
   const registryIndex = RAIL_REGISTRY.findIndex(r => r.key === rail.key);
+  if (slug && US_LEANING_COMMUNITY_SLUGS.has(slug)) {
+    const usIndex = US_FIRST_RAIL_KEYS.indexOf(rail.key);
+    if (usIndex >= 0) return -100 + usIndex;
+  }
   if (rail.key === "phone-number") return registryIndex / 1000;
   const local = slug && rail.region?.includes(slug);
   if (local) return 100 + registryIndex / 1000;

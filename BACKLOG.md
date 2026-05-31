@@ -411,6 +411,41 @@ Move these into a target section once the shape is clear.
 
 ---
 
+## Field-test asks (post-v1.2.12, from APK / Tauri / browser smoke)
+
+- [x] **#1 — US rails lead for US-leaning Chamas.** When the selected *Chama*
+      (not the federation) is GBF (`us-gbf`), Global USD (`us-blf`), or
+      `global-usd`, Create's payment picker now leads with Strike, Cash App
+      ($cashtag), Zelle, and bank transfer — US users almost certainly want
+      these. Pure rail-registry ranking rule (`railCommunityRank`); every other
+      community unaffected. Shipped v1.2.13.
+
+- [ ] **#2 — Landscape / desktop two-sided views → folded into #9.** Make the
+      desktop view equal a mobile *landscape* view. In landscape, split two-up
+      (info left, info right) to use the extra real estate for trade detail +
+      settings visibility. Browse, Create, and Me each get their own distinct
+      two-sided layout. Pure UI/UX; sized with #9 landscape.
+
+- [ ] **#3 — Create-form fiat toggle broken ON TAURI ONLY.** APK and browser
+      toggle sats↔fiat correctly during Create; Tauri shows only sats for the
+      "BTC" amount entered (e.g. "BTC 12"). The BTC/USD median price itself
+      works on Tauri, so it's the toggle / currency-selector state, not the rate
+      fetch — investigate localized to the Tauri webview. PRODUCT DIRECTION
+      recorded alongside: a bill-pay / fiat listing should be priced and shown
+      in the **creator's own Chama currency** for everyone — hardcode it so a
+      lurker from another Chama sees the creator's currency (what the creator
+      expects to receive), not a converted estimate in their own. This would
+      SUPPRESS the viewer-currency "≈" estimate (added v1.2.8) for these
+      listings — write the call in DECISIONS.md before coding it.
+
+- [ ] **#4 — Suggest + match payment methods before lock.** If a buyer (before
+      joining) or the locker has no saved payment method, prompt them to add one
+      instead of the generic "waiting…" copy — for BOTH buyer and seller — and
+      LITERALLY MATCH them on a shared rail so the two sides agree on how the
+      fiat moves. Lock-flow UX.
+
+---
+
 ## Process Notes
 
 - Items move out of this file via commit messages. When a backlog item is

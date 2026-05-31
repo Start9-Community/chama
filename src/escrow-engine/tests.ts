@@ -3003,6 +3003,15 @@ console.log("\n── RAIL REGISTRY ──");
     "ke-kes community also shows Orange Money for cross-Africa sellers");
   assert(kenya.findIndex(r => r.key === "m-pesa") < kenya.findIndex(r => r.key === "wave"),
     "ke-kes keeps local rails ahead of the cross-Africa tail");
+  // Field-test ask #1: US-leaning Chamas lead with US rails.
+  assert(railsForCommunity("us-gbf").slice(0, 4).map(r => r.key).join(",") === "strike,cashtag,zelle,bank-transfer",
+    "GBF Chama leads with US rails: Strike, Cash App, Zelle, bank transfer");
+  assert(railsForCommunity("global-usd").slice(0, 4).map(r => r.key).join(",") === "strike,cashtag,zelle,bank-transfer",
+    "Global USD Chama leads with the same US rails");
+  assert(railsForCommunity("us-blf").slice(0, 4).map(r => r.key).join(",") === "strike,cashtag,zelle,bank-transfer",
+    "Global · USD (us-blf) leads with the same US rails");
+  assert(!railsForCommunity("ke-kes").slice(0, 4).map(r => r.key).includes("strike"),
+    "A non-US Chama (Kenya) does not promote US rails to the top");
   const tanzania = railsForCommunity("tz-tzs");
   assert(tanzania.some(r => r.key === "m-pesa"),
     "tz-tzs community shows M-Pesa");
