@@ -78,6 +78,13 @@ import {
   buildEscrowFilter,
 } from "./event-parser.js";
 import {
+  remainingStock,
+  unsoldStock,
+  isSoldOut,
+  isLastUnitContested,
+  childCommitsStock,
+} from "./storefront.js";
+import {
   EscrowClient,
   type Signer,
   type UnsignedEvent,
@@ -1206,6 +1213,90 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
         "LOCK on an uncapped legacy item accepts any in-range quantity");
     }
   }
+}
+
+// 3k.2. #7 Stage 2a — pure remainingStock accountant (multi-unit storefront).
+{
+  const parent = {
+    ...(applyEvent(null, createEvent({ stock: 5 })) as any).state,
+    id: "parent_A",
+    stock: 5,
+  } as EscrowState;
+  const child = (
+    parentId: string,
+    status: EscrowStatus,
+    claimedQuantity: number,
+    holdExpiresAt?: number,
+  ): EscrowState => ({
+    ...(applyEvent(null, createEvent({ claimedQuantity })) as any).state,
+    parent: parentId,
+    claimedQuantity,
+    status,
+    joinHolds: holdExpiresAt !== undefined
+      ? { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER_PK, joinedAt: NOW, expiresAt: holdExpiresAt, eventId: "h" } }
+      : {},
+  }) as EscrowState;
+  const t = NOW;
+
+  assert(remainingStock(parent, [], t) === 5, "Storefront: empty → full stock (5)");
+  assert(remainingStock(parent, [child("parent_A", EscrowStatus.LOCKED, 2)], t) === 3,
+    "Storefront: one locked child of 2 → 3 left");
+  assert(remainingStock(parent, [
+    child("parent_A", EscrowStatus.LOCKED, 2),
+    child("parent_A", EscrowStatus.CREATED, 1, t + 600),
+  ], t) === 2, "Storefront: locked 2 + an actively-held 1 → 2 left");
+  assert(remainingStock(parent, [child("parent_A", EscrowStatus.CREATED, 1, t - 1000)], t) === 5,
+    "Storefront: an expired-hold CREATED child frees its unit");
+  assert(remainingStock(parent, [child("parent_A", EscrowStatus.CANCELLED, 2)], t) === 5,
+    "Storefront: a cancelled child frees its units");
+  assert(remainingStock(parent, [child("parent_A", EscrowStatus.COMPLETED, 2)], t) === 3,
+    "Storefront: a completed child stays counted (sold)");
+  assert(remainingStock(parent, [child("parent_B", EscrowStatus.LOCKED, 3)], t) === 5,
+    "Storefront: a different parent's child is ignored");
+  assert(remainingStock(parent, [
+    child("parent_A", EscrowStatus.LOCKED, 3),
+    child("parent_A", EscrowStatus.LOCKED, 3),
+  ], t) === 0, "Storefront: overcommit floors remaining at 0");
+
+  assert(childCommitsStock(child("parent_A", EscrowStatus.LOCKED, 1), t),
+    "childCommitsStock: a locked child commits its unit");
+  assert(!childCommitsStock(child("parent_A", EscrowStatus.CREATED, 1, t - 1000), t),
+    "childCommitsStock: a lapsed-hold CREATED child does not commit");
+
+  // The last-unit race: stock 1, two live holds both reserve it → 0 remaining
+  // (the overcommit the design resolves optimistically via refund).
+  const single = {
+    ...(applyEvent(null, createEvent({ stock: 1 })) as any).state,
+    id: "parent_S",
+    stock: 1,
+  } as EscrowState;
+  assert(remainingStock(single, [
+    child("parent_S", EscrowStatus.CREATED, 1, t + 600),
+    child("parent_S", EscrowStatus.CREATED, 1, t + 600),
+  ], t) === 0, "Storefront: two buyers racing the last unit both reserve it (remaining 0)");
+  assert(isLastUnitContested(single, [child("parent_S", EscrowStatus.CREATED, 1, t + 600)], t),
+    "isLastUnitContested: 1 stock with one live hold is the contested last unit");
+  assert(!isLastUnitContested(parent, [], t),
+    "isLastUnitContested: a 5-stock storefront with no holds is not contested");
+
+  // Undefined claimedQuantity counts as exactly one unit.
+  const undefChild = {
+    ...(applyEvent(null, createEvent({})) as any).state,
+    parent: "parent_A",
+    status: EscrowStatus.LOCKED,
+  } as EscrowState;
+  assert(remainingStock(parent, [undefChild], t) === 4,
+    "Storefront: undefined claimedQuantity counts as one unit");
+
+  // unsold (only locked subtracted) vs available (held + locked subtracted).
+  assert(unsoldStock(parent, [child("parent_A", EscrowStatus.LOCKED, 2)], t) === 3,
+    "unsoldStock: locked 2 → 3 unsold");
+  assert(unsoldStock(parent, [child("parent_A", EscrowStatus.CREATED, 1, t + 600)], t) === 5,
+    "unsoldStock: a held (not locked) unit still counts as unsold");
+  assert(isSoldOut(single, [child("parent_S", EscrowStatus.LOCKED, 1)], t),
+    "isSoldOut: the only unit locked → sold out");
+  assert(!isSoldOut(single, [child("parent_S", EscrowStatus.CREATED, 1, t + 600)], t),
+    "isSoldOut: a held-but-not-locked last unit is NOT sold out (still browsable)");
 }
 
 // 3k.0. Legacy menu JOINs that carried a cart before orderFinalizedAt replay as final
