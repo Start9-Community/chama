@@ -65,7 +65,7 @@ export function TradeDetail({
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
   onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
-  onPrewarmFunding,
+  onPrewarmFunding, onRebroadcast, onForget,
 }: {
   state: EscrowState; pubkey: string;
   /** User's home community slug — drives State A vs State B subtitle
@@ -148,6 +148,15 @@ export function TradeDetail({
   /** Opens Me › Advanced Settings focused on the NWC wallets section.
    *  Distinct from onOpenSettings (which opens saved Payment Handles). */
   onOpenNwcSettings?: () => void;
+  /** Re-broadcast this trade's full event chain to today's relays — heals a
+   *  "ghost" trade the counterparty can't see (events never reached their
+   *  relays). Surfaced in the Advanced event-chain panel. Resolves with how
+   *  many of the chain's events at least one relay accepted. */
+  onRebroadcast?: (escrowId: string) => Promise<{ published: number; total: number }>;
+  /** Forget this trade locally (drop saved pointer + hide from the list) for
+   *  unrecoverable ghosts. Money stays in escrow; re-loadable by ID. App
+   *  navigates back to the list after this resolves. */
+  onForget?: (escrowId: string) => void;
 }) {
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
@@ -166,6 +175,9 @@ export function TradeDetail({
   const [voting, setVoting] = useState(false);
   const [joining, setJoining] = useState(false);
   const [locking, setLocking] = useState(false);
+  // Advanced "re-broadcast / heal" — idle → broadcasting → a result line.
+  const [rebroadcasting, setRebroadcasting] = useState(false);
+  const [rebroadcastResult, setRebroadcastResult] = useState<string | null>(null);
 
   // v1.2.4: direct-NWC paths for Fund + Claim. When the user has a
   // saved NWC wallet, the action buttons skip the chooser modal and
@@ -2346,6 +2358,77 @@ export function TradeDetail({
             </div>
           ))}
         </div>
+        {onRebroadcast && (
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${T.border}` }}>
+            <button
+              type="button"
+              disabled={rebroadcasting}
+              onClick={async () => {
+                setRebroadcasting(true);
+                setRebroadcastResult(null);
+                try {
+                  const { published, total } = await onRebroadcast(state.id);
+                  setRebroadcastResult(
+                    total === 0
+                      ? "Nothing cached to re-broadcast on this device."
+                      : `Re-published ${published}/${total} events. If the other party couldn't see this trade, they can load it now.`,
+                  );
+                } catch (e) {
+                  setRebroadcastResult(`Re-broadcast failed: ${e instanceof Error ? e.message : String(e)}`);
+                } finally {
+                  setRebroadcasting(false);
+                }
+              }}
+              style={{
+                background: "transparent",
+                border: `1px solid ${T.border}`,
+                borderRadius: T.r,
+                color: T.muted,
+                cursor: rebroadcasting ? "default" : "pointer",
+                fontFamily: T.mono,
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0.5,
+                opacity: rebroadcasting ? 0.6 : 1,
+                padding: "8px 12px",
+                width: "100%",
+              }}
+            >
+              {rebroadcasting ? "RE-BROADCASTING…" : "↻ RE-BROADCAST / HEAL THIS TRADE"}
+            </button>
+            <p style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, margin: "8px 2px 0" }}>
+              {rebroadcastResult
+                ?? "Re-publishes this trade's full event chain to today's relays. Use it if a counterparty can't see a trade you can — money stays in escrow either way."}
+            </p>
+          </div>
+        )}
+        {onForget && (
+          <div style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              onClick={() => {
+                const ok = window.confirm(
+                  "Forget this trade on this device?\n\nIt disappears from your list but your money stays in 2-of-3 escrow — nothing is cancelled or lost. You can re-load it anytime by pasting its trade ID.",
+                );
+                if (ok) onForget(state.id);
+              }}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: T.red,
+                cursor: "pointer",
+                fontFamily: T.mono,
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: 0.5,
+                padding: "6px 2px",
+                textDecoration: "underline",
+              }}
+            >
+              FORGET THIS TRADE LOCALLY
+            </button>
+          </div>
+        )}
       </details>
     </div>
   );

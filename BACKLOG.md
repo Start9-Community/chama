@@ -26,10 +26,10 @@ candidate list with the older roadmap.
       Me display them under "Payout destinations." Landed in the
       post-v0.6.2 wave.
 
-- [ ] **PROD_ENCRYPTION flip.** Flip the production encryption flag and
+- [x] **PROD_ENCRYPTION flip.** Flip the production encryption flag and
       verify NIP-44 works end-to-end across seeded communities before v1.
 
-- [ ] **getchama.app / app.getchama.app migration.** Retire
+- [x] **getchama.app / app.getchama.app migration.** Retire
       `chama.satoshimarket.app`, update deploy targets and Capacitor
       metadata, and keep a 301 redirect from the old host for a grace
       window. Marketing metadata has started moving, but deploy/release
@@ -82,7 +82,7 @@ candidate list with the older roadmap.
       repeatedly can leave old auto-credit timers alive in sim mode. Cancel
       timers on modal dismissal/cleanup.
 
-- [ ] **APK rebuild + Zapstore listing.** Rebuild and list after the core
+- [x] **APK rebuild + Zapstore listing.** Rebuild and list after the core
       product surface is stable enough to invite non-developer testers.
 
 - [ ] **Remove browser-default blue button glow.** Smoke testing surfaced a
@@ -231,7 +231,7 @@ codebase. Keep these here briefly so the consolidation has memory.
       Bill Pay fee menus, lending terms, and raw escrow fee tiers without
       changing the escrow envelope.
 
-- [ ] **Me dashboard for sellers and arbiters.** Split Me into operational
+- [x] **Me dashboard for sellers and arbiters.** Split Me into operational
       queues instead of treating Browse banners as a dashboard. Sellers get
       menu/listing inventory, incoming orders, lock-window holds, locked
       trades, votes, claims, and history. Official community arbiters see
@@ -257,7 +257,17 @@ real collateral; make it legible. Read-only v1 surface; no UI work
 until election events exist.
 
 - [ ] **Recurring payments unlock.** Reveal subscription listings only for
-      graduated sellers once aggregate ratings are populated.
+      graduated sellers once aggregate ratings are populated. Currently hidden;
+      gating for graduated sellers is blocked on the Ratings primitive below.
+
+- [ ] **Ratings primitive (core — unblocks graduation).** Implement the actual
+      per-counterparty rating capture + aggregation that `canOfferSubscription`
+      and graduated-seller features already assume (5 positive / 0 negative =
+      graduated). Natural capture point: the post-claim / complete screen, where
+      the off-ramp also wants to live (see docs/DESIGN-7 + the bridge/off-ramp
+      notes). Prerequisite for recurring payments, graduated capabilities, and
+      the parked external-rail re-enable. The Me dashboard already shows the
+      "No ratings yet" placeholder. Provenance: user ask, field testing.
 
 - [ ] **Bill Pay subscriptions for graduated bitcoiners.** Convenience
       layer for recurring family bills; one-shot Bill Pay remains enough
@@ -270,7 +280,7 @@ until election events exist.
 - [ ] **Storefront per npub.** Group open listings by seller with kind:0
       metadata as a shopfront header.
 
-- [ ] **Fiat-secondary display.** Sat-primary listings with currency-aware
+- [x] **Fiat-secondary display.** Sat-primary listings with currency-aware
       fiat estimates and Browse filters. Use production feedback, not a
       conference deadline, to choose which fiat displays matter first.
 
@@ -281,7 +291,7 @@ until election events exist.
 - [ ] **EcashProvider interface.** Abstract the bearer-cash backend once a
       second provider is concrete enough to shape the interface.
 
-- [ ] **NWC advanced wallet automation.** After the v0.7.0 NWC foundation,
+- [x] **NWC advanced wallet automation.** After the v0.7.0 NWC foundation,
       evaluate deeper NWC flows beyond basic fund/claim: recurring payments,
       saved permissions, policy limits, and richer wallet capability checks.
 
@@ -393,11 +403,11 @@ Move these into a target section once the shape is clear.
       `wss://relay.satoshimarket.app`, NIP-44 support, timeout/retry copy,
       and session restoration before promoting it.
 
-- [ ] **Multi-relay loadEscrow over-eager pruning.** v0.1.88 smoke caught
+- [x] **Multi-relay loadEscrow over-eager pruning.** v0.1.88 smoke caught
       a "Removed broken escrow from saved list" warning during chain
       replay. Escalate if it reproduces.
 
-- [ ] **OPFS-bound-to-previous-npub orphan ecash detection.** Detect and
+- [x] **OPFS-bound-to-previous-npub orphan ecash detection.** Detect and
       surface the case where npub A leaves ecash in browser OPFS and npub
       B logs into the same browser.
 
@@ -443,6 +453,23 @@ Move these into a target section once the shape is clear.
       instead of the generic "waiting…" copy — for BOTH buyer and seller — and
       LITERALLY MATCH them on a shared rail so the two sides agree on how the
       fiat moves. Lock-flow UX.
+
+- [x] **Ghost / un-surfacing trades from a broken-state era.** (v1.2.14) A
+      handful of trades (2-3) made while the app/bridge was in a broken state
+      surface for one participant (the seller) but NOT the other — the buyer
+      npub never sees it. Root cause: the escrow event chain reached too few
+      relays during the outage (or some events live only in one participant's
+      local cache), so the buyer's subscription can't discover or fully replay
+      it. `loadEscrow(id)` + `LoadTradeInput` can recover IF the events are on
+      the current relays. Shipped the durable fix: `EscrowClient.rebroadcastEscrow(id)`
+      merges the cached raw chain (`rawEvents`) with the replayed `state.eventChain`,
+      deduped by id, and best-effort re-publishes every event to today's relay
+      set (a single relay rejection can't abort the heal). Surfaced as
+      "↻ RE-BROADCAST / HEAL THIS TRADE" in TradeDetail's Advanced event-chain
+      panel; any participant who can see the trade heals it for the others. Plus
+      a "FORGET THIS TRADE LOCALLY" escape hatch (`forgetEscrow` → drops saved
+      pointer + hides from list, money stays in escrow, re-loadable by ID) for
+      unrecoverable ghosts. +11 tests. Provenance: user field report.
 
 ---
 

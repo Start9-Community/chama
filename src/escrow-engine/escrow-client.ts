@@ -310,6 +310,34 @@ export class EscrowClient {
     await this.relayManager.publish(event);
   }
 
+  /** Re-broadcast a trade's full cached event chain to the current relays —
+   *  heals a "ghost" trade whose events never reached a counterparty's relays
+   *  (e.g. created during an outage / broken-state era, so the other party's
+   *  subscription can't discover or replay it). Any participant who can see the
+   *  trade holds the chain (cached rawEvents + the replayed state's eventChain),
+   *  so calling this re-publishes every event to today's relay set and the
+   *  trade self-heals for everyone. Best-effort: each event is published
+   *  independently and a per-event relay rejection is tolerated, so one bad
+   *  event can't abort the heal. Returns how many of the chain's events were
+   *  accepted by at least one relay. */
+  async rebroadcastEscrow(escrowId: string): Promise<{ published: number; total: number }> {
+    const chain = mergeRawEventsById(
+      this.rawEvents.get(escrowId) ?? [],
+      this.states.get(escrowId)?.eventChain.map(event => event.raw) ?? [],
+    );
+    let published = 0;
+    for (const event of chain) {
+      try {
+        await this.relayManager.publish(event);
+        published++;
+      } catch (error) {
+        console.debug(`[escrow] rebroadcastEscrow ${escrowId}: relay rejected ${event.id}`, error);
+      }
+    }
+    console.debug(`[escrow] rebroadcastEscrow ${escrowId}: re-published ${published}/${chain.length} events`);
+    return { published, total: chain.length };
+  }
+
   /**
    * One-shot query for events matching a filter. Resolves after EOSE
    * from all connected relays, or after the timeout.

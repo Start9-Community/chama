@@ -1777,6 +1777,86 @@ console.log("\n── CHAT ──");
   assertErr(applyEvent(state, badChat), "NOT_PARTICIPANT", "Non-participant can't chat");
 }
 
+// ── 8b. REBROADCAST / HEAL (re-publish a ghost trade's cached chain) ──────
+console.log("\n── REBROADCAST / HEAL (re-publish cached chain to today's relays) ──");
+{
+  const healSigner = {
+    async getPublicKey() { return SELLER_PK; },
+    async signEvent(event: UnsignedEvent) {
+      return { ...event, id: "heal_signed", pubkey: SELLER_PK, sig: "sig" } as NostrEvent;
+    },
+    async nip44Encrypt(_plaintext: string, recipientPubkey: string) { return `cipher:${recipientPubkey}`; },
+    async nip44Decrypt(ciphertext: string) { return ciphertext; },
+  };
+  const rawEv = (id: string): NostrEvent => ({
+    id, kind: EscrowEventKind.CREATE, pubkey: SELLER_PK, created_at: NOW, tags: [], content: "", sig: "sig",
+  } as NostrEvent);
+
+  // (1) Re-publishes the full cached rawEvents chain, in chain order.
+  {
+    const ghostId = "sm_ghost_heal_1";
+    const client = new EscrowClient(healSigner, { relays: [] });
+    const captured: NostrEvent[] = [];
+    (client as any).relayManager.publish = async (event: NostrEvent) => {
+      captured.push(event);
+      return { accepted: 1, rejected: 0, errors: [] };
+    };
+    (client as any).rawEvents.set(ghostId, [rawEv("g1"), rawEv("g2"), rawEv("g3")]);
+    const res = await client.rebroadcastEscrow(ghostId);
+    assert(res.total === 3, "rebroadcast: total counts the full cached chain");
+    assert(res.published === 3, "rebroadcast: every cached event is re-published");
+    assert(captured.map(e => e.id).join(",") === "g1,g2,g3",
+      "rebroadcast: re-publishes the cached events in chain order");
+  }
+
+  // (2) Merges cached rawEvents with the replayed state's eventChain, deduped by id.
+  {
+    const ghostId = "sm_ghost_heal_2";
+    const client = new EscrowClient(healSigner, { relays: [] });
+    const captured: NostrEvent[] = [];
+    (client as any).relayManager.publish = async (event: NostrEvent) => {
+      captured.push(event);
+      return { accepted: 1, rejected: 0, errors: [] };
+    };
+    (client as any).rawEvents.set(ghostId, [rawEv("g1"), rawEv("g2"), rawEv("g3")]);
+    (client as any).states.set(ghostId, { id: ghostId, eventChain: [{ raw: rawEv("g2") }, { raw: rawEv("g4") }] });
+    const res = await client.rebroadcastEscrow(ghostId);
+    assert(res.total === 4, "rebroadcast: merges rawEvents + state.eventChain (g2 shared, g4 unique)");
+    assert(captured.some(e => e.id === "g4"),
+      "rebroadcast: includes an event present only in state.eventChain");
+    assert(captured.filter(e => e.id === "g2").length === 1,
+      "rebroadcast: a shared event is published once, not twice");
+  }
+
+  // (3) A per-event relay rejection doesn't abort the heal of the rest.
+  {
+    const ghostId = "sm_ghost_heal_3";
+    const client = new EscrowClient(healSigner, { relays: [] });
+    const captured: string[] = [];
+    (client as any).relayManager.publish = async (event: NostrEvent) => {
+      if (event.id === "g2") throw new Error("all relays rejected this event");
+      captured.push(event.id);
+      return { accepted: 1, rejected: 0, errors: [] };
+    };
+    (client as any).rawEvents.set(ghostId, [rawEv("g1"), rawEv("g2"), rawEv("g3")]);
+    const res = await client.rebroadcastEscrow(ghostId);
+    assert(res.total === 3, "rebroadcast: reports full chain size even when one event is rejected");
+    assert(res.published === 2, "rebroadcast: counts only events a relay accepted");
+    assert(captured.join(",") === "g1,g3",
+      "rebroadcast: one rejected event does not abort re-publishing the rest");
+  }
+
+  // (4) Nothing cached → a safe no-op (no publishes).
+  {
+    const client = new EscrowClient(healSigner, { relays: [] });
+    let calls = 0;
+    (client as any).relayManager.publish = async () => { calls++; return { accepted: 1, rejected: 0, errors: [] }; };
+    const res = await client.rebroadcastEscrow("sm_nothing_cached_here");
+    assert(res.total === 0 && res.published === 0, "rebroadcast: uncached trade resolves to 0/0");
+    assert(calls === 0, "rebroadcast: uncached trade publishes nothing");
+  }
+}
+
 // ── 9. REPLAY ─────────────────────────────────────────────────────────────
 console.log("\n── REPLAY (full happy path from event chain) ──");
 {

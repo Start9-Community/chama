@@ -339,6 +339,12 @@ export interface UseEscrowActions {
   cancel: (escrowId: string, reason?: string) => Promise<EscrowState>;
   /** Load an escrow from relays by ID */
   loadEscrow: (escrowId: string) => Promise<EscrowState | null>;
+  /** Re-broadcast a trade's cached event chain to today's relays — heals a
+   *  "ghost" trade the counterparty can't see. Returns how many events landed. */
+  rebroadcastEscrow: (escrowId: string) => Promise<{ published: number; total: number }>;
+  /** Forget a trade locally (drop saved pointer + hide from the list). Safe:
+   *  money stays in escrow and the trade is re-loadable by ID. */
+  forgetEscrow: (escrowId: string) => void;
   /** Fetch self-published kind:0 profile names for visible participants. */
   fetchNostrProfiles: (pubkeys: string[]) => Promise<NostrProfileNameMap>;
   /** Trigger haptic feedback */
@@ -1371,6 +1377,25 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       }));
       return null;
     }
+  }, []);
+
+  const rebroadcastEscrow = useCallback(async (escrowId: string) => {
+    const client = requireClient();
+    return client.rebroadcastEscrow(escrowId);
+  }, []);
+
+  /** Forget a trade locally: drop its saved pointer and hide it from the
+   *  in-memory list. For unrecoverable "ghost" trades the user wants out of
+   *  their view. Non-custodial-safe — money lives in 2-of-3 escrow regardless,
+   *  and the trade can always be re-loaded by ID, which re-saves the pointer. */
+  const forgetEscrow = useCallback((escrowId: string) => {
+    removeEscrowId(escrowId, stateRef.current?.pubkey ?? null);
+    setState(prev => {
+      if (!prev.escrows.has(escrowId)) return prev;
+      const next = new Map(prev.escrows);
+      next.delete(escrowId);
+      return { ...prev, escrows: next };
+    });
   }, []);
 
   const fetchNostrProfiles = useCallback(async (pubkeys: string[]): Promise<NostrProfileNameMap> => {
@@ -2501,6 +2526,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     sendChat,
     cancel: cancelAction,
     loadEscrow,
+    rebroadcastEscrow,
+    forgetEscrow,
     fetchNostrProfiles,
     vibrate,
     initFedimint,

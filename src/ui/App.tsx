@@ -1481,6 +1481,18 @@ export default function App() {
                 setToast({ message: e.message || "Failed to send", type: "error" })
               );
             }}
+            // Re-broadcast / heal a "ghost" trade: re-publish its cached event
+            // chain to today's relays so a counterparty who can't see it
+            // (events never reached their relays) can finally load + claim it.
+            onRebroadcast={(escrowId) => actions.rebroadcastEscrow(escrowId)}
+            // Forget an unrecoverable ghost locally, then leave the now-empty
+            // detail view. Money stays in escrow; re-loadable by ID.
+            onForget={(escrowId) => {
+              actions.forgetEscrow(escrowId);
+              setToast({ message: "Trade forgotten on this device — money stays in escrow.", type: "success" });
+              setView(detailBackView);
+              setSelectedId(null);
+            }}
             // v1.2.4: direct-NWC Fund. Saved-NWC users skip the
             // AtomicFundingModal chooser entirely; the button on
             // TradeDetail dispatches fundAndLock with NWC params and
