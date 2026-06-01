@@ -219,6 +219,12 @@ function validateCreatePayload(data: unknown): data is CreatePayload {
   if (d.stock !== undefined && (!isPositiveNumber(d.stock) || !Number.isInteger(d.stock))) return false;
   if (d.parent !== undefined && (typeof d.parent !== "string" || d.parent.length === 0)) return false;
   if (d.claimedQuantity !== undefined && (!isPositiveNumber(d.claimedQuantity) || !Number.isInteger(d.claimedQuantity))) return false;
+  if (d.sellerPubkey !== undefined && (typeof d.sellerPubkey !== "string" || d.sellerPubkey.length === 0)) return false;
+  // Stage 2b: a CHILD purchase (parent set) must name its seller. The buyer
+  // publishes the child CREATE (Option A — seller offline), so without the
+  // carried seller pubkey there's no SELLER to seat and the child could never
+  // lock to the right counterparty. Reject the malformed child outright.
+  if (d.parent !== undefined && (typeof d.sellerPubkey !== "string" || d.sellerPubkey.length === 0)) return false;
   return (
     d.type === "escrow:create" &&
     typeof d.description === "string" &&

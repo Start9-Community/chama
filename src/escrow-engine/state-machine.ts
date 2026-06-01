@@ -255,13 +255,27 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
   //   p2p-trade → seller creates (offering to sell sats for fiat)
   //   marketplace → seller creates (listing an item for sale)
   //   lending → buyer creates (borrower requesting a loan)
-  const initiatorRole = p.category === "lending"
+  //
+  // #7 multi-unit storefront — a CHILD purchase inverts the marketplace
+  // convention. The child carries `parent` (the listing's id) and the
+  // parent's `sellerPubkey`; the BUYER publishes the child CREATE so the
+  // seller needn't be online for each sale (Option A). The signer is the
+  // buyer; the real seller is seated up front from the carried pubkey, so the
+  // buyer can LOCK immediately and the SSS seller-share routes to the seller
+  // (who discovers the child later via the `#parent` filter). A wrong/forged
+  // sellerPubkey only locks the buyer's own funds to a counterparty that
+  // won't fulfil → recovered via the existing refund/expiry path; no loss.
+  const isChildPurchase = p.parent !== undefined && p.sellerPubkey !== undefined;
+
+  const initiatorRole = (p.category === "lending" || isChildPurchase)
     ? Role.BUYER
     : Role.SELLER;
 
   const participants = {
     [Role.BUYER]: initiatorRole === Role.BUYER ? event.pubkey : null,
-    [Role.SELLER]: initiatorRole === Role.SELLER ? event.pubkey : null,
+    [Role.SELLER]: isChildPurchase
+      ? p.sellerPubkey!
+      : (initiatorRole === Role.SELLER ? event.pubkey : null),
     [Role.ARBITER]: null as string | null,
   };
 

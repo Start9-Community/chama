@@ -83,6 +83,7 @@ import {
   isSoldOut,
   isLastUnitContested,
   childCommitsStock,
+  buildChildCreateParams,
 } from "./storefront.js";
 import {
   EscrowClient,
@@ -162,7 +163,15 @@ import {
   railsForCommunity,
   phoneNetworksForCommunity,
   railAllowsPublicHandle,
+  matchRails,
+  toRailKey,
 } from "../payments/rail-registry.js";
+import {
+  getForgottenEscrowIds,
+  isForgottenEscrowId,
+  addForgottenEscrowId,
+  unforgetEscrowId,
+} from "../storage/forgotten-trades.js";
 import {
   SAVED_HANDLES_STORAGE_KEY,
   SAVED_HANDLES_BACKUP_STORAGE_KEY,
@@ -1299,6 +1308,182 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
     "isSoldOut: a held-but-not-locked last unit is NOT sold out (still browsable)");
 }
 
+// 3k.3. #7 Stage 2b — child spawn (buildChildCreateParams) + role inversion +
+// lock-readiness. The buyer publishes a child CREATE referencing the parent and
+// carrying the parent's seller, so the child is a full 2-of-3 escrow the buyer
+// can LOCK at once (Option A — the seller needn't be online per sale).
+{
+  const throws = (fn: () => unknown): boolean => { try { fn(); return false; } catch { return true; } };
+  const mktParent = (applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
+    type: "escrow:create", description: "Hand-woven baskets", amountMsats: 50_000_000,
+    fiatAmount: 50, fiatCurrency: "USD", category: "marketplace", mintUrl: "fed11qparent",
+    platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, arbiterFeeMsats: 1_000_000,
+    paymentMethods: ["Zelle"], expirySeconds: 86400, communityArbiters: [ARBITER_PK],
+    fulfillment: "physical", stock: 5, createdAt: NOW,
+  })) as any).state as EscrowState;
+
+  // ── buildChildCreateParams: maps parent → child params, prices by qty ──
+  const cp = buildChildCreateParams(mktParent, 2);
+  assert(cp.parent === mktParent.id, "child params: parent ref = parent id");
+  assert(cp.claimedQuantity === 2, "child params: claimedQuantity carried");
+  assert(cp.sellerPubkey === SELLER_PK, "child params: parent's seller seated");
+  assert(cp.amountMsats === 100_000_000, "child params: per-unit price × quantity (50M × 2)");
+  assert(cp.fiatAmount === 100, "child params: fiat scales by quantity (50 × 2)");
+  assert(cp.fiatCurrency === "USD", "child params: inherits fiat currency");
+  assert(cp.category === "marketplace", "child params: inherits category");
+  assert(cp.mintUrl === "fed11qparent", "child params: inherits the parent's federation (mintUrl)");
+  assert(cp.arbiterFeeMsats === 1_000_000, "child params: flat arbiter fee is NOT scaled by quantity");
+  assert(JSON.stringify(cp.communityArbiters) === JSON.stringify([ARBITER_PK]),
+    "child params: inherits the community arbiter pool");
+
+  // Guard rails: malformed spawns throw rather than mint a half-formed escrow.
+  assert([0, -1, 2.5].every(q => throws(() => buildChildCreateParams(mktParent, q))),
+    "child params: rejects non-positive / non-integer quantity");
+  assert(throws(() => buildChildCreateParams({ ...mktParent, category: "p2p-trade" } as EscrowState, 1)),
+    "child params: only marketplace listings spawn children");
+  assert(throws(() => buildChildCreateParams({ ...mktParent, parent: "grandparent" } as EscrowState, 1)),
+    "child params: cannot spawn a child of a child");
+  assert(throws(() => buildChildCreateParams(
+    { ...mktParent, participants: { ...mktParent.participants, [Role.SELLER]: null } } as EscrowState, 1)),
+    "child params: a listing with no seller can't be bought from");
+
+  // ── handleCreate role inversion: buyer creates the child, seller seated ──
+  const childCreate = makeParsedEvent(EscrowEventKind.CREATE, BUYER_PK, {
+    type: "escrow:create", description: cp.description, amountMsats: cp.amountMsats,
+    fiatAmount: cp.fiatAmount, fiatCurrency: cp.fiatCurrency, category: "marketplace",
+    mintUrl: cp.mintUrl, platformFeeBps: 50, platformFeePubkey: PLATFORM_PK,
+    arbiterFeeMsats: cp.arbiterFeeMsats, paymentMethods: cp.paymentMethods, expirySeconds: 86400,
+    communityArbiters: cp.communityArbiters, fulfillment: "physical",
+    parent: cp.parent, claimedQuantity: cp.claimedQuantity, sellerPubkey: cp.sellerPubkey,
+    createdAt: NOW,
+  });
+  const childRes = applyEvent(null, childCreate);
+  if (assertOk(childRes, "child CREATE applies")) {
+    assert(childRes.state.participants[Role.BUYER] === BUYER_PK,
+      "child role: the signer (buyer) is seated as BUYER");
+    assert(childRes.state.participants[Role.SELLER] === SELLER_PK,
+      "child role: the parent's seller is seated as SELLER (lock-ready under Option A)");
+    assert(childRes.state.initiator.role === Role.BUYER,
+      "child role: the buyer is the initiator (inverted from marketplace's seller-creates)");
+    assert(childRes.state.parent === mktParent.id && childRes.state.claimedQuantity === 2,
+      "child role: parent ref + claimedQuantity land on state");
+    assert(childRes.state.stock === undefined, "child role: a child carries no stock of its own");
+  }
+
+  // Contrast: a normal marketplace listing (no parent) keeps seller-creates.
+  const normalRes = applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
+    type: "escrow:create", description: "Single basket", amountMsats: 50_000_000,
+    category: "marketplace", mintUrl: "fed11qx", platformFeeBps: 50, platformFeePubkey: PLATFORM_PK,
+    expirySeconds: 86400, fulfillment: "physical", createdAt: NOW,
+  }));
+  if (assertOk(normalRes, "normal marketplace listing applies")) {
+    assert(normalRes.state.participants[Role.SELLER] === SELLER_PK
+      && normalRes.state.participants[Role.BUYER] === null
+      && normalRes.state.initiator.role === Role.SELLER,
+      "non-child marketplace listing is unchanged: seller creates, buyer empty");
+  }
+
+  // ── Lock-readiness: the buyer LOCKs the child immediately, no prior JOIN ──
+  if (childRes.ok) {
+    const childLock = lockEvent(childCreate.raw.id, { locker: BUYER_PK, buyerPubkey: BUYER_PK, arbiterPubkey: ARBITER_PK });
+    const lockRes = applyEvent(childRes.state, childLock);
+    if (assertOk(lockRes, "child LOCK by the buyer applies (the seated seller makes it lock-ready)")) {
+      assert(lockRes.state.status === EscrowStatus.LOCKED, "child reaches LOCKED on the buyer's lock");
+    }
+  }
+
+  // ── Spawn → accountant: spawned children decrement the parent's stock ──
+  const mkChild = (status: EscrowStatus, qty: number, holdExpiresAt?: number): EscrowState => ({
+    ...(applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, BUYER_PK, {
+      type: "escrow:create", description: "c", amountMsats: 50_000_000 * qty, category: "marketplace",
+      mintUrl: "fed11qparent", platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, expirySeconds: 86400,
+      communityArbiters: [ARBITER_PK], fulfillment: "physical",
+      parent: mktParent.id, claimedQuantity: qty, sellerPubkey: SELLER_PK, createdAt: NOW,
+    })) as any).state,
+    status,
+    joinHolds: holdExpiresAt !== undefined
+      ? { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER_PK, joinedAt: NOW, expiresAt: holdExpiresAt, eventId: "h" } }
+      : {},
+  }) as EscrowState;
+  const kids = [
+    mkChild(EscrowStatus.LOCKED, 2),               // sold 2
+    mkChild(EscrowStatus.CREATED, 1, NOW + 600),   // held 1
+    mkChild(EscrowStatus.CANCELLED, 1),            // frees back
+  ];
+  assert(remainingStock(mktParent, kids, NOW) === 2,
+    "spawn→count: stock 5 − (locked 2 + held 1) = 2 available now");
+  assert(unsoldStock(mktParent, kids, NOW) === 3,
+    "spawn→count: 5 − locked 2 = 3 unsold (a held unit still counts as unsold)");
+  assert(kids.every(k => k.parent === mktParent.id),
+    "spawn→count: every spawned child references the parent listing");
+}
+
+// 3k.4. #7 Stage 6 — concurrency + replay sweep. The races the design flagged
+// as highest-risk: two buyers on the last unit, a refund freeing stock back, an
+// expired hold freeing a reservation, partial sell-through, sold-out, and
+// order-independence (replay safety). Money never moves outside each child's
+// own 2-of-3 escrow, so a wrong count is a display glitch, never a loss — the
+// floor that makes the optimistic (overcommit → refund) policy acceptable.
+{
+  const parent = (applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
+    type: "escrow:create", description: "Concert tickets", amountMsats: 10_000_000,
+    category: "marketplace", mintUrl: "fed11qp", platformFeeBps: 50, platformFeePubkey: PLATFORM_PK,
+    expirySeconds: 86400, fulfillment: "physical", stock: 3, createdAt: NOW,
+  })) as any).state as EscrowState;
+  const child = (status: EscrowStatus, qty: number, holdExpiresAt?: number): EscrowState => ({
+    ...(applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, BUYER_PK, {
+      type: "escrow:create", description: "c", amountMsats: 10_000_000 * qty, category: "marketplace",
+      mintUrl: "fed11qp", platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, expirySeconds: 86400,
+      fulfillment: "physical", parent: parent.id, claimedQuantity: qty, sellerPubkey: SELLER_PK, createdAt: NOW,
+    })) as any).state,
+    status,
+    joinHolds: holdExpiresAt !== undefined
+      ? { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER_PK, joinedAt: NOW, expiresAt: holdExpiresAt, eventId: "h" } }
+      : {},
+  }) as EscrowState;
+  const t = NOW;
+
+  // Partial sell-through: 2 locked + 1 actively held → 0 buyable now, 1 unsold.
+  const mid = [child(EscrowStatus.LOCKED, 1), child(EscrowStatus.LOCKED, 1), child(EscrowStatus.CREATED, 1, t + 600)];
+  assert(remainingStock(parent, mid, t) === 0, "Stage 6: 2 locked + 1 held of 3 → 0 buyable now");
+  assert(unsoldStock(parent, mid, t) === 1, "Stage 6: 1 unsold (the held unit isn't locked yet)");
+  assert(!isSoldOut(parent, mid, t), "Stage 6: a held last unit is NOT sold out");
+  assert(isLastUnitContested(parent, mid, t), "Stage 6: the held last unit is contested (countdown gate)");
+
+  // Two buyers race the LAST unit — both hold it. Overcommit; remaining floors
+  // at 0 and only 1 is unsold (Option A: the loser refunds, no double-sell).
+  const race = [child(EscrowStatus.LOCKED, 1), child(EscrowStatus.LOCKED, 1),
+    child(EscrowStatus.CREATED, 1, t + 600), child(EscrowStatus.CREATED, 1, t + 600)];
+  assert(remainingStock(parent, race, t) === 0, "Stage 6: two racers on the last unit → remaining floors at 0");
+  assert(unsoldStock(parent, race, t) === 1, "Stage 6: still only 1 unsold despite 2 racers (one will refund)");
+
+  // A refund frees stock back: a sold-out storefront where one lock is
+  // CANCELLED (refunded) re-opens that unit.
+  const soldOut = [child(EscrowStatus.LOCKED, 1), child(EscrowStatus.LOCKED, 1), child(EscrowStatus.LOCKED, 1)];
+  assert(isSoldOut(parent, soldOut, t), "Stage 6: all 3 locked → sold out");
+  assert(remainingStock(parent, soldOut, t) === 0 && unsoldStock(parent, soldOut, t) === 0, "Stage 6: sold out → 0/0");
+  const afterRefund = [child(EscrowStatus.LOCKED, 1), child(EscrowStatus.LOCKED, 1), child(EscrowStatus.CANCELLED, 1)];
+  assert(remainingStock(parent, afterRefund, t) === 1, "Stage 6: a refunded (cancelled) child frees its unit — re-sellable");
+  assert(!isSoldOut(parent, afterRefund, t), "Stage 6: the refund re-opens the storefront");
+
+  // An expired buyer hold frees its reservation back to available.
+  const expiredHold = [child(EscrowStatus.LOCKED, 1), child(EscrowStatus.LOCKED, 1), child(EscrowStatus.CREATED, 1, t - 1000)];
+  assert(remainingStock(parent, expiredHold, t) === 1, "Stage 6: an expired hold frees its unit");
+
+  // Replay safety: the count is order-independent (children can arrive in any
+  // order over an eventually-consistent relay set).
+  assert(remainingStock(parent, [...mid].reverse(), t) === remainingStock(parent, mid, t),
+    "Stage 6: stock count is order-independent (replay-safe)");
+
+  // A child referencing a DIFFERENT parent never touches this parent's stock.
+  const foreign = [child(EscrowStatus.LOCKED, 1), { ...child(EscrowStatus.LOCKED, 5), parent: "some-other-parent" } as EscrowState];
+  assert(remainingStock(parent, foreign, t) === 2, "Stage 6: a foreign-parent child is ignored");
+
+  // A multi-quantity child commits all its claimed units at once.
+  assert(remainingStock(parent, [child(EscrowStatus.LOCKED, 2)], t) === 1, "Stage 6: a child claiming 2 units decrements by 2");
+  assert(remainingStock(parent, [child(EscrowStatus.LOCKED, 5)], t) === 0, "Stage 6: an over-claiming child still floors at 0");
+}
+
 // 3k.0. Legacy menu JOINs that carried a cart before orderFinalizedAt replay as final
 {
   const items: MenuItem[] = [
@@ -1974,12 +2159,13 @@ console.log("\n── EVENT PARSER ──");
     type: "escrow:create", description: "Child purchase", amountMsats: 10_000_000,
     category: "marketplace", mintUrl: "fed://test", platformFeeBps: 50,
     platformFeePubkey: PLATFORM_PK, expirySeconds: 3600, createdAt: NOW,
-    parent: "parent-listing-id", claimedQuantity: 2,
+    parent: "parent-listing-id", claimedQuantity: 2, sellerPubkey: SELLER_PK,
   }), true);
   assert(okChild.ok
     && (okChild.event.payload as CreatePayload).parent === "parent-listing-id"
-    && (okChild.event.payload as CreatePayload).claimedQuantity === 2,
-    "Parser preserves a child escrow's parent + claimedQuantity");
+    && (okChild.event.payload as CreatePayload).claimedQuantity === 2
+    && (okChild.event.payload as CreatePayload).sellerPubkey === SELLER_PK,
+    "Parser preserves a child escrow's parent + claimedQuantity + sellerPubkey");
   {
     const baseCreate = {
       type: "escrow:create", description: "x", amountMsats: 10_000_000,
@@ -1994,6 +2180,14 @@ console.log("\n── EVENT PARSER ──");
       "Parser rejects an empty parent id");
     assert(!parseEscrowEvent(raw, JSON.stringify({ ...baseCreate, claimedQuantity: 0 }), true).ok,
       "Parser rejects claimedQuantity of 0");
+    // Stage 2b: a child must name its seller (buyer-initiated child needs the
+    // SELLER seated up front to be lock-ready under Option A).
+    assert(!parseEscrowEvent(raw, JSON.stringify({ ...baseCreate, parent: "p-id", claimedQuantity: 1 }), true).ok,
+      "Parser rejects a child with parent but no sellerPubkey");
+    assert(parseEscrowEvent(raw, JSON.stringify({ ...baseCreate, parent: "p-id", claimedQuantity: 1, sellerPubkey: SELLER_PK }), true).ok,
+      "Parser accepts a child with parent + sellerPubkey");
+    assert(!parseEscrowEvent(raw, JSON.stringify({ ...baseCreate, parent: "p-id", claimedQuantity: 1, sellerPubkey: "" }), true).ok,
+      "Parser rejects a child with an empty sellerPubkey");
   }
   // Reducer carries the fields onto state; legacy listings stay untouched.
   {
@@ -3162,6 +3356,86 @@ console.log("\n── RAIL REGISTRY ──");
     "Unmatched community still surfaces Wave");
   assert(!fallback.some(r => r.key === "phone-number"),
     "Phone-number meta rail itself is excluded from the network picker");
+
+  // #4 — suggest + match rails before lock. The load-bearing subtlety: a
+  // listing's paymentMethods are DISPLAY NAMES ("M-Pesa"), a buyer's saved
+  // handles are KEYS ("m-pesa"). The matcher must normalize both or nothing
+  // ever matches.
+  assert(toRailKey("strike") === "strike", "toRailKey: a key passes through");
+  assert(toRailKey("M-Pesa") === "m-pesa", "toRailKey: display name → key");
+  assert(toRailKey("$cashtag (Cash App)") === "cashtag", "toRailKey: parenthetical display name → key");
+  assert(toRailKey("Bank transfer") === "bank-transfer", "toRailKey: multi-word display name → key");
+  assert(toRailKey("Totally Unknown Rail") === "totally unknown rail", "toRailKey: unknown token → lowercased passthrough");
+
+  // The core match: seller names vs buyer keys, intersected + ranked.
+  const m1 = matchRails(["M-Pesa", "Airtel Money", "Strike"], ["m-pesa", "strike"], "ke-kes");
+  assert(JSON.stringify(m1.shared) === JSON.stringify(["m-pesa", "strike"]),
+    "matchRails: shared = seller∩buyer, normalized across name/key, ke-kes-ranked (m-pesa first)");
+  assert(JSON.stringify(m1.sellerOnly) === JSON.stringify(["airtel-money"]),
+    "matchRails: sellerOnly = accepted rails the buyer has no handle for");
+  assert(m1.suggested === "m-pesa", "matchRails: suggests the top shared rail");
+
+  // Name-vs-key absorption proven directly: "M-Pesa" (name) ≡ "m-pesa" (key).
+  assert(matchRails(["M-Pesa"], ["m-pesa"], "ke-kes").shared.length === 1,
+    "matchRails: a display-name listing matches a key-based saved handle");
+
+  // Community ranking flips the suggestion: same rails, US-leaning Chama.
+  const m2 = matchRails(["Strike", "M-Pesa"], ["strike", "m-pesa"], "global-usd");
+  assert(JSON.stringify(m2.shared) === JSON.stringify(["strike", "m-pesa"]),
+    "matchRails: global-usd ranks Strike above M-Pesa");
+  assert(m2.suggested === "strike", "matchRails: suggestion follows community ranking");
+
+  // No overlap → suggest the seller's top accepted rail so the buyer still has a lead.
+  const m3 = matchRails(["Zelle"], ["m-pesa"], "ke-kes");
+  assert(m3.shared.length === 0 && JSON.stringify(m3.sellerOnly) === JSON.stringify(["zelle"]),
+    "matchRails: no shared rail → shared empty, seller rail listed");
+  assert(m3.suggested === "zelle", "matchRails: with no overlap, suggest the seller's top rail");
+
+  // Degenerate inputs are safe.
+  assert(matchRails([], ["m-pesa"], "ke-kes").suggested === null, "matchRails: no seller rails → null suggestion");
+  const m4 = matchRails(undefined, undefined, null);
+  assert(m4.shared.length === 0 && m4.sellerOnly.length === 0 && m4.suggested === null,
+    "matchRails: undefined inputs → empty match");
+  assert(matchRails(["M-Pesa", "m-pesa"], [], "ke-kes").sellerOnly.length === 1,
+    "matchRails: a rail listed by both name and key dedupes to one");
+}
+
+// ── 18b. FORGOTTEN-TRADE DENYLIST — persist a "forget" across restarts ───
+console.log("\n── FORGOTTEN TRADES (persistent denylist) ──");
+{
+  (globalThis as any).localStorage.clear();
+  const A = "ff".repeat(32);
+  const B = "ab".repeat(32);
+
+  assert(!isForgottenEscrowId("sm_ghost_1", A), "Fresh: nothing forgotten");
+
+  addForgottenEscrowId("sm_ghost_1", A);
+  assert(isForgottenEscrowId("sm_ghost_1", A), "After forget: id is on the denylist");
+  // Persistence: a FRESH read (simulating a restart re-hydrating the ref from
+  // localStorage) still sees it — this is the bit that was failing on-device.
+  assert(getForgottenEscrowIds(A).includes("sm_ghost_1"),
+    "Persisted: a fresh read after 'restart' still finds the forgotten id");
+
+  // Per-pubkey scoping: B (a different signer) is unaffected.
+  assert(!isForgottenEscrowId("sm_ghost_1", B), "Scoping: another pubkey doesn't see A's forget");
+  addForgottenEscrowId("sm_ghost_1", B);
+  assert(isForgottenEscrowId("sm_ghost_1", B), "B can independently forget the same id");
+
+  // Idempotent: forgetting twice keeps one entry.
+  addForgottenEscrowId("sm_ghost_1", A);
+  assert(getForgottenEscrowIds(A).filter(i => i === "sm_ghost_1").length === 1,
+    "Idempotent: forgetting twice stores one entry");
+
+  // Un-forget (loading by ID) removes it — and A's other forgets survive.
+  addForgottenEscrowId("sm_ghost_2", A);
+  unforgetEscrowId("sm_ghost_1", A);
+  assert(!isForgottenEscrowId("sm_ghost_1", A), "Un-forget: loading by ID clears the denylist entry");
+  assert(isForgottenEscrowId("sm_ghost_2", A), "Un-forget removes only the one id, not the whole list");
+  // B still has its own entry — un-forget is scoped too.
+  assert(isForgottenEscrowId("sm_ghost_1", B), "Un-forget on A doesn't touch B");
+
+  // Unscoped (no pubkey) bucket is independent of the scoped ones.
+  assert(!isForgottenEscrowId("sm_ghost_2", null), "Unscoped bucket is separate from A's");
 }
 
 // ── 19. SAVED HANDLES — CRUD + visibility refusal ────────────────────────
@@ -5875,6 +6149,37 @@ console.log("\n── hasActiveBuyerSellerCommitment + findActiveTrade ──");
       browseCategory: "all",
     }) === false,
     "Browse hides expired CREATED listings while sentinel cleanup catches up",
+  );
+
+  // #7 Stage 3: multi-unit storefront Browse visibility.
+  const childPurchase = escrow({
+    id: "child-1",
+    status: EscrowStatus.CREATED,
+    participants: { buyer: me, seller: other, arbiter: arb },
+    parent: "parent-listing",
+    claimedQuantity: 1,
+  });
+  assert(
+    shouldShowOnBrowse({ escrow: childPurchase, browseCategory: "all" }) === false,
+    "Stage 3: a child purchase escrow never shows on Browse (it's a trade, lives in Me)",
+  );
+  const multiUnitParent = escrow({
+    id: "parent-listing",
+    status: EscrowStatus.CREATED,
+    participants: { buyer: null, seller: me, arbiter: null },
+    stock: 5,
+  });
+  assert(
+    shouldShowOnBrowse({ escrow: multiUnitParent, browseCategory: "all", isSoldOut: false }) === true,
+    "Stage 3: a multi-unit parent listing shows on Browse while stock remains",
+  );
+  assert(
+    shouldShowOnBrowse({ escrow: multiUnitParent, browseCategory: "all", isSoldOut: true }) === false,
+    "Stage 3: a sold-out multi-unit parent drops off Browse",
+  );
+  assert(
+    shouldShowOnBrowse({ escrow: listingOnly, browseCategory: "all", isSoldOut: undefined }) === true,
+    "Stage 3: a legacy single-unit listing (no sold-out flag) is unaffected",
   );
 
   // User as buyer, LOCKED → commitment.

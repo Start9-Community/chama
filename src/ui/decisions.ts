@@ -515,12 +515,21 @@ export function shouldShowOnBrowse(inputs: {
   escrow: EscrowState;
   browseCategory: string;
   nowSec?: number;
+  /** #7 Stage 3: derived sold-out flag for a multi-unit parent (the caller
+   *  computes it from the parent's children via isSoldOut). A sold-out
+   *  storefront drops off Browse. Absent / false for single-unit listings. */
+  isSoldOut?: boolean;
 }): boolean {
   const { escrow, browseCategory } = inputs;
   if (escrow.status !== EscrowStatus.CREATED) return false;
+  // #7 Stage 3: a CHILD purchase escrow (carries `parent`) is a trade, not a
+  // listing — it lives in Me / loadable by id, never as its own Browse card.
+  if (escrow.parent !== undefined) return false;
   if (isPastEscrowDeadline(escrow, inputs.nowSec ?? Math.floor(Date.now() / 1000))) {
     return false;
   }
+  // #7 Stage 3: a sold-out multi-unit parent stops showing as buyable.
+  if (inputs.isSoldOut) return false;
   if (browseCategory === "all") return true;
   if (browseCategory === "subscription") return escrow.subscription !== null;
   return escrow.category === browseCategory;

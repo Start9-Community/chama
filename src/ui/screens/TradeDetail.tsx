@@ -21,7 +21,7 @@ import {
   maskHandle,
   handleDisplayForViewer,
 } from "../../payments/saved-handles.js";
-import { getRailByKey } from "../../payments/rail-registry.js";
+import { getRailByKey, matchRails, toRailKey } from "../../payments/rail-registry.js";
 import {
   T, STATUS, ROLE_COLOR, CAT_LABEL, TRINITY_RING_ORDER,
   fmtSats, refundRecipientFor, inputStyle,
@@ -59,6 +59,35 @@ import {
 
 const samePubkey = (a?: string | null, b?: string | null): boolean =>
   !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+/** Copy text to the clipboard, robustly. navigator.clipboard is undefined or a
+ *  no-op in some Tauri/Capacitor webviews (same class as window.confirm), so
+ *  fall back to a hidden-textarea + execCommand("copy"). Returns whether a copy
+ *  path was attempted; callers still show the ID so the user can hand-select if
+ *  even the fallback is blocked. */
+function copyTextRobust(text: string): void {
+  try {
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(() => execCommandCopy(text));
+      return;
+    }
+  } catch { /* fall through */ }
+  execCommandCopy(text);
+}
+function execCommandCopy(text: string): void {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  } catch { /* user can still hand-select the visible ID */ }
+}
 
 export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
@@ -178,6 +207,11 @@ export function TradeDetail({
   // Advanced "re-broadcast / heal" — idle → broadcasting → a result line.
   const [rebroadcasting, setRebroadcasting] = useState(false);
   const [rebroadcastResult, setRebroadcastResult] = useState<string | null>(null);
+  const [rebroadcastDone, setRebroadcastDone] = useState(false);
+  const [idCopied, setIdCopied] = useState(false);
+  // Inline two-tap forget confirm (no native confirm() — it's a no-op in the
+  // Tauri/Capacitor webview, which made the button look frozen).
+  const [forgetArmed, setForgetArmed] = useState(false);
 
   // v1.2.4: direct-NWC paths for Fund + Claim. When the user has a
   // saved NWC wallet, the action buttons skip the chooser modal and
@@ -277,6 +311,14 @@ export function TradeDetail({
   const acceptedPaymentMethods = (state.paymentMethods ?? [])
     .map(method => method.trim())
     .filter(Boolean);
+  // #4: suggest + match a shared payment rail before lock. Intersect the
+  // seller's accepted rails with the rails THIS viewer can pay on (their saved
+  // handles), community-ranked. Surfaced to a prospective buyer (not the
+  // seller, who set the rails). The seller's matched handle is revealed at lock.
+  const viewerRailKeys = listSavedHandles().map(h => h.rail);
+  const railMatch = matchRails(state.paymentMethods, viewerRailKeys, state.community);
+  const sharedRailSet = new Set(railMatch.shared);
+  const suggestedRail = railMatch.suggested ? getRailByKey(railMatch.suggested) : null;
   const premiumLine = listingPremiumLine(state, btcPrice.usd);
   const selectionMatchesSavedOrder = selectedOrderKey.length > 0 && selectedOrderKey === savedOrderKey;
   const savedOrderFinalizedAt = state.joinHolds?.[menuSelectorRole]?.orderFinalizedAt ?? null;
@@ -1133,26 +1175,40 @@ export function TradeDetail({
             ACCEPTED PAYMENT
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-            {acceptedPaymentMethods.map(method => (
-              <span
-                key={method}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  padding: "5px 9px",
-                  borderRadius: 999,
-                  background: T.surface,
-                  border: `1px solid ${T.border}`,
-                  color: T.text,
-                  fontFamily: T.mono,
-                  fontSize: 11,
-                  fontWeight: 800,
-                }}
-              >
-                {method}
-              </span>
-            ))}
+            {acceptedPaymentMethods.map(method => {
+              // For a prospective buyer, flag the rails they can already pay on.
+              const isShared = myRole !== Role.SELLER && sharedRailSet.has(toRailKey(method));
+              return (
+                <span
+                  key={method}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    padding: "5px 9px",
+                    borderRadius: 999,
+                    background: isShared ? `${T.green}22` : T.surface,
+                    border: `1px solid ${isShared ? T.green : T.border}`,
+                    color: isShared ? T.green : T.text,
+                    fontFamily: T.mono,
+                    fontSize: 11,
+                    fontWeight: 800,
+                  }}
+                >
+                  {isShared ? "✓ " : ""}{method}
+                </span>
+              );
+            })}
           </div>
+          {myRole !== Role.SELLER && suggestedRail && (
+            <div style={{ marginTop: 10, color: T.muted, fontSize: 11, lineHeight: 1.5 }}>
+              {railMatch.shared.length > 0 ? (
+                <>You both use <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong> — the easiest rail to settle on before you lock.</>
+              ) : (
+                <>No saved handle matches the seller's rails yet. Suggested: <strong style={{ color: T.text }}>{suggestedRail.displayName}</strong>. Add it in Me → Saved handles to match faster.</>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -2366,13 +2422,23 @@ export function TradeDetail({
               onClick={async () => {
                 setRebroadcasting(true);
                 setRebroadcastResult(null);
+                setRebroadcastDone(false);
                 try {
                   const { published, total } = await onRebroadcast(state.id);
-                  setRebroadcastResult(
-                    total === 0
-                      ? "Nothing cached to re-broadcast on this device."
-                      : `Re-published ${published}/${total} events. If the other party couldn't see this trade, they can load it now.`,
-                  );
+                  if (total === 0) {
+                    setRebroadcastResult("Nothing cached to re-broadcast on this device — re-open the trade so its full history loads, then try again.");
+                  } else {
+                    // Show the ID-to-share whenever we have a chain. Relays may
+                    // not re-ACK events they already store (published can be 0
+                    // even though they're available) — the ID hand-off is what
+                    // actually heals it, so never hide that on the ACK count.
+                    setRebroadcastResult(
+                      published > 0
+                        ? `Re-published ${published}/${total} events to today's relays.`
+                        : `Sent ${total} events — relays may already store them. Share the trade ID below either way.`,
+                    );
+                    setRebroadcastDone(true);
+                  }
                 } catch (e) {
                   setRebroadcastResult(`Re-broadcast failed: ${e instanceof Error ? e.message : String(e)}`);
                 } finally {
@@ -2398,35 +2464,92 @@ export function TradeDetail({
             </button>
             <p style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, margin: "8px 2px 0" }}>
               {rebroadcastResult
-                ?? "Re-publishes this trade's full event chain to today's relays. Use it if a counterparty can't see a trade you can — money stays in escrow either way."}
+                ?? "Re-publishes this trade's full event chain to today's relays. Money stays in escrow either way."}
             </p>
+            {rebroadcastDone && (
+              <div style={{ marginTop: 10, padding: "10px 12px", background: T.card, border: `1px solid ${T.accent}`, borderRadius: T.r }}>
+                <div style={{ color: T.text, fontSize: 10, fontWeight: 700, fontFamily: T.mono, letterSpacing: 0.5, marginBottom: 6 }}>
+                  NEXT — SEND THIS TRADE ID TO THE OTHER PARTY
+                </div>
+                <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginBottom: 8 }}>
+                  The events are on the relays now, but their app only fetches trades it already knows. Have them paste this ID into “Load a trade” to pull it in and claim.
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <code style={{ flex: 1, color: T.text, fontSize: 10, fontFamily: T.mono, wordBreak: "break-all", background: T.border, padding: "6px 8px", borderRadius: 6, userSelect: "all", WebkitUserSelect: "all" }}>
+                    {state.id}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      copyTextRobust(state.id);
+                      setIdCopied(true);
+                      setTimeout(() => setIdCopied(false), 1500);
+                    }}
+                    style={{
+                      background: T.accent, border: "none", borderRadius: 6, color: "#fff",
+                      cursor: "pointer", fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+                      padding: "7px 10px", whiteSpace: "nowrap",
+                    }}
+                  >
+                    {idCopied ? "COPIED ✓" : "COPY"}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
         {onForget && (
           <div style={{ marginTop: 12 }}>
-            <button
-              type="button"
-              onClick={() => {
-                const ok = window.confirm(
-                  "Forget this trade on this device?\n\nIt disappears from your list but your money stays in 2-of-3 escrow — nothing is cancelled or lost. You can re-load it anytime by pasting its trade ID.",
-                );
-                if (ok) onForget(state.id);
-              }}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: T.red,
-                cursor: "pointer",
-                fontFamily: T.mono,
-                fontSize: 10,
-                fontWeight: 700,
-                letterSpacing: 0.5,
-                padding: "6px 2px",
-                textDecoration: "underline",
-              }}
-            >
-              FORGET THIS TRADE LOCALLY
-            </button>
+            {!forgetArmed ? (
+              <button
+                type="button"
+                onClick={() => setForgetArmed(true)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: T.red,
+                  cursor: "pointer",
+                  fontFamily: T.mono,
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: 0.5,
+                  padding: "6px 2px",
+                  textDecoration: "underline",
+                }}
+              >
+                FORGET THIS TRADE LOCALLY
+              </button>
+            ) : (
+              <div style={{ background: T.card, border: `1px solid ${T.red}`, borderRadius: T.r, padding: "10px 12px" }}>
+                <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginBottom: 8 }}>
+                  Hide this trade on this device? Your money stays in 2-of-3 escrow — nothing is cancelled or lost, and you can re-load it anytime by its ID.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => { setForgetArmed(false); onForget(state.id); }}
+                    style={{
+                      background: T.red, border: "none", borderRadius: 6, color: "#fff",
+                      cursor: "pointer", fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+                      letterSpacing: 0.5, padding: "7px 12px",
+                    }}
+                  >
+                    FORGET IT
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForgetArmed(false)}
+                    style={{
+                      background: "transparent", border: `1px solid ${T.border}`, borderRadius: 6,
+                      color: T.muted, cursor: "pointer", fontFamily: T.mono, fontSize: 10,
+                      fontWeight: 700, letterSpacing: 0.5, padding: "7px 12px",
+                    }}
+                  >
+                    CANCEL
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </details>

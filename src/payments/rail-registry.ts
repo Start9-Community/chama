@@ -469,3 +469,61 @@ function railCommunityRank(rail: Rail, slug: string | null | undefined): number 
   if (globalSouthIndex >= 0) return 400 + globalSouthIndex;
   return 600 + registryIndex;
 }
+
+// ── #4: suggest + match rails before lock ─────────────────────────────────
+// A listing advertises which rails the seller accepts; the buyer needs to pay
+// on a rail they can both use. The catch the matcher MUST absorb: a listing's
+// `paymentMethods` is stored as rail DISPLAY NAMES (CreateForm toggles by
+// `rail.displayName`), while a buyer's saved handles carry rail KEYS. Matching
+// the two requires normalizing both to the canonical key — otherwise "M-Pesa"
+// (name) never equals "m-pesa" (key) and every match silently fails.
+
+const BY_DISPLAY_NAME: Map<string, string> = new Map(
+  RAIL_REGISTRY.map(r => [r.displayName.toLowerCase(), r.key]),
+);
+
+/** Normalize a rail token (a key OR a display name, any case) to its canonical
+ *  registry key. Unknown tokens fall through lowercased so a rail from a future
+ *  registry version still compares consistently rather than throwing. */
+export function toRailKey(token: string): string {
+  const t = token.trim().toLowerCase();
+  if (BY_KEY.has(t)) return t;
+  return BY_DISPLAY_NAME.get(t) ?? t;
+}
+
+export interface RailMatch {
+  /** Rails the seller accepts AND the buyer already uses (has a saved handle on)
+   *  — community-ranked, best first. The strongest "you both use this" match. */
+  shared: string[];
+  /** Rails the seller accepts that the buyer has no saved handle for — they can
+   *  still pay if they use it. Community-ranked. */
+  sellerOnly: string[];
+  /** The one rail to settle on before lock: top shared, else top seller rail. */
+  suggested: string | null;
+}
+
+/** Intersect a seller's accepted rails with the rails a buyer uses, ranked for
+ *  the community, to suggest a shared rail BEFORE lock. Both sides are
+ *  normalized to keys first (names vs keys). Pure — no storage, no money. */
+export function matchRails(
+  sellerAccepts: readonly string[] | null | undefined,
+  buyerRails: readonly string[] | null | undefined,
+  community: string | null | undefined,
+): RailMatch {
+  const rankOf = new Map<string, number>();
+  railsForCommunity(community).forEach((r, i) => rankOf.set(r.key, i));
+  const byRank = (a: string, b: string) =>
+    (rankOf.get(a) ?? Number.MAX_SAFE_INTEGER) - (rankOf.get(b) ?? Number.MAX_SAFE_INTEGER);
+
+  const sellerKeys: string[] = [];
+  const seen = new Set<string>();
+  for (const token of sellerAccepts ?? []) {
+    const key = toRailKey(token);
+    if (key && !seen.has(key)) { seen.add(key); sellerKeys.push(key); }
+  }
+  const buyerSet = new Set((buyerRails ?? []).map(toRailKey));
+
+  const shared = sellerKeys.filter(k => buyerSet.has(k)).sort(byRank);
+  const sellerOnly = sellerKeys.filter(k => !buyerSet.has(k)).sort(byRank);
+  return { shared, sellerOnly, suggested: shared[0] ?? sellerOnly[0] ?? null };
+}

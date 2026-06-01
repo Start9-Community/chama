@@ -263,6 +263,15 @@ export interface CreatePayload {
   /** Units this child escrow claims from the parent listing's stock.
    *  Present only on child escrows. */
   claimedQuantity?: number;
+  /** The parent listing's seller pubkey, pre-filled onto a CHILD by the
+   *  buyer who creates it. A multi-unit purchase inverts the marketplace
+   *  convention: the BUYER publishes the child CREATE (so the seller needn't
+   *  be online per purchase — Option A), which would normally make the
+   *  signer the seller. Carrying the seller's pubkey lets handleCreate seat
+   *  the real seller as the SELLER participant up front, so the buyer can
+   *  LOCK immediately and the SSS share routes to the seller. Required when
+   *  `parent` is set; absent on parents / standalone listings. */
+  sellerPubkey?: string;
   /** Timestamp */
   createdAt: number;
 }

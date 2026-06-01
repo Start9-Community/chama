@@ -12,6 +12,7 @@ import {
 } from "../escrow-engine/types.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
+import { remainingStock, isSoldOut } from "../escrow-engine/storefront.js";
 import {
   getActiveInvite,
   getConfiguredNativeBridgeCommunitySlug,
@@ -283,6 +284,12 @@ export default function App() {
   // testable in isolation and App.tsx stays an orchestrator.
   const { dismissed: browserBannerDismissed, dismiss: dismissBrowserBanner } =
     useBrowserBanner(pubkey);
+
+  // Two-tap confirm for destructive listing delete. window.confirm() is a
+  // no-op in the Tauri/Capacitor webview (it silently returned false, so the
+  // old confirm-gated delete never fired). This arms on the first tap and
+  // deletes on a second tap of the same listing within 5s — no native dialog.
+  const pendingDeleteRef = useRef<{ id: string; at: number } | null>(null);
 
   // v0.2.0 item 8 / v0.3.0 Phase 4 reminder #3: post-recover auto-
   // switch. State machine unchanged; only the trigger surface moves
@@ -601,12 +608,32 @@ export default function App() {
   // load-bearing money-route fact; mintUrl can be stale if a power user
   // switched routes without changing their home community.
   const myActiveInvite = fedimint.joined ? getActiveInvite() : null;
+  // #7 Stage 3: index child purchases by parent so a multi-unit listing can
+  // show a derived "N left" and drop off Browse when sold out. Children seen via
+  // the public CREATE feed are enough to subtract visible reservations; a
+  // prospective buyer can't decrypt others' LOCKs, so this is a safe estimate
+  // (an overcommit just refunds — Option A).
+  const childrenByParent = new Map<string, EscrowState[]>();
+  for (const s of escrows.values()) {
+    if (s.parent !== undefined) {
+      const arr = childrenByParent.get(s.parent);
+      if (arr) arr.push(s); else childrenByParent.set(s.parent, [s]);
+    }
+  }
+  const listingChildren = (s: EscrowState) => childrenByParent.get(s.id) ?? [];
+  const listingSoldOut = (s: EscrowState) =>
+    s.stock !== undefined && isSoldOut(s, listingChildren(s), now);
   const allVisibleListings = visibleTrades.filter(s =>
-    shouldShowOnBrowse({ escrow: s, browseCategory: "all", nowSec: now })
+    shouldShowOnBrowse({ escrow: s, browseCategory: "all", nowSec: now, isSoldOut: listingSoldOut(s) })
   );
   const visibleListings = allVisibleListings.filter(s =>
-    shouldShowOnBrowse({ escrow: s, browseCategory, nowSec: now })
+    shouldShowOnBrowse({ escrow: s, browseCategory, nowSec: now, isSoldOut: listingSoldOut(s) })
   );
+  // "N left" badge data for the cards — only for multi-unit parents (stock set).
+  const stockByListing = new Map<string, number>();
+  for (const s of visibleListings) {
+    if (s.stock !== undefined) stockByListing.set(s.id, remainingStock(s, listingChildren(s), now));
+  }
   const browseCategoryCounts = BROWSE_CATS.reduce((acc, cat) => {
     acc[cat.id] = cat.id === "all"
       ? allVisibleListings.length
@@ -1783,8 +1810,13 @@ export default function App() {
               openEscrow(id, "me");
             }}
             onSellerDeleteListing={async (id) => {
-              const ok = window.confirm("Delete this open listing? This publishes a cancel event and removes it from Browse.");
-              if (!ok) return;
+              const armed = pendingDeleteRef.current;
+              if (!armed || armed.id !== id || Date.now() - armed.at > 5000) {
+                pendingDeleteRef.current = { id, at: Date.now() };
+                setToast({ message: "Tap Delete again to confirm — this cancels the listing and removes it from Browse.", type: "info" });
+                return;
+              }
+              pendingDeleteRef.current = null;
               try {
                 await actions.cancel(id, "seller_deleted_listing");
                 setToast({ message: "Listing deleted.", type: "success" });
@@ -1899,6 +1931,7 @@ export default function App() {
               amountDisplayMode={amountDisplayMode}
               matchingListings={matchingListings}
               nonMatchingListings={nonMatchingListings}
+              stockByListing={stockByListing}
               categoryCounts={browseCategoryCounts}
               fedimintJoined={fedimint.joined}
               isFirstTime={getUserCommunitySlugRaw() === null}

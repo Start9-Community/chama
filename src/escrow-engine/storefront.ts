@@ -119,3 +119,74 @@ export function isLastUnitContested(
     remainingStock(parent, children, now) === 0
   );
 }
+
+// ── Child spawn (Stage 2b) ────────────────────────────────────────────────
+// Turning a multi-unit parent listing + a desired quantity into the params for
+// the buyer's child CREATE. Pure: no relays, no money — it just maps the
+// parent's terms onto a fresh child, prices it per-unit × quantity, and seats
+// the parent's seller so the buyer-created child is lock-ready under Option A.
+
+/** Params for a child purchase CREATE — a structural subset of
+ *  EscrowClient.createEscrow's params, carrying the storefront link. */
+export interface ChildCreateParams {
+  description: string;
+  amountMsats: number;
+  fiatAmount?: number;
+  fiatCurrency?: string;
+  premiumBps?: number;
+  category: string;
+  fulfillment?: "physical" | "service" | "digital";
+  community?: string;
+  mintUrl: string;
+  paymentMethods?: string[];
+  arbiterFeeMsats?: number;
+  communityArbiters?: string[];
+  /** Parent listing id — also emitted as a `#parent` tag for child fan-out. */
+  parent: string;
+  /** Units this child claims from the parent's stock. */
+  claimedQuantity: number;
+  /** Parent's seller, seated as SELLER so the buyer-created child can LOCK. */
+  sellerPubkey: string;
+}
+
+/** Build the createEscrow params for a CHILD purchase of `claimedQuantity`
+ *  units from a multi-unit parent listing. Per-unit price (and fiat) scale by
+ *  quantity; the flat arbiter fee does not (one child = one escrow). Throws on
+ *  a malformed parent or quantity — spawning a child from a non-listing or
+ *  with a bad count is a programming error, never a silent half-formed escrow.
+ *  Money safety is unaffected regardless: every child is its own 2-of-3 escrow. */
+export function buildChildCreateParams(
+  parent: EscrowState,
+  claimedQuantity: number,
+): ChildCreateParams {
+  if (!Number.isInteger(claimedQuantity) || claimedQuantity <= 0) {
+    throw new Error(`buildChildCreateParams: claimedQuantity must be a positive integer (got ${claimedQuantity})`);
+  }
+  if (parent.category !== "marketplace") {
+    throw new Error(`buildChildCreateParams: only marketplace listings spawn children (parent is ${parent.category})`);
+  }
+  if (parent.parent !== undefined) {
+    throw new Error("buildChildCreateParams: cannot spawn a child of a child");
+  }
+  const sellerPubkey = parent.participants[Role.SELLER];
+  if (!sellerPubkey) {
+    throw new Error("buildChildCreateParams: parent listing has no seller to buy from");
+  }
+  return {
+    description: parent.description,
+    amountMsats: parent.amountMsats * claimedQuantity,
+    ...(parent.fiatAmount !== undefined ? { fiatAmount: parent.fiatAmount * claimedQuantity } : {}),
+    ...(parent.fiatCurrency !== undefined ? { fiatCurrency: parent.fiatCurrency } : {}),
+    ...(parent.premiumBps !== undefined ? { premiumBps: parent.premiumBps } : {}),
+    category: parent.category,
+    fulfillment: parent.fulfillment,
+    ...(parent.community ? { community: parent.community } : {}),
+    mintUrl: parent.mintUrl,
+    ...(parent.paymentMethods ? { paymentMethods: parent.paymentMethods } : {}),
+    arbiterFeeMsats: parent.fees.arbiterMsats,
+    communityArbiters: parent.communityArbiters,
+    parent: parent.id,
+    claimedQuantity,
+    sellerPubkey,
+  };
+}

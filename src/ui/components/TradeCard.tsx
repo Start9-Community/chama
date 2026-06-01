@@ -40,6 +40,7 @@ export function TradeCard({
   profileNames,
   amountDisplayMode = "sats",
   quoteCurrency,
+  stockLeft,
 }: {
   state: EscrowState;
   pubkey: string;
@@ -49,6 +50,9 @@ export function TradeCard({
   profileNames?: NostrProfileNameMap;
   amountDisplayMode?: AmountDisplayMode;
   quoteCurrency?: string | null;
+  /** #7 Stage 3: derived remaining units for a multi-unit parent listing.
+   *  Undefined for single-unit listings (no badge). */
+  stockLeft?: number;
 }) {
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
@@ -199,6 +203,19 @@ export function TradeCard({
                 fontFamily: T.mono, fontWeight: 800,
               }}>
                 {menuBadgeLabel(state.category)}
+              </span>
+            )}
+            {/* #7 Stage 3: derived stock on a multi-unit listing. >0 → "N left";
+                0 (all units currently held/locked but not fully sold) → reserved. */}
+            {stockLeft !== undefined && (
+              <span style={{
+                fontSize: 10, padding: "3px 8px", borderRadius: 999,
+                background: stockLeft > 0 ? `${T.green}22` : `${T.amber}22`,
+                color: stockLeft > 0 ? T.green : T.amber,
+                border: `1px solid ${(stockLeft > 0 ? T.green : T.amber)}55`,
+                fontFamily: T.mono, fontWeight: 800,
+              }}>
+                {stockLeft > 0 ? `${stockLeft} left` : "reserved"}
               </span>
             )}
             {state.category === "marketplace" && sellerPubkey && (

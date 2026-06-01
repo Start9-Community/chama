@@ -24,6 +24,7 @@ export function BrowseView({
   browseCommunity, onSelectCommunity,
   amountDisplayMode,
   matchingListings, nonMatchingListings,
+  stockByListing,
   categoryCounts,
   fedimintJoined, pubkey,
   kind0Enabled = false, profileNames,
@@ -37,6 +38,8 @@ export function BrowseView({
   amountDisplayMode: AmountDisplayMode;
   matchingListings: EscrowState[];
   nonMatchingListings: EscrowState[];
+  /** #7 Stage 3: derived "N left" per multi-unit parent listing id. */
+  stockByListing?: Map<string, number>;
   categoryCounts?: Record<string, number>;
   fedimintJoined: boolean;
   pubkey: string;
@@ -274,6 +277,7 @@ export function BrowseView({
                     profileNames={profileNames}
                     amountDisplayMode={amountDisplayMode}
                     quoteCurrency={quoteCurrency}
+                    stockByListing={stockByListing}
                   />
                 ))
               ) : (
@@ -288,6 +292,7 @@ export function BrowseView({
                         profileNames={profileNames}
                         amountDisplayMode={amountDisplayMode}
                         quoteCurrency={quoteCurrency}
+                        stockLeft={stockByListing?.get(s.id)}
                       />
                     </div>
                   ))}
@@ -327,6 +332,7 @@ export function BrowseView({
                     profileNames={profileNames}
                     amountDisplayMode={amountDisplayMode}
                     quoteCurrency={quoteCurrency}
+                    stockByListing={stockByListing}
                   />
                 ))
               ) : (
@@ -342,6 +348,7 @@ export function BrowseView({
                         profileNames={profileNames}
                         amountDisplayMode={amountDisplayMode}
                         quoteCurrency={quoteCurrency}
+                        stockLeft={stockByListing?.get(s.id)}
                       />
                     </div>
                   ))}
@@ -508,6 +515,7 @@ function BrowseSection({
   profileNames,
   amountDisplayMode,
   quoteCurrency,
+  stockByListing,
 }: {
   section: BrowseListingSection;
   pubkey: string;
@@ -517,6 +525,7 @@ function BrowseSection({
   profileNames?: NostrProfileNameMap;
   amountDisplayMode: AmountDisplayMode;
   quoteCurrency?: string | null;
+  stockByListing?: Map<string, number>;
 }) {
   return (
     <section style={{ marginBottom: 16 }}>
@@ -561,6 +570,7 @@ function BrowseSection({
               profileNames={profileNames}
               amountDisplayMode={amountDisplayMode}
               quoteCurrency={quoteCurrency}
+              stockLeft={stockByListing?.get(s.id)}
             />
           </div>
         ))}

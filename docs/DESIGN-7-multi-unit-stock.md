@@ -101,15 +101,30 @@ annoying in practice. **This is the one decision I need from you.**
 
 ## Staged implementation (each stage ships + tests independently)
 
-1. **Schema + parent tag (no behavior yet).** `stock` on the listing payload,
-   `parent` + `claimedQuantity` on child payloads, parser validation, cloner
-   preservation. Pure additive; legacy single-unit listings untouched.
-2. **Child creation + stock accounting (read side).** Client helper to spawn a
-   child referencing a parent; `#parent` subscription; a pure
-   `remainingStock(parent, children, now)` function (this is the testable heart
-   — covers holds, locks, expiries, refunds). Heavy unit tests incl. the race.
-3. **Browse "N left" + visibility.** Parent shows remaining; hides at 0; child
-   trades live in Me. 
+1. **Schema + parent tag (no behavior yet).** ✅ DONE (v1.2.12). `stock` on the
+   listing payload, `parent` + `claimedQuantity` on child payloads, parser
+   validation, cloner preservation. Pure additive; legacy single-unit listings
+   untouched.
+2. **Child creation + stock accounting (read side).** ✅ DONE.
+   - 2a (v1.2.12): the pure `remainingStock` / `unsoldStock` / `isSoldOut` /
+     `isLastUnitContested` accountant in `storefront.ts` (the testable heart —
+     holds, locks, expiries, refunds, overcommit; heavy unit tests).
+   - 2b: the write + read plumbing. `buildChildCreateParams(parent, qty)` maps a
+     parent's terms onto a child (per-unit price × qty, flat arbiter fee), and
+     a new schema field `sellerPubkey` lets a CHILD invert the marketplace
+     convention — the BUYER publishes the child CREATE and the parent's seller
+     is seated up front (Option A: seller offline), so the buyer can LOCK at
+     once. `EscrowClient.purchaseFromListing` spawns + publishes; `#parent`
+     fetch/subscribe (`fetchChildCreates` / `subscribeToChildren`) +
+     `loadChildren` / `derivedStock` aggregate children through the 2a
+     accountant. +30 tests incl. role inversion, lock-readiness, and the race.
+3. **Browse "N left" + visibility.** ✅ DONE. `shouldShowOnBrowse` now excludes
+   child purchases (carry `parent`) from Browse and hides a sold-out parent
+   (caller passes `isSoldOut` from the accountant). App indexes children by
+   parent from the escrows map and feeds `remainingStock` to a `stockByListing`
+   map; TradeCard shows a derived "N left" badge (">0 → N left", "0 → reserved").
+   Parent shows remaining; hides at 0; child trades live in Me. Observer counts
+   are best-effort (others' LOCKs are encrypted) — safe under Option A. +4 tests.
 4. **Reservation decrement + last-unit contention UX.** Hold reserves a unit;
    when `remaining` is `<2 but >0` and held, non-holders see "being viewed —
    Ns left" via `CountdownTimer`.

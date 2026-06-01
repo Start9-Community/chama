@@ -59,7 +59,15 @@ function removeEscrowId(id: string, pubkey?: string | null) {
   } catch {}
 }
 
+// Forgotten-trade denylist lives in its own testable module (storage/
+// forgotten-trades.ts).
+
 import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  getForgottenEscrowIds,
+  addForgottenEscrowId,
+  unforgetEscrowId,
+} from "../storage/forgotten-trades.js";
 import {
   EscrowClient,
   type EscrowClientConfig,
@@ -508,6 +516,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   const fedimintRef = useRef<FedimintClient | null>(null);
   const bridgeRef = useRef<EscrowFedimintBridge | null>(null);
   const signerRef = useRef<Signer | null>(null);
+  // Forgotten-trade denylist, in memory. Loaded at connect from the persistent
+  // store with the RELIABLE pubkey (the local `pubkey` var) so updateEscrow can
+  // honor it the instant Browse events arrive — before `state.pubkey` has even
+  // re-rendered. Kept in sync by forgetEscrow / loadEscrow.
+  const forgottenIdsRef = useRef<Set<string>>(new Set());
   // PR 5: federation health cache. Mirrored into React state for the UI;
   // the ref is the source of truth read inside createFundingInvoice so
   // we don't depend on the latest closure of `state`.
@@ -572,6 +585,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // ── State updater helpers ───────────────────────────────────────────────
 
   const updateEscrow = useCallback((escrowId: string, escrowState: EscrowState) => {
+    // A locally-forgotten ghost stays gone: don't let the Browse/public-
+    // listings feed (or any re-delivery) re-add it after a restart. The ref is
+    // loaded at connect with the reliable pubkey, so this works even before
+    // state.pubkey re-renders. Loading it by ID un-forgets it (see loadEscrow).
+    if (forgottenIdsRef.current.has(escrowId)) return;
     if (isExpiredUnfundedEscrow(escrowState)) {
       setState(prev => {
         if (!prev.escrows.has(escrowId)) return prev;
@@ -637,6 +655,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const pubkey = await signer.getPublicKey();
       signerRef.current = signer;
       setLocalStorageUserScope(pubkey);
+      // Hydrate the forgotten-trade denylist NOW, with the reliable pubkey, so
+      // the Browse feed (which starts below, before state.pubkey re-renders)
+      // can't re-add a ghost the user forgot on a prior run.
+      forgottenIdsRef.current = new Set(getForgottenEscrowIds(pubkey));
 
       const callbacks: EscrowClientCallbacks = {
         onStateUpdate: (id, s) => updateEscrow(id, s),
@@ -1363,6 +1385,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
   const loadEscrow = useCallback(async (escrowId: string) => {
     const client = requireClient();
+    // Loading a trade by ID is a deliberate "bring it back" — clear any
+    // forgotten-denylist entry so it can surface and persist again.
+    unforgetEscrowId(escrowId, stateRef.current?.pubkey ?? null);
+    forgottenIdsRef.current.delete(escrowId);
     setState(prev => ({ ...prev, loading: true }));
     try {
       const result = await client.loadEscrow(escrowId);
@@ -1389,7 +1415,16 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
    *  their view. Non-custodial-safe — money lives in 2-of-3 escrow regardless,
    *  and the trade can always be re-loaded by ID, which re-saves the pointer. */
   const forgetEscrow = useCallback((escrowId: string) => {
-    removeEscrowId(escrowId, stateRef.current?.pubkey ?? null);
+    const pk = stateRef.current?.pubkey ?? null;
+    removeEscrowId(escrowId, pk);
+    // Persistently deny-list it so the Browse feed can't re-add it on the next
+    // restart; updateEscrow honors this (via the in-memory ref). Cleared when
+    // the user loads it by ID.
+    addForgottenEscrowId(escrowId, pk);
+    forgottenIdsRef.current.add(escrowId);
+    // Stop watching it too, so a late relay event can't silently re-add a
+    // ghost the user just dismissed. Re-loading by ID re-subscribes.
+    clientRef.current?.unwatchEscrow(escrowId);
     setState(prev => {
       if (!prev.escrows.has(escrowId)) return prev;
       const next = new Map(prev.escrows);

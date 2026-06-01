@@ -49,6 +49,7 @@ import {
 } from "./types.js";
 
 import { applyEvent, replayEventChain, canVote, getWinner, type TransitionResult } from "./state-machine.js";
+import { buildChildCreateParams, remainingStock, unsoldStock, isSoldOut, isLastUnitContested } from "./storefront.js";
 import { EscrowNotifier } from "./notifier.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
 import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
@@ -384,6 +385,18 @@ export class EscrowClient {
     fedPrefix?: string;
     /** Full federation ID (hex). Locker captures via probeFederation(). */
     fed?: string;
+    // #7 multi-unit storefront ───────────────────────────────────────────
+    /** Parent listing: total units offered. Marks this CREATE as a perpetual
+     *  multi-unit storefront (never locked itself; buyers spawn children). */
+    stock?: number;
+    /** Child purchase: the parent listing's escrow id. Emitted as a `#parent`
+     *  tag so the parent's children are relay-filterable for stock counting. */
+    parent?: string;
+    /** Child purchase: units claimed from the parent's stock. */
+    claimedQuantity?: number;
+    /** Child purchase: the parent's seller pubkey, seated as SELLER so a
+     *  buyer-created child is lock-ready without the seller online (Option A). */
+    sellerPubkey?: string;
   }): Promise<{ escrowId: string; state: EscrowState }> {
     const pubkey = await this.getPubkey();
     const now = Math.floor(Date.now() / 1000);
@@ -419,6 +432,12 @@ export class EscrowClient {
       // v0.1.72 federation gates: optional locker-fed identity
       fedPrefix: params.fedPrefix,
       fed: params.fed,
+      // #7 multi-unit storefront: stock on a parent; parent/claimedQuantity/
+      // sellerPubkey on a child purchase. All optional — legacy listings omit.
+      stock: params.stock,
+      parent: params.parent,
+      claimedQuantity: params.claimedQuantity,
+      sellerPubkey: params.sellerPubkey,
       createdAt: now,
     };
 
@@ -444,6 +463,10 @@ export class EscrowClient {
         // v0.1.72 federation gates: tag the locker's fed for fast filtering
         ...(params.fedPrefix ? [[TAGS.FED_PREFIX, params.fedPrefix]] : []),
         ...(params.fed ? [[TAGS.FED, params.fed]] : []),
+        // #7 multi-unit storefront: a child carries its parent's id as a
+        // `#parent` tag so Browse can fan out one relay filter to fetch all of
+        // a listing's children and derive remaining stock.
+        ...(params.parent ? [[TAGS.PARENT, params.parent]] : []),
       ],
       content,
     };
@@ -1083,6 +1106,90 @@ export class EscrowClient {
   /** Stop the Browse feed subscription. */
   unwatchPublicListings(): void {
     const label = "public-listings";
+    const subId = this.subscriptions.get(label);
+    if (subId) {
+      this.relayManager.unsubscribe(subId);
+      this.subscriptions.delete(label);
+    }
+  }
+
+  // ── #7 multi-unit storefront ───────────────────────────────────────────
+
+  /** Spawn a CHILD purchase escrow for `claimedQuantity` units of a multi-unit
+   *  parent listing and publish its CREATE. This client is seated as BUYER and
+   *  the parent's seller as SELLER (Option A — seller needn't be online), so
+   *  the caller can LOCK it immediately via the normal marketplace path.
+   *  Returns the new child escrow. */
+  async purchaseFromListing(
+    parent: EscrowState,
+    claimedQuantity: number,
+  ): Promise<{ escrowId: string; state: EscrowState }> {
+    return this.createEscrow(buildChildCreateParams(parent, claimedQuantity));
+  }
+
+  /** Load the full states of a listing's CHILD purchase escrows. Fetches child
+   *  CREATEs by `#parent`, then loads each child's chain by id so its status /
+   *  hold / claimedQuantity are known for stock accounting. Best-effort: a
+   *  child that fails to load is skipped. Note: a non-participant (browsing
+   *  buyer) can't decrypt other buyers' LOCKs, so they may under-count locked
+   *  units and briefly see more stock than real — safe under Option A (an
+   *  overcommit just refunds). The SELLER is a participant in every child, so
+   *  the seller's own view is accurate. */
+  async loadChildren(parentId: string): Promise<EscrowState[]> {
+    const createEvents = await this.relayManager.fetchChildCreates(parentId);
+    const childIds = new Set<string>();
+    for (const ev of createEvents) {
+      const d = ev.tags.find(t => t[0] === TAGS.ESCROW_ID)?.[1];
+      if (d) childIds.add(d);
+    }
+    const children: EscrowState[] = [];
+    for (const id of childIds) {
+      try {
+        const state = await this.loadEscrow(id);
+        if (state && state.parent === parentId) children.push(state);
+      } catch (e) {
+        console.debug(`[escrow] loadChildren ${parentId}: child ${id} failed to load`, e);
+      }
+    }
+    return children;
+  }
+
+  /** Derived remaining-stock snapshot for a multi-unit parent listing: resolves
+   *  the parent (cache or relays) + its children, then runs the pure storefront
+   *  accountant. `now` defaults to the wall clock. Returns null if the parent
+   *  can't be resolved. */
+  async derivedStock(parentId: string, now: number = Math.floor(Date.now() / 1000)): Promise<{
+    remaining: number;
+    unsold: number;
+    soldOut: boolean;
+    lastUnitContested: boolean;
+    childCount: number;
+  } | null> {
+    const parent = this.states.get(parentId) ?? await this.loadEscrow(parentId);
+    if (!parent) return null;
+    const children = await this.loadChildren(parentId);
+    return {
+      remaining: remainingStock(parent, children, now),
+      unsold: unsoldStock(parent, children, now),
+      soldOut: isSoldOut(parent, children, now),
+      lastUnitContested: isLastUnitContested(parent, children, now),
+      childCount: children.length,
+    };
+  }
+
+  /** Live-watch a listing's children (CREATE fan-out by `#parent`). New child
+   *  CREATEs flow through the normal onStateUpdate path so the UI can recompute
+   *  derived stock. Idempotent per parent. */
+  watchChildren(parentId: string): void {
+    const label = `children:${parentId}`;
+    if (this.subscriptions.has(label)) return;
+    const subId = this.relayManager.subscribeToChildren(parentId);
+    this.subscriptions.set(label, subId);
+  }
+
+  /** Stop watching a listing's children. */
+  unwatchChildren(parentId: string): void {
+    const label = `children:${parentId}`;
     const subId = this.subscriptions.get(label);
     if (subId) {
       this.relayManager.unsubscribe(subId);

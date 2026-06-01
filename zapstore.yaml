@@ -13,12 +13,42 @@ pubkey: npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6
 release_notes: ./zapstore/release-notes.md
 
 name: Chama
-summary: Nostr-native P2P escrow client. Non-custodial. No server.
+summary: Trade Bitcoin peer-to-peer with escrow no one can freeze — non-custodial, serverless, no KYC.
 description: |
-  Chama is a Nostr-native P2P escrow client for Bitcoin commerce.
+  **Trade Bitcoin with anyone. Trust the math, not a middleman.**
 
-  It is non-custodial, serverless, and built on Nostr events, Fedimint ecash,
-  and 2-of-3 Shamir Secret Sharing.
+  A *chama* is an East African savings circle — neighbors who pool their money
+  and settle on trust. Chama gives that same circle to the whole world, except
+  here the trust is cryptographic. Buy and sell Bitcoin, goods, and services
+  peer-to-peer behind an escrow that no company can freeze, seize, or switch
+  off — because there is no company in the middle. No server. No "Chama Inc."
+  Just you, your counterparty, your community, and Nostr.
+
+  **Your money is never ours to lose.** Every trade is locked into a 2-of-3
+  escrow, split with Shamir Secret Sharing and held as Fedimint ecash. No
+  custodian ever touches the funds. When both sides are happy it settles over
+  Lightning in seconds. If a deal goes sideways, a community arbiter you already
+  trust — not a faceless support queue — helps release the funds to the right
+  side. Two of three keys always decide. Never one.
+
+  **No account. No email. No KYC.** Sign in with your Nostr key and you're in —
+  nothing to sign up for, nothing to be deplatformed from. Trades travel as
+  encrypted Nostr events (NIP-44) across many relays, so the marketplace itself
+  is as censorship-resistant as Nostr.
+
+  **Built for real-world commerce:**
+
+  - 2-of-3 escrow with community arbiters — disputes settled by people, not policies
+  - Lightning-fast settlement via client-side Fedimint ecash
+  - Get paid your way — Strike, Cash App, Zelle, bank transfer and local rails, surfaced for your community
+  - Bring your own Lightning wallet over Nostr Wallet Connect (NWC)
+  - Join community "Chamas" — from Bitcoin Life to Global USD — each with its own arbiters and payment rails
+  - Runs in your browser, on Android, and on desktop — same keys everywhere
+
+  Bitcoin was meant to be peer-to-peer electronic cash. Chama is peer-to-peer
+  electronic *commerce* — sovereign, private, and woven from trust.
+
+  Bring your keys. Bring your circle.
 website: https://getchama.app
 icon: public/icons/chama-woven-trust-mark-transparent-512.png
 images:

@@ -38,6 +38,10 @@ export interface NostrFilter {
   authors?: string[];
   "#d"?: string[];
   "#p"?: string[];
+  /** #7 multi-unit storefront: child purchase CREATEs carry their parent
+   *  listing's id as a `parent` tag, so a `#parent` filter fans out one REQ
+   *  to fetch all of a listing's children for derived stock counting. */
+  "#parent"?: string[];
   since?: number;
   until?: number;
   limit?: number;
@@ -551,6 +555,32 @@ export class RelayManager {
       kinds: [EscrowEventKind.CREATE],
       since: since ?? sevenDaysAgo,
     });
+  }
+
+  /**
+   * #7 multi-unit storefront: subscribe to a listing's CHILD purchase CREATEs
+   * (events tagged `parent: <parentId>`). Each child's CREATE announces a
+   * buyer's claim; the caller loads each child's full chain by id to derive
+   * committed stock. Live updates keep a parent's "N left" current.
+   */
+  subscribeToChildren(parentId: string): string {
+    return this.subscribe({
+      kinds: [EscrowEventKind.CREATE],
+      "#parent": [parentId],
+    });
+  }
+
+  /**
+   * #7 multi-unit storefront: one-shot fetch of a listing's CHILD purchase
+   * CREATEs by `#parent`. Returns the children's CREATE events (each d-tag is
+   * a child escrow id); the caller loads each child's full chain to derive
+   * committed stock.
+   */
+  fetchChildCreates(parentId: string, timeoutMs = 5_000): Promise<NostrEvent[]> {
+    return this.fetchOnce({
+      kinds: [EscrowEventKind.CREATE],
+      "#parent": [parentId],
+    }, timeoutMs);
   }
 
   // ── One-shot fetch: get all events for an escrow ────────────────────────

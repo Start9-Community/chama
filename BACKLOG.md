@@ -470,6 +470,42 @@ Move these into a target section once the shape is clear.
       a "FORGET THIS TRADE LOCALLY" escape hatch (`forgetEscrow` → drops saved
       pointer + hides from list, money stays in escrow, re-loadable by ID) for
       unrecoverable ghosts. +11 tests. Provenance: user field report.
+  - [x] **v1.2.15 follow-up — the heal/forget didn't actually work on-device.**
+        Field report: Forget "frozen, doesn't trigger anything"; re-broadcast
+        "doesn't fix it." Two root causes, both fixed: (1) `window.confirm()` is
+        a NO-OP in the Tauri/Capacitor webview, so the confirm-gated Forget
+        never fired — replaced with an inline two-tap confirm (and the same
+        broken pattern on seller "Delete listing" → two-tap toast confirm).
+        (2) Re-broadcast publishes to relays, but the counterparty's client has
+        NOTHING subscribed to discover a never-seen trade (no `#p` participant
+        feed; events carry no `#p` tag; the notifier only sends), so the events
+        sat on relays unseen. Fixed the UX to complete the heal: on success it
+        now surfaces the trade ID + a Copy button + "send this to the other
+        party so they can Load it," and surfaces publish failures (0 relays /
+        nothing cached) instead of a vague success line. `forgetEscrow` now also
+        `unwatchEscrow`s so a late event can't re-add a dismissed ghost.
+        (3) Forget didn't PERSIST across a restart — dropping the saved pointer
+        wasn't enough because the Browse/public-listings feed re-delivers every
+        trade's public CREATE through `updateEscrow`, silently re-adding the
+        ghost on the next reload. Fixed with a persistent per-pubkey
+        forgotten-ids denylist (`chama_forgotten_ids:<npub>`) that `updateEscrow`
+        honors; loading the trade by ID clears it (deliberate un-forget). So a
+        forget now sticks across restart + sign-out/in on the SAME device.
+        Caveats (by design): a full localStorage wipe clears the denylist, and
+        forget is LOCAL — it doesn't propagate to other devices (to remove a
+        listing everywhere, the seller Cancels/Deletes it, which publishes a
+        cancel event).
+  - [ ] **Auto-discovery so re-broadcast self-heals (no manual ID share).** The
+        proper long-term fix: tag escrow CREATEs with `#p` for each participant,
+        run `subscribeToParticipant(myPubkey)` on connect (already exists in
+        relay-manager, never called), and on re-broadcast publish a FRESH
+        `#p`-tagged pointer (new timestamp, so it isn't excluded by Browse's
+        `since` window) → the counterparty's participant feed auto-loads the
+        trade. Would heal even old ghosts (the pointer is new). Deferred from
+        v1.2.15 — needs its own design + tests, beyond the hotfix.
+  - [ ] **Remaining `window.confirm` / `window.alert` sites.** Same webview
+        no-op class: `CreateForm.tsx` photo-type `window.alert` → convert to an
+        inline error. Audit for any others before they bite.
 
 ---
 
