@@ -37,10 +37,17 @@ export function getFediInternal(): FediInternalProvider | null {
 }
 
 export function hasFediInternalEcash(): boolean {
+  return hasFediInternalGenerateEcash() && hasFediInternalReceiveEcash();
+}
+
+export function hasFediInternalGenerateEcash(): boolean {
   const provider = getFediInternal();
-  return !!provider
-    && typeof provider.generateEcash === "function"
-    && typeof provider.receiveEcash === "function";
+  return !!provider && typeof provider.generateEcash === "function";
+}
+
+export function hasFediInternalReceiveEcash(): boolean {
+  const provider = getFediInternal();
+  return !!provider && typeof provider.receiveEcash === "function";
 }
 
 export function msatsToExactSats(amountMsats: number): number {

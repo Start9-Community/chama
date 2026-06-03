@@ -27,6 +27,8 @@ export {
   generateFediEcash,
   getFediInternal,
   hasFediInternalEcash,
+  hasFediInternalGenerateEcash,
+  hasFediInternalReceiveEcash,
   msatsToExactSats,
   receiveFediEcash,
 } from "./fedi-internal.js";

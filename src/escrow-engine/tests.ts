@@ -5702,6 +5702,9 @@ console.log("\n── Fedi Mini-App ecash funding path ──");
 {
   const {
     generateFediEcash,
+    hasFediInternalEcash,
+    hasFediInternalGenerateEcash,
+    hasFediInternalReceiveEcash,
     msatsToExactSats,
     receiveFediEcash,
   } = await import("../fedimint/fedi-internal.js");
@@ -5732,11 +5735,30 @@ console.log("\n── Fedi Mini-App ecash funding path ──");
         },
       },
     };
+    assert(hasFediInternalGenerateEcash(),
+      "Fedi funding capability is true when generateEcash is available");
+    assert(hasFediInternalReceiveEcash(),
+      "Fedi receive capability is true when receiveEcash is available");
+    assert(hasFediInternalEcash(),
+      "Fedi full ecash capability is true when generate+receive are available");
     const generated = await generateFediEcash(1_000_000, "test trade");
     assert(generated.notes === "oob-notes-from-fedi",
       "generateFediEcash unwraps Fedi's {notes} response");
     assert(requestedAmount === 1_000,
       "generateFediEcash asks Fedi for sats, not msats");
+
+    delete (globalThis as any).window.fediInternal.receiveEcash;
+    assert(hasFediInternalGenerateEcash(),
+      "Fedi funding still uses generateEcash when receiveEcash is unavailable");
+    assert(!hasFediInternalReceiveEcash(),
+      "Fedi receive capability is false when receiveEcash is unavailable");
+    assert(!hasFediInternalEcash(),
+      "Fedi full ecash capability stays false without receiveEcash");
+    const generatedWithoutReceive = await generateFediEcash(1_000_000, "fund-only trade");
+    assert(generatedWithoutReceive.notes === "oob-notes-from-fedi",
+      "Fedi funding does not require receiveEcash and avoids Lightning receive");
+
+    (globalThis as any).window.fediInternal.receiveEcash = async () => ({ msats: 1_000_000 });
 
     (globalThis as any).window.fediInternal.generateEcash = async () => "raw-oob-notes";
     const rawGenerated = await generateFediEcash(2_000_000);

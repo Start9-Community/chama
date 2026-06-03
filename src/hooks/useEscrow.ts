@@ -107,6 +107,7 @@ import {
   deriveCreateFedTags,
   generateFediEcash,
   hasFediInternalEcash,
+  hasFediInternalGenerateEcash,
 } from "../fedimint/index.js";
 import type { LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
 import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
@@ -2345,7 +2346,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         return { kind: "locked" };
       }
 
-      if (opts.fundingMethod !== "nwc" && hasFediInternalEcash()) {
+      if (opts.fundingMethod !== "nwc" && hasFediInternalGenerateEcash()) {
         opts.onPhase({ kind: "requesting-fedi-ecash" });
         await requireBridge().preflightLock(escrowId);
         const { notes } = await generateFediEcash(opts.amountMsats, opts.description);
