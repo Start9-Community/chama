@@ -92,7 +92,7 @@ function execCommandCopy(text: string): void {
 export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
-  onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
+  disableNwc = false, onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
   onPrewarmFunding, onRebroadcast, onForget, onPurchase, stockLeft, isOversoldOrder = false,
 }: {
@@ -127,6 +127,8 @@ export function TradeDetail({
   onAmountDisplayModeChange?: (mode: AmountDisplayMode) => void;
   kind0Enabled?: boolean;
   profileNames?: NostrProfileNameMap;
+  /** Fedi Mini-App must stay on internal ecash paths, not NWC shortcuts. */
+  disableNwc?: boolean;
   onBack: () => void;
   // v1.2.2 vote-freeze fix: typed as Promise<void> so handleVote can
   // await the publish-and-toast chain wired in App. The previous `void`
@@ -238,7 +240,7 @@ export function TradeDetail({
   const [savedNwcs, setSavedNwcs] = useState<SavedNwcConnection[]>(
     () => listSavedNwcConnections(),
   );
-  const activeNwc = savedNwcs.length > 0 ? savedNwcs[0] : null;
+  const activeNwc = !disableNwc && savedNwcs.length > 0 ? savedNwcs[0] : null;
   const [directNwcFundPhase, setDirectNwcFundPhase] = useState<string | null>(null);
   const [directNwcClaimPhase, setDirectNwcClaimPhase] = useState<string | null>(null);
   const refreshSavedNwcs = () => setSavedNwcs(listSavedNwcConnections());

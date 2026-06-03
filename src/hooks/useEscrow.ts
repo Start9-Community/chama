@@ -2346,7 +2346,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         return { kind: "locked" };
       }
 
-      if (opts.fundingMethod !== "nwc" && hasFediInternalGenerateEcash()) {
+      if (hasFediInternalGenerateEcash()) {
         opts.onPhase({ kind: "requesting-fedi-ecash" });
         await requireBridge().preflightLock(escrowId);
         const { notes } = await generateFediEcash(opts.amountMsats, opts.description);

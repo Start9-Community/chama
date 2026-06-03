@@ -84,6 +84,9 @@ export interface AtomicFundingModalProps {
     savedHandleId?: string;
     selectedItems?: SelectedMenuItem[];
   }) => Promise<unknown>;
+  /** Hide NWC in environments where funding must stay on an internal
+   *  wallet route, e.g. Fedi Mini-App. */
+  disableNwc?: boolean;
   /** Closed when the modal terminates (success or user cancel). The
    *  consumer can read the terminal kind to decide post-modal navigation
    *  (e.g. show success toast on locked, error toast on lock-failed). */
@@ -131,13 +134,14 @@ export function AtomicFundingModal({
   fundAndLock,
   getOnchainInfo,
   lockAndPublish,
+  disableNwc = false,
   onClose,
 }: AtomicFundingModalProps) {
   const amountSats = Math.floor(amountMsats / 1000);
   const [phase, setPhase] = useState<ModalPhase>({ kind: "choose-method" });
   const [fundingMethod, setFundingMethod] = useState<"lightning" | "onchain" | "nwc" | null>(null);
   const [savedNwcConnections, setSavedNwcConnections] = useState<SavedNwcConnection[]>(
-    () => listSavedNwcConnections(),
+    () => disableNwc ? [] : listSavedNwcConnections(),
   );
   const [nwcInput, setNwcInput] = useState("");
   const [rememberNwc, setRememberNwc] = useState(true);
@@ -438,12 +442,13 @@ export function AtomicFundingModal({
             amountSats={amountSats}
             onchainInfoState={onchainInfoState}
             onSelect={handleSelectMethod}
-            savedNwcConnections={savedNwcConnections}
+            savedNwcConnections={disableNwc ? [] : savedNwcConnections}
             nwcInput={nwcInput}
             rememberNwc={rememberNwc}
             onNwcInputChange={setNwcInput}
             onRememberNwcChange={setRememberNwc}
             onSelectNwc={handleSelectNwc}
+            disableNwc={disableNwc}
             bidirectionalSwaps={EXTERNAL_SWAPS_ENABLED ? getBidirectionalSwapsForContext({
               homeCommunity,
               tradeCommunity,
@@ -573,6 +578,7 @@ function FundingMethodChooser({
   onNwcInputChange,
   onRememberNwcChange,
   onSelectNwc,
+  disableNwc,
   bidirectionalSwaps,
 }: {
   amountSats: number;
@@ -587,6 +593,7 @@ function FundingMethodChooser({
   onNwcInputChange: (value: string) => void;
   onRememberNwcChange: (value: boolean) => void;
   onSelectNwc: (connectionString: string, remember: boolean) => void;
+  disableNwc?: boolean;
   /** v1.2.4: bidirectional external-swap providers (currently Banxaas
    *  only) that apply to this trade's context. Surfaced as an
    *  on/offramp CTA above the regular funding methods because the
@@ -706,7 +713,7 @@ function FundingMethodChooser({
           paste-new-NWC textarea stays behind the disclosure since
           it's a rare-path setup step; returning users with a known
           wallet should fund a trade in one tap. */}
-      {savedNwcConnections.length > 0 && (
+      {!disableNwc && savedNwcConnections.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <div style={{
             fontSize: 9, color: T.accent, fontFamily: T.mono,
@@ -801,6 +808,7 @@ function FundingMethodChooser({
         Trade amount: <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />
       </div>
 
+      {!disableNwc && (
       <details style={{ marginTop: 12 }}>
         <summary style={{
           color: T.muted, fontFamily: T.mono, fontSize: 10,
@@ -858,6 +866,7 @@ function FundingMethodChooser({
           </button>
         </div>
       </details>
+      )}
     </div>
   );
 }

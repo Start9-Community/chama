@@ -89,7 +89,11 @@ import { SavedHandlesPanel } from "./panels/SavedHandlesPanel.js";
 import { PayoutDestinationsPanel } from "./panels/PayoutDestinationsPanel.js";
 import { SimModePill, SimEntryModal, SIM_PILL_HEIGHT } from "../sim/SimModeBanner.js";
 import { isSimModeOn } from "../sim/simMode.js";
-import { getSignInEnvironment, shouldApplyCssSafeAreaInsets } from "./sign-in-environment.js";
+import {
+  getSignInEnvironment,
+  isFediWebViewSignInEnvironment,
+  shouldApplyCssSafeAreaInsets,
+} from "./sign-in-environment.js";
 import { readKind0Toggle, type NostrProfileNameMap } from "./nostr-profiles.js";
 import {
   readAmountDisplayMode,
@@ -963,7 +967,9 @@ export default function App() {
 
   // ── Not connected → show connect screen ──
   const simOn = isSimModeOn();
-  const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(getSignInEnvironment());
+  const signInEnvironment = getSignInEnvironment();
+  const fediWebView = isFediWebViewSignInEnvironment(signInEnvironment);
+  const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(signInEnvironment);
   const safeAreaTop = useSafeAreaInsets ? "env(safe-area-inset-top, 0px)" : 0;
   const shellPaddingTop = simOn
     ? (useSafeAreaInsets ? `calc(${SIM_PILL_HEIGHT}px + env(safe-area-inset-top, 0px))` : SIM_PILL_HEIGHT)
@@ -1216,6 +1222,7 @@ export default function App() {
           fundAndLock={actions.fundAndLock}
           getOnchainInfo={actions.getOnchainInfo}
           lockAndPublish={actions.lockAndPublish}
+          disableNwc={fediWebView}
           onClose={(terminal) => {
             const { resolve } = pendingFundAndLock;
             setPendingFundAndLock(null);
@@ -1252,7 +1259,7 @@ export default function App() {
           escrowId={pendingClaim.escrowId}
           payoutMsats={pendingClaim.payoutMsats}
           savedDestinations={listPayoutDestinations()}
-          savedNwcConnections={listSavedNwcConnections()}
+          savedNwcConnections={fediWebView ? [] : listSavedNwcConnections()}
           homeCommunity={getUserCommunitySlugRaw()}
           tradeCommunity={pendingClaim.tradeCommunity}
           fiatCurrency={pendingClaim.fiatCurrency}
@@ -1367,7 +1374,7 @@ export default function App() {
         <RecoveryPayoutModal
           balanceMsats={fedimint.balanceMsats ?? 0}
           savedDestinations={listPayoutDestinations()}
-          savedNwcConnections={listSavedNwcConnections()}
+          savedNwcConnections={fediWebView ? [] : listSavedNwcConnections()}
           title={pendingRecovery.title}
           subtitle={pendingRecovery.subtitle}
           payInvoice={(bolt11) => actions.payInvoice(
@@ -1451,6 +1458,7 @@ export default function App() {
             receiveUnavailable={fedimint.lastHealthOk === false}
             fundingInProgress={midFunding}
             claimBlockedReason={selectedClaimBlockedReason}
+            disableNwc={fediWebView}
             onBack={() => { setView(detailBackView); setSelectedId(null); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
@@ -1561,6 +1569,13 @@ export default function App() {
             // onLock (modal flow) on failure via the "Try other
             // method" link.
             onLockDirectNwc={async (opts) => {
+              if (fediWebView) {
+                setToast({
+                  message: "Fedi uses its built-in ecash flow here — NWC is disabled.",
+                  type: "info",
+                });
+                return { ok: false, error: "NWC disabled in Fedi" };
+              }
               if (!fedimint.joined) {
                 setToast({ message: "Join a Chama first — tap a community pill.", type: "error" });
                 return { ok: false, error: "Join a Chama first" };
@@ -1654,6 +1669,13 @@ export default function App() {
             // invoice via NWC make_invoice, then dispatches the
             // claim-and-payout flow. Skips ClaimPayoutModal entirely.
             onClaimDirectNwc={async (opts) => {
+              if (fediWebView) {
+                setToast({
+                  message: "Fedi claims directly into your Fedi wallet — NWC is disabled.",
+                  type: "info",
+                });
+                return { ok: false, error: "NWC disabled in Fedi" };
+              }
               if (!selected) return { ok: false, error: "No selected trade" };
               const winner = getWinner(selected);
               if (!winner) return { ok: false, error: "No winner yet" };
