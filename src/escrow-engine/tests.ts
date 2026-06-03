@@ -7807,6 +7807,9 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       assert(Array.isArray(diagnostics?.requiredCapabilities) &&
         diagnostics.requiredCapabilities.includes("reset"),
         "Native bridge stale-sidecar diagnostics name the missing reset capability");
+      assert(Array.isArray(diagnostics?.requiredCapabilities) &&
+        diagnostics.requiredCapabilities.includes("idempotent_join"),
+        "Native bridge stale-sidecar diagnostics require idempotent join capability");
     } finally {
       (globalThis as any).fetch = originalFetch;
     }
@@ -7882,7 +7885,7 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
           ok: true,
           joined: true,
           api_version: 2,
-          capabilities: ["reset"],
+          capabilities: ["reset", "idempotent_join"],
         }), { status: 200 });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });

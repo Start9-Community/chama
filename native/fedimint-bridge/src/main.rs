@@ -492,6 +492,10 @@ impl Bridge {
     async fn join(&self, invite_code: &str) -> Result<ClientHandleArc> {
         let invite_code =
             InviteCode::from_str(invite_code).context("invalid federation invite code")?;
+        self.join_invite(invite_code).await
+    }
+
+    async fn join_invite(&self, invite_code: InviteCode) -> Result<ClientHandleArc> {
         let (builder, db) = self.client_builder().await?;
         let mnemonic = load_or_generate_mnemonic(&db).await?;
         let connectors = self.connectors().await?;
@@ -539,10 +543,22 @@ impl Bridge {
     }
 
     async fn open_or_join(&self, invite_code: &str) -> Result<ClientHandleArc> {
+        let invite_code =
+            InviteCode::from_str(invite_code).context("invalid federation invite code")?;
+        let requested_federation_id = invite_code.federation_id();
+
         match self.open().await {
-            Ok(client) => Ok(client),
+            Ok(client) => {
+                let existing_federation_id = client.federation_id();
+                if existing_federation_id != requested_federation_id {
+                    bail!(
+                        "existing Fedimint client database is initialized for federation {existing_federation_id}, but requested invite is for federation {requested_federation_id}; reset local state before switching federations"
+                    );
+                }
+                Ok(client)
+            }
             Err(open_err) => self
-                .join(invite_code)
+                .join_invite(invite_code)
                 .await
                 .with_context(|| format!("open failed before join attempt: {open_err:#}")),
         }
@@ -1329,7 +1345,7 @@ impl AppState {
     }
 
     async fn join(&self, invite_code: &str) -> Result<ClientHandleArc> {
-        let client = self.bridge.join(invite_code).await?;
+        let client = self.bridge.open_or_join(invite_code).await?;
         *self.client.lock().await = Some(client.clone());
         Ok(client)
     }
@@ -1350,6 +1366,7 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "api_version": 2,
         "capabilities": [
             "reset",
+            "idempotent_join",
         ],
     }))
 }
