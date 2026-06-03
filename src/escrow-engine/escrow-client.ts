@@ -48,8 +48,10 @@ import {
   type EscrowPayload,
 } from "./types.js";
 
-import { applyEvent, replayEventChain, canVote, getWinner, type TransitionResult } from "./state-machine.js";
+import { applyEvent, replayEventChain, canVote, getWinner, payoutRecipientFor, type TransitionResult } from "./state-machine.js";
 import { buildChildCreateParams, remainingStock, unsoldStock, isSoldOut, isLastUnitContested } from "./storefront.js";
+import { HOLDER_ONLY_SHARE_POLICY, shareIndexForRole } from "./holder-shares.js";
+import type { VoteShareEnvelope } from "./types.js";
 import { EscrowNotifier } from "./notifier.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
 import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
@@ -653,6 +655,9 @@ export class EscrowClient {
      *  ("m-pesa", "wave", etc.). Bridge pulls from saved handle. */
     handleNetworks?: string[];
     selectedItems?: LockPayload["selectedItems"];
+    /** Holder-only shares: "holder-only-v1" when the bridge built per-holder
+     *  shares. Absent ⇒ legacy dual-encrypted (old claim path). */
+    sharePolicy?: LockPayload["sharePolicy"];
   }): Promise<EscrowState> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
@@ -692,6 +697,7 @@ export class EscrowClient {
       type: "escrow:lock",
       notesHash: params.notesHash,
       shares: params.shares,
+      sharePolicy: params.sharePolicy,
       sellerReceivesMsats: params.sellerReceivesMsats,
       arbiterFeeMsats: params.arbiterFeeMsats,
       selectedItems: params.selectedItems,
@@ -747,6 +753,44 @@ export class EscrowClient {
 
   // ── Cast a vote ─────────────────────────────────────────────────────────
 
+  /** Holder-only shares: build the VOTE-carried share envelope for `outcome`.
+   *  Decrypts the voter's OWN holder-only LOCK share (locker = sender) and
+   *  re-encrypts it to the engine-computed recipient (voter = sender), so only
+   *  the recipient can read it even though the VOTE is visible to all three
+   *  participants. Returns undefined for legacy locks or on any failure —
+   *  best-effort, never blocks the vote. */
+  private async buildVoteShareEnvelope(
+    state: EscrowState,
+    voterRole: Role,
+    voterPubkey: string,
+    outcome: Outcome,
+  ): Promise<VoteShareEnvelope | undefined> {
+    try {
+      if (state.lock.sharePolicy !== HOLDER_ONLY_SHARE_POLICY) return undefined;
+      const recipient = payoutRecipientFor(state, outcome);
+      if (!recipient) return undefined;
+      const shareIndex = shareIndexForRole(voterRole);
+      const myCipher = state.lock.shares.get(String(shareIndex))?.encryptedFor?.[voterPubkey];
+      if (!myCipher) return undefined;
+      // LOCK shares were encrypted by the locker → decrypt with locker = sender.
+      const lockerPubkey = state.eventChain.find(e => e.kind === EscrowEventKind.LOCK)?.raw.pubkey;
+      if (!lockerPubkey) return undefined;
+      const plaintextShare = await this.signer.nip44Decrypt(myCipher, lockerPubkey);
+      // Re-encrypt to the recipient — voter is the sender.
+      const reEncrypted = await this.signer.nip44Encrypt(plaintextShare, recipient.pubkey);
+      return {
+        shareIndex,
+        outcome,
+        notesHash: state.lock.notesHash ?? "",
+        recipientPubkey: recipient.pubkey,
+        encryptedFor: { [recipient.pubkey]: reEncrypted },
+      };
+    } catch (e) {
+      console.debug("[escrow] vote share-envelope skipped (best-effort):", e);
+      return undefined;
+    }
+  }
+
   async vote(escrowId: string, outcome: Outcome): Promise<EscrowState> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
@@ -761,10 +805,19 @@ export class EscrowClient {
     const now = Math.floor(Date.now() / 1000);
     const lastEventId = state.eventChain[state.eventChain.length - 1]?.raw.id;
 
+    // Holder-only shares: re-encrypt this voter's own LOCK share to the
+    // outcome's engine-computed recipient and carry it on the VOTE so the
+    // recipient can reconstruct from their own share + this one. Best-effort —
+    // a failure or a legacy dual-encrypted lock just omits it, never blocking
+    // the vote (the expiry-heal refund pays the funder, whose token makes its
+    // share redundant — refinement #3).
+    const shareEnvelope = await this.buildVoteShareEnvelope(state, role, pubkey, outcome);
+
     const payload: VotePayload = {
       type: "escrow:vote",
       outcome,
       role,
+      ...(shareEnvelope ? { shareEnvelope } : {}),
       votedAt: now,
     };
 

@@ -42,6 +42,12 @@ import {
   type PeriodReleasePayload,
   type ValidationError,
 } from "./types.js";
+import { payoutRecipientFor } from "./recipients.js";
+import { validateVoteShareEnvelope } from "./holder-shares.js";
+
+// Re-export so existing callers (escrow-client, escrow-bridge, tests) keep
+// importing payoutRecipientFor from the state machine.
+export { payoutRecipientFor } from "./recipients.js";
 
 // ── Result type for state transitions ─────────────────────────────────────
 
@@ -781,6 +787,9 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   next.lock.notesHash = p.notesHash;
   next.lock.lockedAt = p.lockedAt;
   next.lock.selectedItems = selectedItems;
+  // Holder-only shares: carry the share policy onto state so the claim path can
+  // branch (holder-only reconstruct vs legacy dual-encrypted). Absent ⇒ legacy.
+  next.lock.sharePolicy = p.sharePolicy;
   next.listingExpiresAt = state.listingExpiresAt ?? state.expiresAt;
   next.tradeTimeoutSeconds = tradeTimeoutSecondsFor(state);
   next.expiresAt = p.lockedAt + next.tradeTimeoutSeconds;
@@ -886,6 +895,21 @@ function handleVote(state: EscrowState, event: ParsedEscrowEvent<VotePayload>): 
         "Arbiter vote not needed — buyer and seller agree",
         event.raw.id
       );
+    }
+  }
+
+  // Holder-only shares: a carried share envelope must bind correctly — its
+  // shareIndex must be the voter's holder index, its outcome must match the
+  // vote, its notesHash must match the lock, and it must route to the engine
+  // recipient for that outcome. A malformed / misrouted share is rejected (a
+  // well-behaved client always produces a valid one). Absent envelopes (legacy
+  // votes, expiry-heal) skip this entirely.
+  if (p.shareEnvelope) {
+    const reason = validateVoteShareEnvelope(
+      p.shareEnvelope, state, voterRole, p.outcome, state.lock.notesHash,
+    );
+    if (reason) {
+      return err("INVALID_SHARE_ENVELOPE", `Vote share envelope invalid: ${reason}`, event.raw.id);
     }
   }
 
@@ -1422,27 +1446,13 @@ export function canVote(state: EscrowState, pubkey: string): { canVote: boolean;
 }
 
 /** Determine who the winner is (or null if not yet resolved) */
+/** The resolved winner — recipient for the *resolved* outcome. Returns null
+ *  before resolution. For vote-time recipient routing use payoutRecipientFor()
+ *  (re-exported from ./recipients) with the candidate outcome instead — it does
+ *  not read resolvedOutcome (holder-only refinement #2). */
 export function getWinner(state: EscrowState): { pubkey: string; role: Role } | null {
   if (!state.resolvedOutcome) return null;
-
-  // RELEASE sends sats to the non-locker; REFUND returns to locker.
-  //   p2p-trade:   seller locks → buyer wins release, seller wins refund
-  //   bill-pay:    seller locks → buyer wins release, seller wins refund
-  //   marketplace: buyer locks  → SELLER wins release, buyer wins refund
-  //   lending:     seller locks → buyer wins release, seller wins refund
-  //   raw-escrow:  default buyer wins release, seller wins refund
-  const isMarketplace = state.category === "marketplace";
-
-  let winnerRole: Role;
-  if (state.resolvedOutcome === Outcome.RELEASE) {
-    winnerRole = isMarketplace ? Role.SELLER : Role.BUYER;
-  } else {
-    winnerRole = isMarketplace ? Role.BUYER : Role.SELLER;
-  }
-
-  const pubkey = state.participants[winnerRole];
-  if (!pubkey) return null;
-  return { pubkey, role: winnerRole };
+  return payoutRecipientFor(state, state.resolvedOutcome);
 }
 
 /** Check if the escrow has expired based on a given timestamp */

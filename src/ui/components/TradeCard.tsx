@@ -73,6 +73,17 @@ export function TradeCard({
   const sellerContextLine = sellerPubkey && state.category !== "marketplace"
     ? `Seller · ${sellerName ?? shortPubkey(sellerPubkey)}`
     : null;
+  // When the viewer is a participant in their OWN trade (the Me list), show the
+  // counterparty's id so otherwise-identical orders (same store, same title —
+  // e.g. two race-locked units of "Adidas sneakers") are told apart at a glance.
+  // The seller especially must distinguish a real sale from an oversold duplicate.
+  const viewerRole = pubkey === state.participants[Role.SELLER] ? Role.SELLER
+    : pubkey === state.participants[Role.BUYER] ? Role.BUYER : null;
+  const counterpartyPk = viewerRole === Role.SELLER ? participants[Role.BUYER]
+    : viewerRole === Role.BUYER ? sellerPubkey : null;
+  const counterpartyLine = viewerRole && counterpartyPk
+    ? `${viewerRole === Role.SELLER ? "Buyer" : "Seller"} · ${profileNameFor(profileNames, counterpartyPk, kind0Enabled) ?? shortPubkey(counterpartyPk)}`
+    : null;
   const status = STATUS[state.status] ?? STATUS.CREATED;
   const timeLine = compactJoinHoldRemaining(state, nowSec) ?? compactTimeRemaining(state, nowSec);
   const fiatLine = state.fiatAmount != null && state.fiatCurrency
@@ -259,6 +270,23 @@ export function TradeCard({
           }}>
             {state.description}
           </div>
+
+          {counterpartyLine && (
+            <div style={{
+              marginTop: -4,
+              marginBottom: 9,
+              color: viewerRole === Role.SELLER ? T.purple : T.amber,
+              fontFamily: T.mono,
+              fontSize: 10,
+              fontWeight: 700,
+              lineHeight: 1.4,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap" as const,
+            }}>
+              {counterpartyLine}
+            </div>
+          )}
 
           {sellerContextLine && (
             <div style={{

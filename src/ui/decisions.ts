@@ -16,7 +16,7 @@ import {
   DEFAULT_COMMUNITY_SLUG,
 } from "../communities/registry.js";
 import { BP_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
-import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
+import { balanceBlocksFederationSwitch, MATERIAL_RECOVERY_MIN_SATS } from "../payments/lightning-fees.js";
 import {
   type EscrowState,
   EscrowStatus,
@@ -27,11 +27,12 @@ import {
   getEffectiveParticipantsAt,
 } from "../escrow-engine/types.js";
 
-export const MAIN_SURFACE_RECOVERY_MIN_SATS = 2_000;
+// One dust line, defined in the payments layer so the UI decision code and the
+// data-layer switch guards can't drift apart (see balanceBlocksFederationSwitch).
+export const MAIN_SURFACE_RECOVERY_MIN_SATS = MATERIAL_RECOVERY_MIN_SATS;
 
 function hasMainSurfaceRecoveryBalance(balanceMsats: number): boolean {
-  const sats = Math.floor(Math.max(0, balanceMsats) / 1000);
-  return sats >= MAIN_SURFACE_RECOVERY_MIN_SATS && hasLightningWithdrawableBalance(balanceMsats);
+  return balanceBlocksFederationSwitch(balanceMsats);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -114,11 +115,15 @@ export function decideCommunityTapEffect(inputs: CommunityTapInputs): CommunityT
     return { kind: "switch-silent", slug: inputs.slug, targetInvite, displayName };
   }
 
-  // Returning user, fed differs. Sub-fee dust is not recoverable through
-  // the Lightning payout UI, so treat it as zero for switch safety and
-  // recovery blockers until small balances accumulate into something
-  // withdrawable.
-  if (!hasLightningWithdrawableBalance(inputs.balanceMsats)) {
+  // Returning user, fed differs. Only a MATERIAL recoverable balance should
+  // block the switch — the SAME dust line every other recovery surface uses
+  // (hasMainSurfaceRecoveryBalance: >= MAIN_SURFACE_RECOVERY_MIN_SATS AND
+  // Lightning-withdrawable). The old bare hasLightningWithdrawableBalance check
+  // fired for any balance that could withdraw even 1 sat (~4 sats total), so a
+  // switch blocked over ~1 sat the app ITSELF treats as dust — it won't even
+  // nudge you to recover it via the banner. Aligning the two so dust never
+  // blocks a switch while a real balance still surfaces the destroy guard.
+  if (!hasMainSurfaceRecoveryBalance(inputs.balanceMsats)) {
     return { kind: "switch-silent", slug: inputs.slug, targetInvite, displayName };
   }
 
@@ -903,7 +908,9 @@ export function decideListingTapEffect(inputs: ListingTapInputs): ListingTapEffe
   if (inputs.currentInvite === targetInvite) {
     return { kind: "matching" };
   }
-  if (!inputs.currentInvite || !hasLightningWithdrawableBalance(inputs.balanceMsats)) {
+  // Same material-balance dust line as decideCommunityTapEffect: dust never
+  // blocks a listing-fed switch; only a recoverable-worth balance guards.
+  if (!inputs.currentInvite || !hasMainSurfaceRecoveryBalance(inputs.balanceMsats)) {
     return { kind: "switch-silent", targetInvite, displayName };
   }
   return {

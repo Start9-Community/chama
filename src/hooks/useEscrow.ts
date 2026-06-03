@@ -116,7 +116,7 @@ import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
 import { payInvoiceWithNwc } from "../payments/nwc.js";
-import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
+import { balanceBlocksFederationSwitch } from "../payments/lightning-fees.js";
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
@@ -353,6 +353,10 @@ export interface UseEscrowActions {
   /** Forget a trade locally (drop saved pointer + hide from the list). Safe:
    *  money stays in escrow and the trade is re-loadable by ID. */
   forgetEscrow: (escrowId: string) => void;
+  /** #7 multi-unit storefront: spawn a CHILD purchase escrow for `quantity`
+   *  units of a multi-unit parent listing and return it (the buyer then locks
+   *  the child via the normal flow). */
+  purchaseFromListing: (parent: EscrowState, quantity: number) => Promise<{ escrowId: string; state: EscrowState }>;
   /** Fetch self-published kind:0 profile names for visible participants. */
   fetchNostrProfiles: (pubkeys: string[]) => Promise<NostrProfileNameMap>;
   /** Trigger haptic feedback */
@@ -1410,6 +1414,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     return client.rebroadcastEscrow(escrowId);
   }, []);
 
+  const purchaseFromListing = useCallback(async (parent: EscrowState, quantity: number) => {
+    const client = requireClient();
+    const result = await client.purchaseFromListing(parent, quantity);
+    saveEscrowId(result.escrowId, stateRef.current?.pubkey ?? null);
+    return result;
+  }, []);
+
   /** Forget a trade locally: drop its saved pointer and hide it from the
    *  in-memory list. For unrecoverable "ghost" trades the user wants out of
    *  their view. Non-custodial-safe — money lives in 2-of-3 escrow regardless,
@@ -1660,7 +1671,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         }
 
         const balanceUnknown = opfsBalanceMsats < 0;
-        const balanceWithdrawable = hasLightningWithdrawableBalance(opfsBalanceMsats);
+        // Material dust line: only a recoverable-worth balance blocks the switch
+        // (same predicate the UI decision + modal use). Sub-material dust — e.g.
+        // ~1 sat that costs more than itself to recover — switches silently.
+        const balanceWithdrawable = balanceBlocksFederationSwitch(opfsBalanceMsats);
         if (!force && (balanceUnknown || balanceWithdrawable)) {
           const sats = opfsBalanceMsats > 0
             ? Math.floor(opfsBalanceMsats / 1000)
@@ -1997,7 +2011,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     if (
       !force
       && currentBalanceMsats !== null
-      && hasLightningWithdrawableBalance(currentBalanceMsats)
+      && balanceBlocksFederationSwitch(currentBalanceMsats)
     ) {
       const sats = Math.floor(currentBalanceMsats / 1000);
       const err = new Error(
@@ -2563,6 +2577,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     loadEscrow,
     rebroadcastEscrow,
     forgetEscrow,
+    purchaseFromListing,
     fetchNostrProfiles,
     vibrate,
     initFedimint,

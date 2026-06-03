@@ -18,13 +18,19 @@ import {
   type EscrowState,
   type SelectedMenuItem,
   type LockShareEntry,
+  type VotePayload,
   EscrowEventKind,
   Role,
   Outcome,
   getEffectiveParticipantAt,
   selectedMenuItemsTotalMsats,
 } from "../escrow-engine/types.js";
-import { getWinner } from "../escrow-engine/state-machine.js";
+import { getWinner, payoutRecipientFor } from "../escrow-engine/state-machine.js";
+import {
+  HOLDER_ONLY_SHARE_POLICY,
+  holderRoleForShareIndex,
+  shareIndexForRole,
+} from "../escrow-engine/holder-shares.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
@@ -181,15 +187,21 @@ export class EscrowFedimintBridge {
 
     const shares: { shareIndex: number; encryptedFor: Record<string, string> }[] = [];
 
+    // Holder-only-v1: encrypt each share to ONLY its assigned holder. allPks is
+    // [buyer, seller, arbiter] — exactly the shareIndex→holder convention
+    // (0=buyer, 1=seller, 2=arbiter) — so share i goes to holder i and no single
+    // party holds two. Reconstruction needs the agreeing voter's VOTE-carried
+    // share (see appendVoteShareEnvelope / claimAndRedeem). We stop emitting
+    // dual-encrypted shares entirely; old locks still claim via the legacy path
+    // (keyed on the absent sharePolicy). See docs/DESIGN-holder-only-shares.md.
     for (let i = 0; i < lockBundle.shares.length; i++) {
       const share = lockBundle.shares[i];
-      const encryptedFor: Record<string, string> = {};
-
-      for (const pk of allPks) {
-        encryptedFor[pk] = await this.encryptShare(share, pk);
-      }
-
-      shares.push({ shareIndex: i, encryptedFor });
+      const holderPk = allPks[i];
+      if (!holderPk) continue;
+      shares.push({
+        shareIndex: i,
+        encryptedFor: { [holderPk]: await this.encryptShare(share, holderPk) },
+      });
     }
 
     let handleId: string | undefined;
@@ -216,6 +228,7 @@ export class EscrowFedimintBridge {
     return this.escrow.lockEscrow(escrowId, {
       notesHash: lockBundle.notesHash,
       shares,
+      sharePolicy: HOLDER_ONLY_SHARE_POLICY,
       sellerReceivesMsats: lockBundle.sellerReceivesMsats,
       arbiterFeeMsats: lockBundle.arbiterFeeMsats,
       buyerPubkey,
@@ -321,33 +334,78 @@ export class EscrowFedimintBridge {
       throw new Error("No lock data available — escrow may not be fully loaded");
     }
 
-    // With dual-encryption, any participant can decrypt all shares.
-    // We just need any 2 shares for Shamir reconstruction.
-    const sharesSize = state.lock.shares instanceof Map ? state.lock.shares.size : (state.lock.shares as any)?.length || 0;
-    if (!state.lock.shares || sharesSize < 2) {
-      throw new Error("Not enough shares available — state may be incomplete");
+    if (!state.lock.shares || state.lock.shares.size < 1) {
+      throw new Error("No shares available — state may be incomplete");
     }
 
-    // shares is a Map<shareIndex-as-string, LockShareEntry>.
-    // Each entry holds the encryptedFor map for every participant, so
-    // we can pick any two entries for Shamir reconstruction.
-    const shareEntries = [...state.lock.shares.values()];
-
-    if (shareEntries.length < 2) {
-      throw new Error("Not enough shares: got " + shareEntries.length + ", need 2");
-    }
-
-    const share0 = shareEntries[0];
-    const share1 = shareEntries[1];
-
-    // Find the locker's pubkey from the LOCK event in the chain
-    // NIP-44 decrypt needs the sender's pubkey (the person who encrypted)
+    // NIP-44 decrypt needs the sender's pubkey. LOCK shares were encrypted by
+    // the locker (the LOCK event signer).
     const lockEvent = state.eventChain.find((e: any) => e.kind === 38102 || e.payload?.type === "escrow:lock");
     const lockerPubkey = lockEvent?.raw?.pubkey || lockEvent?.pubkey || myPubkey;
 
-    // Decrypt 2 shares
-    const decryptedMyShare = await this.decryptShareDual(share0, myPubkey, lockerPubkey);
-    const decryptedPartnerShare = await this.decryptShareDual(share1, myPubkey, lockerPubkey);
+    let decryptedMyShare: SSSShare;
+    let decryptedPartnerShare: SSSShare;
+
+    if (state.lock.sharePolicy === HOLDER_ONLY_SHARE_POLICY) {
+      // Holder-only: the winner reconstructs from their OWN LOCK share (the
+      // locker encrypted it to them at their holder index) PLUS one agreeing
+      // voter's VOTE-carried share (a voter re-encrypted their own share to the
+      // winner when voting this outcome). Two distinct shares, mixed senders —
+      // the cryptographic 2-of-3. See docs/DESIGN-holder-only-shares.md.
+      const ownShareIndex = shareIndexForRole(winner.role);
+      const ownEntry = state.lock.shares.get(String(ownShareIndex));
+      if (!ownEntry?.encryptedFor?.[myPubkey]) {
+        throw new Error("Can't find your share of this trade. Make sure you're on Chama v2.x.x or higher and let it finish syncing — if the other side is on an older version, everyone needs to update for the trade to complete.");
+      }
+      // LOCK share: locker is the sender.
+      decryptedMyShare = await this.decryptShareDual(ownEntry, myPubkey, lockerPubkey);
+
+      // VOTE share: scan for an agreeing voter's share routed to me — but it
+      // must be a DISTINCT share from my own. The winner usually also voted, and
+      // their own vote re-encrypts their own share (same index) back to
+      // themselves; using it would feed SSS two copies of one share ("shares
+      // must contain unique values"). Skip any envelope at my own shareIndex so
+      // we take a different holder's agreeing share.
+      let partner: SSSShare | null = null;
+      for (const ve of state.eventChain) {
+        if (ve.kind !== EscrowEventKind.VOTE) continue;
+        const env = (ve.payload as VotePayload | undefined)?.shareEnvelope;
+        if (!env || env.outcome !== state.resolvedOutcome || env.recipientPubkey !== myPubkey) continue;
+        if (env.shareIndex === ownShareIndex) continue; // my own share — not a 2nd
+        const ct = env.encryptedFor?.[myPubkey];
+        if (!ct) continue;
+        // VOTE share: the VOTER is the sender (not the locker).
+        partner = await this.decryptShare(ct, ve.raw.pubkey);
+        break;
+      }
+      if (!partner) {
+        // Tell apart "no one has agreed yet" from a VERSION MISMATCH: a voter on
+        // a pre-2.0 build votes WITHOUT a holder-only shareEnvelope, so their
+        // agreement carries no release key and the winner can never assemble the
+        // second share. The fix is an upgrade — say so plainly instead of leaving
+        // a cryptic share error (the original field-test confusion).
+        const agreedButNoKey = state.eventChain.some((ve: any) =>
+          ve.kind === EscrowEventKind.VOTE &&
+          (ve.payload as VotePayload | undefined)?.outcome === state.resolvedOutcome &&
+          ((ve.raw?.pubkey || ve.pubkey) !== myPubkey) &&
+          !(ve.payload as VotePayload | undefined)?.shareEnvelope
+        );
+        if (agreedButNoKey) {
+          throw new Error("Can't release yet — someone who agreed is on an older Chama that can't carry the release key. Ask them to update to Chama v2.x.x or higher and vote again, then you can claim.");
+        }
+        throw new Error("Waiting on a second agreeing vote — someone other than you must vote your way before you can claim.");
+      }
+      decryptedPartnerShare = partner;
+    } else {
+      // Legacy dual-encryption: every share is locker-encrypted to all three,
+      // so any two reconstruct.
+      const shareEntries = [...state.lock.shares.values()];
+      if (shareEntries.length < 2) {
+        throw new Error("Not enough shares: got " + shareEntries.length + ", need 2");
+      }
+      decryptedMyShare = await this.decryptShareDual(shareEntries[0], myPubkey, lockerPubkey);
+      decryptedPartnerShare = await this.decryptShareDual(shareEntries[1], myPubkey, lockerPubkey);
+    }
 
     // v0.1.63: Publish CLAIM before redeem
     // ──────────────────────────────────────

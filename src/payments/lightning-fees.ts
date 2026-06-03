@@ -43,6 +43,26 @@ export function hasLightningWithdrawableBalance(balanceMsats: number): boolean {
   return maxLightningPayoutSats(balanceMsats) > 0;
 }
 
+/** The dust line (sats) below which a local balance is treated as not worth
+ *  recovering. A federation switch silently proceeds and abandons anything
+ *  below this; at or above it (and Lightning-withdrawable) the switch surfaces
+ *  the destroy-confirm / recovery path. Recovering ~1 sat costs ~2.5 sats in
+ *  Lightning fees, so a bare "can withdraw >= 1 sat" check wrongly BLOCKED a
+ *  Chama switch over ~1 sat of in-practice-unrecoverable dust. Kept here (the
+ *  payments layer) so both the UI decision code and the data-layer switch
+ *  guards share ONE dust line — see MAIN_SURFACE_RECOVERY_MIN_SATS. */
+export const MATERIAL_RECOVERY_MIN_SATS = 2_000;
+
+/** True only when a balance should BLOCK a federation switch: both material
+ *  (>= MATERIAL_RECOVERY_MIN_SATS) AND actually Lightning-withdrawable. Dust
+ *  never blocks a switch; a real balance does. The single predicate every
+ *  switch surface shares (UI decision, reconcile/switch data guards, modal
+ *  render) so they can never disagree about what counts as recoverable. */
+export function balanceBlocksFederationSwitch(balanceMsats: number): boolean {
+  const sats = Math.floor(Math.max(0, balanceMsats) / 1000);
+  return sats >= MATERIAL_RECOVERY_MIN_SATS && hasLightningWithdrawableBalance(balanceMsats);
+}
+
 export function lightningPayoutReserveSats(balanceMsats: number): number {
   const payoutSats = maxLightningPayoutSats(balanceMsats);
   return Math.max(0, Math.ceil((Math.max(0, balanceMsats) - payoutSats * 1000) / 1000));

@@ -3,8 +3,17 @@ import { type ChatImageAttachment, type EscrowState, Role } from "../../escrow-e
 import { T } from "../theme.js";
 import { randomId } from "../../storage/random-id.js";
 
-const MAX_CHAT_IMAGE_DATA_URL_CHARS = 120_000;
-const CHAT_IMAGE_MAX_EDGE_PX = 960;
+// The chat body (message + image) is NIP-44-encrypted SEPARATELY to all THREE
+// participants in the bodyEnvelope, so the published event is roughly
+// 3 × (1.33 × image) + overhead ≈ 4× the image dataUrl. Relays drop events over
+// MAX_EVENT_CONTENT_BYTES (128 KB) on BOTH publish and receive — silently — so a
+// "small enough looking" image never crosses devices. Budget the IMAGE so the
+// tripled, base64-inflated event still fits under 128 KB with margin: cap the
+// dataUrl at ~24 KB (≈ 4× → ~100 KB event) and shrink the longest edge to keep
+// quality usable at that byte budget. (Old values 120 KB / 960 px produced
+// ~480 KB events — the silent image-upload failure across APK/Tauri.)
+const MAX_CHAT_IMAGE_DATA_URL_CHARS = 24_000;
+const CHAT_IMAGE_MAX_EDGE_PX = 720;
 const CHAT_IMAGE_ACCEPT = [
   "image/*",
   ".avif",
@@ -111,31 +120,39 @@ async function prepareChatImage(file: File): Promise<ChatImageAttachment> {
     };
   }
 
-  const scale = Math.min(1, CHAT_IMAGE_MAX_EDGE_PX / Math.max(width, height));
-  const targetWidth = Math.max(1, Math.round(width * scale));
-  const targetHeight = Math.max(1, Math.round(height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Image preview is not available in this browser");
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, targetWidth, targetHeight);
-  ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+  // Re-encode to JPEG, shrinking BOTH the edge and the quality until it fits the
+  // per-event byte budget. Phone screenshots (Android + iOS both save PNG) are
+  // the common case and decode fine; a dark, low-detail Chama screenshot fits
+  // easily at 720px, while a busy or photographic one falls back to smaller
+  // edges so it ALWAYS sends rather than hard-failing. The final throw is a
+  // clear, non-silent error reserved for pathological input.
+  for (const maxEdge of [CHAT_IMAGE_MAX_EDGE_PX, 560, 440, 340]) {
+    const scale = Math.min(1, maxEdge / Math.max(width, height));
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Image preview is not available in this browser");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, targetWidth, targetHeight);
+    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
 
-  for (const quality of [0.78, 0.68, 0.58, 0.48, 0.38]) {
-    const dataUrl = canvas.toDataURL("image/jpeg", quality);
-    if (dataUrl.length <= MAX_CHAT_IMAGE_DATA_URL_CHARS) {
-      return {
-        id: imageId(),
-        kind: "image",
-        mimeType: "image/jpeg",
-        dataUrl,
-        name: file.name,
-        width: targetWidth,
-        height: targetHeight,
-        sizeBytes: Math.ceil(dataUrl.length * 0.75),
-      };
+    for (const quality of [0.72, 0.6, 0.48, 0.38, 0.3]) {
+      const dataUrl = canvas.toDataURL("image/jpeg", quality);
+      if (dataUrl.length <= MAX_CHAT_IMAGE_DATA_URL_CHARS) {
+        return {
+          id: imageId(),
+          kind: "image",
+          mimeType: "image/jpeg",
+          dataUrl,
+          name: file.name,
+          width: targetWidth,
+          height: targetHeight,
+          sizeBytes: Math.ceil(dataUrl.length * 0.75),
+        };
+      }
     }
   }
 

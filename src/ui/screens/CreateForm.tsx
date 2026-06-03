@@ -46,7 +46,7 @@ import {
   MIN_REAL_ATOMIC_FUNDING_SATS,
   minimumAtomicFundingMessage,
 } from "../../payments/funding-limits.js";
-import { railsForCommunity } from "../../payments/rail-registry.js";
+import { railsForCommunity, categoryUsesPaymentRails } from "../../payments/rail-registry.js";
 import { isTestnetMode } from "../../fedimint/index.js";
 import { isSimModeOn } from "../../sim/simMode.js";
 import {
@@ -88,6 +88,11 @@ interface FormState {
   intervalDays: string;
   paymentMethods: string[];
   menuItems: MenuDraftItem[];
+  /** #7 multi-unit storefront: units in stock for a single-product marketplace
+   *  listing. ">=2 makes it a multi-unit parent (buyers spawn child escrows);
+   *  blank / 1 is a legacy single-unit listing. Stored as a string for the
+   *  input; parsed at submit. Optional so older drafts load without it. */
+  stock?: string;
 }
 
 interface SavedDraft {
@@ -911,8 +916,17 @@ export function CreateForm({
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
         communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,
-        paymentMethods: form.paymentMethods.length > 0 ? form.paymentMethods : undefined,
+        // Marketplace is sats-only — never carry payment rails on it.
+        paymentMethods: categoryUsesPaymentRails(vertical) && form.paymentMethods.length > 0 ? form.paymentMethods : undefined,
         items: hasMenu ? menuItems : undefined,
+        // #7 multi-unit storefront: only a single-product marketplace listing
+        // carries stock. >=2 makes it a parent buyers purchase via child
+        // escrows; 1 / blank stays a legacy single-unit listing (undefined).
+        stock: (() => {
+          if (vertical !== "marketplace" || hasMenu) return undefined;
+          const n = parseOptionalPositiveInt(form.stock ?? "");
+          return n !== undefined && n >= 2 ? n : undefined;
+        })(),
       };
       if (!hasMenu && form.isSubscription) {
         params.subscription = {
@@ -1623,6 +1637,26 @@ function Step2({
         </div>
       )}
 
+      {/* #7 multi-unit storefront: single-product marketplace listings can carry
+          a stock count. 2+ makes it a parent buyers purchase via child escrows. */}
+      {vertical === "marketplace" && !usingMenu && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>UNITS IN STOCK</div>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            value={form.stock ?? ""}
+            onChange={e => set("stock", e.target.value)}
+            placeholder="1"
+            style={{ ...inputStyle, color: T.text, background: T.surface }}
+          />
+          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.sans, marginTop: 5, lineHeight: 1.4 }}>
+            Leave blank or 1 for a single item. Set 2+ to sell multiple units — each buyer gets their own escrow, and Browse shows “N left.”
+          </div>
+        </div>
+      )}
+
       {descriptionRequired(vertical, usingMenu) && (
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
@@ -1808,7 +1842,7 @@ function Step2({
         </div>
       )}
 
-      {paymentMethodOptions.length > 0 && (
+      {categoryUsesPaymentRails(vertical) && paymentMethodOptions.length > 0 && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
             ACCEPTED PAYMENT

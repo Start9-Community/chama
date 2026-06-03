@@ -21,7 +21,7 @@ import {
   maskHandle,
   handleDisplayForViewer,
 } from "../../payments/saved-handles.js";
-import { getRailByKey, matchRails, toRailKey } from "../../payments/rail-registry.js";
+import { getRailByKey, matchRails, toRailKey, categoryUsesPaymentRails } from "../../payments/rail-registry.js";
 import {
   T, STATUS, ROLE_COLOR, CAT_LABEL, TRINITY_RING_ORDER,
   fmtSats, refundRecipientFor, inputStyle,
@@ -94,7 +94,7 @@ export function TradeDetail({
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
   onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
-  onPrewarmFunding, onRebroadcast, onForget,
+  onPrewarmFunding, onRebroadcast, onForget, onPurchase, stockLeft, isOversoldOrder = false,
 }: {
   state: EscrowState; pubkey: string;
   /** User's home community slug — drives State A vs State B subtitle
@@ -186,6 +186,17 @@ export function TradeDetail({
    *  unrecoverable ghosts. Money stays in escrow; re-loadable by ID. App
    *  navigates back to the list after this resolves. */
   onForget?: (escrowId: string) => void;
+  /** #7 multi-unit storefront: buy `quantity` units from THIS parent listing.
+   *  Spawns a child purchase escrow and navigates to it (App handles that), so
+   *  the buyer locks the child via the normal flow. */
+  onPurchase?: (parentId: string, quantity: number) => void | Promise<void>;
+  /** #7 multi-unit storefront: derived units left on this parent listing (for
+   *  the buy stepper's max + the "N left" line). */
+  stockLeft?: number;
+  /** #7 seller overcommit refund: this child order is OVERSOLD (locked beyond
+   *  the parent's stock by lock order). Reliable only for the seller. Shows a
+   *  refund banner. */
+  isOversoldOrder?: boolean;
 }) {
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
@@ -212,6 +223,9 @@ export function TradeDetail({
   // Inline two-tap forget confirm (no native confirm() — it's a no-op in the
   // Tauri/Capacitor webview, which made the button look frozen).
   const [forgetArmed, setForgetArmed] = useState(false);
+  // #7 multi-unit storefront: buyer "Buy N units" quantity + in-flight flag.
+  const [buyQty, setBuyQty] = useState(1);
+  const [purchasing, setPurchasing] = useState(false);
 
   // v1.2.4: direct-NWC paths for Fund + Claim. When the user has a
   // saved NWC wallet, the action buttons skip the chooser modal and
@@ -319,6 +333,20 @@ export function TradeDetail({
   const railMatch = matchRails(state.paymentMethods, viewerRailKeys, state.community);
   const sharedRailSet = new Set(railMatch.shared);
   const suggestedRail = railMatch.suggested ? getRailByKey(railMatch.suggested) : null;
+  // #7 multi-unit storefront: a parent listing (stock set, no parent ref) is
+  // bought by quantity — each purchase spawns its own child escrow rather than
+  // locking the parent. The buy stepper clamps to the units left.
+  const isMultiUnitParent = state.stock !== undefined && state.parent === undefined;
+  // Units a buyer can still take. stockLeft is the derived remaining (0 when
+  // sold out); fall back to the listing's stock only when remaining is unknown.
+  // NOT floored at 1 — the old Math.max(1, …) let a buyer purchase a sold-out
+  // listing (stockLeft 0 → still offered "Buy 1"), which is how 6 units sold
+  // from a stock of 5. (The genuine concurrent last-unit race is still possible
+  // on a coordinator-free relay backbone — Option A: the loser refunds — but no
+  // one can buy a *visibly* sold-out listing.)
+  const buyMax = stockLeft !== undefined ? Math.max(0, stockLeft) : (state.stock ?? 1);
+  const soldOut = isMultiUnitParent && buyMax <= 0;
+  const buyQtyClamped = Math.min(Math.max(1, buyQty), Math.max(1, buyMax));
   const premiumLine = listingPremiumLine(state, btcPrice.usd);
   const selectionMatchesSavedOrder = selectedOrderKey.length > 0 && selectedOrderKey === savedOrderKey;
   const savedOrderFinalizedAt = state.joinHolds?.[menuSelectorRole]?.orderFinalizedAt ?? null;
@@ -1156,7 +1184,7 @@ export function TradeDetail({
         </div>
       )}
 
-      {acceptedPaymentMethods.length > 0 && (
+      {categoryUsesPaymentRails(state.category) && acceptedPaymentMethods.length > 0 && (
         <div style={{
           background: T.card,
           border: `1px solid ${T.border}`,
@@ -1624,7 +1652,10 @@ export function TradeDetail({
             </div>
           )}
         </div>
-        <div style={{ display: "flex", justifyContent: "space-around" }}>
+        {/* Match the vote tally's 3-column grid (below) exactly so the arbiter
+            (middle) sits directly above the FINAL DECISION chip and the buyer /
+            seller align over their vote columns. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, justifyItems: "center" }}>
           {TRINITY_RING_ORDER.map(role => {
             const realPk = participants[role];
             const isAutoArbiter = role === Role.ARBITER && !realPk && !!previewArbiterPk;
@@ -1653,23 +1684,52 @@ export function TradeDetail({
             marginBottom: 18,
             borderTop: `1px solid ${T.border}`,
           }}>
-            {/* Tally reads left→right like the Trinity ring above it: green
-                release under the Buyer · the arbiter's pending/final decision
-                centered under the teal Arbiter · amber refund under the Seller. */}
-            <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.green)}>
-              <strong style={voteDecisionValueStyle()}>{releaseVoteCount}</strong>
-              <span style={voteDecisionLabelStyle()}>release votes</span>
-            </div>
-            <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(decisionTone)}>
-              <strong style={voteDecisionValueStyle()}>{decisionValue}</strong>
-              <span style={voteDecisionLabelStyle()}>{decisionLabel}</span>
-            </div>
-            <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.amber)}>
-              <strong style={voteDecisionValueStyle()}>{refundVoteCount}</strong>
-              <span style={voteDecisionLabelStyle()}>refund votes</span>
-            </div>
+            {/* Tally reads left→right like the Trinity ring above it (Buyer ·
+                Arbiter · Seller). The winning outcome's green chip sits under
+                whoever wins RELEASE: the Buyer for p2p/bill-pay/lending, but the
+                SELLER for Market (buyer locks → seller wins release). So Market
+                mirrors the chips — amber refund under the Buyer, green release
+                under the Seller — and the arbiter's decision stays centered. */}
+            {(() => {
+              const releaseChip = (
+                <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.green)}>
+                  <strong style={voteDecisionValueStyle()}>{releaseVoteCount}</strong>
+                  <span style={voteDecisionLabelStyle()}>release votes</span>
+                </div>
+              );
+              const centerChip = (
+                <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(decisionTone)}>
+                  <strong style={voteDecisionValueStyle()}>{decisionValue}</strong>
+                  <span style={voteDecisionLabelStyle()}>{decisionLabel}</span>
+                </div>
+              );
+              const refundChip = (
+                <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.amber)}>
+                  <strong style={voteDecisionValueStyle()}>{refundVoteCount}</strong>
+                  <span style={voteDecisionLabelStyle()}>refund votes</span>
+                </div>
+              );
+              return state.category === "marketplace"
+                ? <>{refundChip}{centerChip}{releaseChip}</>
+                : <>{releaseChip}{centerChip}{refundChip}</>;
+            })()}
           </div>
         )}
+
+      {isOversoldOrder && (state.status === EscrowStatus.LOCKED || state.status === EscrowStatus.APPROVED) && (
+        <div style={{
+          background: T.amberDim, border: `1px solid ${T.amber}66`,
+          borderRadius: T.r, padding: 14, marginBottom: 16,
+          color: T.amber, fontFamily: T.sans, fontSize: 12, lineHeight: 1.5,
+        }}>
+          <div style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 800, letterSpacing: 0.5, marginBottom: 6 }}>
+            ⚠ OVERSOLD ORDER{state.participants[Role.BUYER] ? ` · buyer ${shortParticipantPubkey(state.participants[Role.BUYER]!)}` : ""}
+          </div>
+          {myRole === Role.SELLER
+            ? "This unit was already sold to an earlier buyer (a last-unit race), so it's safe to refund. Use “Refund duplicate order” below — don't release it. Your real sale is the order without this banner."
+            : "This unit went to an earlier buyer in a last-unit race — tap Refund below to get your sats back. The seller's side refunds too, so you're made whole."}
+        </div>
+      )}
 
       {hasDuplicateParticipant && (
         <div style={{
@@ -1731,8 +1791,47 @@ export function TradeDetail({
           borderTop: `1px solid ${T.border}`,
         }}>
           <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-            JOIN THIS TRADE
+            {isMultiUnitParent ? "BUY FROM THIS LISTING" : "JOIN THIS TRADE"}
           </div>
+          {isMultiUnitParent && onPurchase && (
+            soldOut ? (
+              <div style={{ padding: "12px 14px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 12, fontWeight: 700, textAlign: "center", letterSpacing: 0.5 }}>
+                SOLD OUT · all units claimed
+              </div>
+            ) : (
+            <div style={{ marginBottom: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <button type="button" disabled={purchasing || buyQtyClamped <= 1}
+                  onClick={() => setBuyQty(q => Math.max(1, Math.min(q, buyMax) - 1))}
+                  style={{ width: 40, height: 40, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 18, fontWeight: 800, cursor: (purchasing || buyQtyClamped <= 1) ? "default" : "pointer" }}>−</button>
+                <div style={{ minWidth: 44, textAlign: "center", fontFamily: T.mono, fontSize: 18, fontWeight: 800, color: T.text }}>{buyQtyClamped}</div>
+                <button type="button" disabled={purchasing || buyQtyClamped >= buyMax}
+                  onClick={() => setBuyQty(q => Math.min(buyMax, q + 1))}
+                  style={{ width: 40, height: 40, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 18, fontWeight: 800, cursor: (purchasing || buyQtyClamped >= buyMax) ? "default" : "pointer" }}>+</button>
+                <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 11, marginLeft: 4 }}>
+                  {typeof stockLeft === "number" ? `${stockLeft} left` : `${state.stock} in stock`}
+                </div>
+              </div>
+              <button type="button" disabled={purchasing}
+                onClick={async () => {
+                  setPurchasing(true);
+                  try { await onPurchase(state.id, buyQtyClamped); } finally { setPurchasing(false); }
+                }}
+                style={{
+                  width: "100%", padding: "14px", borderRadius: T.rs,
+                  background: T.accentDim, border: `1px solid ${T.accent}44`,
+                  color: T.accent, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+                  cursor: purchasing ? "default" : "pointer",
+                }}>
+                {purchasing ? "Starting your order…" : `Buy ${buyQtyClamped} unit${buyQtyClamped > 1 ? "s" : ""}`}
+              </button>
+              <p style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, margin: "8px 2px 0" }}>
+                Each purchase is its own 2-of-3 escrow — you'll fund and lock it on the next screen.
+              </p>
+            </div>
+            )
+          )}
+          {!isMultiUnitParent && (<>
           <div style={{ display: "flex", gap: 10 }}>
             {canJoinAsBuyer && (
               <button disabled={joining} onClick={async () => {
@@ -1778,6 +1877,7 @@ export function TradeDetail({
               {joining ? "Joining..." : "Join as Seller"}
             </button>
           )}
+          </>)}
         </div>
       )}
 
@@ -2153,7 +2253,13 @@ export function TradeDetail({
         const voteRole = votePrompt.role;
         const isArbiter = voteRole === Role.ARBITER;
         const isMarketplace = state.category === "marketplace";
-        const showRelease = votePrompt.outcomes.includes(Outcome.RELEASE);
+        // Oversold order: this unit was already taken by an earlier buyer, so the
+        // ONLY correct action for BOTH sides is to refund — releasing just loses
+        // someone their sats. Hide Release for buyer and seller alike (the arbiter,
+        // in the rare case it reaches them, still sees both to decide). Refunding
+        // the right order is what protects everyone.
+        const isOversoldVoterView = isOversoldOrder && voteRole !== Role.ARBITER;
+        const showRelease = votePrompt.outcomes.includes(Outcome.RELEASE) && !isOversoldVoterView;
         const showRefund = votePrompt.outcomes.includes(Outcome.REFUND);
         // Who wins on RELEASE / REFUND
         const releaseWinner = isMarketplace ? "seller" : "buyer";
@@ -2182,8 +2288,55 @@ export function TradeDetail({
           ? "Cancel & refund remaining"
           : isArbiter
             ? "Side with " + refundWinner
-            : voteOutcomeLabel("Refund", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND));
+            : isOversoldVoterView
+              // The single, unmistakable action on an oversold unit, phrased for
+              // whoever is tapping it: the seller refunds the duplicate; the buyer
+              // simply gets their own sats back.
+              ? (voteRole === Role.SELLER ? "Refund duplicate order" : "Refund — get my sats back")
+              : isMarketplace && voteRole === Role.SELLER
+                // Market seller votes first; "Refund" stays neutral rather than
+                // presuming "Buyer never received" before any dispute exists.
+                ? "Refund"
+                : voteOutcomeLabel("Refund", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND));
 
+        const releaseButton = showRelease ? (
+          <button
+            key="release"
+            disabled={voting}
+            onClick={() => handleVote(Outcome.RELEASE)}
+            aria-label={`Vote release: ${releaseLabel}`}
+            style={voteActionButtonStyle({
+              disabled: voting,
+              background: releaseBg,
+              border: releaseBorder,
+              color: releaseText,
+            })}
+          >
+            <span aria-hidden="true" style={voteActionIconStyle(releaseText)}>✓</span>
+            <span style={voteActionLabelStyle()}>{releaseLabel}</span>
+          </button>
+        ) : null;
+        const refundButton = showRefund ? (
+          <button
+            key="refund"
+            disabled={voting}
+            onClick={() => handleVote(Outcome.REFUND)}
+            aria-label={`Vote refund: ${refundLabel}`}
+            style={voteActionButtonStyle({
+              disabled: voting,
+              background: refundBg,
+              border: refundBorder,
+              color: refundText,
+            })}
+          >
+            <span aria-hidden="true" style={voteActionIconStyle(refundText)}>↩</span>
+            <span style={voteActionLabelStyle()}>{refundLabel}</span>
+          </button>
+        ) : null;
+        // Buyer-favoring vote on the LEFT (purple), seller-favoring on the RIGHT
+        // (orange), mirroring the B · A · S participant ring + the tally. RELEASE
+        // wins for the buyer in p2p/bill-pay/lending but for the SELLER in
+        // Market — so Market swaps the two so the buyer's outcome stays left.
         return (
           <div className="trade-vote-actions" style={{
             display: "grid",
@@ -2191,38 +2344,7 @@ export function TradeDetail({
             gap: 10,
             marginBottom: 16,
           }}>
-            {showRelease && (
-              <button
-                disabled={voting}
-                onClick={() => handleVote(Outcome.RELEASE)}
-                aria-label={`Vote release: ${releaseLabel}`}
-                style={voteActionButtonStyle({
-                  disabled: voting,
-                  background: releaseBg,
-                  border: releaseBorder,
-                  color: releaseText,
-                })}
-              >
-                <span aria-hidden="true" style={voteActionIconStyle(releaseText)}>✓</span>
-                <span style={voteActionLabelStyle()}>{releaseLabel}</span>
-              </button>
-            )}
-            {showRefund && (
-              <button
-                disabled={voting}
-                onClick={() => handleVote(Outcome.REFUND)}
-                aria-label={`Vote refund: ${refundLabel}`}
-                style={voteActionButtonStyle({
-                  disabled: voting,
-                  background: refundBg,
-                  border: refundBorder,
-                  color: refundText,
-                })}
-              >
-                <span aria-hidden="true" style={voteActionIconStyle(refundText)}>↩</span>
-                <span style={voteActionLabelStyle()}>{refundLabel}</span>
-              </button>
-            )}
+            {isMarketplace ? <>{refundButton}{releaseButton}</> : <>{releaseButton}{refundButton}</>}
           </div>
         );
       })()}

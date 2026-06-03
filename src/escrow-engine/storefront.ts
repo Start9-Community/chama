@@ -120,6 +120,36 @@ export function isLastUnitContested(
   );
 }
 
+/** Children that are OVERSOLD — LOCKED beyond the parent's stock by lock order
+ *  (the Option A overcommit from a last-unit race). The first `stock` units'
+ *  worth of locked children, ordered by lock time, are honored; any later
+ *  locked child that would push the delivered total past `stock` is oversold and
+ *  should be refunded. Only the SELLER can compute this — they're a participant
+ *  in every child and can decrypt each lock to see its status + time. Pure.
+ *
+ *  Held-but-unlocked children are NOT counted (no sats committed yet). A child
+ *  already refunded (CANCELLED/EXPIRED) drops out, so refunding an oversold one
+ *  frees its slot and the list shrinks on the next pass. Multi-unit children are
+ *  atomic: a child that would straddle the boundary is refunded whole (never
+ *  partially oversold), so the storefront can never deliver more than `stock`. */
+export function overcommittedChildren(
+  parent: EscrowState,
+  children: readonly EscrowState[],
+): EscrowState[] {
+  const stock = parent.stock ?? 1;
+  const locked = children
+    .filter((c) => c.parent === parent.id && childIsLocked(c))
+    .sort((a, b) => (a.lock.lockedAt ?? a.createdAt) - (b.lock.lockedAt ?? b.createdAt));
+  const oversold: EscrowState[] = [];
+  let delivered = 0;
+  for (const child of locked) {
+    const q = childClaim(child);
+    if (delivered + q > stock) oversold.push(child);
+    else delivered += q;
+  }
+  return oversold;
+}
+
 // ── Child spawn (Stage 2b) ────────────────────────────────────────────────
 // Turning a multi-unit parent listing + a desired quantity into the params for
 // the buyer's child CREATE. Pure: no relays, no money — it just maps the

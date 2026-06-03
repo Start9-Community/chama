@@ -392,6 +392,15 @@ const GLOBAL_SOUTH_TAIL_RAIL_KEYS = [
   "wise-tag",
 ];
 
+/** Whether a listing category settles fiat over a payment rail, so rails /
+ *  handles are relevant. Marketplace ("Market") is sats-only — the buyer locks
+ *  sats into escrow and any fiat conversion happens off-app after claim — so it
+ *  carries NO payment rails. The fiat verticals (p2p-trade, bill-pay, lending)
+ *  do. Used to gate the Create payment picker and the trade-detail rail UI. */
+export function categoryUsesPaymentRails(category: string | null | undefined): boolean {
+  return category !== "marketplace";
+}
+
 /** Look up a rail by its wire key. Returns null for unknown keys
  *  (e.g. a listing using a rail from a future registry version) so
  *  callers can render a generic pill without crashing. */

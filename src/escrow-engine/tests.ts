@@ -67,10 +67,17 @@ import {
   replayEventChain,
   canVote,
   getWinner,
+  payoutRecipientFor,
   isExpired,
   getSummary,
   type TransitionResult,
 } from "./state-machine.js";
+import {
+  holderRoleForShareIndex,
+  shareIndexForRole,
+  holderPubkeyForShareIndex,
+  validateVoteShareEnvelope,
+} from "./holder-shares.js";
 
 import {
   parseEscrowEvent,
@@ -84,6 +91,7 @@ import {
   isLastUnitContested,
   childCommitsStock,
   buildChildCreateParams,
+  overcommittedChildren,
 } from "./storefront.js";
 import {
   EscrowClient,
@@ -165,6 +173,7 @@ import {
   railAllowsPublicHandle,
   matchRails,
   toRailKey,
+  categoryUsesPaymentRails,
 } from "../payments/rail-registry.js";
 import {
   getForgottenEscrowIds,
@@ -1484,6 +1493,52 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
   assert(remainingStock(parent, [child(EscrowStatus.LOCKED, 5)], t) === 0, "Stage 6: an over-claiming child still floors at 0");
 }
 
+// 3k.5. #7 seller overcommit refund — which LOCKED children are oversold,
+// identified by lock order (the seller-side detection that closes the "6 of 5").
+{
+  const parent = (applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
+    type: "escrow:create", description: "Tix", amountMsats: 10_000_000, category: "marketplace",
+    mintUrl: "f", platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, expirySeconds: 86400,
+    fulfillment: "physical", stock: 3, createdAt: NOW,
+  })) as any).state as EscrowState;
+  const lockedChild = (id: string, qty: number, lockedAt: number, status: EscrowStatus = EscrowStatus.LOCKED): EscrowState => {
+    const base = (applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, BUYER_PK, {
+      type: "escrow:create", description: "c", amountMsats: 10_000_000 * qty, category: "marketplace",
+      mintUrl: "f", platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, expirySeconds: 86400,
+      fulfillment: "physical", parent: parent.id, claimedQuantity: qty, sellerPubkey: SELLER_PK, createdAt: NOW,
+    })) as any).state as EscrowState;
+    return { ...base, id, status, lock: { ...base.lock, lockedAt } };
+  };
+
+  // Within stock → nothing oversold.
+  assert(overcommittedChildren(parent, [lockedChild("a", 1, 1), lockedChild("b", 1, 2)]).length === 0,
+    "overcommit: 2 single-unit locks of 3 → nothing oversold");
+
+  // 4 single-unit locks of 3 → the LATEST-locked is the oversold one.
+  const four = [lockedChild("a", 1, 1), lockedChild("b", 1, 2), lockedChild("c", 1, 3), lockedChild("d", 1, 4)];
+  const over = overcommittedChildren(parent, four);
+  assert(over.length === 1 && over[0].id === "d", "overcommit: the last-locked unit (d) is oversold — earliest 3 honored");
+
+  // Two race the last unit (locked 3 and 4): the later one is refunded.
+  const race = [lockedChild("a", 1, 1), lockedChild("b", 1, 2), lockedChild("late", 1, 4), lockedChild("first", 1, 3)];
+  assert(overcommittedChildren(parent, race).map(c => c.id).join(",") === "late",
+    "overcommit: of two racers for the last unit, the later lock is the oversold one");
+
+  // Refunding the oversold one frees its slot — the list shrinks.
+  const afterRefund = [lockedChild("a", 1, 1), lockedChild("b", 1, 2), lockedChild("c", 1, 3), lockedChild("d", 1, 4, EscrowStatus.CANCELLED)];
+  assert(overcommittedChildren(parent, afterRefund).length === 0,
+    "overcommit: once the oversold child is refunded (cancelled), nothing is oversold");
+
+  // Multi-unit straddle: A=2, B=2 over stock 3 → B (would straddle) is refunded whole.
+  assert(overcommittedChildren(parent, [lockedChild("A", 2, 1), lockedChild("B", 2, 2)]).map(c => c.id).join(",") === "B",
+    "overcommit: a multi-unit child that would straddle the boundary is refunded whole (never partial-oversold)");
+
+  // Held-but-unlocked children don't count (no sats committed).
+  const held = { ...lockedChild("h", 1, 0, EscrowStatus.CREATED), joinHolds: { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER_PK, joinedAt: NOW, expiresAt: NOW + 600, eventId: "h" } } } as EscrowState;
+  assert(overcommittedChildren(parent, [lockedChild("a", 1, 1), lockedChild("b", 1, 2), lockedChild("c", 1, 3), held]).length === 0,
+    "overcommit: a held-but-unlocked child isn't oversold (no sats committed)");
+}
+
 // 3k.0. Legacy menu JOINs that carried a cart before orderFinalizedAt replay as final
 {
   const items: MenuItem[] = [
@@ -1960,6 +2015,160 @@ console.log("\n── CHAT ──");
     sentAt: NOW,
   });
   assertErr(applyEvent(state, badChat), "NOT_PARTICIPANT", "Non-participant can't chat");
+}
+
+// ── 8a. HOLDER-ONLY SHARES — payoutRecipientFor pure over candidate outcome ─
+// Refinement #2 (the subtlest bug site): a voter must route their vote-carried
+// share to the recipient of THEIR voted outcome, computed BEFORE resolution.
+// payoutRecipientFor must therefore be pure over (state, outcome) and never read
+// state.resolvedOutcome.
+console.log("\n── HOLDER-ONLY: payoutRecipientFor (pure over candidate outcome) ──");
+{
+  const stateFor = (category: string): EscrowState => ({
+    ...(applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
+      type: "escrow:create", description: "x", amountMsats: 1_000_000, category,
+      mintUrl: "fed", platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, expirySeconds: 3600,
+      fulfillment: category === "marketplace" ? "physical" : "service", createdAt: NOW,
+    })) as any).state,
+    participants: { [Role.BUYER]: BUYER_PK, [Role.SELLER]: SELLER_PK, [Role.ARBITER]: ARBITER_PK },
+    resolvedOutcome: null,
+  }) as EscrowState;
+
+  const p2p = stateFor("p2p-trade");
+  assert(getWinner(p2p) === null, "getWinner is null before resolution");
+  assert(payoutRecipientFor(p2p, Outcome.RELEASE)?.role === Role.BUYER,
+    "payoutRecipientFor works at vote time (no resolvedOutcome): p2p RELEASE → buyer");
+  assert(payoutRecipientFor(p2p, Outcome.REFUND)?.role === Role.SELLER,
+    "p2p REFUND → seller (the locker)");
+  assert(payoutRecipientFor(p2p, Outcome.RELEASE)?.pubkey === BUYER_PK,
+    "payoutRecipientFor returns the recipient pubkey, not just the role");
+
+  const mkt = stateFor("marketplace");
+  assert(payoutRecipientFor(mkt, Outcome.RELEASE)?.role === Role.SELLER,
+    "marketplace RELEASE → seller (RELEASE-to-non-funder, the safety-critical path)");
+  assert(payoutRecipientFor(mkt, Outcome.REFUND)?.role === Role.BUYER,
+    "marketplace REFUND → buyer (the locker)");
+
+  assert(payoutRecipientFor(stateFor("bill-pay"), Outcome.RELEASE)?.role === Role.BUYER,
+    "bill-pay RELEASE → buyer");
+  assert(payoutRecipientFor(stateFor("lending"), Outcome.RELEASE)?.role === Role.BUYER,
+    "lending RELEASE → buyer");
+
+  // Purity: a (mismatched) resolvedOutcome must not change the answer.
+  const stale = { ...p2p, resolvedOutcome: Outcome.REFUND } as EscrowState;
+  assert(payoutRecipientFor(stale, Outcome.RELEASE)?.role === Role.BUYER,
+    "payoutRecipientFor ignores resolvedOutcome — pure over the candidate outcome");
+}
+
+// ── 8a.2 HOLDER-ONLY SHARES — index↔role mapping + vote-envelope binding ──
+console.log("\n── HOLDER-ONLY: share mapping + vote-envelope binding ──");
+{
+  assert(holderRoleForShareIndex(0) === Role.BUYER, "share 0 → buyer");
+  assert(holderRoleForShareIndex(1) === Role.SELLER, "share 1 → seller");
+  assert(holderRoleForShareIndex(2) === Role.ARBITER, "share 2 → arbiter");
+  assert(holderRoleForShareIndex(3) === null, "share 3 → none (out of range)");
+  assert(shareIndexForRole(Role.BUYER) === 0 && shareIndexForRole(Role.SELLER) === 1
+    && shareIndexForRole(Role.ARBITER) === 2, "role → share index round-trips");
+
+  const st = {
+    ...(applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
+      type: "escrow:create", description: "x", amountMsats: 1_000_000, category: "p2p-trade",
+      mintUrl: "fed", platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, expirySeconds: 3600,
+      fulfillment: "service", createdAt: NOW,
+    })) as any).state,
+    participants: { [Role.BUYER]: BUYER_PK, [Role.SELLER]: SELLER_PK, [Role.ARBITER]: ARBITER_PK },
+  } as EscrowState;
+  assert(holderPubkeyForShareIndex(st, 0) === BUYER_PK, "holderPubkeyForShareIndex 0 → buyer pubkey");
+  assert(holderPubkeyForShareIndex(st, 2) === ARBITER_PK, "holderPubkeyForShareIndex 2 → arbiter pubkey");
+
+  // A valid SELLER vote-share for RELEASE in p2p → recipient is the BUYER.
+  const validEnv = {
+    shareIndex: 1, outcome: Outcome.RELEASE, notesHash: "hash_abc",
+    recipientPubkey: BUYER_PK, encryptedFor: { [BUYER_PK]: "ct" },
+  };
+  assert(validateVoteShareEnvelope(validEnv as any, st, Role.SELLER, Outcome.RELEASE, "hash_abc") === null,
+    "valid seller RELEASE vote-share passes binding");
+  assert(validateVoteShareEnvelope({ ...validEnv, shareIndex: 0 } as any, st, Role.SELLER, Outcome.RELEASE, "hash_abc") !== null,
+    "rejects a shareIndex that isn't the voter's holder index (#5)");
+  assert(validateVoteShareEnvelope({ ...validEnv, outcome: Outcome.REFUND } as any, st, Role.SELLER, Outcome.RELEASE, "hash_abc") !== null,
+    "rejects a share whose outcome disagrees with the vote");
+  assert(validateVoteShareEnvelope({ ...validEnv, notesHash: "wrong" } as any, st, Role.SELLER, Outcome.RELEASE, "hash_abc") !== null,
+    "rejects a share bound to the wrong token (notesHash)");
+  assert(validateVoteShareEnvelope({ ...validEnv, recipientPubkey: SELLER_PK, encryptedFor: { [SELLER_PK]: "ct" } } as any, st, Role.SELLER, Outcome.RELEASE, "hash_abc") !== null,
+    "rejects a share routed to the wrong recipient (not the engine recipient)");
+  assert(validateVoteShareEnvelope({ ...validEnv, encryptedFor: { [SELLER_PK]: "ct" } } as any, st, Role.SELLER, Outcome.RELEASE, "hash_abc") !== null,
+    "rejects a share not encrypted to the recipient");
+}
+
+// ── 8a.3 HOLDER-ONLY end-to-end (protocol): lock → vote-carried shares ────
+console.log("\n── HOLDER-ONLY: lock + vote-envelope end-to-end ──");
+{
+  const create = createEvent(); // p2p-trade, seller = SELLER_PK
+  const r1 = applyEvent(null, create);
+  if (!r1.ok) throw new Error("holder-only e2e: create failed");
+
+  const lock = makeParsedEvent(EscrowEventKind.LOCK, SELLER_PK, {
+    type: "escrow:lock",
+    notesHash: "hash_xyz",
+    sharePolicy: "holder-only-v1",
+    shares: [
+      { shareIndex: 0, encryptedFor: { [BUYER_PK]: "ct0" } },
+      { shareIndex: 1, encryptedFor: { [SELLER_PK]: "ct1" } },
+      { shareIndex: 2, encryptedFor: { [ARBITER_PK]: "ct2" } },
+    ],
+    sellerReceivesMsats: 99_000_000,
+    arbiterFeeMsats: 1_000_000,
+    buyerPubkey: BUYER_PK,
+    arbiterPubkey: ARBITER_PK,
+    lockedAt: NOW,
+  } as any, create.raw.id);
+  const r2 = applyEvent(r1.state, lock);
+  if (assertOk(r2, "holder-only LOCK applies")) {
+    assert(r2.state.lock.sharePolicy === "holder-only-v1", "lock carries the holder-only-v1 policy");
+    assert(r2.state.lock.shares.size === 3, "lock stores 3 holder-only shares");
+    const share0 = r2.state.lock.shares.get("0");
+    assert(!!share0 && Object.keys(share0.encryptedFor).length === 1 && share0.encryptedFor[BUYER_PK] !== undefined,
+      "share 0 is encrypted ONLY to the buyer (no one else can read it)");
+    assert(r2.state.lock.shares.get("2")?.encryptedFor[ARBITER_PK] !== undefined
+      && r2.state.lock.shares.get("2")?.encryptedFor[BUYER_PK] === undefined,
+      "share 2 is encrypted ONLY to the arbiter (non-holders absent)");
+  }
+
+  if (r2.ok) {
+    // Buyer votes RELEASE (p2p RELEASE → recipient = buyer) with a valid share.
+    const validVote = makeParsedEvent(EscrowEventKind.VOTE, BUYER_PK, {
+      type: "escrow:vote", outcome: Outcome.RELEASE, role: Role.BUYER, votedAt: NOW,
+      shareEnvelope: { shareIndex: 0, outcome: Outcome.RELEASE, notesHash: "hash_xyz", recipientPubkey: BUYER_PK, encryptedFor: { [BUYER_PK]: "vct" } },
+    } as any, lock.raw.id);
+    assert(applyEvent(r2.state, validVote).ok, "holder-only VOTE with a valid share envelope is accepted");
+
+    // Misrouted share (wrong recipient) → rejected at apply time.
+    const misrouted = makeParsedEvent(EscrowEventKind.VOTE, BUYER_PK, {
+      type: "escrow:vote", outcome: Outcome.RELEASE, role: Role.BUYER, votedAt: NOW,
+      shareEnvelope: { shareIndex: 0, outcome: Outcome.RELEASE, notesHash: "hash_xyz", recipientPubkey: SELLER_PK, encryptedFor: { [SELLER_PK]: "vct" } },
+    } as any, lock.raw.id);
+    assert(!applyEvent(r2.state, misrouted).ok, "VOTE with a misrouted share (wrong recipient) is rejected");
+
+    // Wrong shareIndex (not the voter's holder index) → rejected.
+    const wrongIdx = makeParsedEvent(EscrowEventKind.VOTE, BUYER_PK, {
+      type: "escrow:vote", outcome: Outcome.RELEASE, role: Role.BUYER, votedAt: NOW,
+      shareEnvelope: { shareIndex: 1, outcome: Outcome.RELEASE, notesHash: "hash_xyz", recipientPubkey: BUYER_PK, encryptedFor: { [BUYER_PK]: "vct" } },
+    } as any, lock.raw.id);
+    assert(!applyEvent(r2.state, wrongIdx).ok, "VOTE with the wrong shareIndex is rejected");
+
+    // Wrong notesHash (bound to a different token) → rejected.
+    const wrongHash = makeParsedEvent(EscrowEventKind.VOTE, BUYER_PK, {
+      type: "escrow:vote", outcome: Outcome.RELEASE, role: Role.BUYER, votedAt: NOW,
+      shareEnvelope: { shareIndex: 0, outcome: Outcome.RELEASE, notesHash: "other", recipientPubkey: BUYER_PK, encryptedFor: { [BUYER_PK]: "vct" } },
+    } as any, lock.raw.id);
+    assert(!applyEvent(r2.state, wrongHash).ok, "VOTE with a share bound to the wrong notesHash is rejected");
+
+    // A vote with NO envelope still applies (legacy / expiry-heal best-effort).
+    const noEnv = makeParsedEvent(EscrowEventKind.VOTE, BUYER_PK, {
+      type: "escrow:vote", outcome: Outcome.RELEASE, role: Role.BUYER, votedAt: NOW,
+    } as any, lock.raw.id);
+    assert(applyEvent(r2.state, noEnv).ok, "a vote with no share envelope still applies (legacy / heal)");
+  }
 }
 
 // ── 8b. REBROADCAST / HEAL (re-publish a ghost trade's cached chain) ──────
@@ -3398,6 +3607,14 @@ console.log("\n── RAIL REGISTRY ──");
     "matchRails: undefined inputs → empty match");
   assert(matchRails(["M-Pesa", "m-pesa"], [], "ke-kes").sellerOnly.length === 1,
     "matchRails: a rail listed by both name and key dedupes to one");
+
+  // Market is sats-only: no payment rails. Fiat verticals carry them.
+  assert(categoryUsesPaymentRails("marketplace") === false,
+    "Market is sats-only — no payment rails");
+  assert(categoryUsesPaymentRails("p2p-trade") === true
+    && categoryUsesPaymentRails("bill-pay") === true
+    && categoryUsesPaymentRails("lending") === true,
+    "Fiat verticals (p2p-trade, bill-pay, lending) use payment rails");
 }
 
 // ── 18b. FORGOTTEN-TRADE DENYLIST — persist a "forget" across restarts ───
@@ -4790,17 +5007,34 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
   });
   assert(feeFloorSwitchSilent.kind === "switch-silent",
     "Sub-fee dust does not block community switching");
-
-  // Returning user on a different fed, balance > 0 → destroy-confirm modal.
-  const destroyConfirm = decideCommunityTapEffect({
+  // Regression (field report): ~3.5 sats can technically withdraw 1 sat (which
+  // burns ~2.5 sats in fees, a net loss), but it's far below the app's material
+  // dust line, so it must NOT block a switch. The old bare-withdrawable check
+  // blocked here — "can't switch because of 1 stranded sat".
+  const oneSatStranded = decideCommunityTapEffect({
+    slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 3_505,
+  });
+  assert(oneSatStranded.kind === "switch-silent",
+    "1 recoverable sat (sub-material dust) does not block community switching");
+  // A withdrawable-but-sub-material balance (50 sats) is still dust here — the
+  // SAME line the recovery banner uses (it won't even nudge to recover this).
+  const subMaterialSwitchSilent = decideCommunityTapEffect({
     slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 50_000,
   });
+  assert(subMaterialSwitchSilent.kind === "switch-silent",
+    "Sub-material balance (50 sats) does not block community switching");
+
+  // Returning user on a different fed with a MATERIAL balance (>= 2000 sats)
+  // → destroy-confirm modal.
+  const destroyConfirm = decideCommunityTapEffect({
+    slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 5_000_000,
+  });
   assert(destroyConfirm.kind === "destroy-confirm",
-    "Tap different-fed community with balance>0 → destroy-confirm");
+    "Tap different-fed community with a material balance → destroy-confirm");
   if (destroyConfirm.kind === "destroy-confirm") {
     assert(destroyConfirm.targetInvite === BLF_FEDERATION_INVITE,
       "Destroy-confirm targets the community's pinned invite");
-    assert(destroyConfirm.balanceMsats === 50_000,
+    assert(destroyConfirm.balanceMsats === 5_000_000,
       "Destroy-confirm carries the live balance for the modal copy");
     assert(destroyConfirm.currentInvite === BP_FEDERATION_INVITE,
       "Destroy-confirm carries the active invite for cancel-revert");
@@ -6763,15 +6997,24 @@ console.log("\n── decideListingTapEffect ──");
   });
   assert(feeFloorSwitchSilent.kind === "switch-silent",
     "Sub-fee dust does not block listing-fed switching");
-
-  // Different fed, balance > 0 → destroy-confirm modal.
-  const destroyConfirm = decideListingTapEffect({
+  // Same material dust line as the community path: a withdrawable-but-sub-
+  // material balance (50 sats) must NOT block a listing-fed switch.
+  const subMaterialSwitchSilent = decideListingTapEffect({
     listing: { mintUrl: BLF_FEDERATION_INVITE, community: "us-blf" },
     currentInvite: BP_FEDERATION_INVITE,
     balanceMsats: 50_000,
   });
+  assert(subMaterialSwitchSilent.kind === "switch-silent",
+    "Sub-material balance (50 sats) does not block listing-fed switching");
+
+  // Different fed + MATERIAL balance (>= 2000 sats) → destroy-confirm modal.
+  const destroyConfirm = decideListingTapEffect({
+    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 5_000_000,
+  });
   assert(destroyConfirm.kind === "destroy-confirm",
-    "Different fed + balance>0 → destroy-confirm (Pillar 2.1)");
+    "Different fed + material balance → destroy-confirm (Pillar 2.1)");
 
   // No current invite (truly disconnected) → switch-silent (caller
   // dispatches initFedimint vs switchFederation based on whether a

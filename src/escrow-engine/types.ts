@@ -382,10 +382,18 @@ export interface LockPayload {
   type: "escrow:lock";
   /** Hash of the full ecash notes (for verification) */
   notesHash: string;
-  /** SSS shares — each encrypted to ALL participants for dual-encryption.
-   *  Every share is NIP-44 encrypted separately to each participant's
-   *  pubkey, so any participant can decrypt any share. */
+  /** SSS shares. Encryption depends on `sharePolicy`:
+   *   - absent / legacy: DUAL-ENCRYPTED — each share NIP-44-encrypted to ALL
+   *     three participants, so any participant can decrypt any share (the
+   *     2-of-3 is only app-enforced, not cryptographic).
+   *   - "holder-only-v1": each share encrypted to ONLY its assigned holder
+   *     (shareIndex 0=buyer, 1=seller, 2=arbiter), so no one holds two. */
   shares: LockShareEntry[];
+  /** Holder-only shares (escrow safety). "holder-only-v1" → each share is
+   *  encrypted only to its assigned holder; reconstruction then needs a
+   *  vote-carried share from an agreeing participant (see VoteShareEnvelope),
+   *  making 2-of-3 cryptographic. Absent ⇒ legacy dual-encrypted (old path). */
+  sharePolicy?: "holder-only-v1";
   /** Breakdown of amounts (2-way split since v0.1.71) */
   sellerReceivesMsats: number;
   arbiterFeeMsats: number;
@@ -438,6 +446,25 @@ export interface LockPayload {
   lockedAt: number;
 }
 
+/** Holder-only shares: a voter's SSS share, re-encrypted to the outcome's
+ *  engine-computed recipient and bound to the funded token. Carried on VOTE so
+ *  the recipient can reconstruct from their own LOCK share + one agreeing
+ *  voter's share. The binding fields let the parser reject a share replayed
+ *  against the wrong outcome / recipient / token / escrow / share slot. */
+export interface VoteShareEnvelope {
+  /** The voter's holder share index (role-derived: buyer=0, seller=1, arbiter=2). */
+  shareIndex: number;
+  /** The outcome this share is bound to — the voter's voted outcome. */
+  outcome: Outcome;
+  /** notesHash of the LOCK this share belongs to (binds to the funded token). */
+  notesHash: string;
+  /** The recipient for `outcome` per payoutRecipientFor(state, outcome). */
+  recipientPubkey: string;
+  /** The share re-encrypted to the recipient. Sender = the voting participant
+   *  (NOT the locker) — decrypt with the voter's pubkey as sender. */
+  encryptedFor: Record<string, string>;
+}
+
 /** Content of a VOTE event */
 export interface VotePayload {
   type: "escrow:vote";
@@ -445,7 +472,11 @@ export interface VotePayload {
   role: Role;
   /** Optional reason */
   reason?: string;
-  /** The voter's SSS share (encrypted to winner once outcome is known) */
+  /** Holder-only shares: the voter's share re-encrypted to the outcome's
+   *  recipient (see VoteShareEnvelope). Optional — absent on legacy votes and
+   *  on the expiry-heal auto-refund path (best-effort there; the funder already
+   *  holds the minted token, so its vote-carried share is redundant). */
+  shareEnvelope?: VoteShareEnvelope;
   votedAt: number;
 }
 
@@ -719,10 +750,14 @@ export interface EscrowState {
   lock: {
     notesHash: string | null;
     lockedAt: number | null;
-    /** Encrypted SSS shares, keyed by share index (stringified).
-     *  Each entry contains the encryptedFor map so any participant can
-     *  decrypt any share they need for Shamir reconstruction. */
+    /** Encrypted SSS shares, keyed by share index (stringified). Under the
+     *  legacy policy each entry's encryptedFor holds all three participants;
+     *  under holder-only-v1 each entry holds only its assigned holder. */
     shares: Map<string, LockShareEntry>;
+    /** Holder-only shares: "holder-only-v1" when each share was encrypted only
+     *  to its holder (claim reconstructs from own LOCK share + a vote-carried
+     *  share). Absent ⇒ legacy dual-encrypted (claim picks any two). */
+    sharePolicy?: "holder-only-v1";
     /** PR 3: revealed payment handle for the trade. Populated by
      *  handleLock when the LockPayload carried handle/rail fields.
      *  null when the trade is a non-fiat vertical (marketplace digital,

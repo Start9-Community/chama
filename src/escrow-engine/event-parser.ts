@@ -307,8 +307,25 @@ function validateLockPayload(data: unknown): data is LockPayload {
   );
 }
 
+/** Holder-only shares: structural shape of a VOTE shareEnvelope. The semantic
+ *  BINDING (shareIndex matches the voter's role, recipient == engine recipient,
+ *  notesHash == lock) is enforced at apply time in handleVote, which has the
+ *  escrow state; here we only reject a malformed shape on ingest. */
+function isValidVoteShareEnvelopeShape(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const e = v as Record<string, unknown>;
+  if (typeof e.shareIndex !== "number" || !Number.isInteger(e.shareIndex) || e.shareIndex < 0 || e.shareIndex > 2) return false;
+  if (typeof e.outcome !== "string" || !Object.values(Outcome).includes(e.outcome as Outcome)) return false;
+  if (typeof e.notesHash !== "string") return false;
+  if (typeof e.recipientPubkey !== "string" || e.recipientPubkey.length === 0) return false;
+  if (!e.encryptedFor || typeof e.encryptedFor !== "object") return false;
+  const ef = e.encryptedFor as Record<string, unknown>;
+  return typeof ef[e.recipientPubkey as string] === "string";
+}
+
 function validateVotePayload(data: unknown): data is VotePayload {
   const d = data as Record<string, unknown>;
+  if (d.shareEnvelope !== undefined && !isValidVoteShareEnvelopeShape(d.shareEnvelope)) return false;
   return (
     d.type === "escrow:vote" &&
     typeof d.outcome === "string" && Object.values(Outcome).includes(d.outcome as Outcome) &&

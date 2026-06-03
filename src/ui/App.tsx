@@ -7,12 +7,13 @@ import {
   type EscrowState,
   type SelectedMenuItem,
   EscrowStatus,
+  Outcome,
   TRULY_TERMINAL_STATES,
   getEffectiveParticipantsAt,
 } from "../escrow-engine/types.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
-import { remainingStock, isSoldOut } from "../escrow-engine/storefront.js";
+import { remainingStock, isSoldOut, overcommittedChildren } from "../escrow-engine/storefront.js";
 import {
   getActiveInvite,
   getConfiguredNativeBridgeCommunitySlug,
@@ -72,7 +73,7 @@ import {
   listSavedNwcConnections,
 } from "../payments/nwc-connections.js";
 import { humanizeNwcError } from "../payments/nwc.js";
-import { hasLightningWithdrawableBalance } from "../payments/lightning-fees.js";
+import { balanceBlocksFederationSwitch } from "../payments/lightning-fees.js";
 import {
   buildChamaOperationMeta,
   getBestSatsTrace,
@@ -634,6 +635,16 @@ export default function App() {
   for (const s of visibleListings) {
     if (s.stock !== undefined) stockByListing.set(s.id, remainingStock(s, listingChildren(s), now));
   }
+  // #7 seller overcommit refund: which child orders are OVERSOLD (locked beyond
+  // the parent's stock by lock order). Reliable only for the seller — they hold
+  // every child's lock. Surfaced as a refund banner on the oversold child.
+  const oversoldChildIds = new Set<string>();
+  for (const [parentId, kids] of childrenByParent) {
+    const parentState = escrows.get(parentId);
+    if (parentState?.stock !== undefined) {
+      for (const c of overcommittedChildren(parentState, kids)) oversoldChildIds.add(c.id);
+    }
+  }
   const browseCategoryCounts = BROWSE_CATS.reduce((acc, cat) => {
     acc[cat.id] = cat.id === "all"
       ? allVisibleListings.length
@@ -733,7 +744,7 @@ export default function App() {
       return;
     }
 
-    if (hasLightningWithdrawableBalance(request.balanceMsats)) {
+    if (balanceBlocksFederationSwitch(request.balanceMsats)) {
       setPendingDestroyConfirm(request);
       return;
     }
@@ -759,7 +770,7 @@ export default function App() {
         if (
           (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE"
             || e?.code === "SWITCH_REFUSED_NONZERO_BALANCE")
-          && hasLightningWithdrawableBalance(e.balanceMsats || 0)
+          && balanceBlocksFederationSwitch(e.balanceMsats || 0)
         ) {
           setPendingDestroyConfirm({
             ...request,
@@ -1209,7 +1220,7 @@ export default function App() {
             const { resolve } = pendingFundAndLock;
             setPendingFundAndLock(null);
             if (terminal.kind === "locked") {
-              setToast({ message: "Locked! Vote buttons are live.", type: "success" });
+              setToast({ message: "⚡ Sats locked in escrow — vote buttons are live.", type: "success" });
             } else if (terminal.kind === "lock-failed") {
               // v1.2.5: translate NWC FAILURE_REASON_* / NIP-47 codes
               // into human-readable copy so the user knows what to do
@@ -1260,7 +1271,15 @@ export default function App() {
                 delete next[pendingClaim.escrowId];
                 return next;
               });
-              setToast({ message: "Payout sent!", type: "success" });
+              // Name the sats movement so the moment lands: a release pays the
+              // winner, a refund returns the funder's locked sats.
+              const wasRefund = escrows.get(pendingClaim.escrowId)?.resolvedOutcome === Outcome.REFUND;
+              setToast({
+                message: wasRefund
+                  ? "⚡ Refunded — your locked sats are back in your wallet."
+                  : "⚡ Released — the sats just landed in your wallet.",
+                type: "success",
+              });
             } else if (terminal.kind === "claim-failed") {
               if (/reissue|consumed|settle/i.test(terminal.error)) {
                 setBlockedClaimReasons(prev => ({
@@ -1277,7 +1296,7 @@ export default function App() {
               setToast({ message: terminal.error, type: "error" });
             } else if (terminal.kind === "claim-pending") {
               setToast({
-                message: "Claim is in flight — sats will arrive shortly.",
+                message: "⚡ Claim is in flight — your sats are on the way.",
                 type: "info",
               });
             } else if (terminal.kind === "payout-failed") {
@@ -1301,7 +1320,7 @@ export default function App() {
           zero. The destroy escape (v0.2.0's tertiary button) is gone
           — Sandbox-mode users who truly need to nuke OPFS use
           Settings → Advanced → Sandbox → Reset OPFS. */}
-      {pendingDestroyConfirm && hasLightningWithdrawableBalance(pendingDestroyConfirm.balanceMsats) && (
+      {pendingDestroyConfirm && balanceBlocksFederationSwitch(pendingDestroyConfirm.balanceMsats) && (
         <DestroyEcashConfirmModal
           targetLabel={pendingDestroyConfirm.label}
           balanceMsats={pendingDestroyConfirm.balanceMsats}
@@ -1520,6 +1539,21 @@ export default function App() {
               setView(detailBackView);
               setSelectedId(null);
             }}
+            // #7 multi-unit storefront: buy N units from a parent listing →
+            // spawn the buyer's own child escrow and open it so they fund + lock
+            // it via the normal flow. The parent stays a perpetual offer.
+            onPurchase={async (_parentId, quantity) => {
+              if (!selected) return;
+              try {
+                setToast({ message: "Starting your order…", type: "info" });
+                const { escrowId } = await actions.purchaseFromListing(selected, quantity);
+                openEscrow(escrowId);
+              } catch (e: any) {
+                setToast({ message: e?.message || "Couldn't start the order.", type: "error" });
+              }
+            }}
+            stockLeft={selected ? stockByListing.get(selected.id) : undefined}
+            isOversoldOrder={selected ? oversoldChildIds.has(selected.id) : false}
             // v1.2.4: direct-NWC Fund. Saved-NWC users skip the
             // AtomicFundingModal chooser entirely; the button on
             // TradeDetail dispatches fundAndLock with NWC params and
@@ -1590,7 +1624,7 @@ export default function App() {
                   },
                 });
                 if (terminal.kind === "locked") {
-                  setToast({ message: "Locked! Vote buttons are live.", type: "success" });
+                  setToast({ message: "⚡ Sats locked in escrow — vote buttons are live.", type: "success" });
                   return { ok: true };
                 }
                 if (terminal.kind === "lock-failed") {
