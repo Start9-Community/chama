@@ -7,6 +7,26 @@ const LEGACY_STORAGE_KEY = "chama_escrow_ids";
 const MAX_SAVED_ESCROW_IDS = 50;
 const FEDIMINT_WALLET_NOT_READY =
   "Chama wallet disconnected. Tap Reconnect and try again.";
+const FEDI_ECASH_UNAVAILABLE =
+  "Fedi wallet ecash funding is not available in this Fedi build. Chama did not create a Lightning invoice. Update Fedi, or use the Android APK/Tauri for this trade.";
+
+function describeError(error: unknown, fallback: string): string {
+  if (typeof error === "string" && error.trim()) return error.trim();
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  if (error && typeof error === "object") {
+    try {
+      const json = JSON.stringify(error);
+      if (json && json !== "{}") return json;
+    } catch {}
+  }
+  return fallback;
+}
+
+function isFediMiniAppRuntime(): boolean {
+  if (typeof window !== "undefined" && Boolean((window as any).fediInternal)) return true;
+  if (typeof navigator === "undefined") return false;
+  return /\bFedi\b/i.test(navigator.userAgent || "");
+}
 
 function escrowStorageKey(pubkey?: string | null): string {
   return pubkey ? `${LEGACY_STORAGE_KEY}:${pubkey}` : LEGACY_STORAGE_KEY;
@@ -2236,6 +2256,29 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       ? prev
       : { ...prev, fundingInProgress: true });
     try {
+      if (hasFediInternalGenerateEcash()) {
+        opts.onPhase({ kind: "requesting-fedi-ecash" });
+        await requireBridge().preflightLock(escrowId);
+        let notes: string;
+        try {
+          ({ notes } = await generateFediEcash(opts.amountMsats, opts.description));
+        } catch (error) {
+          throw new Error(`Fedi ecash funding failed: ${describeError(error, "Fedi wallet did not return ecash.")}`);
+        }
+        if (opts.signal?.aborted) {
+          opts.onPhase({ kind: "aborted" });
+          return { kind: "aborted" };
+        }
+        opts.onPhase({ kind: "fedi-ecash-created" });
+        opts.onPhase({ kind: "locking" });
+        await lockAndPublishWithEcashAction(escrowId, notes, {
+          savedHandleId: opts.savedHandleId,
+          selectedItems: opts.selectedItems,
+        });
+        opts.onPhase({ kind: "locked" });
+        return { kind: "locked" };
+      }
+
       if (opts.fundingMethod === "onchain") {
         const meta = buildChamaOperationMeta({
           flow: "fund_receive",
@@ -2346,22 +2389,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         return { kind: "locked" };
       }
 
-      if (hasFediInternalGenerateEcash()) {
-        opts.onPhase({ kind: "requesting-fedi-ecash" });
-        await requireBridge().preflightLock(escrowId);
-        const { notes } = await generateFediEcash(opts.amountMsats, opts.description);
-        if (opts.signal?.aborted) {
-          opts.onPhase({ kind: "aborted" });
-          return { kind: "aborted" };
-        }
-        opts.onPhase({ kind: "fedi-ecash-created" });
-        opts.onPhase({ kind: "locking" });
-        await lockAndPublishWithEcashAction(escrowId, notes, {
-          savedHandleId: opts.savedHandleId,
-          selectedItems: opts.selectedItems,
-        });
-        opts.onPhase({ kind: "locked" });
-        return { kind: "locked" };
+      if (isFediMiniAppRuntime() || hasFediInternalEcash()) {
+        opts.onPhase({ kind: "lock-failed", error: FEDI_ECASH_UNAVAILABLE });
+        return { kind: "lock-failed", error: FEDI_ECASH_UNAVAILABLE };
       }
 
       const { runFundAndLock } = await import("../payments/fund-and-lock.js");
@@ -2394,8 +2424,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         onPhase: opts.onPhase,
         signal: opts.signal,
       });
-    } catch (e: any) {
-      const err = e?.message || "Funding failed";
+    } catch (e: unknown) {
+      const err = describeError(e, "Funding failed");
       opts.onPhase({ kind: "lock-failed", error: err });
       return { kind: "lock-failed", error: err };
     } finally {

@@ -6,6 +6,22 @@ updates:
       interval: daily
     cooldown:
       default-days: 2
+    groups:
+      # Routine version bumps arrive as ONE reviewable PR instead of five.
+      # A green CI run (typecheck + 2080 tests + build on every PR) is the
+      # merge signal for these.
+      npm-routine:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "shamir-secret-sharing" # escrow crypto core — always its own PR
+          - "@fedimint/*"           # money path — review by hand, never batch
+        update-types:
+          - "minor"
+          - "patch"
+    # Majors and the excluded crypto/money deps still arrive as individual
+    # PRs. Security updates stay individual too — those should be loud.
 
   - package-ecosystem: github-actions
     directory: /
@@ -13,3 +29,10 @@ updates:
       interval: daily
     cooldown:
       default-days: 2
+    groups:
+      # Actions are SHA-pinned (see ci.yml). One grouped PR per batch —
+      # verify each new SHA against the action's release page before merging.
+      gha-routine:
+        applies-to: version-updates
+        patterns:
+          - "*"

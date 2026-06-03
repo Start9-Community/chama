@@ -643,6 +643,53 @@ function FundingMethodChooser({
   })();
   const nwcReady = isNwcConnectionString(nwcInput);
 
+  if (disableNwc) {
+    return (
+      <div>
+        <div style={{
+          marginBottom: 12, padding: 14, borderRadius: T.r,
+          background: T.tealDim, border: `1px solid ${T.teal}66`,
+        }}>
+          <div style={{
+            fontSize: 9, color: T.teal, fontFamily: T.mono,
+            letterSpacing: 1, fontWeight: 900, marginBottom: 8,
+          }}>
+            FEDI WALLET FUNDING
+          </div>
+          <div style={{
+            fontSize: 11, color: T.text, fontFamily: T.mono,
+            lineHeight: 1.55,
+          }}>
+            Chama asks Fedi for ecash and locks the trade directly. No
+            Lightning receive invoice or NWC wallet is used here.
+          </div>
+        </div>
+
+        <div style={{
+          marginBottom: 12, padding: "8px 10px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          fontSize: 10, color: T.muted, fontFamily: T.mono,
+          lineHeight: 1.45, textAlign: "center",
+        }}>
+          Trade amount: <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />
+        </div>
+
+        <button
+          onClick={() => onSelect("lightning")}
+          style={{
+            width: "100%", minHeight: 64, padding: "14px 16px",
+            borderRadius: T.r, background: T.accent,
+            border: `1px solid ${T.accent}`, color: "#000",
+            cursor: "pointer", fontFamily: T.mono, fontSize: 13,
+            fontWeight: 900, letterSpacing: 0.5,
+          }}
+        >
+          Use Fedi wallet · <BitcoinAmount sats={amountSats} size={13} gap={4} glyphScale={1.18} color="#000" glyphColor="#000" />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div>
       <div style={{

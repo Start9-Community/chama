@@ -1967,11 +1967,13 @@ export function TradeDetail({
               AtomicFundingModal chooser and dispatches straight via
               actions.fundAndLock. The banner above lets the user
               switch / add wallets without leaving the trade page. */}
-          <NwcStatusBanner
-            activeConnection={activeNwc}
-            onSaved={refreshSavedNwcs}
-            onManage={onOpenNwcSettings}
-          />
+          {!disableNwc && (
+            <NwcStatusBanner
+              activeConnection={activeNwc}
+              onSaved={refreshSavedNwcs}
+              onManage={onOpenNwcSettings}
+            />
+          )}
 
           <button
             disabled={locking || directNwcFundPhase !== null || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal}
@@ -2368,11 +2370,13 @@ export function TradeDetail({
               Mirror of the Fund button treatment — saved NWC wallet
               → one-tap claim straight to that wallet, banner above
               for context + paste-to-add. */}
-          <NwcStatusBanner
-            activeConnection={activeNwc}
-            onSaved={refreshSavedNwcs}
-            onManage={onOpenNwcSettings}
-          />
+          {!disableNwc && (
+            <NwcStatusBanner
+              activeConnection={activeNwc}
+              onSaved={refreshSavedNwcs}
+              onManage={onOpenNwcSettings}
+            />
+          )}
 
           <button
             disabled={claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked}
