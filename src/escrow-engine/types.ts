@@ -394,6 +394,14 @@ export interface LockPayload {
    *  vote-carried share from an agreeing participant (see VoteShareEnvelope),
    *  making 2-of-3 cryptographic. Absent ⇒ legacy dual-encrypted (old path). */
   sharePolicy?: "holder-only-v1";
+  /** Arbiter substitution (additive to holder-only-v1): when true, the
+   *  arbiter share (index 2) is encrypted to the escrow's deterministic
+   *  arbiter PRIORITY ORDER (assigned + 2 backups — see
+   *  arbiter-substitution.ts) instead of the assigned arbiter alone, so a
+   *  pool backup can carry the deciding share if the assigned arbiter goes
+   *  absent. Buyer/seller shares stay strictly holder-only. Old clients
+   *  ignore this field and keep working in every non-substituted flow. */
+  arbiterPoolShare?: boolean;
   /** Breakdown of amounts (2-way split since v0.1.71) */
   sellerReceivesMsats: number;
   arbiterFeeMsats: number;
@@ -726,7 +734,10 @@ export interface EscrowState {
   /** Subscription metadata (null for non-subscription escrows) */
   subscription: SubscriptionMeta | null;
 
-  /** Votes cast so far */
+  /** Votes cast so far. The ARBITER slot is DERIVED on pooled-share locks:
+   *  among all arbiter-role votes in the chain, the one from the
+   *  lowest-priority-index pool member wins (assigned = 0 always trumps
+   *  backups pre-settlement). See arbiter-substitution.ts. */
   votes: {
     [Role.BUYER]?: Outcome;
     [Role.SELLER]?: Outcome;
@@ -737,6 +748,11 @@ export interface EscrowState {
   resolvedOutcome: Outcome | null;
   /** Which two roles formed the majority */
   resolvedMajority: [Role, Role] | null;
+  /** Arbiter substitution: the pubkey whose vote currently holds the ARBITER
+   *  slot — the assigned arbiter in the normal case, or the
+   *  highest-priority pool backup who stepped in. Undefined before any
+   *  arbiter vote (and on all pre-substitution trades). */
+  actingArbiter?: string;
 
   /** Fee structure */
   fees: {
@@ -758,6 +774,11 @@ export interface EscrowState {
      *  to its holder (claim reconstructs from own LOCK share + a vote-carried
      *  share). Absent ⇒ legacy dual-encrypted (claim picks any two). */
     sharePolicy?: "holder-only-v1";
+    /** Arbiter substitution: true when the arbiter share was encrypted to the
+     *  escrow's deterministic priority order (assigned + 2 backups) so a pool
+     *  backup may cast the arbiter vote after the grace window. Absent ⇒
+     *  assigned-arbiter-only (every pre-substitution lock). */
+    arbiterPoolShare?: boolean;
     /** PR 3: revealed payment handle for the trade. Populated by
      *  handleLock when the LockPayload carried handle/rail fields.
      *  null when the trade is a non-fiat vertical (marketplace digital,

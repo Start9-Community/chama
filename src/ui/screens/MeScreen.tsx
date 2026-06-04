@@ -31,9 +31,11 @@ import {
   getEffectiveParticipantsAt,
 } from "../../escrow-engine/types.js";
 import { getWinner } from "../../escrow-engine/state-machine.js";
+import { arbiterVotePriority, substitutionEligibleAt } from "../../escrow-engine/arbiter-substitution.js";
 import { BLF_OFFICIAL_ARBITERS } from "../../arbiters/pool.js";
 import {
   MAIN_SURFACE_RECOVERY_MIN_SATS,
+  formatStepInCountdown,
   type AggregateRatings,
 } from "../decisions.js";
 import {
@@ -115,6 +117,11 @@ export function MeScreen({
   const localReserveSats = lightningPayoutReserveSats(balanceMsats);
   const showLocalRecovery = !hasActiveCommitment && localRecoverySats > 0;
   const isSmallLeftover = localRecoverySats < MAIN_SURFACE_RECOVERY_MIN_SATS;
+  // A leftover below the material dust line never offers an ACTIVE recover
+  // button — recovering ~1 sat burns more than itself in Lightning fees (the
+  // same line the switch guard and recovery banner use). The card stays as a
+  // quiet "accumulating" note until the pile is worth the fees.
+  const recoverWorthwhile = !isSmallLeftover && localRecoverableSats > 0;
   const isClaimPayoutRecovery = !isSmallLeftover && Boolean(satsTrace?.escrowId);
   const traceCopy = describeSatsTrace(satsTrace ?? null);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -208,20 +215,22 @@ export function MeScreen({
           )}
           <button
             onClick={onRecoverSats}
-            disabled={localRecoverableSats <= 0}
+            disabled={!recoverWorthwhile}
             style={{
               width: "100%", padding: "12px", marginTop: 14,
-              background: localRecoverableSats > 0 ? T.amberDim : T.surface,
-              border: `1px solid ${localRecoverableSats > 0 ? T.amber + "66" : T.border}`,
+              background: recoverWorthwhile ? T.amberDim : T.surface,
+              border: `1px solid ${recoverWorthwhile ? T.amber + "66" : T.border}`,
               borderRadius: T.rs,
-              color: localRecoverableSats > 0 ? T.amber : T.muted,
+              color: recoverWorthwhile ? T.amber : T.muted,
               fontFamily: T.mono, fontSize: 12, fontWeight: 800,
-              cursor: localRecoverableSats > 0 ? "pointer" : "default",
+              cursor: recoverWorthwhile ? "pointer" : "default",
             }}
           >
-            {localRecoverableSats > 0
+            {recoverWorthwhile
               ? <>{isClaimPayoutRecovery ? "Recover payout" : "Recover"} <BitcoinAmount sats={localRecoverableSats} size={12} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /></>
-              : "Waiting for enough sats to recover"}
+              : isSmallLeftover
+                ? "Accumulating — too small to recover over Lightning yet"
+                : "Waiting for enough sats to recover"}
           </button>
         </div>
       )}
@@ -231,6 +240,7 @@ export function MeScreen({
         onOpenTrade={onOpenTrade}
         onSellerEditListing={onSellerEditListing}
         onSellerDeleteListing={onSellerDeleteListing}
+        pubkey={pubkey}
       />
 
       {/* Ratings — minimal v0.2.0 surface. Per Pillar 2.6 reputation
@@ -485,11 +495,13 @@ function MeDashboard({
   onOpenTrade,
   onSellerEditListing,
   onSellerDeleteListing,
+  pubkey,
 }: {
   dashboard: MeDashboardModel;
   onOpenTrade: (id: string) => void;
   onSellerEditListing?: (id: string) => void;
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
+  pubkey: string;
 }) {
   const hasSellerDashboard = dashboard.sellerOpen.length > 0 || dashboard.sellerLive.length > 0;
   const hasNeedsYou = dashboard.needsYou.length > 0;
@@ -560,6 +572,7 @@ function MeDashboard({
         <ArbiterDashboardPanel
           dashboard={dashboard}
           onOpenTrade={onOpenTrade}
+          viewerPubkey={pubkey}
         />
       )}
     </div>
@@ -947,9 +960,11 @@ const ARBITER_QUEUE_LABEL: Record<ArbiterQueueKey, string> = {
 function ArbiterDashboardPanel({
   dashboard,
   onOpenTrade,
+  viewerPubkey,
 }: {
   dashboard: MeDashboardModel;
   onOpenTrade: (id: string) => void;
+  viewerPubkey: string;
 }) {
   const [queue, setQueue] = useState<ArbiterQueueKey>(() => firstArbiterQueue(dashboard));
   useEffect(() => {
@@ -1025,6 +1040,7 @@ function ArbiterDashboardPanel({
         queue={queue}
         trades={activeTrades}
         onOpenTrade={onOpenTrade}
+        viewerPubkey={viewerPubkey}
       />
     </div>
   );
@@ -1034,10 +1050,12 @@ function ArbiterQueueList({
   queue,
   trades,
   onOpenTrade,
+  viewerPubkey,
 }: {
   queue: ArbiterQueueKey;
   trades: EscrowState[];
   onOpenTrade: (id: string) => void;
+  viewerPubkey: string;
 }) {
   const tone = arbiterQueueTone(queue);
   const emptyCopy = queue === "needs"
@@ -1104,6 +1122,7 @@ function ArbiterQueueList({
             queue={queue}
             last={index === trades.length - 1}
             onOpenTrade={onOpenTrade}
+            viewerPubkey={viewerPubkey}
           />
         ))}
       </div>
@@ -1116,11 +1135,13 @@ function ArbiterQueueItem({
   queue,
   last,
   onOpenTrade,
+  viewerPubkey,
 }: {
   trade: EscrowState;
   queue: ArbiterQueueKey;
   last: boolean;
   onOpenTrade: (id: string) => void;
+  viewerPubkey: string;
 }) {
   const tone = arbiterQueueTone(queue);
   const participants = getEffectiveParticipantsAt(trade);
@@ -1157,7 +1178,7 @@ function ArbiterQueueItem({
             overflow: "hidden",
             textOverflow: "ellipsis",
           }}>
-            {arbiterQueueStatus(queue, trade)}
+            {arbiterQueueStatus(queue, trade, viewerPubkey)}
           </div>
         </div>
         <div style={{
@@ -1352,8 +1373,21 @@ function arbiterQueueTone(queue: ArbiterQueueKey): string {
   return T.green;
 }
 
-function arbiterQueueStatus(queue: ArbiterQueueKey, trade: EscrowState): string {
+function arbiterQueueStatus(queue: ArbiterQueueKey, trade: EscrowState, viewerPubkey?: string): string {
   if (queue === "needs") {
+    // Arbiter substitution: a BACKUP viewing a pooled-lock dispute sees the
+    // assigned arbiter's floor countdown, then the step-in invitation.
+    const assigned = getEffectiveParticipantsAt(trade)[Role.ARBITER];
+    if (
+      viewerPubkey && trade.lock.arbiterPoolShare && assigned !== viewerPubkey
+    ) {
+      const eligibleAt = substitutionEligibleAt(trade);
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (eligibleAt !== null && nowSec < eligibleAt) {
+        return `${arbiterDisputeLine(trade)} · assigned arbiter has the floor · you can step in ${formatStepInCountdown(eligibleAt - nowSec)}`;
+      }
+      return `${arbiterDisputeLine(trade)} · assigned arbiter absent · step in as backup`;
+    }
     return `${arbiterDisputeLine(trade)} · decision needed`;
   }
   if (queue === "watching") {
@@ -1402,11 +1436,24 @@ function buildMeDashboard(
     const watchesAsArbiter = isAssignedArbiter || isPoolArbiter;
 
     if (watchesAsArbiter) {
-      if (
-        isAssignedArbiter &&
+      // Arbiter substitution: a pool BACKUP also lands in "needs" on a
+      // pooled-share lock with a live dispute and an open arbiter slot —
+      // first showing the assigned arbiter's floor countdown, then the
+      // step-in affordance once it lapses (decideVotePrompt gates the
+      // actual buttons; the reducer re-enforces everything).
+      const substitutionCandidate =
+        !isAssignedArbiter &&
         trade.status === EscrowStatus.LOCKED &&
+        trade.lock.arbiterPoolShare === true &&
         tradeHasBuyerSellerDispute(trade) &&
-        !trade.votes[Role.ARBITER]
+        trade.votes[Role.ARBITER] === undefined &&
+        arbiterVotePriority(trade, pubkey) !== null;
+      if (
+        (isAssignedArbiter &&
+          trade.status === EscrowStatus.LOCKED &&
+          tradeHasBuyerSellerDispute(trade) &&
+          !trade.votes[Role.ARBITER]) ||
+        substitutionCandidate
       ) {
         arbiterDisputes.push(trade);
       } else if (isArbiterSettledTrade(trade)) {

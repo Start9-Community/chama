@@ -26,6 +26,8 @@ import {
   TERMINAL_STATES,
   getEffectiveParticipantsAt,
 } from "../escrow-engine/types.js";
+import { arbiterVotePriority, substitutionEligibleAt } from "../escrow-engine/arbiter-substitution.js";
+import { payoutRecipientFor } from "../escrow-engine/recipients.js";
 
 // One dust line, defined in the payments layer so the UI decision code and the
 // data-layer switch guards can't drift apart (see balanceBlocksFederationSwitch).
@@ -415,8 +417,22 @@ function isPastEscrowDeadline(e: EscrowState, nowSec: number): boolean {
   return typeof e.expiresAt === "number" && e.expiresAt > 0 && nowSec > e.expiresAt;
 }
 
-function isLiveBuyerSellerCommitment(e: EscrowState, nowSec: number): boolean {
+/** True when a RESOLVED trade's payout belongs to someone other than the
+ *  viewer: the viewer's part is DONE (vote cast, share envelope carried) and
+ *  the remaining work — claiming — is entirely the winner's. The locker who
+ *  released shouldn't keep an orange "in escrow" pill for money that is no
+ *  longer theirs; the trade stays in history for chat + rebroadcast. */
+function resolvedForSomeoneElse(e: EscrowState, viewerPubkey: string | undefined): boolean {
+  if (!viewerPubkey || !e.resolvedOutcome) return false;
+  const winner = payoutRecipientFor(e, e.resolvedOutcome);
+  return !!winner && winner.pubkey !== viewerPubkey;
+}
+
+function isLiveBuyerSellerCommitment(e: EscrowState, nowSec: number, viewerPubkey?: string): boolean {
   if (TERMINAL_STATES.has(e.status)) return false;
+  // Resolved in someone else's favor → my commitment is over; only the
+  // winner's claim remains. Releases the locker at RESOLVE, not at CLAIM.
+  if (e.status === EscrowStatus.APPROVED && resolvedForSomeoneElse(e, viewerPubkey)) return false;
   // CLAIMED means the trade has left the live escrow phase. Successful
   // claims move on to COMPLETED; locally failed redemptions stay visible on
   // the detail screen as "Claim failed", but should not keep the global
@@ -448,7 +464,7 @@ export function hasActiveBuyerSellerCommitment(inputs: {
   for (const e of inputs.escrows) {
     const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
-    if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
+    if (!isLiveBuyerSellerCommitment(e, nowSec, inputs.userPubkey)) continue;
     return true;
   }
   return false;
@@ -469,7 +485,7 @@ export function countActiveBuyerSellerCommitments(inputs: {
   for (const e of inputs.escrows) {
     const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
-    if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
+    if (!isLiveBuyerSellerCommitment(e, nowSec, inputs.userPubkey)) continue;
     n += 1;
   }
   return n;
@@ -499,7 +515,7 @@ export function sumActiveBuyerSellerTradeMsats(inputs: {
   for (const e of inputs.escrows) {
     const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
-    if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
+    if (!isLiveBuyerSellerCommitment(e, nowSec, inputs.userPubkey)) continue;
     sum += e.amountMsats;
   }
   return sum;
@@ -596,6 +612,9 @@ export function activeCommittedMsats(inputs: {
     if (!isBuyerOrSeller) continue;
     if (e.status !== EscrowStatus.LOCKED && e.status !== EscrowStatus.APPROVED) continue;
     if (e.status === EscrowStatus.LOCKED && isPastEscrowDeadline(e, nowSec)) continue;
+    // Resolved for someone else → these sats are the winner's claim now, not
+    // the viewer's escrow. The locker is released at RESOLVE.
+    if (e.status === EscrowStatus.APPROVED && resolvedForSomeoneElse(e, inputs.userPubkey)) continue;
     sum += e.amountMsats;
   }
   return sum;
@@ -684,7 +703,7 @@ export function findActiveTrade(inputs: {
   for (const e of inputs.escrows) {
     const isBuyerOrSeller = isEffectiveBuyerOrSeller(e, inputs.userPubkey, nowSec);
     if (!isBuyerOrSeller) continue;
-    if (!isLiveBuyerSellerCommitment(e, nowSec)) continue;
+    if (!isLiveBuyerSellerCommitment(e, nowSec, inputs.userPubkey)) continue;
     if (!best || e.createdAt > best.createdAt) best = e;
   }
   return best;
@@ -1004,7 +1023,18 @@ export function decideTradeDetailFraming(inputs: DetailFramingInputs): DetailFra
 export type VotePrompt =
   | { kind: "none"; reason: string }
   | { kind: "waiting"; waitingOn: Role | "dispute"; message: string }
-  | { kind: "buttons"; role: Role; outcomes: Outcome[] };
+  | {
+      kind: "buttons";
+      role: Role;
+      outcomes: Outcome[];
+      /** True for the FIRST happy-path voter while zero buyer/seller votes
+       *  exist. At that moment there is no real duality: the voter has ONE
+       *  task (attest the off-chain deed) plus a back-out hatch. The UI
+       *  renders a single primary button + a demoted "cancel this trade"
+       *  link instead of two co-equal vote buttons. Vote #2 and disputes
+       *  keep the dual buttons (a genuine confirm-or-deny decision). */
+      firstVote?: boolean;
+    };
 
 function samePubkey(a?: string | null, b?: string | null): boolean {
   return !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -1021,12 +1051,21 @@ function participantRoleForPubkey(
   return null;
 }
 
+/** Who votes first on the happy path: the OFF-CHAIN DEED-DOER. Market: the
+ *  seller ships/delivers. Bill Pay: the VOLUNTEER (seller role) pays the
+ *  owner's bill (maintainer correction 2026-06-05 — the owner only confirms).
+ *  Exchange: the buyer sends the fiat. Lending: the borrower acknowledges the
+ *  disbursement. The other side responds, which is where real vote duality
+ *  begins. */
 function firstHappyPathVoter(state: EscrowState): Role {
-  return state.category === "marketplace" ? Role.SELLER : Role.BUYER;
+  return state.category === "marketplace" || state.category === "bill-pay"
+    ? Role.SELLER
+    : Role.BUYER;
 }
 
 function waitingForFirstVoteCopy(state: EscrowState, role: Role): string {
   if (role === Role.SELLER) {
+    if (state.category === "bill-pay") return "Waiting on the volunteer to pay the bill";
     if (state.category !== "marketplace") return "Waiting on seller to confirm";
     if (state.fulfillment === "digital") return "Waiting on seller to deliver the file";
     if (state.fulfillment === "service") return "Waiting on seller to deliver the service";
@@ -1037,18 +1076,82 @@ function waitingForFirstVoteCopy(state: EscrowState, role: Role): string {
   return "Waiting on buyer to confirm payment sent";
 }
 
+/** Human countdown for the backup-arbiter floor: "in ~2h 10m" / "in ~8m". */
+export function formatStepInCountdown(seconds: number): string {
+  const s = Math.max(0, seconds);
+  if (s < 60) return "in under a minute";
+  const h = Math.floor(s / 3600);
+  const m = Math.ceil((s % 3600) / 60);
+  return h > 0 ? `in ~${h}h ${m}m` : `in ~${m}m`;
+}
+
 export function decideVotePrompt(
   state: EscrowState,
   pubkey: string,
   participants: EscrowState["participants"] = state.participants,
+  nowSec: number = Math.floor(Date.now() / 1000),
 ): VotePrompt {
   if (state.status !== EscrowStatus.LOCKED && state.status !== EscrowStatus.EXPIRED) {
     return { kind: "none", reason: "not-votable-state" };
   }
 
   const role = participantRoleForPubkey(state, pubkey, participants);
-  if (!role) return { kind: "none", reason: "not-participant" };
-  if (state.votes[role] !== undefined) return { kind: "none", reason: "already-voted" };
+  if (!role) {
+    // HEALING substitution: an expired, unresolved pooled-share trade can be
+    // rescued by ANY pool backup — REFUND only, no floor (the disputed-expiry
+    // limbo fix). The reducer enforces all of it.
+    if (
+      state.status === EscrowStatus.EXPIRED
+      && state.lock.arbiterPoolShare
+      && (arbiterVotePriority(state, pubkey) ?? 0) > 0
+      && !state.eventChain.some((ve) => ve.kind === EscrowEventKind.RESOLVE)
+    ) {
+      const votedAlready = state.eventChain.some(
+        (ve) => ve.kind === EscrowEventKind.VOTE && ve.pubkey === pubkey,
+      );
+      if (votedAlready) return { kind: "none", reason: "already-voted" };
+      return { kind: "buttons", role: Role.ARBITER, outcomes: [Outcome.REFUND] };
+    }
+    // Arbiter substitution: an eligible pool backup gets the arbiter's vote
+    // surface on a pooled-share lock — a countdown while the assigned arbiter
+    // still has the floor, buttons once it opens. Mirrors the engine's gates
+    // (the reducer re-enforces everything).
+    if (
+      state.status === EscrowStatus.LOCKED
+      && state.lock.arbiterPoolShare
+      && (arbiterVotePriority(state, pubkey) ?? 0) > 0
+    ) {
+      const buyerVote = state.votes[Role.BUYER];
+      const sellerVote = state.votes[Role.SELLER];
+      const disputeLive = buyerVote !== undefined && sellerVote !== undefined && buyerVote !== sellerVote;
+      if (!disputeLive) return { kind: "none", reason: "not-participant" };
+      const votedAlready = state.eventChain.some(
+        (ve) => ve.kind === EscrowEventKind.VOTE && ve.pubkey === pubkey,
+      );
+      if (votedAlready) return { kind: "none", reason: "already-voted" };
+      const eligibleAt = substitutionEligibleAt(state);
+      if (eligibleAt !== null && nowSec < eligibleAt) {
+        return {
+          kind: "waiting",
+          waitingOn: "dispute",
+          message: `Dispute live — the assigned arbiter has the floor. As backup arbiter you can step in ${formatStepInCountdown(eligibleAt - nowSec)}.`,
+        };
+      }
+      return { kind: "buttons", role: Role.ARBITER, outcomes: [Outcome.RELEASE, Outcome.REFUND] };
+    }
+    return { kind: "none", reason: "not-participant" };
+  }
+  // Already-voted is per PUBKEY for the arbiter on a pooled lock: a backup may
+  // hold the slot while the ASSIGNED arbiter is still entitled to vote and
+  // retake it (priority 0 wins on replay).
+  if (role === Role.ARBITER && state.lock.arbiterPoolShare) {
+    const votedAlready = state.eventChain.some(
+      (ve) => ve.kind === EscrowEventKind.VOTE && ve.pubkey === pubkey,
+    );
+    if (votedAlready) return { kind: "none", reason: "already-voted" };
+  } else if (state.votes[role] !== undefined) {
+    return { kind: "none", reason: "already-voted" };
+  }
 
   // Expiry healing votes should only drive REFUND. Ordering is deliberately
   // skipped here, matching the state-machine's healing path.
@@ -1095,7 +1198,13 @@ export function decideVotePrompt(
     }
   }
 
-  return { kind: "buttons", role, outcomes: standardOutcomes };
+  return {
+    kind: "buttons",
+    role,
+    outcomes: standardOutcomes,
+    // Zero votes + this voter is the deed-doer ⇒ single-primary moment.
+    firstVote: noBuyerSellerVotes && !state.subscription,
+  };
 }
 
 // ──────────────────────────────────────────────────────────────────────────

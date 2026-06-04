@@ -94,6 +94,14 @@ import {
   overcommittedChildren,
 } from "./storefront.js";
 import {
+  arbiterPriorityOrder,
+  arbiterPriorityOrderFor,
+  arbiterVotePriority,
+  disputeStartAt,
+  substitutionEligibleAt,
+  SUBSTITUTION_GRACE_MAX_SECONDS,
+} from "./arbiter-substitution.js";
+import {
   EscrowClient,
   type Signer,
   type UnsignedEvent,
@@ -1845,6 +1853,333 @@ console.log("\n── VOTE (dispute: arbiter breaks tie) ──");
   assertErr(applyEvent(state, v1dup), "ALREADY_VOTED", "Double vote rejected");
 }
 
+// ── 5b. ARBITER SUBSTITUTION (DESIGN-arbiter-substitution.md) ────────────
+console.log("\n── ARBITER SUBSTITUTION (pooled share, grace window, priority) ──");
+{
+  const BACKUP3_PK = "ff".repeat(32);
+  const POOL = [ARBITER_PK, ARBITER2_PK, BACKUP3_PK];
+
+  /** Pooled-share LOCKED state with a live buyer/seller dispute. */
+  const disputedPooledState = () => {
+    const create = createEvent({ communityArbiters: POOL });
+    let state = (applyEvent(null, create) as any).state;
+    const lock = lockEvent(create.raw.id);
+    lock.payload.arbiterPoolShare = true;
+    state = (applyEvent(state, lock) as any).state;
+    const v1 = voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, lock.raw.id);
+    state = (applyEvent(state, v1) as any).state;
+    const v2 = voteEvent(Role.SELLER, SELLER_PK, Outcome.REFUND, v1.raw.id);
+    state = (applyEvent(state, v2) as any).state;
+    return { state, disputeAt: v2.raw.created_at, prevId: v2.raw.id };
+  };
+
+  // Priority order: assigned first, then deterministic backups, capped.
+  const { state, disputeAt, prevId } = disputedPooledState();
+  const order = arbiterPriorityOrder(state);
+  assert(order[0] === ARBITER_PK, "substitution: priority 0 is the assigned arbiter");
+  assert(order.length === 3, "substitution: pool of 3 fills the cap exactly");
+  assert(new Set(order).size === 3, "substitution: priority order has no duplicates");
+  assert(JSON.stringify(arbiterPriorityOrder(state)) === JSON.stringify(order),
+    "substitution: priority order is deterministic on recompute");
+  assert(arbiterVotePriority(state, order[1]) === 1, "substitution: backup1 has priority 1");
+  assert(arbiterVotePriority(state, BUYER_PK) === null, "substitution: buyer is not in the order");
+
+  // Dispute clock + grace boundary (long trade → 4h cap applies).
+  assert(disputeStartAt(state) === disputeAt, "substitution: dispute starts at the LATER disagreeing vote");
+  const eligibleAt = substitutionEligibleAt(state)!;
+  assert(eligibleAt === disputeAt + SUBSTITUTION_GRACE_MAX_SECONDS,
+    "substitution: long trade → backup eligible at dispute + 4h");
+  // Short trade: half the remaining life wins the min().
+  const shortState = { ...state, expiresAt: disputeAt + 3600 };
+  assert(substitutionEligibleAt(shortState as any) === disputeAt + 1800,
+    "substitution: short trade → backup eligible at half the remaining life");
+
+  const backup = order[1];
+
+  // Too early → SUBSTITUTE_TOO_EARLY (1s before the boundary).
+  const early = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.REFUND, prevId), eligibleAt - 1);
+  assertErr(applyEvent(state, early), "SUBSTITUTE_TOO_EARLY",
+    "substitution: backup 1s before the boundary is rejected");
+
+  // At the boundary → accepted; backup fills the slot.
+  const bv = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.REFUND, prevId), eligibleAt);
+  const rBackup = applyEvent(state, bv);
+  if (assertOk(rBackup, "substitution: backup vote at the boundary is accepted")) {
+    assert(rBackup.state.votes[Role.ARBITER] === Outcome.REFUND, "substitution: backup's outcome holds the slot");
+    assert(rBackup.state.actingArbiter === backup, "substitution: actingArbiter is the backup");
+
+    // Assigned arbiter votes AFTER the backup → not ALREADY_VOTED; priority 0 retakes the slot.
+    const av = retimeEvent(voteEvent(Role.ARBITER, ARBITER_PK, Outcome.RELEASE, bv.raw.id), eligibleAt + 10);
+    const rAssigned = applyEvent(rBackup.state, av);
+    if (assertOk(rAssigned, "substitution: assigned arbiter can still vote after a backup")) {
+      assert(rAssigned.state.votes[Role.ARBITER] === Outcome.RELEASE,
+        "substitution: assigned arbiter's vote supersedes the backup's (priority 0 wins)");
+      assert(rAssigned.state.actingArbiter === ARBITER_PK, "substitution: actingArbiter flips to the assigned");
+
+      // Permutation convergence: assigned-then-backup reaches the same material state.
+      const av2 = retimeEvent(voteEvent(Role.ARBITER, ARBITER_PK, Outcome.RELEASE, prevId), eligibleAt + 10);
+      const rA = applyEvent(state, av2);
+      if (assertOk(rA, "substitution: assigned-first order accepted")) {
+        const bv2 = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.REFUND, av2.raw.id), eligibleAt + 20);
+        const rAB = applyEvent(rA.state, bv2);
+        if (assertOk(rAB, "substitution: backup vote still accepted after the assigned (stays in chain)")) {
+          assert(
+            rAB.state.votes[Role.ARBITER] === rAssigned.state.votes[Role.ARBITER]
+            && rAB.state.actingArbiter === rAssigned.state.actingArbiter,
+            "substitution: both arrival orders converge on the same slot + actingArbiter",
+          );
+        }
+      }
+    }
+
+    // Same backup can't vote twice.
+    const dup = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.RELEASE, bv.raw.id), eligibleAt + 30);
+    assertErr(applyEvent(rBackup.state, dup), "ALREADY_VOTED", "substitution: same backup voting twice rejected");
+
+    // Downstream machinery: RESOLVE on the backup-carried majority works untouched.
+    const resolve = resolveEvent(Outcome.REFUND, [Role.SELLER, Role.ARBITER], true, bv.raw.id);
+    const rResolved = applyEvent(rBackup.state, resolve);
+    if (assertOk(rResolved, "substitution: RESOLVE accepts the backup-formed majority")) {
+      assert(rResolved.state.resolvedOutcome === Outcome.REFUND, "substitution: resolves to the backup's outcome");
+    }
+  }
+
+  // Strangers stay out; the cap holds.
+  const stranger = retimeEvent(voteEvent(Role.ARBITER, "99".repeat(32), Outcome.REFUND, prevId), eligibleAt + 5);
+  assertErr(applyEvent(state, stranger), "NOT_POOL_ARBITER",
+    "substitution: a non-pool pubkey is rejected even on a pooled lock");
+
+  // No pooled share → byte-identical v2.0 behavior (backup is a stranger).
+  {
+    const create = createEvent({ communityArbiters: POOL });
+    let legacy = (applyEvent(null, create) as any).state;
+    legacy = (applyEvent(legacy, lockEvent(create.raw.id)) as any).state; // no arbiterPoolShare
+    const lv1 = voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, create.raw.id);
+    legacy = (applyEvent(legacy, lv1) as any).state;
+    const lv2 = voteEvent(Role.SELLER, SELLER_PK, Outcome.REFUND, lv1.raw.id);
+    legacy = (applyEvent(legacy, lv2) as any).state;
+    const lateBackup = retimeEvent(
+      voteEvent(Role.ARBITER, arbiterPriorityOrder(legacy)[1], Outcome.REFUND, lv2.raw.id),
+      lv2.raw.created_at + SUBSTITUTION_GRACE_MAX_SECONDS + 60,
+    );
+    assertErr(applyEvent(legacy, lateBackup), "NOT_PARTICIPANT",
+      "substitution: without the pooled-share marker a backup stays NOT_PARTICIPANT");
+  }
+
+  // Dispute gates still precede the clock.
+  {
+    const create = createEvent({ communityArbiters: POOL });
+    let agree = (applyEvent(null, create) as any).state;
+    const lk = lockEvent(create.raw.id);
+    lk.payload.arbiterPoolShare = true;
+    agree = (applyEvent(agree, lk) as any).state;
+    const a1 = voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, lk.raw.id);
+    agree = (applyEvent(agree, a1) as any).state;
+    const oneVoteBackup = retimeEvent(
+      voteEvent(Role.ARBITER, arbiterPriorityOrder(agree)[1], Outcome.RELEASE, a1.raw.id),
+      a1.raw.created_at + SUBSTITUTION_GRACE_MAX_SECONDS + 60,
+    );
+    assertErr(applyEvent(agree, oneVoteBackup), "ARBITER_TOO_EARLY",
+      "substitution: backup before both sides voted → ARBITER_TOO_EARLY");
+    const a2 = voteEvent(Role.SELLER, SELLER_PK, Outcome.RELEASE, a1.raw.id);
+    agree = (applyEvent(agree, a2) as any).state;
+    const agreeBackup = retimeEvent(
+      voteEvent(Role.ARBITER, arbiterPriorityOrder(agree)[1], Outcome.RELEASE, a2.raw.id),
+      a2.raw.created_at + SUBSTITUTION_GRACE_MAX_SECONDS + 60,
+    );
+    assertErr(applyEvent(agree, agreeBackup), "ARBITER_NOT_NEEDED",
+      "substitution: backup when buyer+seller agree → ARBITER_NOT_NEEDED");
+  }
+
+  // ── Stage 2: lock-time priority anchoring + envelope + canVote ──────────
+  // The LOCK builder computes the order before the arbiter is seated in
+  // state: a custom assigned arbiter (not in the pool) still anchors
+  // priority 0, and backups derive from the pool around them.
+  {
+    const customAssigned = "11".repeat(32);
+    const lockTime = arbiterPriorityOrderFor({
+      escrowId: ESCROW_ID,
+      pool: POOL,
+      buyerPubkey: BUYER_PK,
+      sellerPubkey: SELLER_PK,
+      assignedArbiter: customAssigned,
+    });
+    assert(lockTime[0] === customAssigned,
+      "substitution: lock-time order anchors priority 0 on the committed arbiter (even off-pool)");
+    assert(lockTime.length === 3 && !lockTime.slice(1).includes(customAssigned),
+      "substitution: backups derive from the pool around the committed arbiter");
+  }
+
+  // A backup's vote-carried envelope validates exactly like the assigned
+  // arbiter's: shareIndex pinned to the ARBITER holder index (2), recipient
+  // pinned to the engine-computed payout for the outcome.
+  {
+    const recipient = payoutRecipientFor(state, Outcome.REFUND)!;
+    const goodEnv = {
+      shareIndex: 2,
+      outcome: Outcome.REFUND,
+      notesHash: state.lock.notesHash!,
+      recipientPubkey: recipient.pubkey,
+      encryptedFor: { [recipient.pubkey]: "ct_backup_to_winner" },
+    };
+    assert(validateVoteShareEnvelope(goodEnv as any, state, Role.ARBITER, Outcome.REFUND, state.lock.notesHash) === null,
+      "substitution: a backup's shareIndex-2 envelope validates for the ARBITER role");
+    assert(validateVoteShareEnvelope({ ...goodEnv, shareIndex: 0 } as any, state, Role.ARBITER, Outcome.REFUND, state.lock.notesHash) !== null,
+      "substitution: a backup smuggling a non-arbiter shareIndex is rejected");
+    // And the reducer accepts a backup vote CARRYING that envelope, leaving it
+    // in the chain addressed to the winner (what the claim scan reads).
+    const envVote = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.REFUND, prevId), eligibleAt + 2);
+    (envVote.payload as any).shareEnvelope = goodEnv;
+    const rEnv = applyEvent(state, envVote);
+    if (assertOk(rEnv, "substitution: backup vote carrying a valid envelope is accepted")) {
+      const carried = rEnv.state.eventChain.some((ve: any) =>
+        ve.kind === EscrowEventKind.VOTE
+        && ve.payload?.shareEnvelope?.recipientPubkey === recipient.pubkey
+        && ve.payload?.shareEnvelope?.shareIndex === 2
+        && ve.pubkey === backup);
+      assert(carried, "substitution: the backup's envelope rides the chain addressed to the winner");
+    }
+  }
+
+  // canVote mirrors the reducer for the UI: floor → eligible → already-voted.
+  {
+    assert(canVote(state, backup, eligibleAt - 1).canVote === false,
+      "substitution: canVote holds the floor for the assigned arbiter before the boundary");
+    assert(canVote(state, backup, eligibleAt).canVote === true,
+      "substitution: canVote opens for the backup at the boundary");
+    assert(canVote(state, "99".repeat(32), eligibleAt + 5).canVote === false,
+      "substitution: canVote stays closed for non-pool strangers");
+    const bv3 = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.REFUND, prevId), eligibleAt + 1);
+    const afterBackup = (applyEvent(state, bv3) as any).state;
+    assert(canVote(afterBackup, ARBITER_PK, eligibleAt + 5).canVote === true,
+      "substitution: canVote still lets the ASSIGNED arbiter vote after a backup filled the slot");
+    assert(canVote(afterBackup, backup, eligibleAt + 5).canVote === false,
+      "substitution: canVote blocks the backup from voting twice");
+  }
+
+  // The UI prompt mirrors all of it: countdown before the floor opens,
+  // arbiter buttons after, nothing for strangers, and the assigned arbiter
+  // keeps their buttons even after a backup filled the slot.
+  {
+    const before = decideVotePrompt(state, backup, state.participants, eligibleAt - 60);
+    assert(before.kind === "waiting" && /step in/.test((before as any).message ?? ""),
+      "substitution: votePrompt shows the backup a step-in countdown before the floor opens");
+    const after = decideVotePrompt(state, backup, state.participants, eligibleAt + 1);
+    assert(after.kind === "buttons" && (after as any).role === Role.ARBITER,
+      "substitution: votePrompt gives the backup arbiter buttons once the floor opens");
+    assert(decideVotePrompt(state, "99".repeat(32), state.participants, eligibleAt + 1).kind === "none",
+      "substitution: votePrompt stays silent for non-pool strangers");
+    const bv4 = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.REFUND, prevId), eligibleAt + 1);
+    const slotFilled = (applyEvent(state, bv4) as any).state;
+    const assignedPrompt = decideVotePrompt(slotFilled, ARBITER_PK, slotFilled.participants, eligibleAt + 5);
+    assert(assignedPrompt.kind === "buttons",
+      "substitution: votePrompt still offers the ASSIGNED arbiter buttons after a backup voted");
+    assert(decideVotePrompt(slotFilled, backup, slotFilled.participants, eligibleAt + 5).kind === "none",
+      "substitution: votePrompt closes for the backup after they voted");
+  }
+
+  // ── HEALING substitution: the disputed-expiry limbo fix ─────────────────
+  // A 1-1 disputed trade expires; every participant has voted except the
+  // absent assigned arbiter — previously the ONLY device able to cast the
+  // rescue vote. On pooled locks any pool backup heals instead: REFUND only,
+  // no grace floor, slot still converges by priority.
+  {
+    const expired = { ...state, status: EscrowStatus.EXPIRED } as EscrowState;
+
+    // Backup heals with REFUND — accepted, no floor, slot = backup.
+    const healVote = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.REFUND, prevId), disputeAt + 10);
+    const rHeal = applyEvent(expired, healVote);
+    if (assertOk(rHeal, "healing-sub: backup's healing REFUND on an expired pooled dispute is accepted")) {
+      assert(rHeal.state.votes[Role.ARBITER] === Outcome.REFUND,
+        "healing-sub: the healing vote fills the arbiter slot with REFUND");
+      assert(rHeal.state.actingArbiter === backup,
+        "healing-sub: the healing backup becomes the acting arbiter");
+      // Seller (REFUND) + backup (REFUND) = 2-of-3 → RESOLVE heals the chain.
+      const healResolve = resolveEvent(Outcome.REFUND, [Role.SELLER, Role.ARBITER], true, healVote.raw.id);
+      const rHealed = applyEvent(rHeal.state, healResolve);
+      if (assertOk(rHealed, "healing-sub: RESOLVE lands on the healed expired trade")) {
+        assert(rHealed.state.resolvedOutcome === Outcome.REFUND,
+          "healing-sub: the limbo trade resolves to REFUND (sats route home)");
+      }
+    }
+
+    // RELEASE is not a legitimate healing outcome for a backup.
+    const badHeal = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.RELEASE, prevId), disputeAt + 10);
+    assertErr(applyEvent(expired, badHeal), "INVALID_HEAL_OUTCOME",
+      "healing-sub: a backup's healing vote must be REFUND");
+
+    // No grace floor in healing: a vote long BEFORE the live-dispute boundary
+    // timestamp is still accepted once the trade is expired.
+    const earlyHeal = retimeEvent(voteEvent(Role.ARBITER, order[2], Outcome.REFUND, prevId), disputeAt + 1);
+    assert((applyEvent(expired, earlyHeal) as any).ok !== false,
+      "healing-sub: healing has no grace floor (trade already dead)");
+
+    // Non-pooled legacy locks: backups stay out even in healing.
+    {
+      const create = createEvent({ communityArbiters: POOL });
+      let legacy = (applyEvent(null, create) as any).state;
+      legacy = (applyEvent(legacy, lockEvent(create.raw.id)) as any).state;
+      const lv1 = voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, create.raw.id);
+      legacy = (applyEvent(legacy, lv1) as any).state;
+      const lv2 = voteEvent(Role.SELLER, SELLER_PK, Outcome.REFUND, lv1.raw.id);
+      legacy = (applyEvent(legacy, lv2) as any).state;
+      const legacyExpired = { ...legacy, status: EscrowStatus.EXPIRED } as EscrowState;
+      const legacyHeal = voteEvent(Role.ARBITER, arbiterPriorityOrder(legacy)[1], Outcome.REFUND, lv2.raw.id);
+      assertErr(applyEvent(legacyExpired, legacyHeal), "NOT_PARTICIPANT",
+        "healing-sub: backups stay NOT_PARTICIPANT on non-pooled locks even in healing");
+    }
+
+    // canVote + votePrompt mirrors for the healing backup.
+    assert(canVote(expired, backup, disputeAt + 1).canVote === true,
+      "healing-sub: canVote opens for a pool backup on the expired pooled dispute");
+    const healPrompt = decideVotePrompt(expired, backup, expired.participants, disputeAt + 1);
+    assert(healPrompt.kind === "buttons"
+      && (healPrompt as any).role === Role.ARBITER
+      && (healPrompt as any).outcomes.length === 1
+      && (healPrompt as any).outcomes[0] === Outcome.REFUND,
+      "healing-sub: votePrompt offers the backup REFUND-only healing buttons");
+  }
+}
+
+// ── 5c. Locker released at RESOLVE — won-by-other trades stop counting ────
+// Once a trade RESOLVES in someone else's favor, the viewer's part is done:
+// their vote is cast, their share envelope is carried, only the WINNER's
+// claim remains. The escrow pill + active counts must release them at
+// RESOLVE — not keep screaming "in escrow" until the winner gets around to
+// claiming. The winner, by contrast, stays active until they claim.
+console.log("\n── Locker released at RESOLVE ──");
+{
+  const create = createEvent();
+  let state = (applyEvent(null, create) as any).state;
+  state = (applyEvent(state, lockEvent(create.raw.id)) as any).state;
+  const v1 = voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, create.raw.id);
+  state = (applyEvent(state, v1) as any).state;
+  const v2 = voteEvent(Role.SELLER, SELLER_PK, Outcome.RELEASE, v1.raw.id);
+  state = (applyEvent(state, v2) as any).state;
+  const resolved = (applyEvent(state, resolveEvent(Outcome.RELEASE, [Role.BUYER, Role.SELLER], false, v2.raw.id)) as any).state;
+  assert(resolved.status === EscrowStatus.APPROVED, "locker-release fixture: trade is APPROVED");
+  const winner = payoutRecipientFor(resolved, resolved.resolvedOutcome!)!;
+  assert(winner.pubkey === BUYER_PK, "locker-release fixture: p2p RELEASE pays the buyer");
+
+  // The seller (locker, released) is OUT of every active surface…
+  assert(hasActiveBuyerSellerCommitment({ escrows: [resolved], userPubkey: SELLER_PK }) === false,
+    "locker-release: resolved-for-buyer trade no longer counts as the seller's active commitment");
+  assert(countActiveBuyerSellerCommitments({ escrows: [resolved], userPubkey: SELLER_PK }) === 0,
+    "locker-release: the seller's active-trade count drops at RESOLVE");
+  assert(activeCommittedMsats({ escrows: [resolved], userPubkey: SELLER_PK }) === 0,
+    "locker-release: the seller's in-escrow msats read 0 at RESOLVE");
+
+  // …while the WINNER stays active until they actually claim.
+  assert(hasActiveBuyerSellerCommitment({ escrows: [resolved], userPubkey: BUYER_PK }) === true,
+    "locker-release: the winner keeps their active commitment until claim");
+  assert(activeCommittedMsats({ escrows: [resolved], userPubkey: BUYER_PK }) === resolved.amountMsats,
+    "locker-release: the winner's claimable escrow still counts");
+
+  // Pre-resolution, both sides stay active (the boundary is RESOLVE, not own-vote).
+  assert(hasActiveBuyerSellerCommitment({ escrows: [state], userPubkey: SELLER_PK }) === true,
+    "locker-release: before RESOLVE the seller is still committed (dispute could still need them)");
+}
+
 // ── 6. CLAIM + COMPLETE ──────────────────────────────────────────────────
 console.log("\n── CLAIM + COMPLETE ──");
 {
@@ -3209,12 +3544,12 @@ console.log("\n── VOTE LABEL DICTIONARY ──");
   // Bill Pay — payer is the seller (sats-receiver), payee is the buyer (bill-holder)
   assert(getVoteLabel("bill-pay", "service", Role.BUYER, Outcome.RELEASE) === "My bill was paid",
     "bill-pay/buyer/release = 'My bill was paid'");
-  assert(getVoteLabel("bill-pay", "service", Role.SELLER, Outcome.RELEASE) === "Bill has been paid",
-    "bill-pay/seller/release = 'Bill has been paid'");
+  assert(getVoteLabel("bill-pay", "service", Role.SELLER, Outcome.RELEASE) === "I paid the bill as a volunteer",
+    "bill-pay/seller/release = volunteer attestation (deed-doer votes first)");
 
   // Lending (placeholder labels for v1)
-  assert(getVoteLabel("lending", "service", Role.BUYER, Outcome.RELEASE) === "I got the loan",
-    "lending/buyer/release = 'I got the loan'");
+  assert(getVoteLabel("lending", "service", Role.BUYER, Outcome.RELEASE) === "Loan received — I'll repay on time",
+    "lending/buyer/release leans forward (receipt + repayment intent)");
   assert(getVoteLabel("lending", "service", Role.SELLER, Outcome.RELEASE) === "Loan disbursed",
     "lending/seller/release = 'Loan disbursed'");
 
@@ -3251,6 +3586,10 @@ console.log("\n── VOTE PROMPT TURN-GATE ──");
     && prompt.outcomes.includes(Outcome.REFUND),
     "P2P starts buyer-first with both buyer vote outcomes available",
   );
+  // Vote-#1 policy: the deed-doer's opening prompt is the single-primary
+  // moment (one task button + demoted cancel hatch in the UI)…
+  assert(prompt.kind === "buttons" && prompt.firstVote === true,
+    "P2P buyer's opening prompt carries firstVote (single-primary moment)");
   assert(
     getVoteLabel("p2p-trade", defaultFulfillmentFor("p2p-trade"), Role.BUYER, Outcome.RELEASE) === "I sent the fiat",
     "P2P buyer release copy confirms fiat was sent",
@@ -3306,6 +3645,9 @@ console.log("\n── VOTE PROMPT TURN-GATE ──");
     && prompt.outcomes.includes(Outcome.REFUND),
     "After buyer votes, P2P seller buttons unlock",
   );
+  // …and the RESPONDER keeps the dual buttons: real duality starts at vote #2.
+  assert(prompt.kind === "buttons" && !prompt.firstVote,
+    "P2P seller responding to the buyer's vote is NOT a firstVote moment (dual buttons)");
   assert(
     getVoteLabel("p2p-trade", defaultFulfillmentFor("p2p-trade"), Role.SELLER, Outcome.RELEASE) === "Fiat received",
     "P2P seller release copy confirms fiat was received",
@@ -3319,13 +3661,16 @@ console.log("\n── VOTE PROMPT TURN-GATE ──");
     fulfillment: defaultFulfillmentFor("bill-pay"),
     votes: {},
   } as EscrowState;
-  prompt = decideVotePrompt(billPay, BUYER_PK);
-  assert(prompt.kind === "buttons", "Bill Pay starts buyer-first");
   prompt = decideVotePrompt(billPay, SELLER_PK);
+  assert(prompt.kind === "buttons", "Bill Pay starts VOLUNTEER-first (the deed-doer votes first)");
+  assert(prompt.kind === "buttons" && prompt.firstVote === true,
+    "Bill Pay volunteer's opening prompt is the single-primary firstVote moment");
+  prompt = decideVotePrompt(billPay, BUYER_PK);
   assert(
     prompt.kind === "waiting"
-    && prompt.waitingOn === Role.BUYER,
-    "Bill Pay seller waits until buyer confirms the bill was paid",
+    && prompt.waitingOn === Role.SELLER
+    && /volunteer/i.test(prompt.message),
+    "Bill Pay owner waits on the volunteer to pay the bill",
   );
 
   const lending = {
@@ -4944,6 +5289,7 @@ import {
   resolveCreateMintUrl,
   decideArbiterWarning,
   MAIN_SURFACE_RECOVERY_MIN_SATS,
+  activeCommittedMsats,
 } from "../ui/decisions.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
 // BP_FEDERATION_INVITE / BLF_FEDERATION_INVITE already imported above

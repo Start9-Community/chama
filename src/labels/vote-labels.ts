@@ -78,17 +78,23 @@ const TABLE: Record<string, CategoryLabels> = {
     seller: { release: "Fiat received",   refund: "Fiat not received" },
     arbiter: ARBITER_NEUTRAL,
   },
-  // ── Bill Pay — sats-receiver (seller) pays buyer's fiat bill ────────
+  // ── Bill Pay — the VOLUNTEER (seller role) pays the owner's fiat bill
+  //    off-chain. The volunteer is the deed-doer, so they vote FIRST
+  //    ("I paid the bill as a volunteer"); the bill owner then confirms.
+  //    The volunteer's refund is the back-out hatch: refund the owner so
+  //    they can find someone else (maintainer wording, 2026-06-05). ────
   "bill-pay:service": {
-    buyer:  { release: "My bill was paid",   refund: "Bill not paid" },
-    seller: { release: "Bill has been paid", refund: "Couldn't pay the bill" },
+    buyer:  { release: "My bill was paid",               refund: "Bill not paid" },
+    seller: { release: "I paid the bill as a volunteer", refund: "Cancel — refund the bill owner" },
     arbiter: ARBITER_NEUTRAL,
   },
-  // ── Lending — first cycle (loan disbursement). The repayment cycle
-  //    is a separate Option B trade with reversed roles; its labels
-  //    will land alongside the lending vertical itself. ───────────────
+  // ── Lending — first cycle (loan disbursement). The borrower's first
+  //    vote leans FORWARD — acknowledge receipt + repayment intent — and
+  //    their refund is the credit-responsible decline: what a repayment-
+  //    aware borrower says when their situation has changed. The
+  //    repayment cycle is a separate Option B trade with reversed roles.
   "lending:service": {
-    buyer:  { release: "I got the loan", refund: "Loan didn't arrive" },
+    buyer:  { release: "Loan received — I'll repay on time", refund: "Cancel — I can't take this loan right now" },
     seller: { release: "Loan disbursed", refund: "Borrower didn't accept" },
     arbiter: ARBITER_NEUTRAL,
   },

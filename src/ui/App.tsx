@@ -1101,8 +1101,11 @@ export default function App() {
               gap: 6,
               flexShrink: 0,
             }}>
-              <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, padding: "4px 10px", borderRadius: 6, background: T.surface, border: `1px solid ${T.border}` }}>
-                v{__APP_VERSION__}
+              <div style={{ fontSize: 9, color: __BUILD_STAMP__ ? T.amber : T.muted, fontFamily: T.mono, padding: "4px 10px", borderRadius: 6, background: T.surface, border: `1px solid ${__BUILD_STAMP__ ? T.amber + "55" : T.border}` }}>
+                {/* Local/test builds carry an amber "dev <build time>" stamp so a
+                    Tauri/ASDK refresh visibly confirms it picked up the new
+                    bundle. ship.sh exports CHAMA_RELEASE=1 → clean version. */}
+                v{__APP_VERSION__}{__BUILD_STAMP__ ? ` · dev ${__BUILD_STAMP__}` : ""}
               </div>
             </div>
           </div>

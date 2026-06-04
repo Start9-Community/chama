@@ -295,6 +295,12 @@ function validateLockPayload(data: unknown): data is LockPayload {
     }
   }
   if (!validateSelectedMenuItems(d.selectedItems)) return false;
+  // Arbiter substitution: optional marker, must be a boolean when present
+  // (a truthy non-boolean could enable backup voting on a lock whose arbiter
+  // share was never actually pooled).
+  if (d.arbiterPoolShare !== undefined && typeof d.arbiterPoolShare !== "boolean") {
+    return false;
+  }
   return (
     d.type === "escrow:lock" &&
     typeof d.notesHash === "string" &&

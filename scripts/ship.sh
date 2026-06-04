@@ -67,6 +67,10 @@ CHAMA_GPG_KEY="${CHAMA_GPG_KEY:-0CCF412F47859431BDB2C1F1489728C34DF7C33D}"
 # remembering to set them each run; export anything yourself to override.
 # These propagate to the `npm run release:all` child process below.
 export SIGN_WITH="${SIGN_WITH:-browser}"
+# Release builds carry NO dev build-stamp: vite reads this and bakes a clean
+# "vX.Y.Z" chip. Local `npm run build` / android:sync (without this) bake an
+# amber "v2.0.3 · dev MM-DD HH:mm" stamp so testers can SEE a refresh landed.
+export CHAMA_RELEASE=1
 if [ -z "${CHAMA_ZSP_BIN:-}" ]; then
   if [ -x /private/tmp/zsp ]; then
     CHAMA_ZSP_BIN=/private/tmp/zsp
@@ -76,9 +80,10 @@ if [ -z "${CHAMA_ZSP_BIN:-}" ]; then
 fi
 export CHAMA_ZSP_BIN
 
+BUMP_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "${1:-}" in
-    --patch|--minor|--major) BUMP="${1#--}"; shift ;;
+    --patch|--minor|--major) BUMP="${1#--}"; BUMP_EXPLICIT=1; shift ;;
     --set-version)
       SET_VERSION="${2:-}"
       if ! printf '%s' "$SET_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -115,6 +120,41 @@ else
     else { c[2]++; }
     console.log(c.join("."));
   ' "$BUMP")"
+fi
+
+# ── Infer the target from the notes files themselves ───────────────────────
+# The convention-named notes file IS the declaration of intent: when no
+# explicit --set-version / --patch / --minor / --major was given, scan
+# $CHAMA_COMMIT_DIR for chama-vX.Y.Z_release_notes versions GREATER than the
+# current package.json version and target the highest one. Stale notes from
+# already-shipped releases (<= current) are ignored automatically; an
+# accidental future-versioned file is surfaced loudly here and again at the
+# Proceed prompt before anything mutates.
+if [ -z "$SET_VERSION" ] && [ "$BUMP_EXPLICIT" != "1" ]; then
+  INFERRED="$(node -e '
+    const fs = require("fs");
+    const dir = process.argv[1];
+    const cur = process.argv[2].split(".").map(Number);
+    const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+    let best = null, files = [];
+    try { files = fs.readdirSync(dir); } catch { process.exit(0); }
+    for (const f of files) {
+      const m = /^chama-v(\d+)\.(\d+)\.(\d+)_release_notes$/.exec(f);
+      if (!m) continue;
+      const v = [Number(m[1]), Number(m[2]), Number(m[3])];
+      if (cmp(v, cur) <= 0) continue;
+      if (!best || cmp(v, best) > 0) best = v;
+    }
+    if (best) console.log(best.join("."));
+  ' "$CHAMA_COMMIT_DIR" "$CURRENT_VERSION")"
+  if [ -n "$INFERRED" ] && [ "$INFERRED" != "$NEW_VERSION" ]; then
+    NEW_VERSION="$INFERRED"
+    # Route the bump through the exact-version branch — otherwise step 1
+    # would still run `npm version patch` and trip the post-bump guard.
+    SET_VERSION="$NEW_VERSION"
+    echo "📝 Targeting v$NEW_VERSION — inferred from $CHAMA_COMMIT_DIR/chama-v${NEW_VERSION}_release_notes"
+    echo "   (newest future-versioned notes file; pass --set-version or --patch/--minor/--major to override)"
+  fi
 fi
 
 # ── Resolve the convention-named notes files ──────────────────────────────
@@ -211,6 +251,21 @@ if [ "$APPLIED" != "$NEW_VERSION" ]; then
   git checkout -- package.json package-lock.json 2>/dev/null || true
   exit 1
 fi
+
+# Keep Tauri metadata in lockstep. Gradle derives versionName/versionCode from
+# package.json automatically; src-tauri/tauri.conf.json does NOT — the v2.0.3
+# desktop assets were nearly built with stale 1.3.0 metadata because of this.
+# Targeted line-replace (no reformat) of the top-level "version" field; the
+# git add -A below commits it with the bump.
+node -e '
+  const fs = require("fs");
+  const v = require("./package.json").version;
+  const p = "src-tauri/tauri.conf.json";
+  let s = fs.readFileSync(p, "utf8");
+  const next = s.replace(/("version"\s*:\s*")[^"]+(")/, "$1" + v + "$2");
+  if (next !== s) { fs.writeFileSync(p, next); console.log("   synced tauri.conf.json -> v" + v); }
+  else if (!s.includes("\"version\": \"" + v + "\"")) { process.exit(1); }
+' || echo "   ⚠ tauri.conf.json version sync failed — sync it manually before desktop builds."
 
 # ── 2. Commit everything with the release-notes file, then push ───────────
 echo "📦 git add -A && git commit -F $REL_NOTES"

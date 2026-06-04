@@ -138,6 +138,20 @@ import { isSimModeOn } from "../sim/simMode.js";
 import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
 import { payInvoiceWithNwc } from "../payments/nwc.js";
 import { balanceBlocksFederationSwitch } from "../payments/lightning-fees.js";
+
+/** Test/sandbox-only CREATE expiry override (see the createEscrow call site).
+ *  Returns null unless chama_create_expiry_seconds holds a sane number. */
+function readCreateExpiryOverride(): number | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem("chama_create_expiry_seconds");
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 300 && n <= 30 * 86400 ? Math.floor(n) : null;
+  } catch {
+    return null;
+  }
+}
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
@@ -986,8 +1000,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     const cachedFedId = fedimintRef.current?.getFederationId() ?? null;
     const fedTags = deriveCreateFedTags({ cachedFedId, probeResult: null });
 
+    // Sandbox/test lever: override the default trade expiry for CREATEs made
+    // on THIS device. Consensus-safe by construction — expirySeconds becomes
+    // committed wire data in the CREATE event, so every client derives the
+    // same expiry and the same arbiter-substitution floor (min(4h, half the
+    // remaining life)) from it. Example: localStorage.setItem(
+    // "chama_create_expiry_seconds", "1800") → 30-minute trades whose
+    // backup-arbiter floor opens after ~15 minutes. Remove the key for the
+    // 24h default. Clamped to [5 minutes, 30 days].
+    const expiryOverride = readCreateExpiryOverride();
     const result = await client.createEscrow({
       ...params,
+      ...(params.expirySeconds === undefined && expiryOverride !== null
+        ? { expirySeconds: expiryOverride }
+        : {}),
       fedPrefix: fedTags.fedPrefix,
       fed: fedTags.fed,
     });

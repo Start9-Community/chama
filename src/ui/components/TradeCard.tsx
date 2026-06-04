@@ -10,6 +10,7 @@ import { getCommunityBySlug } from "../../communities/registry.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER, fmtSats } from "../theme.js";
 import { listingPremiumLine } from "../listing-metrics.js";
+import { payoutRecipientFor } from "../../escrow-engine/recipients.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
@@ -401,7 +402,7 @@ export function TradeCard({
               width: 6, height: 6, borderRadius: "50%",
               background: status.c, boxShadow: `0 0 8px ${status.c}66`,
             }} />
-            {compactStatusLabel(state, nowSec)}
+            {compactStatusLabel(state, nowSec, pubkey)}
           </span>
           {timeLine && (
             <div style={{
@@ -570,7 +571,7 @@ function paymentMethodsSummary(methods: string[] | undefined): string | null {
   return `${visible}${extra}`;
 }
 
-function compactStatusLabel(state: EscrowState, nowSec: number): string {
+function compactStatusLabel(state: EscrowState, nowSec: number, viewerPubkey?: string): string {
   const { status } = state;
   if (
     status === EscrowStatus.CREATED &&
@@ -583,7 +584,15 @@ function compactStatusLabel(state: EscrowState, nowSec: number): string {
   }
   if (status === EscrowStatus.CREATED) return "Open";
   if (status === EscrowStatus.LOCKED) return "Escrow";
-  if (status === EscrowStatus.APPROVED) return "Claim";
+  if (status === EscrowStatus.APPROVED) {
+    // Resolved for someone else → the viewer's part is done; only the
+    // winner still has a claim to make. Their chip reads Done, not Claim.
+    if (viewerPubkey && state.resolvedOutcome) {
+      const winner = payoutRecipientFor(state, state.resolvedOutcome);
+      if (winner && winner.pubkey !== viewerPubkey) return "Done";
+    }
+    return "Claim";
+  }
   if (status === EscrowStatus.CLAIMED) return "Settling";
   if (status === EscrowStatus.COMPLETED) return "Done";
   if (status === EscrowStatus.EXPIRED) return "Timed out";

@@ -14,6 +14,7 @@ import {
   selectedMenuItemsTotalMsats,
 } from "../../escrow-engine/types.js";
 import { getWinner } from "../../escrow-engine/state-machine.js";
+import { payoutRecipientFor } from "../../escrow-engine/recipients.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { getVoteLabel } from "../../labels/vote-labels.js";
 import {
@@ -215,6 +216,9 @@ export function TradeDetail({
   });
   const fundUnavailable = bootProbeFailed || receiveUnavailable;
   const [voting, setVoting] = useState(false);
+  // Two-tap confirm for the vote-#1 "cancel this trade" hatch (a quiet link
+  // shouldn't end a trade on one mis-tap). Reset per trade below.
+  const [cancelArmed, setCancelArmed] = useState(false);
   const [joining, setJoining] = useState(false);
   const [locking, setLocking] = useState(false);
   // Advanced "re-broadcast / heal" — idle → broadcasting → a result line.
@@ -437,6 +441,12 @@ export function TradeDetail({
   const canJoinAsSeller = !participants.seller;
   const canJoinTrade = canJoinAsBuyer || canJoinAsSeller || canJoinAsArbiter;
   const prewarmedEscrowRef = useRef<string | null>(null);
+
+  // Disarm the cancel hatch whenever the viewed trade (or its vote state)
+  // changes — an armed confirm must never carry across trades.
+  useEffect(() => {
+    setCancelArmed(false);
+  }, [state.id, state.votes[Role.BUYER], state.votes[Role.SELLER]]);
 
   useEffect(() => {
     if (!onPrewarmFunding) return;
@@ -1650,7 +1660,11 @@ export function TradeDetail({
           <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>PARTICIPANTS</div>
           {state.communityArbiters && state.communityArbiters.length > 0 && (
             <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono }}>
-              {state.communityArbiters.length} backup arbiter{state.communityArbiters.length !== 1 ? "s" : ""}
+              {state.actingArbiter && state.actingArbiter !== participants[Role.ARBITER]
+                // Arbiter substitution: a pool backup's vote currently holds the
+                // arbiter slot (the assigned arbiter went absent past the floor).
+                ? `backup arbiter ${shortParticipantPubkey(state.actingArbiter)} stepped in`
+                : `${state.communityArbiters.length} backup arbiter${state.communityArbiters.length !== 1 ? "s" : ""}`}
             </div>
           )}
         </div>
@@ -2285,9 +2299,16 @@ export function TradeDetail({
         const refundText = isArbiter
           ? arbiterRefundColor
           : state.subscription ? T.red : T.amber;
+        // Vote #1 (the off-chain deed-doer, zero votes cast): no real duality
+        // exists yet — the voter has ONE task plus a back-out hatch, so the
+        // primary button drops the protocol prefix and the refund demotes to a
+        // quiet cancel link below (rendered in the firstVote branch).
+        const isFirstVoteMoment = votePrompt.firstVote === true && !isArbiter && !isOversoldVoterView;
         const releaseLabel = isArbiter
           ? "Side with " + releaseWinner
-          : voteOutcomeLabel("Release", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE));
+          : isFirstVoteMoment
+            ? getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE)
+            : voteOutcomeLabel("Release", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE));
         const refundLabel = state.subscription
           ? "Cancel & refund remaining"
           : isArbiter
@@ -2337,6 +2358,46 @@ export function TradeDetail({
             <span style={voteActionLabelStyle()}>{refundLabel}</span>
           </button>
         ) : null;
+        // Vote #1: ONE primary task button, refund demoted to a quiet two-tap
+        // "cancel this trade" hatch whose routing copy derives from the engine
+        // (payoutRecipientFor) so it can never lie about where the sats go.
+        if (isFirstVoteMoment && showRelease && showRefund) {
+          const refundRecipient = payoutRecipientFor(state, Outcome.REFUND);
+          const cancelRouting = refundRecipient && refundRecipient.pubkey === pubkey
+            ? "refund me"
+            : refundRecipient
+              ? `sats return to the ${refundRecipient.role}`
+              : "the locked sats are returned";
+          return (
+            <div className="trade-vote-actions" style={{
+              display: "grid", gridTemplateColumns: "1fr", marginBottom: 16,
+            }}>
+              {releaseButton}
+              <button
+                disabled={voting}
+                aria-label={`Vote refund: cancel this trade — ${cancelRouting}`}
+                onClick={() => {
+                  if (!cancelArmed) { setCancelArmed(true); return; }
+                  setCancelArmed(false);
+                  handleVote(Outcome.REFUND);
+                }}
+                style={{
+                  width: "100%", marginTop: 10, padding: "9px 10px",
+                  background: cancelArmed ? T.amberDim : "none",
+                  border: cancelArmed ? `1px solid ${T.amber}66` : `1px dashed ${T.border}`,
+                  borderRadius: T.rs,
+                  color: cancelArmed ? T.amber : T.muted,
+                  fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+                  cursor: voting ? "default" : "pointer",
+                }}
+              >
+                {cancelArmed
+                  ? `Sure? This ends the trade — ${cancelRouting}. Tap again to confirm.`
+                  : `${getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND)} · ${cancelRouting}`}
+              </button>
+            </div>
+          );
+        }
         // Buyer-favoring vote on the LEFT (purple), seller-favoring on the RIGHT
         // (orange), mirroring the B · A · S participant ring + the tally. RELEASE
         // wins for the buyer in p2p/bill-pay/lending but for the SELLER in

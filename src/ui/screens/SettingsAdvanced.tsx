@@ -344,9 +344,18 @@ export function SettingsAdvanced({
         </div>
       )}
 
+      {/* Arbiter-substitution live testing: per-device override of the CREATE
+          expiry. Consensus-safe — the value is committed wire data in the
+          CREATE event, so every client derives the same expiry and the same
+          backup-arbiter floor (min(4h, half remaining life)). Only the
+          CREATING device needs it set. Power-user gated like manual fund. */}
+      {(powerUserOn || isDev || simOn) && (
+        <TestExpiryOverrideCard />
+      )}
+
       {!(powerUserOn || isDev) && (
         <div style={{
-          padding: 24, textAlign: "center",
+          padding: 24, textAlign: "center" as const,
           background: T.surface, border: `1px dashed ${T.border}`,
           borderRadius: T.r, color: T.muted, fontFamily: T.mono, fontSize: 11, lineHeight: 1.7,
         }}>
@@ -644,6 +653,97 @@ function NwcPermissionCard({
         lineHeight: 1.45,
       }}>
         {hint}
+      </div>
+    </div>
+  );
+}
+
+// ── Arbiter-substitution test lever ──────────────────────────────────────
+// Writes chama_create_expiry_seconds, which createEscrow reads as the CREATE
+// expiry override. Consensus-safe: the value is committed into the CREATE
+// event itself, so all clients derive the same expiry + the same backup-
+// arbiter floor. Only the creating device needs it. Power-user gated.
+const CREATE_EXPIRY_OVERRIDE_KEY = "chama_create_expiry_seconds";
+
+function readExpiryOverrideRaw(): string {
+  try {
+    return typeof localStorage === "undefined"
+      ? ""
+      : localStorage.getItem(CREATE_EXPIRY_OVERRIDE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function TestExpiryOverrideCard() {
+  const [value, setValue] = useState<string>(() => readExpiryOverrideRaw());
+  const active = readExpiryOverrideRaw() !== "";
+  const parsed = Number(value);
+  const valid = Number.isFinite(parsed) && parsed >= 300 && parsed <= 30 * 86400;
+
+  const save = () => {
+    try {
+      if (!valid) return;
+      localStorage.setItem(CREATE_EXPIRY_OVERRIDE_KEY, String(Math.floor(parsed)));
+      setValue(String(Math.floor(parsed)));
+    } catch { /* storage unavailable — no-op */ }
+  };
+  const clear = () => {
+    try {
+      localStorage.removeItem(CREATE_EXPIRY_OVERRIDE_KEY);
+      setValue("");
+    } catch { /* no-op */ }
+  };
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${active ? T.amber : T.border}`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 600, color: active ? T.amber : T.muted,
+        fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
+      }}>
+        TEST TRADE EXPIRY {active ? "· ACTIVE" : "(POWER USER)"}
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 12 }}>
+        Overrides the expiry baked into trades CREATED on this device (seconds,
+        5 min – 30 days). A 1800s trade opens the backup-arbiter floor after
+        ~15 min — every device follows the trade, only the creator needs this.
+        Clear it after testing or you will list 30-minute trades for real.
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="e.g. 1800"
+          inputMode="numeric"
+          style={{ ...inputStyle, flex: 1, fontFamily: T.mono, fontSize: 12 }}
+        />
+        <button
+          onClick={save}
+          disabled={!valid}
+          style={{
+            background: valid ? T.amberDim : "none",
+            border: `1px solid ${valid ? T.amber + "66" : T.border}`,
+            color: valid ? T.amber : T.muted,
+            fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+            padding: "8px 12px", borderRadius: T.rs,
+            cursor: valid ? "pointer" : "default",
+          }}
+        >
+          Set
+        </button>
+        <button
+          onClick={clear}
+          style={{
+            background: "none", border: `1px solid ${T.border}`, color: T.muted,
+            fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+            padding: "8px 12px", borderRadius: T.rs, cursor: "pointer",
+          }}
+        >
+          Clear
+        </button>
       </div>
     </div>
   );

@@ -315,10 +315,20 @@ a post-v1 empirical question — let Nairobi usage show what arbiters
 actually do before pricing it. Structure is locked: duty pays, not
 power. "Arbiter was needed" flag goes on the public trade receipt.
 
-- [ ] Arbiter healing powers. Bounded stale-trade repair without
-full consensus, especially for Lending repayment timelines that
-have no server-side timer. Design after v1 usage reveals the
-actual failure modes.
+- [x] Arbiter healing powers. SHIPPED with the v2.1 arbiter-substitution
+release (2026-06-05): the field revealed the actual failure mode — a
+1-1 disputed trade expiring while the assigned arbiter is absent left
+sats in limbo, because the expiry-heal rescue vote could only come
+from the one participant who hadn't voted (the absent arbiter itself).
+Now: the assigned arbiter auto-heals on load (v2.0.x behavior, kept),
+and on pooled-share locks ANY pool backup heals too — REFUND only
+(INVALID_HEAL_OUTCOME enforced by the reducer), no grace floor, slot
+converged by deterministic priority, backup clients auto-heal on load.
+Bounded exactly as this item demanded: healing can only ever route the
+refund to the engine-computed recipient — never an arbitrary payout,
+never a vote flip (vote immutability is permanent policy; any future
+exception requires Chamacito community-consensus voting, see ratings).
+Lending repayment timers still get their own pass with that vertical.
 
 - [ ] Arbiter opt-in and availability signals. Elected arbiters can
 publish kind:38104 events marking themselves unavailable for

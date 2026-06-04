@@ -51,6 +51,7 @@ import {
 import { applyEvent, replayEventChain, canVote, getWinner, payoutRecipientFor, type TransitionResult } from "./state-machine.js";
 import { buildChildCreateParams, remainingStock, unsoldStock, isSoldOut, isLastUnitContested } from "./storefront.js";
 import { HOLDER_ONLY_SHARE_POLICY, shareIndexForRole } from "./holder-shares.js";
+import { arbiterVotePriority } from "./arbiter-substitution.js";
 import type { VoteShareEnvelope } from "./types.js";
 import { EscrowNotifier } from "./notifier.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
@@ -658,6 +659,9 @@ export class EscrowClient {
     /** Holder-only shares: "holder-only-v1" when the bridge built per-holder
      *  shares. Absent ⇒ legacy dual-encrypted (old claim path). */
     sharePolicy?: LockPayload["sharePolicy"];
+    /** Arbiter substitution: true when the bridge encrypted the arbiter share
+     *  to the deterministic priority order (assigned + backups). */
+    arbiterPoolShare?: boolean;
   }): Promise<EscrowState> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
@@ -698,6 +702,7 @@ export class EscrowClient {
       notesHash: params.notesHash,
       shares: params.shares,
       sharePolicy: params.sharePolicy,
+      arbiterPoolShare: params.arbiterPoolShare,
       sellerReceivesMsats: params.sellerReceivesMsats,
       arbiterFeeMsats: params.arbiterFeeMsats,
       selectedItems: params.selectedItems,
@@ -796,8 +801,17 @@ export class EscrowClient {
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
 
     const pubkey = await this.getPubkey();
-    const role = this.getMyRole(state, pubkey);
-    if (!role) throw new Error("You are not a participant in this escrow");
+    let role = this.getMyRole(state, pubkey);
+    if (!role) {
+      // Arbiter substitution: an eligible pool backup votes as ARBITER on a
+      // pooled-share lock. canVote (below) enforces the dispute gates + the
+      // assigned arbiter's grace window; the reducer re-enforces all of it.
+      if (state.lock.arbiterPoolShare && arbiterVotePriority(state, pubkey) !== null) {
+        role = Role.ARBITER;
+      } else {
+        throw new Error("You are not a participant in this escrow");
+      }
+    }
 
     const voteCheck = canVote(state, pubkey);
     if (!voteCheck.canVote) throw new Error(`Cannot vote: ${voteCheck.reason}`);
@@ -1904,7 +1918,28 @@ export class EscrowClient {
     // Check if we're a participant who can vote
     const myPubkey = await this.signer.getPublicKey();
     const myRole = Object.entries(state.participants).find(([, pk]) => pk === myPubkey)?.[0] as Role | undefined;
-    if (!myRole) return;
+    if (!myRole) {
+      // HEALING substitution (the disputed-expiry limbo fix): in a 1-1 dispute
+      // every participant has already voted EXCEPT the assigned arbiter — so
+      // the rescue vote used to depend on the exact absent device that
+      // stranded the trade. On pooled-share locks, any pool backup's client
+      // heals instead: auto-vote REFUND; the vote carries their share-2
+      // envelope to the refund recipient, who can then reconstruct and claim.
+      if (state.lock.arbiterPoolShare !== true) return;
+      if (arbiterVotePriority(state, myPubkey) === null) return;
+      const alreadyVotedByMe = state.eventChain.some(
+        (e) => e.kind === EscrowEventKind.VOTE && e.pubkey === myPubkey,
+      );
+      if (alreadyVotedByMe) return;
+      console.debug(`[escrow] Escrow ${escrowId} expired — pool backup auto-voting healing REFUND`);
+      try {
+        await this.vote(escrowId, Outcome.REFUND);
+        console.debug(`[escrow] Backup healing REFUND published for ${escrowId}`);
+      } catch (e) {
+        console.debug(`[escrow] Backup healing REFUND failed for ${escrowId}:`, e);
+      }
+      return;
+    }
 
     // Check if we already voted
     if (state.votes[myRole]) return;

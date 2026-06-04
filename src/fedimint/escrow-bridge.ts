@@ -31,6 +31,7 @@ import {
   holderRoleForShareIndex,
   shareIndexForRole,
 } from "../escrow-engine/holder-shares.js";
+import { arbiterPriorityOrderFor } from "../escrow-engine/arbiter-substitution.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
@@ -194,14 +195,31 @@ export class EscrowFedimintBridge {
     // share (see appendVoteShareEnvelope / claimAndRedeem). We stop emitting
     // dual-encrypted shares entirely; old locks still claim via the legacy path
     // (keyed on the absent sharePolicy). See docs/DESIGN-holder-only-shares.md.
+    //
+    // Arbiter substitution (DESIGN-arbiter-substitution.md): the ARBITER share
+    // (index 2) alone is encrypted to the escrow's deterministic priority
+    // order — the assigned arbiter + up to 2 backups — so a pool backup can
+    // carry the deciding share if the assigned arbiter goes absent. Each pool
+    // member still holds only this ONE slot, so nobody can reconstruct alone;
+    // buyer/seller shares remain strictly single-holder.
+    const arbiterRecipients = arbiterPriorityOrderFor({
+      escrowId,
+      pool: state.communityArbiters ?? [],
+      buyerPubkey,
+      sellerPubkey: sellerPk,
+      assignedArbiter: arbiterPubkey,
+    });
     for (let i = 0; i < lockBundle.shares.length; i++) {
       const share = lockBundle.shares[i];
-      const holderPk = allPks[i];
-      if (!holderPk) continue;
-      shares.push({
-        shareIndex: i,
-        encryptedFor: { [holderPk]: await this.encryptShare(share, holderPk) },
-      });
+      const recipients = i === 2 && arbiterRecipients.length > 0
+        ? arbiterRecipients
+        : allPks[i] ? [allPks[i]] : [];
+      if (recipients.length === 0) continue;
+      const encryptedFor: Record<string, string> = {};
+      for (const pk of recipients) {
+        encryptedFor[pk] = await this.encryptShare(share, pk);
+      }
+      shares.push({ shareIndex: i, encryptedFor });
     }
 
     let handleId: string | undefined;
@@ -229,6 +247,7 @@ export class EscrowFedimintBridge {
       notesHash: lockBundle.notesHash,
       shares,
       sharePolicy: HOLDER_ONLY_SHARE_POLICY,
+      arbiterPoolShare: arbiterRecipients.length > 0,
       sellerReceivesMsats: lockBundle.sellerReceivesMsats,
       arbiterFeeMsats: lockBundle.arbiterFeeMsats,
       buyerPubkey,

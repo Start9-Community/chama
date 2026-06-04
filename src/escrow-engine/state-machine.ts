@@ -44,6 +44,7 @@ import {
 } from "./types.js";
 import { payoutRecipientFor } from "./recipients.js";
 import { validateVoteShareEnvelope } from "./holder-shares.js";
+import { arbiterVotePriority, substitutionEligibleAt } from "./arbiter-substitution.js";
 
 // Re-export so existing callers (escrow-client, escrow-bridge, tests) keep
 // importing payoutRecipientFor from the state machine.
@@ -790,6 +791,9 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   // Holder-only shares: carry the share policy onto state so the claim path can
   // branch (holder-only reconstruct vs legacy dual-encrypted). Absent ⇒ legacy.
   next.lock.sharePolicy = p.sharePolicy;
+  // Arbiter substitution: carry the pooled-arbiter-share marker so the vote
+  // path knows backups are eligible here. Absent ⇒ assigned-arbiter-only.
+  next.lock.arbiterPoolShare = p.arbiterPoolShare;
   next.listingExpiresAt = state.listingExpiresAt ?? state.expiresAt;
   next.tradeTimeoutSeconds = tradeTimeoutSecondsFor(state);
   next.expiresAt = p.lockedAt + next.tradeTimeoutSeconds;
@@ -855,9 +859,50 @@ function handleVote(state: EscrowState, event: ParsedEscrowEvent<VotePayload>): 
   }
   const isHealing = state.status === EscrowStatus.EXPIRED;
 
-  const voterRole = getRole(state, event.pubkey);
+  let voterRole = getRole(state, event.pubkey);
   if (!voterRole) {
-    return err("NOT_PARTICIPANT", "Voter is not a participant", event.raw.id);
+    // Arbiter substitution (DESIGN-arbiter-substitution.md): on a pooled-share
+    // lock, a backup from the deterministic priority order may cast the
+    // ARBITER vote once the assigned arbiter's grace window has lapsed.
+    // Everyone else stays out.
+    if (p.role !== Role.ARBITER || !state.lock.arbiterPoolShare) {
+      return err("NOT_PARTICIPANT", "Voter is not a participant", event.raw.id);
+    }
+    if (arbiterVotePriority(state, event.pubkey) === null) {
+      return err("NOT_POOL_ARBITER",
+        "Voter is not in this escrow's arbiter priority order", event.raw.id);
+    }
+    if (isHealing) {
+      // HEALING substitution (the disputed-expiry limbo fix): an expired,
+      // unresolved trade's rescue vote previously depended on the ONE
+      // participant who hadn't voted — in a 1-1 dispute that is exactly the
+      // absent assigned arbiter, the same single point of failure that
+      // stranded the trade. Any pool backup may now cast the healing vote,
+      // REFUND ONLY (healing's sole legitimate outcome), no grace floor —
+      // the assigned arbiter had the trade's entire life to act.
+      if (p.outcome !== Outcome.REFUND) {
+        return err("INVALID_HEAL_OUTCOME",
+          "Healing votes on an expired trade must be REFUND", event.raw.id);
+      }
+    } else {
+      const buyerVote = state.votes[Role.BUYER];
+      const sellerVote = state.votes[Role.SELLER];
+      if (buyerVote === undefined || sellerVote === undefined) {
+        return err("ARBITER_TOO_EARLY",
+          "Arbiter can only vote after both buyer and seller have voted", event.raw.id);
+      }
+      if (buyerVote === sellerVote) {
+        return err("ARBITER_NOT_NEEDED",
+          "Arbiter vote not needed — buyer and seller agree", event.raw.id);
+      }
+      const eligibleAt = substitutionEligibleAt(state);
+      if (eligibleAt === null || event.raw.created_at < eligibleAt) {
+        return err("SUBSTITUTE_TOO_EARLY",
+          `Backup arbiter becomes eligible at ${eligibleAt ?? "?"} — the assigned arbiter still has the floor`,
+          event.raw.id);
+      }
+    }
+    voterRole = Role.ARBITER;
   }
 
   // Role in event must match actual role
@@ -868,8 +913,16 @@ function handleVote(state: EscrowState, event: ParsedEscrowEvent<VotePayload>): 
     );
   }
 
-  // Can't vote twice
-  if (state.votes[voterRole] !== undefined) {
+  // Can't vote twice — checked per PUBKEY, not per role-slot. With arbiter
+  // substitution, several pool arbiters may legitimately have votes in the
+  // chain (the slot is derived by priority below), and the ASSIGNED arbiter
+  // must remain able to vote even after a backup filled the slot first. For
+  // buyer/seller this is equivalent to the old votes[role] check (role ↔
+  // pubkey is 1:1 for them).
+  const alreadyVoted = state.eventChain.some(
+    (ve) => ve.kind === EscrowEventKind.VOTE && ve.pubkey === event.pubkey,
+  );
+  if (alreadyVoted) {
     return err("ALREADY_VOTED", `${voterRole} has already voted`, event.raw.id);
   }
 
@@ -914,8 +967,33 @@ function handleVote(state: EscrowState, event: ParsedEscrowEvent<VotePayload>): 
   }
 
   const next = cloneState(state);
-  next.votes[voterRole] = p.outcome;
   next.eventChain.push(event);
+  if (voterRole === Role.ARBITER && state.lock.arbiterPoolShare) {
+    // Pooled-share lock: derive the ARBITER slot from ALL arbiter votes in the
+    // chain — lowest priority index wins (assigned = 0 always trumps backups).
+    // Pure over the chain SET, so replay converges regardless of arrival
+    // order; a superseded backup vote stays in the chain and its vote-carried
+    // share envelope remains usable by the winner at claim. Applies to HEALING
+    // votes too, so assigned + backup both healing converge on the same slot.
+    let best: { priority: number; outcome: Outcome; pubkey: string } | null = null;
+    for (const ve of next.eventChain) {
+      if (ve.kind !== EscrowEventKind.VOTE) continue;
+      const vp = ve.payload as VotePayload | undefined;
+      if (!vp || vp.role !== Role.ARBITER) continue;
+      const pr = arbiterVotePriority(next, ve.pubkey);
+      if (pr === null) continue;
+      if (!best || pr < best.priority) {
+        best = { priority: pr, outcome: vp.outcome, pubkey: ve.pubkey };
+      }
+    }
+    if (best) {
+      next.votes[Role.ARBITER] = best.outcome;
+      next.actingArbiter = best.pubkey;
+    }
+  } else {
+    next.votes[voterRole] = p.outcome;
+    if (voterRole === Role.ARBITER) next.actingArbiter = event.pubkey;
+  }
 
   // NOTE: State stays LOCKED. A separate RESOLVE event is needed.
   // This is intentional — the RESOLVE event is the one that triggers
@@ -1417,7 +1495,7 @@ export function replayEventChain(events: ParsedEscrowEvent[]): TransitionResult 
 // ══════════════════════════════════════════════════════════════════════════
 
 /** Check if a specific pubkey can vote in the current state */
-export function canVote(state: EscrowState, pubkey: string): { canVote: boolean; reason?: string } {
+export function canVote(state: EscrowState, pubkey: string, nowSec?: number): { canVote: boolean; reason?: string } {
   // v0.1.66.26: accept EXPIRED in addition to LOCKED. Mirrors
   // handleVote — healing votes on timed-out trades are allowed.
   if (state.status !== EscrowStatus.LOCKED && state.status !== EscrowStatus.EXPIRED) {
@@ -1425,9 +1503,28 @@ export function canVote(state: EscrowState, pubkey: string): { canVote: boolean;
   }
   const isHealing = state.status === EscrowStatus.EXPIRED;
 
-  const role = getRole(state, pubkey);
-  if (!role) return { canVote: false, reason: "Not a participant" };
-  if (state.votes[role] !== undefined) return { canVote: false, reason: "Already voted" };
+  let role = getRole(state, pubkey);
+  let isSubstitute = false;
+  if (!role) {
+    // Arbiter substitution: on a pooled-share lock, an eligible pool backup
+    // may cast the ARBITER vote (mirrors handleVote's substitution gate) —
+    // including the HEALING rescue vote on an expired trade (REFUND only,
+    // enforced by the reducer; clients only send REFUND in healing).
+    if (!state.lock.arbiterPoolShare
+      || arbiterVotePriority(state, pubkey) === null) {
+      return { canVote: false, reason: "Not a participant" };
+    }
+    role = Role.ARBITER;
+    isSubstitute = true;
+  }
+
+  // Already voted — per PUBKEY, mirroring handleVote: with substitution the
+  // ARBITER slot may hold a backup's vote while the assigned arbiter (a
+  // different pubkey) is still entitled to vote and retake it.
+  const votedAlready = state.eventChain.some(
+    (ve) => ve.kind === EscrowEventKind.VOTE && ve.pubkey === pubkey,
+  );
+  if (votedAlready) return { canVote: false, reason: "Already voted" };
 
   // Arbiter ordering only applies during live disputes, not during
   // expiry healing (all heal votes are REFUND, ordering is irrelevant).
@@ -1439,6 +1536,17 @@ export function canVote(state: EscrowState, pubkey: string): { canVote: boolean;
     }
     if (buyerVote === sellerVote) {
       return { canVote: false, reason: "Buyer and seller agree — arbiter not needed" };
+    }
+  }
+
+  // A backup must also wait out the assigned arbiter's grace window — except
+  // in HEALING, where the trade is already expired and the rescue is open to
+  // the whole pool immediately.
+  if (isSubstitute && !isHealing) {
+    const eligibleAt = substitutionEligibleAt(state);
+    const now = nowSec ?? Math.floor(Date.now() / 1000);
+    if (eligibleAt === null || now < eligibleAt) {
+      return { canVote: false, reason: "The assigned arbiter still has the floor" };
     }
   }
 
