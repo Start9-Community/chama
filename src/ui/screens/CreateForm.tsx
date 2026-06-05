@@ -37,7 +37,11 @@ import { type MenuItem } from "../../escrow-engine/types.js";
 import { randomId } from "../../storage/random-id.js";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
-import { getUserCommunitySlug } from "../../communities/storage.js";
+import {
+  getUserCommunitySlug,
+  getUserCommunitySlugRaw,
+  setUserCommunitySlug,
+} from "../../communities/storage.js";
 import { defaultCurrencyForCommunity } from "../../communities/currency.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
 import { type ArbiterWarning, displayCounterpartyName, resolveCreateMintUrl } from "../decisions.js";
@@ -815,6 +819,7 @@ export function CreateForm({
   arbiterWarning, onGoToArbiterTrade,
   canOfferSubscription, userPubkey, activeInvite,
   amountDisplayMode,
+  communitySlug,
 }: {
   onCreate: (params: any) => void;
   onClose: () => void;
@@ -824,15 +829,41 @@ export function CreateForm({
   userPubkey: string | null;
   activeInvite: string | null;
   amountDisplayMode: AmountDisplayMode;
+  /** v2.1.1: the community the shell is currently presenting as the
+   *  user's identity (the header/Browse pill). Create stamps THIS, so
+   *  what the user sees is what they publish. Previously this read the
+   *  persisted sign-in home directly, which only ConnectScreen ever
+   *  writes — a user whose header said "South Africa · ZAR" could
+   *  silently publish Tanzania·TZS listings with the Tanzania arbiter
+   *  pool because their stored home was stale (the 06-05 field find).
+   *  Optional: falls back to the stored home for any callsite that
+   *  doesn't thread it. */
+  communitySlug?: string | null;
 }) {
   // Resolve community context for the listing. Read once at mount;
-  // listing publishes into seller's current community (Pillar 2.3).
+  // listing publishes into the community the user currently SEES as
+  // theirs (Pillar 2.3 "current community" = the header identity, per
+  // the v2.1.1 ruling), falling back to the persisted sign-in home.
   const community = (() => {
+    if (communitySlug && getCommunityBySlug(communitySlug)) return communitySlug;
     const slug = getUserCommunitySlug();
     return getCommunityBySlug(slug) ? slug : DEFAULT_COMMUNITY_SLUG;
   })();
   const homeCommunity = getCommunityBySlug(community);
   const communityCurrency = defaultCurrencyForCommunity(community);
+  // v2.2.0: the listing community now follows the header identity, but
+  // the PERSISTED home (what boot-routing uses at sign-in) is only ever
+  // written on the sign-in screen — so it can silently go stale (the
+  // tz-tzs field find). Surface the mismatch right here and let one tap
+  // make the displayed community the persisted home.
+  const [persistedHome, setPersistedHome] = useState<string | null>(
+    () => getUserCommunitySlugRaw(),
+  );
+  const isHomeCommunity = persistedHome === community;
+  const setAsHome = () => {
+    try { setUserCommunitySlug(community); } catch {}
+    setPersistedHome(community);
+  };
   const [step, setStep] = useState<Step>(1);
   const [vertical, setVertical] = useState<Vertical>("p2p-trade");
   const [form, setForm] = useState<FormState>(() =>
@@ -980,6 +1011,8 @@ export function CreateForm({
           vertical={vertical}
           setVertical={setVertical}
           homeCommunity={homeCommunity}
+          isHomeCommunity={isHomeCommunity}
+          onSetHome={setAsHome}
           drafts={drafts}
           showAllDrafts={showAllDrafts}
           setShowAllDrafts={setShowAllDrafts}
@@ -1211,6 +1244,8 @@ function equalButtonStyle(): React.CSSProperties {
 function Step1({
   vertical, setVertical,
   homeCommunity,
+  isHomeCommunity,
+  onSetHome,
   drafts, showAllDrafts, setShowAllDrafts,
   onContinueDraft,
   onNext,
@@ -1218,6 +1253,12 @@ function Step1({
   vertical: Vertical;
   setVertical: (v: Vertical) => void;
   homeCommunity: ReturnType<typeof getCommunityBySlug>;
+  /** v2.2.0: whether the listing community matches the PERSISTED home
+   *  (the sign-in boot-routing anchor). When false, the caption becomes
+   *  a one-tap "Set as home" affordance — fixing a stale home at the
+   *  exact moment the user can see the mismatch. */
+  isHomeCommunity: boolean;
+  onSetHome: () => void;
   drafts: SavedDraft[];
   showAllDrafts: boolean;
   setShowAllDrafts: (b: boolean) => void;
@@ -1337,22 +1378,51 @@ function Step1({
         })}
       </div>
 
-      {/* Community context */}
+      {/* Community context. v2.2.0: the line reflects the header
+          identity (what you see is what you publish). When that differs
+          from the persisted home — the sign-in boot-routing anchor that
+          only the sign-in screen used to be able to change — the caption
+          becomes a one-tap "Set as home" so a stale home is fixable at
+          the exact moment the mismatch is visible. */}
       <div style={{
-        display: "flex", alignItems: "center", gap: 8,
         padding: "10px 12px", marginBottom: 24,
         background: T.surface, border: `1px solid ${T.border}`,
         borderRadius: T.rs,
       }}>
-        <span style={{ fontSize: 18, lineHeight: 1 }}>
-          {homeCommunity?.flagEmoji ?? "🌐"}
-        </span>
-        <span style={{ flex: 1, fontSize: 12, color: T.text, fontFamily: T.sans }}>
-          Listing in <strong>{homeCommunity?.displayName ?? "your community"}</strong>
-        </span>
-        <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5 }}>
-          YOUR COMMUNITY
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 18, lineHeight: 1 }}>
+            {homeCommunity?.flagEmoji ?? "🌐"}
+          </span>
+          <span style={{ flex: 1, fontSize: 12, color: T.text, fontFamily: T.sans }}>
+            Listing in <strong>{homeCommunity?.displayName ?? "your community"}</strong>
+          </span>
+          {isHomeCommunity ? (
+            <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5 }}>
+              YOUR COMMUNITY
+            </span>
+          ) : (
+            <button
+              onClick={onSetHome}
+              style={{
+                background: T.accentDim, border: `1px solid ${T.accent}66`,
+                borderRadius: T.rs, padding: "4px 8px", cursor: "pointer",
+                color: T.accent, fontFamily: T.mono, fontSize: 10,
+                fontWeight: 800, letterSpacing: 0.5, flexShrink: 0,
+              }}
+            >
+              SET AS HOME →
+            </button>
+          )}
+        </div>
+        {!isHomeCommunity && (
+          <div style={{
+            marginTop: 6, fontSize: 10, color: T.muted,
+            fontFamily: T.sans, lineHeight: 1.4,
+          }}>
+            Home decides where Chama signs you in. One tap makes{" "}
+            {homeCommunity?.displayName ?? "this community"} your home.
+          </div>
+        )}
       </div>
 
       <button onClick={onNext} style={{

@@ -129,6 +129,7 @@ import {
   hasFediInternalEcash,
   hasFediInternalGenerateEcash,
 } from "../fedimint/index.js";
+import { Capacitor } from "@capacitor/core";
 import type { LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
 import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
@@ -527,13 +528,56 @@ export interface UseEscrowActions {
 }
 
 // ── Haptic feedback ───────────────────────────────────────────────────────
+//
+// Web: navigator.vibrate, which honours pattern arrays natively.
+//
+// Native (Capacitor/Android): navigator.vibrate is gated behind a FRESH
+// WebView user-activation, so the boot "Chama ready" buzz was silently
+// dropped — on the no-gesture auto-login path it can never fire, and on
+// tap-to-connect the relay handshake routinely outlives the ~5s sticky
+// activation window (the v2.1 "lost my vibration" regression). The
+// native Haptics plugin calls the system vibrator straight through the
+// Capacitor bridge with no activation requirement, so on-device we route
+// there and FAITHFULLY REPLAY the same pattern every existing call site
+// passes — one native pulse per "on" segment — so [50,30,50] et al. feel
+// identical to the web version, and no call site changes.
 
 function vibrate(pattern: number | number[] = 50) {
+  if (typeof Capacitor !== "undefined" && Capacitor.isNativePlatform()) {
+    nativeHapticPattern(pattern);
+    return;
+  }
   if (typeof navigator !== "undefined" && navigator.vibrate) {
     try {
       navigator.vibrate(pattern);
     } catch {}
   }
+}
+
+/** Replay a web-style vibration pattern through the native Haptics
+ *  plugin. Web patterns are [on, off, on, off, …] ms; we schedule a
+ *  native vibrate for each ON (even-index) segment at its cumulative
+ *  time offset so the felt rhythm matches the browser exactly. The
+ *  plugin is lazy-imported so it never loads on web or under the
+ *  Node/esbuild test runtime (isNativePlatform() is false there, so the
+ *  import is never reached). */
+function nativeHapticPattern(pattern: number | number[]) {
+  const segments = typeof pattern === "number" ? [pattern] : pattern;
+  void import("@capacitor/haptics")
+    .then(({ Haptics }) => {
+      let offset = 0;
+      for (let i = 0; i < segments.length; i++) {
+        const ms = Math.max(0, Math.floor(segments[i] ?? 0));
+        if (i % 2 === 0 && ms > 0) {
+          const at = offset;
+          setTimeout(() => {
+            Haptics.vibrate({ duration: ms }).catch(() => {});
+          }, at);
+        }
+        offset += ms;
+      }
+    })
+    .catch(() => {});
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -762,6 +806,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           if (isStuckLocked || isStuckExpired) {
             try {
               await (escrowClient as any).maybeAutoRefundExpired?.(escrowId);
+            } catch {}
+            // Belt-and-suspenders for the resolve-starvation gap: if the
+            // healing votes already meet 2-of-3 but the RESOLVE never landed,
+            // publish it from here too (its guards no-op safely otherwise).
+            try {
+              await (escrowClient as any).maybeAutoResolve?.(escrowId);
             } catch {}
           }
         }

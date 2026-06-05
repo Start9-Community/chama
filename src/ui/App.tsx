@@ -32,6 +32,7 @@ import {
   canOfferSubscription,
   shouldShowBrowserSupportBanner,
   shouldShowRecoveryBanner,
+  MAIN_SURFACE_RECOVERY_MIN_SATS,
   hasActiveBuyerSellerCommitment,
   countActiveBuyerSellerCommitments,
   sumActiveBuyerSellerTradeMsats,
@@ -1310,11 +1311,30 @@ export default function App() {
                 type: "info",
               });
             } else if (terminal.kind === "payout-failed") {
-              setView("me");
-              setToast({
-                message: "Payout failed. Your sats are safe — recover them from Me.",
-                type: "error",
-              });
+              // v2.1.1: route by what can actually help. When the claim
+              // settled via the cover check, COMPLETE wasn't published —
+              // the trade's Claim button is alive and retries with a
+              // fresh invoice. And below the material line, Me's Recover
+              // surface is deliberately quiet, so pointing there would
+              // strand sub-material payouts (the ₿17 Samuel case).
+              const payoutSatsForCopy = Math.floor(pendingClaim.payoutMsats / 1000);
+              if (terminal.claimCompleted === false) {
+                setToast({
+                  message: "⚡ Payout couldn't be sent — your sats are safe. Tap Claim again to retry.",
+                  type: "error",
+                });
+              } else if (payoutSatsForCopy < MAIN_SURFACE_RECOVERY_MIN_SATS) {
+                setToast({
+                  message: "Payout couldn't be sent — your sats are safe in your Chama.",
+                  type: "error",
+                });
+              } else {
+                setView("me");
+                setToast({
+                  message: "Payout failed. Your sats are safe — recover them from Me.",
+                  type: "error",
+                });
+              }
             }
             resolve();
           }}
@@ -1833,6 +1853,7 @@ export default function App() {
               userPubkey={pubkey ?? null}
               activeInvite={getActiveInvite()}
               amountDisplayMode={amountDisplayMode}
+              communitySlug={browseCommunity}
             />
           )}
         </div>

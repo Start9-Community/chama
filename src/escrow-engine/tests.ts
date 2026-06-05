@@ -304,7 +304,9 @@ import {
 import {
   waitForBalanceGrowth,
   runClaimAndPayout,
+  balanceCoversPayout,
   BRIDGE_THREW_ERROR_CODES,
+  CONFIRM_HARD_CAP_MULTIPLIER,
   type ClaimAndPayoutPhase,
 } from "../payments/claim-and-payout.js";
 
@@ -2127,6 +2129,40 @@ console.log("\n── ARBITER SUBSTITUTION (pooled share, grace window, priority
       const legacyHeal = voteEvent(Role.ARBITER, arbiterPriorityOrder(legacy)[1], Outcome.REFUND, lv2.raw.id);
       assertErr(applyEvent(legacyExpired, legacyHeal), "NOT_PARTICIPANT",
         "healing-sub: backups stay NOT_PARTICIPANT on non-pooled locks even in healing");
+    }
+
+    // THE FIELD SCENARIO (v2.1.0 live test): the trade is past its deadline
+    // but no event has arrived to flip status — every client still reads
+    // LOCKED — and the backup's device can't see ANY votes (the envelope
+    // gap). Healing must be judged by the CLOCK, not the status, and must
+    // need no votes at all.
+    {
+      const create = createEvent({ communityArbiters: POOL });
+      let dead = (applyEvent(null, create) as any).state;
+      const lk = lockEvent(create.raw.id);
+      lk.payload.arbiterPoolShare = true;
+      dead = (applyEvent(dead, lk) as any).state; // LOCKED, zero votes visible
+      const afterDeadline = dead.expiresAt + 60;
+      const deadBackup = arbiterPriorityOrder(dead)[1];
+      assert(dead.status === EscrowStatus.LOCKED,
+        "field-heal: quiet dead trade still reads LOCKED (no event flipped it)");
+      assert(canVote(dead, deadBackup, afterDeadline).canVote === true,
+        "field-heal: canVote opens for a backup on a LOCKED-past-deadline pooled trade with NO visible votes");
+      const deadPrompt = decideVotePrompt(dead, deadBackup, dead.participants, afterDeadline);
+      assert(deadPrompt.kind === "buttons" && (deadPrompt as any).outcomes[0] === Outcome.REFUND,
+        "field-heal: votePrompt offers the blind backup REFUND-only healing buttons by the clock");
+      assert(canVote(dead, deadBackup, dead.expiresAt - 60).canVote === false,
+        "field-heal: before the deadline the same blind backup stays gated (no dispute visible)");
+      // And the reducer accepts the heal on arrival: the vote's timestamp
+      // flips LOCKED → EXPIRED and the healing gates take it from there.
+      const blindHeal = retimeEvent(voteEvent(Role.ARBITER, deadBackup, Outcome.REFUND, lk.raw.id), afterDeadline);
+      const rBlind = applyEvent(dead, blindHeal);
+      if (assertOk(rBlind, "field-heal: reducer accepts the blind backup's post-deadline healing REFUND")) {
+        assert(rBlind.state.status === EscrowStatus.EXPIRED,
+          "field-heal: the arriving heal vote flips the quiet trade to EXPIRED");
+        assert(rBlind.state.votes[Role.ARBITER] === Outcome.REFUND,
+          "field-heal: the blind heal fills the arbiter slot");
+      }
     }
 
     // canVote + votePrompt mirrors for the healing backup.
@@ -9860,21 +9896,23 @@ console.log("\n── WAIT FOR BALANCE GROWTH ──");
       "Transient getBalance throws don't break the wait loop");
   }
 
-  // Default 60s timeout
+  // Default 90s timeout (v2.1.1: widened from 60s for slow links; reads
+  // succeed here so no failed-read extension applies — the nominal
+  // window is the whole story).
   {
     let nowMs = 0;
     const result = await waitForBalanceGrowth({
       baselineMsats: 0,
       expectedDeltaMsats: 100_000,
       getBalance: async () => 0,
-      pollIntervalMs: 5_000, // 12 ticks of 5s = 60s
+      pollIntervalMs: 5_000, // 18 ticks of 5s = 90s
       sleep: async (ms) => { nowMs += ms; },
       now: () => nowMs,
     });
     assert(result === "timeout",
-      "Default 60s confirm timeout fires when balance never grows");
-    assert(nowMs >= 60_000 && nowMs < 70_000,
-      "Default timeout fired around 60s mark");
+      "Default 90s confirm timeout fires when balance never grows");
+    assert(nowMs >= 90_000 && nowMs < 100_000,
+      "Default timeout fired around 90s mark");
   }
 }
 
@@ -10316,6 +10354,263 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
     });
     assert(confirmingFiredAt >= 0 && confirmingFiredAt < payInvoiceCalledAt,
       "confirming phase fires BEFORE payInvoice is called");
+  }
+
+  // ══ v2.1.1 — absolute-balance COVER settlement ══════════════════════
+  // The sm_mq1cmq6p_a2arwi0x field incident: a slow-link first attempt's
+  // redeem landed AFTER its confirm window closed. Every retry then
+  // re-baselined WITH the landed sats, the re-redeem reported the notes
+  // consumed, and growth could never be observed again → infinite
+  // claim-pending/claim-failed loop while ₿17 sat invisibly in the
+  // wallet (sub-material → no recovery surface engages). The cover
+  // check ends the loop: if the wallet can pay the promised payout
+  // right now, pay it.
+  console.log("\n── CLAIM COVER SETTLEMENT (v2.1.1) ──");
+
+  // balanceCoversPayout: the pure predicate.
+  {
+    // Samuel's exact shape: ~19.6k msats expected → 17-sat invoice
+    // (17_000 + 2_585 fee estimate = 19_585 ≤ 19_600).
+    assert(balanceCoversPayout(19_600, 19_600, "lightning") === true,
+      "cover: balance equal to expected delta covers the sized invoice");
+    assert(balanceCoversPayout(19_585, 19_600, "lightning") === true,
+      "cover: fee-exact balance still covers (maxLightningPayoutSats is monotone)");
+    assert(balanceCoversPayout(15_000, 19_600, "lightning") === false,
+      "cover: partial balance does NOT cover the promised invoice");
+    assert(balanceCoversPayout(0, 19_600, "lightning") === false,
+      "cover: empty wallet never covers");
+    assert(balanceCoversPayout(19_600, 0, "lightning") === false,
+      "cover: zero expected payout is never 'covered' (no invoice to pay)");
+    assert(balanceCoversPayout(2_000, 2_000, "lightning") === false,
+      "cover: sub-fee dust claim (no payable invoice exists) is not covered");
+    assert(balanceCoversPayout(19_600, 19_600, "onchain") === true,
+      "cover/onchain: whole-sat coverage of gross amount suffices");
+    assert(balanceCoversPayout(18_999, 19_600, "onchain") === false,
+      "cover/onchain: below gross sats does not cover");
+  }
+
+  // ── The Samuel rescue: consumed notes + covering balance → payout ───
+  // claimAndRedeem throws claimPublished+settlementFailed (the
+  // MINT_REISSUE_UNKNOWN shape), but the wallet already holds the
+  // credit from the first attempt. Previously: instant claim-failed.
+  // Now: cover check pays out, COMPLETE publishes AFTER the payout,
+  // stash is preserved for the boot drain to reconcile.
+  {
+    const consumed: any = new Error(
+      "Claim published to relays, but ecash redeem failed: " +
+      "Mint notes were consumed by the federation, but no local reissue " +
+      "operation was found to confirm wallet credit."
+    );
+    consumed.claimPublished = true;
+    consumed.settlementFailed = true;
+    consumed.code = "MINT_REISSUE_UNKNOWN";
+    const order: string[] = [];
+    const phases: string[] = [];
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_samuel_rescue",
+      bolt11: "lnbc170n1psamuelrescue",
+      expectedDeltaMsats: 19_600,
+      saveAfter: false,
+      getBalance: async () => 19_600, // landed on a PREVIOUS attempt
+      claimAndRedeem: async () => { throw consumed; },
+      completeClaim: async () => { order.push("complete"); },
+      clearPendingRedemption: () => { order.push("clear"); },
+      payInvoice: async () => { order.push("pay"); },
+      addOrTouchLightningHandle: () => {},
+      onPhase: p => phases.push(p.kind),
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "done",
+      "SAMUEL RESCUE: consumed notes + covering balance → done, not claim-failed");
+    assert(order.filter(x => x === "pay").length === 1,
+      "rescue: payInvoice called exactly once");
+    assert(order.filter(x => x === "complete").length === 1,
+      "rescue: COMPLETE published exactly once");
+    assert(order.indexOf("pay") < order.indexOf("complete"),
+      "rescue: COVER path pays FIRST, then publishes COMPLETE (claim stays retryable if payout fails)");
+    assert(!order.includes("clear"),
+      "rescue: pending-redemption stash preserved on cover settlement (boot drain reconciles)");
+    assert(nowMs === 0,
+      "rescue: growth poll SKIPPED when settlement is terminally failed (no pointless 90s wait)");
+    assert(phases.includes("confirming"),
+      "rescue: confirming phase still emitted for UI continuity");
+  }
+
+  // ── Clean claim + zero growth + pre-landed balance → cover pays ─────
+  // The other loop entrance: redeem reports success/already-spent, but
+  // the credit predates this attempt's baseline (boot drain or late
+  // settlement). Growth times out; cover rescues.
+  {
+    const order: string[] = [];
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_cover_after_timeout",
+      bolt11: "lnbc170n1pcoverafterTO",
+      expectedDeltaMsats: 19_600,
+      saveAfter: false,
+      getBalance: async () => 19_600, // flat: baseline already includes credit
+      claimAndRedeem: async () => ({} as any),
+      completeClaim: async () => { order.push("complete"); },
+      clearPendingRedemption: () => { order.push("clear"); },
+      payInvoice: async () => { order.push("pay"); },
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 10_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "done",
+      "cover-after-timeout: flat covering balance → done, not claim-pending");
+    assert(nowMs >= 10_000,
+      "cover-after-timeout: growth poll genuinely ran to timeout first");
+    assert(order.indexOf("pay") < order.indexOf("complete"),
+      "cover-after-timeout: pay-then-complete ordering on cover path");
+    assert(!order.includes("clear"),
+      "cover-after-timeout: stash preserved on cover settlement");
+  }
+
+  // ── Cover path payout failure → claim NOT completed, retry stays open
+  {
+    let completeCalls = 0;
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_cover_payout_fail",
+      bolt11: "lnbc170n1pcoverpayfail",
+      expectedDeltaMsats: 19_600,
+      saveAfter: false,
+      getBalance: async () => 19_600,
+      claimAndRedeem: async () => ({} as any),
+      completeClaim: async () => { completeCalls++; },
+      clearPendingRedemption: () => {},
+      payInvoice: async () => { throw new Error("invoice expired"); },
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 5_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "payout-failed",
+      "cover + payInvoice throws → payout-failed");
+    if (terminal.kind === "payout-failed") {
+      assert(terminal.claimCompleted === false,
+        "cover + payout failure → claimCompleted=false (Claim button stays the retry path)");
+    }
+    assert(completeCalls === 0,
+      "cover + payout failure → COMPLETE NOT published (trade stays claimable)");
+  }
+
+  // ── Growth path payout failure → claimCompleted=true (existing order)
+  {
+    const wallet = makeMockWallet({
+      balances: [0, 100_000, 100_000],
+      payInvoiceResult: new Error("no route"),
+    });
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_growth_payout_fail_flag",
+      bolt11: "lnbc100n1pgrowthflag",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: wallet.getBalance,
+      claimAndRedeem: wallet.claimAndRedeem,
+      completeClaim: wallet.completeClaim,
+      clearPendingRedemption: wallet.clearPendingRedemption,
+      payInvoice: wallet.payInvoice,
+      addOrTouchLightningHandle: wallet.addOrTouchLightningHandle,
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "payout-failed" && terminal.claimCompleted === true,
+      "growth + payout failure → claimCompleted=true (COMPLETE already published pre-payout)");
+  }
+
+  // ── Consumed notes + NON-covering balance → honest claim-failed ─────
+  // (No false hope: retrying consumed notes with an empty wallet cannot
+  // help. Pinned again here with the new pathway to guard the verdict.)
+  {
+    const consumed: any = new Error(
+      "Claim published to relays, but ecash redeem failed: " +
+      "Mint reissue operation failed after federation consumed the notes"
+    );
+    consumed.claimPublished = true;
+    consumed.settlementFailed = true;
+    consumed.code = "MINT_REISSUE_FAILED";
+    let payCalls = 0;
+    let nowMs = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_consumed_no_cover",
+      bolt11: "lnbc170n1pconsumednocover",
+      expectedDeltaMsats: 19_600,
+      saveAfter: false,
+      getBalance: async () => 1_200, // dust, can't cover a 17-sat invoice
+      claimAndRedeem: async () => { throw consumed; },
+      completeClaim: async () => {},
+      clearPendingRedemption: () => {},
+      payInvoice: async () => { payCalls++; },
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+      confirmTimeoutMs: 30_000,
+      pollIntervalMs: 1_000,
+    });
+    assert(terminal.kind === "claim-failed",
+      "consumed + non-covering balance → claim-failed (honest terminal)");
+    assert(payCalls === 0,
+      "consumed + non-covering → payInvoice never attempted");
+  }
+
+  // ── waitForBalanceGrowth: failed reads extend the deadline ──────────
+  // A failed balance read proves nothing about non-arrival. 12s of
+  // unreadable federation on a 10s window must NOT declare timeout;
+  // the first successful read sees the grown balance.
+  {
+    let calls = 0;
+    let nowMs = 0;
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => {
+        calls++;
+        if (calls <= 12) throw new Error("federation unreachable");
+        return 100_000;
+      },
+      timeoutMs: 10_000,
+      pollIntervalMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "grew",
+      "slow link: failed reads extend the deadline — late credit still detected as grew");
+    assert(calls === 13,
+      "slow link: poll persisted through 12 failed reads to the successful 13th");
+  }
+
+  // ── waitForBalanceGrowth: hard cap terminates an unreadable loop ────
+  {
+    let nowMs = 0;
+    const result = await waitForBalanceGrowth({
+      baselineMsats: 0,
+      expectedDeltaMsats: 100_000,
+      getBalance: async () => { throw new Error("federation unreachable"); },
+      timeoutMs: 10_000,
+      pollIntervalMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+      now: () => nowMs,
+    });
+    assert(result === "timeout",
+      "always-unreadable federation still terminates (hard cap)");
+    assert(nowMs <= 10_000 * CONFIRM_HARD_CAP_MULTIPLIER + 1_000,
+      "hard cap bounds the extended deadline at the multiplier (+1 poll slack)");
   }
 }
 

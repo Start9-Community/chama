@@ -23,8 +23,28 @@
 //                    v0.1.62 watchdog principle as Phase 2's mint-
 //                    confirming: claimAndRedeem may return before the
 //                    balance fully settles (partial-success / transient
-//                    error paths). We poll up to a 60s grace before
-//                    declaring "claim-pending".
+//                    error paths). We poll up to a 90s grace (extended
+//                    while the federation can't even be READ — a failed
+//                    balance read proves nothing about non-arrival on a
+//                    slow link) before falling back to the absolute-
+//                    balance cover check below.
+//
+//                    v2.1.1 (the sm_mq1cmq6p_a2arwi0x incident): growth-
+//                    from-baseline is structurally blind to settlement
+//                    that happened on a PREVIOUS attempt. On a slow link
+//                    the first attempt's redeem can land *after* its 60s
+//                    window expired; every retry then re-baselines WITH
+//                    the landed sats included, the re-redeem reports
+//                    already-spent (treated as success), and growth can
+//                    never be observed again → infinite claim-pending
+//                    loop, while the sats sit invisibly in the wallet
+//                    (sub-material amounts surface nowhere else). The
+//                    fix: when growth times out, judge settlement by the
+//                    ABSOLUTE balance — if the wallet can cover the
+//                    payout right now, pay it out. Sats are fungible,
+//                    the destination is the winner's own wallet, and the
+//                    pending-redemption stash stays intact for the boot
+//                    drain to reconcile the genuinely-pending case.
 // `paying-invoice`   transient — outbound LN to the user's destination
 // `done`             TERMINAL — payout sent, optional handle saved
 // `claim-failed`     TERMINAL — claim threw a HARD failure (bad shares,
@@ -43,15 +63,20 @@
 //                    "your sats are still arriving" while nothing was
 //                    actually arriving.
 // `claim-pending`    TERMINAL — claim returned (no throw) but balance
-//                    hasn't landed within 60s. Genuinely in-flight —
-//                    sats may still arrive from the federation. The
-//                    pending-redemption stash stays intact so boot can
-//                    retry redeeming the notes; if balance later lands
-//                    but payout does not, the recovery banner takes over.
-//                    RESERVED for the no-throw / balance-stalled case
-//                    ONLY. A post-CLAIM terminal mint reissue failure
-//                    routes to claim-failed so we do not invite retries
-//                    against already-consumed notes.
+//                    hasn't landed within the confirm window AND the
+//                    absolute balance can't cover the payout. Genuinely
+//                    in-flight — sats may still arrive from the
+//                    federation. The pending-redemption stash stays
+//                    intact so boot can retry redeeming the notes; if
+//                    balance later lands, the next claim retry's cover
+//                    check pays it out (this is what makes "try the
+//                    claim again" honest copy). RESERVED for the
+//                    no-throw / balance-stalled case ONLY. A post-CLAIM
+//                    terminal mint reissue failure routes to
+//                    claim-failed — but only after the cover check has
+//                    had a chance to rescue it: consumed notes + a
+//                    covering balance means a previous attempt already
+//                    credited this wallet.
 // `payout-failed`    TERMINAL — claim succeeded, balance landed, but
 //                    payInvoice threw. ORPHAN balance — the recovery
 //                    banner catches it.
@@ -62,6 +87,7 @@
 // no-recovery framing; `payout-failed` points at the recovery banner.
 
 import { markSatsTracesDrained, recordSatsTrace } from "./sats-trace.js";
+import { maxLightningPayoutSats } from "./lightning-fees.js";
 
 // ── Phase types ──────────────────────────────────────────────────────────
 
@@ -74,14 +100,19 @@ export type ClaimAndPayoutPhase =
   | { kind: "claim-failed"; error: string }
   | { kind: "claim-bridge-threw"; error: string }
   | { kind: "claim-pending"; error: string }
-  | { kind: "payout-failed"; error: string };
+  | { kind: "payout-failed"; error: string; claimCompleted?: boolean };
 
 export type ClaimAndPayoutTerminal =
   | { kind: "done" }
   | { kind: "claim-failed"; error: string }
   | { kind: "claim-bridge-threw"; error: string }
   | { kind: "claim-pending"; error: string }
-  | { kind: "payout-failed"; error: string };
+  /** `claimCompleted`: false when settlement was proven by the absolute-
+   *  balance cover check (COMPLETE deliberately not yet published) — the
+   *  trade's Claim button is still alive, so "tap Claim again" is the
+   *  honest retry path. True/undefined when the growth path already
+   *  published COMPLETE before the payout attempt. */
+  | { kind: "payout-failed"; error: string; claimCompleted?: boolean };
 
 /** Error codes the bridge tags on typed retry-able failures. Defined
  *  alongside the orchestrator so test mocks + downstream consumers
@@ -96,13 +127,22 @@ function isBridgeThrewError(e: unknown): e is { code: BridgeThrewErrorCode; mess
 
 // ── Tunables ─────────────────────────────────────────────────────────────
 
-/** v0.1.62 watchdog: 60s grace for the federation to credit the user's
- *  wallet after CLAIM publishes. Mirrors the claim-side timeout in
- *  Phase 2's pollForFunding (mint-confirm). */
-export const DEFAULT_CONFIRM_TIMEOUT_MS = 60 * 1000;
+/** v0.1.62 watchdog, widened in v2.1.1: 90s grace for the federation to
+ *  credit the user's wallet after CLAIM publishes. The original 60s was
+ *  calibrated on good links; the sm_mq1cmq6p_a2arwi0x field incident
+ *  (South Africa, high-latency mobile data) showed real redeems landing
+ *  after the window closed. A too-short window costs a claim-pending
+ *  bounce; with the cover check it no longer costs a stuck trade. */
+export const DEFAULT_CONFIRM_TIMEOUT_MS = 90 * 1000;
 
 /** Same cadence as the existing claim watchdog and Phase 2. */
 export const DEFAULT_POLL_INTERVAL_MS = 5_000;
+
+/** Failed balance reads extend the confirm deadline (they prove nothing
+ *  about non-arrival), but never past this multiple of the nominal
+ *  timeout — the loop must terminate even when the federation stays
+ *  unreadable for the whole window. */
+export const CONFIRM_HARD_CAP_MULTIPLIER = 3;
 
 /** Accept any delta ≥ 90% of expected as "fully landed". Matches the
  *  Fedimint settlement tolerance baked into startClaimWatchdog. */
@@ -167,6 +207,43 @@ function errorMessage(e: unknown, fallback: string): string {
   return fallback;
 }
 
+// ── balanceCoversPayout ──────────────────────────────────────────────────
+
+/** Absolute-balance settlement check: can the wallet, RIGHT NOW, pay the
+ *  payout this claim promised? Used when balance GROWTH can't be observed
+ *  — either the confirm window timed out, or the mint reported the notes
+ *  already consumed (a previous attempt's redeem landed after its own
+ *  window closed; re-baselining hides the credit forever).
+ *
+ *  Lightning: the modal sized the invoice as
+ *  maxLightningPayoutSats(expectedDeltaMsats), so the wallet covers it
+ *  exactly when its own max payout reaches that figure (fee headroom
+ *  included — maxLightningPayoutSats is monotone).
+ *  Onchain: payOnchain receives gross sats and re-deducts peg-out fees
+ *  itself, so whole-sat coverage of the gross amount suffices.
+ *
+ *  Safety: sats are fungible and the destination is the winner's OWN
+ *  wallet. In the worst case (claim genuinely still pending + the cover
+ *  came from pre-existing funds) the user is paid from money that was
+ *  already theirs, the pending-redemption stash stays intact, and the
+ *  boot drain reconciles the late credit. The user can only come out
+ *  whole or ahead — never behind. */
+export function balanceCoversPayout(
+  balanceMsats: number,
+  expectedDeltaMsats: number,
+  payoutKind: "lightning" | "onchain" = "lightning",
+): boolean {
+  const balance = Math.max(0, Math.floor(balanceMsats));
+  const expected = Math.max(0, Math.floor(expectedDeltaMsats));
+  if (expected <= 0) return false;
+  if (payoutKind === "onchain") {
+    const grossSats = Math.floor(expected / 1000);
+    return grossSats > 0 && Math.floor(balance / 1000) >= grossSats;
+  }
+  const invoiceSats = maxLightningPayoutSats(expected);
+  return invoiceSats > 0 && maxLightningPayoutSats(balance) >= invoiceSats;
+}
+
 // ── waitForBalanceGrowth ─────────────────────────────────────────────────
 
 export interface WaitForBalanceGrowthOpts {
@@ -197,6 +274,13 @@ export async function waitForBalanceGrowth(
   const requiredDelta = Math.floor(opts.expectedDeltaMsats * thresholdPct);
   const start = now();
   let polls = 0;
+  // v2.1.1 slow-link rule: a FAILED balance read proves nothing about
+  // non-arrival, so it must not consume the confirm window. Each failed
+  // read extends the deadline by one poll interval, hard-capped at
+  // CONFIRM_HARD_CAP_MULTIPLIER × the nominal timeout so an unreachable
+  // federation still terminates the loop.
+  const hardCapMs = timeoutMs * CONFIRM_HARD_CAP_MULTIPLIER;
+  let failedReadExtensionMs = 0;
 
   while (true) {
     if (opts.signal?.aborted) return "aborted";
@@ -207,7 +291,12 @@ export async function waitForBalanceGrowth(
       balance = await opts.getBalance();
     } catch {
       balanceReadOk = false;
-      // Transient federation hiccups during polling — retry on next tick.
+      // Transient federation hiccups during polling — retry on next tick,
+      // and push the deadline out by the interval this read wasted.
+      failedReadExtensionMs = Math.min(
+        failedReadExtensionMs + pollIntervalMs,
+        Math.max(0, hardCapMs - timeoutMs),
+      );
     }
     const elapsedMs = now() - start;
     const delta = balance - opts.baselineMsats;
@@ -235,7 +324,8 @@ export async function waitForBalanceGrowth(
       result: grew ? "grew" : "waiting",
     });
     if (grew) return "grew";
-    if (elapsedMs >= timeoutMs) {
+    const effectiveTimeoutMs = Math.min(timeoutMs + failedReadExtensionMs, hardCapMs);
+    if (elapsedMs >= effectiveTimeoutMs) {
       moneyLog("CLAIM-WAIT", {
         escrowId: opts.debugId,
         poll: polls,
@@ -352,6 +442,14 @@ export async function runClaimAndPayout(
   //   - typed bridge error (throws with code FED_PROBE_FAILED or
   //     FED_MISMATCH — surfaced as claim-bridge-threw, retry-able)
   emit({ kind: "claiming" });
+  // v2.1.1: when the mint reports the notes terminally consumed, balance
+  // GROWTH is impossible by definition — either a previous attempt's
+  // redeem already credited this wallet (the sm_mq1cmq6p_a2arwi0x loop)
+  // or the credit is unprovable. Skip the growth poll and judge by the
+  // absolute-balance cover check; only if that also fails do we surface
+  // the terminal claim-failed.
+  let settlementFailedHard = false;
+  let settlementFailedError = "";
   try {
     await opts.claimAndRedeem(opts.escrowId);
     claimTrace("orchestrator-claim-returned", {
@@ -373,22 +471,23 @@ export async function runClaimAndPayout(
       return { kind: "claim-bridge-threw", error };
     }
     // CLAIM already hit relays, but the SDK has reported a terminal mint
-    // reissue failure. Do not fall through to the comforting "still
-    // arriving" copy: repeating the same consumed notes cannot help.
+    // reissue failure. Growth polling is pointless (the notes are gone),
+    // but the wallet may ALREADY hold the credit from a previous attempt
+    // whose confirm window expired before settlement — the cover check
+    // below decides. Only a non-covering balance keeps this terminal.
     if (e?.claimPublished && e?.settlementFailed) {
       claimTrace("orchestrator-claim-settle-failed", {
         escrowId: opts.escrowId,
         errMsg: error.slice(0, 120),
       });
-      emit({ kind: "claim-failed", error });
-      return { kind: "claim-failed", error };
-    }
-
-    // CLAIM already hit relays, but redeem/balance settlement is still
-    // uncertain. This is not a hard claim failure; continue into the
-    // balance-confirming watchdog. If the balance lands, payout proceeds.
-    // If it does not, the terminal remains claim-pending.
-    if (e?.claimPublished) {
+      settlementFailedHard = true;
+      settlementFailedError = error;
+      // Fall through to the settlement verdict below (poll skipped).
+    } else if (e?.claimPublished) {
+      // CLAIM already hit relays, but redeem/balance settlement is still
+      // uncertain. This is not a hard claim failure; continue into the
+      // balance-confirming watchdog. If the balance lands, payout proceeds.
+      // If it does not, the terminal remains claim-pending.
       moneyLog("CLAIM-PUBLISHED-THROW", {
         escrowId: opts.escrowId,
         errMsg: error.slice(0, 120),
@@ -408,30 +507,65 @@ export async function runClaimAndPayout(
     }
   }
 
-  // Phase 2: confirm balance landed. Poll for up to confirmTimeoutMs.
-  // This handles BOTH the synchronous-success case (poll sees grown
-  // balance immediately on first read) and the watchdog case (poll
-  // waits while the federation settles).
+  // Phase 2: settlement verdict. Two independent proofs, tried in order:
+  //
+  //   growth — balance grew from this attempt's baseline (the classic
+  //            watchdog; cryptographically tied to THIS redeem landing).
+  //   cover  — the absolute balance can pay the promised payout right
+  //            now. Catches every settlement the baseline can't see:
+  //            a previous attempt's redeem landing late, the boot
+  //            drain landing it, or a resumed historical operation.
+  //            Without this, a retry after late settlement loops on
+  //            claim-pending FOREVER (baseline includes the credit, so
+  //            growth can never be observed again).
+  const payoutKind = opts.payoutKind ?? "lightning";
   emit({ kind: "confirming" });
-  const grew = await waitForBalanceGrowth({
-    debugId: opts.escrowId,
-    baselineMsats: baseline,
-    expectedDeltaMsats: opts.expectedDeltaMsats,
-    getBalance: opts.getBalance,
-    timeoutMs: opts.confirmTimeoutMs,
-    pollIntervalMs: opts.pollIntervalMs,
-    sleep: opts.sleep,
-    now: opts.now,
-  });
+  let grew: "grew" | "timeout" | "aborted" = "timeout";
+  if (!settlementFailedHard) {
+    grew = await waitForBalanceGrowth({
+      debugId: opts.escrowId,
+      baselineMsats: baseline,
+      expectedDeltaMsats: opts.expectedDeltaMsats,
+      getBalance: opts.getBalance,
+      timeoutMs: opts.confirmTimeoutMs,
+      pollIntervalMs: opts.pollIntervalMs,
+      sleep: opts.sleep,
+      now: opts.now,
+    });
+  }
+  let settledBy: "growth" | "cover" | null = grew === "grew" ? "growth" : null;
+  let coverBalanceMsats: number | undefined;
+  if (!settledBy) {
+    try { coverBalanceMsats = await opts.getBalance(); } catch {}
+    if (
+      coverBalanceMsats !== undefined &&
+      balanceCoversPayout(coverBalanceMsats, opts.expectedDeltaMsats, payoutKind)
+    ) {
+      settledBy = "cover";
+    }
+  }
   moneyLog("CLAIM-CONFIRM-OUT", {
     escrowId: opts.escrowId,
     result: grew,
+    settledBy: settledBy ?? "none",
+    coverBalance: coverBalanceMsats,
+    settlementFailedHard,
   });
   claimTrace("orchestrator-confirm-out", {
     escrowId: opts.escrowId,
     result: grew,
+    settledBy: settledBy ?? "none",
+    coverBalance: coverBalanceMsats,
+    settlementFailedHard,
   });
-  if (grew !== "grew") {
+  if (!settledBy) {
+    if (settlementFailedHard) {
+      // Notes consumed AND the wallet can't cover the payout: this is
+      // the honest terminal failure. Do not invite retries against
+      // already-consumed notes with comforting "still arriving" copy.
+      emit({ kind: "claim-failed", error: settlementFailedError });
+      return { kind: "claim-failed", error: settlementFailedError };
+    }
     const error =
       "Your sats are still arriving from the federation. They'll land shortly. If this trade stays settling, try the claim again.";
     emit({ kind: "claim-pending", error });
@@ -439,9 +573,19 @@ export async function runClaimAndPayout(
   }
 
   let balanceAfterClaim: number | undefined;
-  try { balanceAfterClaim = await opts.getBalance(); } catch {}
+  if (coverBalanceMsats !== undefined) {
+    balanceAfterClaim = coverBalanceMsats;
+  } else {
+    try { balanceAfterClaim = await opts.getBalance(); } catch {}
+  }
 
-  if (opts.clearPendingRedemption) {
+  // Stash discipline: GROWTH proves this attempt's redeem landed — clear.
+  // COVER is circumstantial (the credit may predate this attempt, or the
+  // redeem may still be genuinely pending while pre-existing funds cover
+  // the payout) — KEEP the stash. If the notes already redeemed, the next
+  // boot drain's already-spent → success path clears it; if they're still
+  // pending, the drain retries them. Self-reconciling either way.
+  if (settledBy === "growth" && opts.clearPendingRedemption) {
     try {
       opts.clearPendingRedemption(opts.escrowId);
       moneyLog("CLAIM-STASH-CLEAR", {
@@ -467,10 +611,16 @@ export async function runClaimAndPayout(
   }
 
   // COMPLETE is a statement that the escrow sats are under the winner's
-  // control. Publish it only after balance growth confirms that reality.
-  // If the relay publish fails, the money path still continues; the
-  // trade can be healed manually/retried later without blocking payout.
-  if (opts.completeClaim) {
+  // control. GROWTH proof publishes it here, before payout (the redeem
+  // demonstrably landed; payout is a wallet-level concern the trade
+  // chain shouldn't wait on). COVER proof defers COMPLETE until the
+  // payout actually succeeds (below): the evidence is circumstantial,
+  // and deferring keeps the trade's Claim button alive if the payout
+  // leg fails — which matters enormously for sub-material amounts that
+  // no recovery surface will ever show. If the relay publish fails, the
+  // money path still continues; the trade can be healed/retried later
+  // without blocking payout.
+  if (settledBy === "growth" && opts.completeClaim) {
     try {
       moneyLog("CLAIM-COMPLETE-IN", {
         escrowId: opts.escrowId,
@@ -503,9 +653,10 @@ export async function runClaimAndPayout(
   }
 
   // Phase 3: outbound payout. Pay the user's destination.
-  // If this throws, the balance is now orphaned in the user's Chama —
-  // recovery banner is the next stop.
-  const payoutKind = opts.payoutKind ?? "lightning";
+  // If this throws on the growth path, the balance is orphaned in the
+  // user's Chama — recovery banner is the next stop. On the cover path
+  // the trade is NOT yet completed, so re-tapping Claim retries cleanly
+  // (picker → fresh invoice → cover check → payout).
   emit({ kind: payoutKind === "onchain" ? "paying-onchain" : "paying-invoice" });
   try {
     moneyLog("CLAIM-PAY-IN", {
@@ -543,8 +694,9 @@ export async function runClaimAndPayout(
       result: "error",
       errMsg: error.slice(0, 120),
     });
-    emit({ kind: "payout-failed", error });
-    return { kind: "payout-failed", error };
+    const claimCompleted = settledBy === "growth";
+    emit({ kind: "payout-failed", error, claimCompleted });
+    return { kind: "payout-failed", error, claimCompleted };
   }
   moneyLog("CLAIM-PAY-OUT", {
     escrowId: opts.escrowId,
@@ -554,6 +706,48 @@ export async function runClaimAndPayout(
     escrowId: opts.escrowId,
     result: "success",
   });
+
+  // Cover-path COMPLETE: deferred until the user is demonstrably made
+  // whole (payout sent). At this point the attestation is materially
+  // true regardless of which attempt's redeem funded it. Best-effort,
+  // same as the growth-path publish.
+  if (settledBy === "cover" && opts.completeClaim) {
+    try {
+      moneyLog("CLAIM-COMPLETE-IN", {
+        escrowId: opts.escrowId,
+        via: "cover",
+      });
+      claimTrace("orchestrator-complete-in", {
+        escrowId: opts.escrowId,
+        via: "cover",
+      });
+      await opts.completeClaim(opts.escrowId);
+      moneyLog("CLAIM-COMPLETE-OUT", {
+        escrowId: opts.escrowId,
+        result: "success",
+        via: "cover",
+      });
+      claimTrace("orchestrator-complete-out", {
+        escrowId: opts.escrowId,
+        result: "success",
+        via: "cover",
+      });
+    } catch (e: any) {
+      moneyLog("CLAIM-COMPLETE-OUT", {
+        escrowId: opts.escrowId,
+        result: "error",
+        via: "cover",
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+      claimTrace("orchestrator-complete-out", {
+        escrowId: opts.escrowId,
+        result: "error",
+        via: "cover",
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+      // Advisory protocol event only; the user already has their sats.
+    }
+  }
 
   let balanceAfterPayout: number | undefined;
   try { balanceAfterPayout = await opts.getBalance(); } catch {}

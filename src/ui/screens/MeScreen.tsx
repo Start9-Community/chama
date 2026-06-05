@@ -24,6 +24,7 @@ import { useState, useEffect } from "react";
 import {
   type EscrowState,
   EscrowStatus,
+  EscrowEventKind,
   Outcome,
   Role,
   type SelectedMenuItem,
@@ -1375,6 +1376,9 @@ function arbiterQueueTone(queue: ArbiterQueueKey): string {
 
 function arbiterQueueStatus(queue: ArbiterQueueKey, trade: EscrowState, viewerPubkey?: string): string {
   if (queue === "needs") {
+    if (trade.status === EscrowStatus.EXPIRED) {
+      return `${arbiterDisputeLine(trade)} · expired unresolved — open it to heal (auto-refunds the locker)`;
+    }
     // Arbiter substitution: a BACKUP viewing a pooled-lock dispute sees the
     // assigned arbiter's floor countdown, then the step-in invitation.
     const assigned = getEffectiveParticipantsAt(trade)[Role.ARBITER];
@@ -1448,12 +1452,36 @@ function buildMeDashboard(
         tradeHasBuyerSellerDispute(trade) &&
         trade.votes[Role.ARBITER] === undefined &&
         arbiterVotePriority(trade, pubkey) !== null;
+      // The field-found visibility gap: an EXPIRED-but-unresolved trade is the
+      // MOST arbiter-needing state there is (funds blocked until a healing
+      // vote), yet the LOCKED-only check above dropped it to WATCHING — zero
+      // red anywhere while sats sat in limbo. Surface healable trades in NEEDS
+      // for the assigned arbiter and (on pooled locks) for pool backups whose
+      // own vote isn't already in the chain. Opening the trade auto-heals.
+      const healableExpired =
+        (trade.status === EscrowStatus.EXPIRED ||
+          (trade.status === EscrowStatus.LOCKED &&
+            trade.expiresAt > 0 &&
+            nowSec > trade.expiresAt)) &&
+        !trade.eventChain.some((e) => e.kind === EscrowEventKind.RESOLVE);
+      const canHealIt =
+        healableExpired &&
+        (isAssignedArbiter
+          ? !trade.eventChain.some(
+              (e) => e.kind === EscrowEventKind.VOTE && e.pubkey === pubkey,
+            )
+          : trade.lock.arbiterPoolShare === true &&
+            arbiterVotePriority(trade, pubkey) !== null &&
+            !trade.eventChain.some(
+              (e) => e.kind === EscrowEventKind.VOTE && e.pubkey === pubkey,
+            ));
       if (
         (isAssignedArbiter &&
           trade.status === EscrowStatus.LOCKED &&
           tradeHasBuyerSellerDispute(trade) &&
           !trade.votes[Role.ARBITER]) ||
-        substitutionCandidate
+        substitutionCandidate ||
+        canHealIt
       ) {
         arbiterDisputes.push(trade);
       } else if (isArbiterSettledTrade(trade)) {

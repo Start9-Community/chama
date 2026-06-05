@@ -37,6 +37,7 @@ import {
 import {
   claimPayoutReserveSats,
   claimPayoutSats,
+  MATERIAL_RECOVERY_MIN_SATS,
 } from "../../payments/lightning-fees.js";
 import {
   EXTERNAL_SWAPS_ENABLED,
@@ -422,6 +423,7 @@ export function ClaimPayoutModal({
             terminal={stage.terminal}
             payoutMethod={payoutMethod}
             retryProbing={retryProbing}
+            recoveryCtaWorthwhile={payoutSats >= MATERIAL_RECOVERY_MIN_SATS}
             onRetry={handleClaimRetry}
             onClose={() => onClose(stage.terminal)}
           />
@@ -970,11 +972,16 @@ function RunningPanel({
 }
 
 function TerminalPanel({
-  terminal, payoutMethod, retryProbing, onRetry, onClose,
+  terminal, payoutMethod, retryProbing, recoveryCtaWorthwhile, onRetry, onClose,
 }: {
   terminal: ClaimAndPayoutTerminal;
   payoutMethod: PayoutMethod | null;
   retryProbing: boolean;
+  /** v2.1.1: whether Me's Recover surface will actually show this amount
+   *  (it stays quiet below the material line). Gates the "Show recovery
+   *  now" CTA so sub-material payout failures aren't pointed at a
+   *  surface that will ignore them. */
+  recoveryCtaWorthwhile: boolean;
   onRetry: () => void;
   onClose: () => void;
 }) {
@@ -1006,7 +1013,15 @@ function TerminalPanel({
   let toneDim: string;
   let icon: string;
   let showRetry = false;
-  const showRecoveryCta = terminal.kind === "payout-failed";
+  // v2.1.1: a payout failure on the COVER settlement path leaves the
+  // trade un-COMPLETEd on purpose — the Claim button is still alive and
+  // retries with a fresh invoice. That's a strictly better retry path
+  // than the recovery surface (which also ignores sub-material amounts),
+  // so only point at recovery when it will actually engage.
+  const claimStillOpen =
+    terminal.kind === "payout-failed" && terminal.claimCompleted === false;
+  const showRecoveryCta =
+    terminal.kind === "payout-failed" && !claimStillOpen && recoveryCtaWorthwhile;
 
   // v1.2.5: translate NWC / BOLT error codes into human copy here too
   // (in addition to the App-level toast wrapper) so the in-modal
@@ -1041,7 +1056,11 @@ function TerminalPanel({
   } else {
     // payout-failed
     title = "Payout couldn't be sent";
-    subtitle = `${humanizedError}\n\nYour sats are safe in your Chama. Tap Show recovery now to retry the payout only.`;
+    subtitle = claimStillOpen
+      ? `${humanizedError}\n\nYour sats are safe in your Chama. Close this and tap Claim again — the payout retries with a fresh invoice.`
+      : showRecoveryCta
+        ? `${humanizedError}\n\nYour sats are safe in your Chama. Tap Show recovery now to retry the payout only.`
+        : `${humanizedError}\n\nYour sats are safe in your Chama.`;
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⏳";

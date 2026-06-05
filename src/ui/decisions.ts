@@ -1094,6 +1094,11 @@ export function decideVotePrompt(
   if (state.status !== EscrowStatus.LOCKED && state.status !== EscrowStatus.EXPIRED) {
     return { kind: "none", reason: "not-votable-state" };
   }
+  // Healing includes LOCKED-past-deadline: the reducer only flips to EXPIRED
+  // when an event arrives, so a quiet dead trade still reads LOCKED on every
+  // client. Judge by the clock (mirrors canVote/handleVote semantics).
+  const isHealingState = state.status === EscrowStatus.EXPIRED
+    || (state.expiresAt > 0 && nowSec > state.expiresAt);
 
   const role = participantRoleForPubkey(state, pubkey, participants);
   if (!role) {
@@ -1101,7 +1106,7 @@ export function decideVotePrompt(
     // rescued by ANY pool backup — REFUND only, no floor (the disputed-expiry
     // limbo fix). The reducer enforces all of it.
     if (
-      state.status === EscrowStatus.EXPIRED
+      isHealingState
       && state.lock.arbiterPoolShare
       && (arbiterVotePriority(state, pubkey) ?? 0) > 0
       && !state.eventChain.some((ve) => ve.kind === EscrowEventKind.RESOLVE)
@@ -1118,6 +1123,7 @@ export function decideVotePrompt(
     // (the reducer re-enforces everything).
     if (
       state.status === EscrowStatus.LOCKED
+      && !isHealingState
       && state.lock.arbiterPoolShare
       && (arbiterVotePriority(state, pubkey) ?? 0) > 0
     ) {
@@ -1154,8 +1160,9 @@ export function decideVotePrompt(
   }
 
   // Expiry healing votes should only drive REFUND. Ordering is deliberately
-  // skipped here, matching the state-machine's healing path.
-  if (state.status === EscrowStatus.EXPIRED) {
+  // skipped here, matching the state-machine's healing path. Includes
+  // LOCKED-past-deadline (see isHealingState above).
+  if (isHealingState) {
     return { kind: "buttons", role, outcomes: [Outcome.REFUND] };
   }
 

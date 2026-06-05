@@ -1501,7 +1501,17 @@ export function canVote(state: EscrowState, pubkey: string, nowSec?: number): { 
   if (state.status !== EscrowStatus.LOCKED && state.status !== EscrowStatus.EXPIRED) {
     return { canVote: false, reason: `State is ${state.status}, not LOCKED or EXPIRED` };
   }
-  const isHealing = state.status === EscrowStatus.EXPIRED;
+  const now = nowSec ?? Math.floor(Date.now() / 1000);
+  // HEALING includes a LOCKED trade past its deadline. The reducer only flips
+  // status to EXPIRED when an EVENT arrives post-deadline — so on a quiet
+  // dead trade every client still reads LOCKED, and judging "healing" by
+  // status alone deadlocked the rescue: the sender's gate demanded live
+  // dispute votes (which a pool backup can't even decrypt) while the healing
+  // path that needs NO votes sat unreachable. Judge by the clock instead;
+  // the receiving reducer flips to EXPIRED on the vote's arrival and accepts
+  // it through the same healing gates.
+  const isHealing = state.status === EscrowStatus.EXPIRED
+    || (state.expiresAt > 0 && now > state.expiresAt);
 
   let role = getRole(state, pubkey);
   let isSubstitute = false;
@@ -1544,7 +1554,6 @@ export function canVote(state: EscrowState, pubkey: string, nowSec?: number): { 
   // the whole pool immediately.
   if (isSubstitute && !isHealing) {
     const eligibleAt = substitutionEligibleAt(state);
-    const now = nowSec ?? Math.floor(Date.now() / 1000);
     if (eligibleAt === null || now < eligibleAt) {
       return { canVote: false, reason: "The assigned arbiter still has the floor" };
     }

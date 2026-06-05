@@ -2915,6 +2915,41 @@ function detailNextStep({
   }
 
   if (state.status === EscrowStatus.CANCELLED || state.status === EscrowStatus.EXPIRED) {
+    // v2.2.0: an EXPIRED trade with locked sats is NOT a dead end — the
+    // healing path (assigned arbiter or any pool backup) auto-refunds
+    // the locker. During the live v2.1.0 substitution test this branch
+    // said "CLOSED — no longer active" while the heal was mid-flight,
+    // which read as money lost. Frame the truth instead: votes on
+    // record → the refund is confirming; no votes yet but locked sats
+    // → a heal is available.
+    if (state.status === EscrowStatus.EXPIRED && state.lock?.notesHash) {
+      const hasResolve = state.eventChain.some(
+        (e: any) => e.kind === EscrowEventKind.RESOLVE,
+      );
+      if (!hasResolve) {
+        const voteCount = state.eventChain.filter(
+          (e: any) => e.kind === EscrowEventKind.VOTE,
+        ).length;
+        if (voteCount > 0) {
+          return {
+            kicker: "HEALING",
+            title: "Expired with votes on record — refund confirming.",
+            body: "The locked sats route back to the locker as soon as any participant's Chama syncs the resolve. Nothing is lost — reload shortly.",
+            tone: "accent",
+            color: T.accent,
+            amountMsats: state.amountMsats,
+          };
+        }
+        return {
+          kicker: "EXPIRED · HEALABLE",
+          title: "This trade expired unresolved.",
+          body: "An arbiter can still heal it: one refund vote returns the locked sats to the locker automatically. This happens on its own when an arbiter signs in.",
+          tone: "accent",
+          color: T.accent,
+          amountMsats: state.amountMsats,
+        };
+      }
+    }
     return {
       kicker: "CLOSED",
       title: "This trade is no longer active.",

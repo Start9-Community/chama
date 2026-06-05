@@ -51,7 +51,7 @@ import {
 import { applyEvent, replayEventChain, canVote, getWinner, payoutRecipientFor, type TransitionResult } from "./state-machine.js";
 import { buildChildCreateParams, remainingStock, unsoldStock, isSoldOut, isLastUnitContested } from "./storefront.js";
 import { HOLDER_ONLY_SHARE_POLICY, shareIndexForRole } from "./holder-shares.js";
-import { arbiterVotePriority } from "./arbiter-substitution.js";
+import { arbiterVotePriority, arbiterPriorityOrder } from "./arbiter-substitution.js";
 import type { VoteShareEnvelope } from "./types.js";
 import { EscrowNotifier } from "./notifier.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
@@ -1380,6 +1380,14 @@ export class EscrowClient {
     // EXPIRED while everyone was offline. maybeAutoRefundExpired's own
     // guard now accepts EXPIRED-without-RESOLVE, so this is safe.
     if (result.state.status === EscrowStatus.EXPIRED) {
+      // Field gap (v2.1.1): an EXPIRED trade whose healing votes already met
+      // 2-of-3 but whose RESOLVE never landed was unresolvable by ANY reload —
+      // this branch healed missing VOTES but never checked the threshold.
+      // maybeAutoResolve itself accepts EXPIRED (v0.1.66.26); call it here so
+      // any participant's reload publishes the missing RESOLVE.
+      this.maybeAutoResolve(escrowId).catch(e =>
+        console.debug("[escrow] Post-reload expired auto-resolve:", e?.message || e)
+      );
       this.maybeAutoRefundExpired(escrowId).catch(e =>
         console.debug("[escrow] Post-reload heal-on-load:", e?.message || e)
       );
@@ -1845,6 +1853,22 @@ export class EscrowClient {
       state.participants[Role.SELLER],
       state.participants[Role.ARBITER],
     ].filter((pk): pk is string => typeof pk === "string" && pk.length > 0);
+
+    // Arbiter substitution (field gap, v2.1.1): on pooled-share locks the
+    // BACKUP arbiters were given the share (inside the LOCK) but never the
+    // MAIL — chain events were enveloped to the three participants only, so
+    // a backup's client silently skipped every VOTE ("envelope-not-for-me")
+    // and could never see the dispute that summons them, nor the votes
+    // backing it. Extend the recipient set with the capped priority order so
+    // the pool can actually do the job the lock gave them. createEnvelope
+    // dedupes, so the assigned arbiter appearing in both lists is harmless.
+    // CHAT is exempt by design — it does not use this helper's pooled path
+    // (see sendChat) and stays private to the three participants.
+    if (state.lock?.arbiterPoolShare === true) {
+      for (const pk of arbiterPriorityOrder(state)) {
+        if (typeof pk === "string" && pk.length > 0) recipients.push(pk);
+      }
+    }
 
     if (recipients.length === 0) {
       throw new Error(
