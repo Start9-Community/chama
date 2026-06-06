@@ -18,6 +18,7 @@ import {
 } from "../../payments/lightning-fees.js";
 import { getCachedSeedWords } from "../../fedimint/seed-manager.js";
 import { QRCode } from "../QRCode.js";
+import { Preferences } from "@capacitor/preferences";
 
 // Settings → Advanced — the home of Power-user mode (formerly
 // "Sandbox mode" through v0.4.1) and the federation-switching tools
@@ -213,6 +214,12 @@ export function SettingsAdvanced({
           is not a wallet — these 12 words are the private key to the ecash. */}
       <RecoveryPhraseCard />
 
+      {/* v2.5 — Account key (nsec). Revealed ONLY when Chama generated the key:
+          an imported key is the user's to back up where they made it; a NIP-46
+          key never touches this device. The nsec is the MASTER key — it owns
+          the Nostr identity AND can recover the wallet seed. */}
+      <NsecRevealCard />
+
       {/* Power-user toggle */}
       <div style={{
         background: T.card, border: `1px solid ${T.border}`,
@@ -373,6 +380,10 @@ export function SettingsAdvanced({
 
       {(powerUserOn || isDev || simOn) && (
         <TestSubstitutionGraceCard />
+      )}
+
+      {(powerUserOn || isDev) && (
+        <FediWeblnProbeCard />
       )}
 
       {!(powerUserOn || isDev) && (
@@ -818,6 +829,153 @@ function RecoveryPhraseCard() {
   );
 }
 
+// ── Account key reveal (v2.5) ────────────────────────────────────────────
+// The nsec is the MASTER key: it owns the Nostr identity AND decrypts the
+// wallet seed stored on Nostr — so it can recover everything. We reveal it
+// ONLY when Chama generated the key (chama_nsec_origin === "generated"), and
+// only when it's actually stored on this device (chama_saved_nsec, native).
+// An imported key is the user's to back up where they made it; a NIP-46 key
+// never touches this device. Async-loaded from secure storage on mount.
+function NsecRevealCard() {
+  const [loaded, setLoaded] = useState(false);
+  const [origin, setOrigin] = useState<string | null>(null);
+  const [nsec, setNsec] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [showQr, setShowQr] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let originVal: string | null = null;
+      let nsecVal: string | null = null;
+      try { originVal = (await Preferences.get({ key: "chama_nsec_origin" })).value; } catch { /* secure storage unavailable */ }
+      try { nsecVal = (await Preferences.get({ key: "chama_saved_nsec" })).value; } catch { /* secure storage unavailable */ }
+      if (cancelled) return;
+      setOrigin(originVal);
+      setNsec(nsecVal);
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const canReveal = origin === "generated" && !!nsec;
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.border}`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+        letterSpacing: 1, marginBottom: 8,
+      }}>
+        ACCOUNT KEY (NSEC)
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 12 }}>
+        Your nsec is the master key to this account — it owns your Nostr identity
+        and can recover your wallet. It is strictly more powerful than your
+        recovery phrase: anyone who has it owns everything.
+      </div>
+
+      {!loaded ? (
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>Checking your device…</div>
+      ) : !canReveal ? (
+        <div style={{
+          padding: "10px 12px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11, lineHeight: 1.6,
+        }}>
+          {origin === "imported"
+            ? "You signed in with your own key, so Chama doesn't reveal it — back it up where you created it."
+            : "Chama only reveals a key it generated for you and stored on this device. If you use a remote signer (NIP-46), your key stays in your signer app."}
+        </div>
+      ) : !revealed ? (
+        <>
+          <div style={{
+            padding: "10px 12px", borderRadius: T.rs, marginBottom: 12,
+            background: T.redDim, border: `1px solid ${T.red}44`,
+            color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.6,
+          }}>
+            ⚠ This is the master key to your whole account. Never type it into a
+            website, never share it, and make sure no one is watching your screen.
+            Chama will never ask for it.
+          </div>
+          <button
+            onClick={() => setRevealed(true)}
+            style={{
+              width: "100%", padding: "11px 14px", borderRadius: T.rs,
+              background: T.accentDim, border: `1px solid ${T.accent}66`,
+              color: T.accent, fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+              cursor: "pointer", letterSpacing: 0.5,
+            }}
+          >
+            Reveal account key
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={{
+            padding: "10px 12px", borderRadius: T.rs, marginBottom: 12,
+            background: T.bg, border: `1px solid ${T.border}`,
+            color: T.text, fontFamily: T.mono, fontSize: 11, lineHeight: 1.5,
+            wordBreak: "break-all" as const,
+          }}>
+            {nsec}
+          </div>
+
+          {showQr && nsec && (
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+              <QRCode data={nsec} size={200} />
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => {
+                try {
+                  if (nsec) navigator.clipboard?.writeText(nsec);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                } catch { /* clipboard unavailable — key is on screen */ }
+              }}
+              style={{
+                flex: 1, padding: "9px 12px", borderRadius: T.rs,
+                background: copied ? T.greenDim : T.surface,
+                border: `1px solid ${copied ? T.green + "66" : T.border}`,
+                color: copied ? T.green : T.muted,
+                fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+              }}
+            >
+              {copied ? "✓ Copied" : "Copy"}
+            </button>
+            <button
+              onClick={() => setShowQr((v) => !v)}
+              style={{
+                flex: 1, padding: "9px 12px", borderRadius: T.rs,
+                background: T.surface, border: `1px solid ${T.border}`,
+                color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+              }}
+            >
+              {showQr ? "Hide QR" : "Show QR"}
+            </button>
+            <button
+              onClick={() => { setRevealed(false); setShowQr(false); }}
+              style={{
+                flex: 1, padding: "9px 12px", borderRadius: T.rs,
+                background: T.surface, border: `1px solid ${T.border}`,
+                color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+              }}
+            >
+              Hide
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Arbiter-substitution test lever ──────────────────────────────────────
 // Writes chama_create_expiry_seconds, which createEscrow reads as the CREATE
 // expiry override. Consensus-safe: the value is committed into the CREATE
@@ -998,6 +1156,202 @@ function TestSubstitutionGraceCard() {
           Clear
         </button>
       </div>
+    </div>
+  );
+}
+
+// ── Fedi WebLN probe (v2.5 #52 spike) ────────────────────────────────────
+// Run INSIDE the real Fedi mini-app. Answers the one open question for the
+// cross-federation sandwich: can Chama's WASM Fedimint client run in the Fedi
+// WebView, and what does the host's window.webln actually expose? The funding
+// leg (webln.sendPayment) is already field-confirmed; the WASM prerequisites
+// (SharedArrayBuffer / crossOriginIsolated / OPFS) are the unknowns. Read out,
+// copy, send back — no side effects beyond an optional webln.enable() prompt.
+function FediWeblnProbeCard() {
+  const [report, setReport] = useState<string | null>(null);
+  const [weblnResult, setWeblnResult] = useState<string | null>(null);
+  const [communities, setCommunities] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const run = () => {
+    const w = window as unknown as Record<string, any>;
+    const yn = (b: boolean) => (b ? "YES" : "no");
+    const methodsOf = (o: any) => {
+      if (!o) return "(absent)";
+      try {
+        const keys = [
+          ...Object.keys(o),
+          ...Object.getOwnPropertyNames(Object.getPrototypeOf(o) ?? {}),
+        ].filter((k) => k !== "constructor");
+        return Array.from(new Set(keys)).join(", ") || "(none enumerable)";
+      } catch { return "(unreadable)"; }
+    };
+    const lines = [
+      `fediInternal: ${yn(!!w.fediInternal)}`,
+      `  fediInternal methods: ${methodsOf(w.fediInternal)}`,
+      `webln: ${yn(!!w.webln)}`,
+      `  webln methods: ${methodsOf(w.webln)}`,
+      `WebAssembly: ${yn(typeof WebAssembly !== "undefined")}`,
+      `OPFS (storage.getDirectory): ${yn(!!(navigator as any).storage?.getDirectory)}`,
+      `SharedArrayBuffer: ${yn(typeof SharedArrayBuffer !== "undefined")}`,
+      `crossOriginIsolated: ${yn(!!w.crossOriginIsolated)}`,
+      `isSecureContext: ${yn(!!w.isSecureContext)}`,
+      `hardwareConcurrency: ${(navigator as any).hardwareConcurrency ?? "?"}`,
+      `UA: ${navigator.userAgent.slice(0, 100)}`,
+    ];
+    setReport(lines.join("\n"));
+  };
+
+  const testWebln = async () => {
+    const w = window as unknown as Record<string, any>;
+    if (!w.webln) { setWeblnResult("webln: not present"); return; }
+    try {
+      if (typeof w.webln.enable === "function") await w.webln.enable();
+      let info = "";
+      if (typeof w.webln.getInfo === "function") {
+        try { info = JSON.stringify(await w.webln.getInfo()).slice(0, 140); } catch {}
+      }
+      setWeblnResult(`enable() OK${info ? " · getInfo: " + info : " (no getInfo)"}`);
+    } catch (e: any) {
+      setWeblnResult(`webln error: ${(e?.message || String(e)).slice(0, 140)}`);
+    }
+  };
+
+  // v2.5 #52 — READ-ONLY community map. No fund movement, no setSelectedCommunity
+  // (that would change your active Fedi state). Just dumps the shapes of the
+  // host's communities + the selected fed's currency/member, so we can see
+  // whether a Fedi "community" carries its federation (id/invite/currency) and
+  // how the switch-and-act flow should address fed B.
+  const mapCommunities = async () => {
+    const fi = (window as unknown as Record<string, any>).fediInternal;
+    if (!fi) { setCommunities("fediInternal: not present"); return; }
+    const out: string[] = [];
+    const call = async (name: string, fn: any) => {
+      if (typeof fn !== "function") { out.push(`${name}: (not a function)`); return; }
+      try {
+        const r = await fn.call(fi);
+        const dump = typeof r === "string" ? r : JSON.stringify(r);
+        out.push(`${name}: ${(dump ?? String(r)).slice(0, 500)}`);
+      } catch (e: any) {
+        out.push(`${name}: ERROR ${(e?.message || String(e)).slice(0, 140)}`);
+      }
+    };
+    await call("getAuthenticatedMember", fi.getAuthenticatedMember);
+    await call("getCurrencyCode", fi.getCurrencyCode);
+    await call("getLanguageCode", fi.getLanguageCode);
+    await call("listCreatedCommunities", fi.listCreatedCommunities);
+    await call("getInstalledMiniApps", fi.getInstalledMiniApps);
+    setCommunities(out.join("\n\n"));
+  };
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.border}`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+        letterSpacing: 1, marginBottom: 8,
+      }}>
+        FEDI WEBLN PROBE (#52 SPIKE)
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 12 }}>
+        Run this inside the Fedi mini-app. It reports whether Chama's Fedimint
+        WASM client can run here (SharedArrayBuffer / crossOriginIsolated / OPFS)
+        and what the host's WebLN exposes — the last unknowns for cross-Chama
+        trading. Copy the readout and send it back.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <button
+          onClick={run}
+          style={{
+            flex: 1, padding: "10px 12px", borderRadius: T.rs,
+            background: T.accentDim, border: `1px solid ${T.accent}66`,
+            color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer",
+          }}
+        >
+          Run probe
+        </button>
+        <button
+          onClick={() => void testWebln()}
+          style={{
+            flex: 1, padding: "10px 12px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          Test WebLN
+        </button>
+      </div>
+
+      <button
+        onClick={() => void mapCommunities()}
+        style={{
+          width: "100%", padding: "10px 12px", borderRadius: T.rs, marginBottom: 12,
+          background: T.tealDim, border: `1px solid ${T.teal}55`,
+          color: T.teal, fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer",
+        }}
+      >
+        Map communities (read-only)
+      </button>
+
+      {report && (
+        <div style={{
+          padding: "10px 12px", borderRadius: T.rs,
+          background: T.bg, border: `1px solid ${T.border}`,
+          color: T.text, fontFamily: T.mono, fontSize: 10, lineHeight: 1.6,
+          whiteSpace: "pre-wrap" as const, wordBreak: "break-all" as const,
+          marginBottom: weblnResult ? 8 : 10,
+        }}>
+          {report}
+        </div>
+      )}
+      {weblnResult && (
+        <div style={{
+          padding: "9px 11px", borderRadius: T.rs, marginBottom: 10,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
+          whiteSpace: "pre-wrap" as const, wordBreak: "break-all" as const,
+        }}>
+          WebLN · {weblnResult}
+        </div>
+      )}
+      {communities && (
+        <div style={{
+          padding: "10px 12px", borderRadius: T.rs, marginBottom: 10,
+          background: T.bg, border: `1px solid ${T.border}`,
+          color: T.text, fontFamily: T.mono, fontSize: 9, lineHeight: 1.6,
+          whiteSpace: "pre-wrap" as const, wordBreak: "break-all" as const,
+          maxHeight: 220, overflowY: "auto",
+        }}>
+          {communities}
+        </div>
+      )}
+      {(report || communities) && (
+        <button
+          onClick={() => {
+            try {
+              const parts = [
+                report,
+                weblnResult ? `webln: ${weblnResult}` : "",
+                communities ? `--- communities ---\n${communities}` : "",
+              ].filter(Boolean);
+              navigator.clipboard?.writeText(parts.join("\n\n"));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            } catch {}
+          }}
+          style={{
+            width: "100%", padding: "9px 12px", borderRadius: T.rs,
+            background: copied ? T.greenDim : T.surface,
+            border: `1px solid ${copied ? T.green + "66" : T.border}`,
+            color: copied ? T.green : T.muted,
+            fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          {copied ? "✓ Copied" : "Copy readout"}
+        </button>
+      )}
     </div>
   );
 }

@@ -47,7 +47,7 @@ export function ConnectScreen({
 }: {
   onConnect: () => void;
   onConnectNIP46: () => void;
-  onConnectNsec: (nsec: string, remember: boolean) => void | Promise<void>;
+  onConnectNsec: (nsec: string, remember: boolean, wasGenerated: boolean) => void | Promise<void>;
   loading: boolean;
   error: string | null;
   nip46Uri?: string | null;
@@ -62,20 +62,35 @@ export function ConnectScreen({
   const offerNIP46Signer = shouldOfferNIP46Signer(signInEnvironment);
   const [homeSlug, setHomeSlug] = useState<string | null>(() => getUserCommunitySlugRaw());
   const [showAdvanced, setShowAdvanced] = useState(false);
+  // v2.5: the recovery-key paste box, revealed by "I'm a returning Chama
+  // citizen" on the platforms where pasting is the right path — no hint detour,
+  // no intermediate button.
   const [showRecoveryKey, setShowRecoveryKey] = useState(false);
   const [returningSignInAttempted, setReturningSignInAttempted] = useState(false);
-  const [recoveryHint, setRecoveryHint] = useState<string | null>(null);
   const homeCommunity = homeSlug ? getCommunityBySlug(homeSlug) : null;
-  const openRecoveryKeyHelp = () => {
-    setReturningSignInAttempted(false);
-    setShowAdvanced(true);
-    setShowRecoveryKey(true);
-    setRecoveryHint("No problem. If you meant to restore an existing Chama account, paste your recovery key below.");
+  // NIP-07 browser extension (Alby, nos2x, …). Only meaningful in a desktop
+  // browser — native shells and the Fedi WebView don't inject window.nostr.
+  const hasNostrExtension = typeof window !== "undefined" && !!(window as any).nostr;
+
+  // v2.5: device-aware "returning" sign-in.
+  //   • Fedi      → the Fedi-provided signer (its own welcome-home button).
+  //   • APK/Tauri → paste the recovery key (no browser extension possible).
+  //   • desktop browser → use the NIP-07 extension; fall back to the clean
+  //     paste box if there's no extension or it fails.
+  const handleReturningSignIn = () => {
+    if (isNative || !hasNostrExtension) {
+      setShowRecoveryKey(true);
+      return;
+    }
+    setReturningSignInAttempted(true);
+    onConnect();
   };
 
+  // Clean fallback: if the extension attempt errors out, just reveal the
+  // attached paste box (no hint prose, no "more options" dig).
   useEffect(() => {
     if (!returningSignInAttempted || loading || !error) return;
-    openRecoveryKeyHelp();
+    setShowRecoveryKey(true);
   }, [returningSignInAttempted, loading, error]);
 
   if (!homeSlug || !homeCommunity) {
@@ -193,21 +208,28 @@ export function ConnectScreen({
             <NsecLogin
               onSubmit={onConnectNsec}
               friendly
-              friendlySecondary={!isNative ? {
+              friendlySecondary={{
                 label: loading ? "Connecting..." : "I'm a returning Chama citizen",
-                onClick: () => {
-                  if (typeof window !== "undefined" && !(window as any).nostr) {
-                    openRecoveryKeyHelp();
-                    return;
-                  }
-                  setReturningSignInAttempted(true);
-                  setRecoveryHint(null);
-                  onConnect();
-                },
+                // v2.5: device-aware — desktop browser kicks the NIP-07
+                // extension; APK/Tauri (and the no-extension / extension-
+                // failure cases) drop the clean paste box in attached below.
+                onClick: handleReturningSignIn,
                 disabled: loading,
                 tone: "accent",
-              } : undefined}
+              }}
             />
+
+            {showRecoveryKey && (
+              // The paste box, attached to "I'm a returning Chama citizen".
+              // minimalPaste: just the field + Show; a valid paste (or Enter)
+              // signs you in — no Continue button, no clutter.
+              <NsecLogin
+                onSubmit={onConnectNsec}
+                defaultOpen
+                allowCreate={false}
+                minimalPaste
+              />
+            )}
 
             <button
               onClick={() => setShowAdvanced(!showAdvanced)}
@@ -223,26 +245,20 @@ export function ConnectScreen({
 
             {showAdvanced && (
               <>
-                {recoveryHint && <InstructionBox>{recoveryHint}</InstructionBox>}
-                <button
-                  onClick={() => setShowRecoveryKey(!showRecoveryKey)}
-                  style={{
-                    width: "100%", padding: "14px", borderRadius: T.r,
-                    background: T.surface,
-                    border: `1px solid ${T.border}`,
-                    color: T.text,
-                    fontFamily: T.sans, fontSize: 13, fontWeight: 700,
-                    cursor: "pointer",
-                  }}
-                >
-                  {showRecoveryKey ? "Hide recovery key entry" : "I have a recovery key"}
-                </button>
-                {showRecoveryKey && (
-                  <NsecLogin
-                    onSubmit={onConnectNsec}
-                    defaultOpen
-                    allowCreate={false}
-                  />
+                {hasNostrExtension && (
+                  <button
+                    onClick={onConnect}
+                    disabled={loading}
+                    style={{
+                      width: "100%", padding: "14px", borderRadius: T.r,
+                      background: "transparent",
+                      border: `1px solid ${T.border}`,
+                      color: T.text, fontFamily: T.sans, fontSize: 13, fontWeight: 600,
+                      cursor: loading ? "default" : "pointer",
+                    }}
+                  >
+                    {loading ? "Connecting..." : "Sign in with browser extension"}
+                  </button>
                 )}
                 {offerNIP46Signer && !nip46Uri && (
                   <button
@@ -296,13 +312,13 @@ function FediOnlyConnectButton({
           cursor: loading ? "default" : "pointer",
         }}
       >
-        {loading ? "Connecting..." : "Continue with Fedi"}
+        {loading ? "Connecting..." : "Welcome home"}
       </button>
       <div style={{
         fontSize: 10, color: T.muted, fontFamily: T.sans,
         textAlign: "center", marginTop: 12, lineHeight: 1.5,
       }}>
-        Chama will use the signer and wallet already provided by Fedi.
+        Chama uses the identity and wallet Fedi already gave you — just step in.
       </div>
     </div>
   );

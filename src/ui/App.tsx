@@ -946,6 +946,7 @@ export default function App() {
   const handleSignOut = async () => {
     if (Capacitor.isNativePlatform()) {
       try { await Preferences.remove({ key: "chama_saved_nsec" }); } catch {}
+      try { await Preferences.remove({ key: "chama_nsec_origin" }); } catch {}
     }
     delete (window as any).__chama_connect_nsec;
     window.location.reload();
@@ -1002,6 +1003,8 @@ export default function App() {
                   if (confirm("Found an nsec key. Sign in with it?")) {
                     (window as any).__chama_connect_nsec = scanned;
                     try { await Preferences.set({ key: "chama_saved_nsec", value: scanned }); } catch {}
+                    // A scanned key is imported, never Chama-generated.
+                    try { await Preferences.set({ key: "chama_nsec_origin", value: "imported" }); } catch {}
                     actions.connect();
                   }
                 } else if (scanned.startsWith("nostrconnect://") || scanned.startsWith("bunker://")) {
@@ -1039,11 +1042,19 @@ export default function App() {
               console.error("[chama] NIP-46 connection failed:", e);
             }
           }}
-          onConnectNsec={async (nsec: string, remember: boolean) => {
+          onConnectNsec={async (nsec: string, remember: boolean, wasGenerated: boolean) => {
             (window as any).__chama_connect_nsec = nsec;
             if (remember && Capacitor.isNativePlatform()) {
               try {
                 await Preferences.set({ key: "chama_saved_nsec", value: nsec });
+                // v2.5: record key origin alongside the saved nsec so Me ›
+                // Advanced reveals the master key ONLY when Chama generated it
+                // (an imported key is the user's to back up where they made it;
+                // NIP-46 keys are never saved here at all).
+                await Preferences.set({
+                  key: "chama_nsec_origin",
+                  value: wasGenerated ? "generated" : "imported",
+                });
               } catch (e) {
                 console.warn("[chama] Failed to save nsec to secure storage:", e);
               }

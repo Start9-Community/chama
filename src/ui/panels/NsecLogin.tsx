@@ -9,8 +9,9 @@ export function NsecLogin({
   friendly = false,
   friendlySecondary,
   allowCreate = true,
+  minimalPaste = false,
 }: {
-  onSubmit: (nsec: string, remember: boolean) => void;
+  onSubmit: (nsec: string, remember: boolean, wasGenerated: boolean) => void;
   defaultOpen?: boolean;
   friendly?: boolean;
   friendlySecondary?: {
@@ -20,6 +21,7 @@ export function NsecLogin({
     tone?: "accent" | "neutral";
   };
   allowCreate?: boolean;
+  minimalPaste?: boolean;
 }) {
   const isNative = Capacitor.isNativePlatform();
   const [showNsec, setShowNsec] = useState(isNative || defaultOpen || friendly);
@@ -27,7 +29,11 @@ export function NsecLogin({
     friendly ? "choice" : "paste",
   );
   const [nsecInput, setNsecInput] = useState("");
-  const [remember, setRemember] = useState(isNative);
+  // v2.5: no more "Remember me" toggle. On native we always persist the key to
+  // secure storage so auto-login just works next launch (sign-out is the
+  // forget switch); on web nothing is persisted regardless. Simpler, and it's
+  // what people expect on their own phone.
+  const remember = isNative;
   const [generatedNsec, setGeneratedNsec] = useState<string | null>(null);
   const [backupConfirmed, setBackupConfirmed] = useState(false);
   const [showKey, setShowKey] = useState(false);
@@ -50,7 +56,6 @@ export function NsecLogin({
       setNsecInput(nsec);
       setGeneratedNsec(nsec);
       setBackupConfirmed(false);
-      if (isNative) setRemember(true);
       setShowKey(true);
     } catch (e: any) {
       setGenerateError(e?.message || "Could not create key");
@@ -68,7 +73,11 @@ export function NsecLogin({
       return;
     }
     setInputError(null);
-    onSubmit(nsecInput.trim(), remember);
+    // v2.5: tell the shell whether this key was generated in Chama (so only
+    // generated keys get the master-key reveal in Me › Advanced). The submitted
+    // key matching the just-generated one is the signal.
+    const wasGenerated = generatedNsec !== null && nsecInput.trim() === generatedNsec;
+    onSubmit(nsecInput.trim(), remember, wasGenerated);
   };
 
   const generatedActive = generatedNsec !== null && nsecInput.trim() === generatedNsec;
@@ -87,7 +96,9 @@ export function NsecLogin({
       if (cancelled || !validated.ok) return;
       autoSubmittedKeyRef.current = value;
       setInputError(null);
-      onSubmit(value, remember);
+      // Auto-submit only fires for a PASTED key (gated on !generatedActive
+      // above), so it's never the Chama-generated one.
+      onSubmit(value, remember, false);
     }, 120);
 
     return () => {
@@ -317,47 +328,40 @@ export function NsecLogin({
         </div>
       )}
 
-      {isNative && (
-        <label style={{
-          display: "flex", alignItems: "center", gap: 8,
-          fontSize: 10, color: T.muted, fontFamily: T.mono,
-          cursor: "pointer", marginBottom: 10,
-          userSelect: "none" as const,
-        }}>
-          <input
-            type="checkbox"
-            checked={remember}
-            onChange={(e) => setRemember(e.target.checked)}
-            style={{ accentColor: T.accent, width: 14, height: 14, cursor: "pointer" }}
-          />
-          Remember me on this device
-        </label>
+      {/* v2.5: minimalPaste (the returning-user box attached to "I'm a
+          returning Chama citizen") drops the Continue button entirely —
+          a valid paste auto-submits, and Enter also works — and the
+          footer, so the user just pastes and is in. The Continue stays
+          for the generation flow (where an explicit "I saved it" confirm
+          is required) and the native sign-in. */}
+      {!minimalPaste && (
+        <button
+          onClick={() => void handleSubmit()}
+          disabled={submitDisabled}
+          style={{
+            width: "100%", padding: "14px",
+            background: !submitDisabled ? T.accent : T.surface,
+            border: `1px solid ${!submitDisabled ? T.accent : T.border}`,
+            borderRadius: T.rs, color: !submitDisabled ? T.bg : T.muted,
+            fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+            cursor: !submitDisabled ? "pointer" : "default",
+            letterSpacing: 0.5,
+            transition: "all 0.2s",
+          }}
+        >
+          {generatedActive ? "Continue with this key" : "Continue"}
+        </button>
       )}
-
-      <button
-        onClick={() => void handleSubmit()}
-        disabled={submitDisabled}
-        style={{
-          width: "100%", padding: "14px",
-          background: !submitDisabled ? T.accent : T.surface,
-          border: `1px solid ${!submitDisabled ? T.accent : T.border}`,
-          borderRadius: T.rs, color: !submitDisabled ? T.bg : T.muted,
-          fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-          cursor: !submitDisabled ? "pointer" : "default",
-          letterSpacing: 0.5,
-          transition: "all 0.2s",
-        }}
-      >
-        {generatedActive ? "Continue with this key" : "Continue"}
-      </button>
-      <div style={{
-        fontSize: 9, color: T.muted, fontFamily: T.mono,
-        textAlign: "center", marginTop: 10, lineHeight: 1.5,
-      }}>
-        {isNative
-          ? "Your recovery key stays on this device, encrypted in secure storage."
-          : "Your recovery key stays in this browser."}
-      </div>
+      {!minimalPaste && (
+        <div style={{
+          fontSize: 9, color: T.muted, fontFamily: T.mono,
+          textAlign: "center", marginTop: 10, lineHeight: 1.5,
+        }}>
+          {isNative
+            ? "Your recovery key stays on this device, encrypted in secure storage."
+            : "Your recovery key stays in this browser."}
+        </div>
+      )}
     </div>
   );
 }
