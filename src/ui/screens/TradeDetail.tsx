@@ -31,7 +31,7 @@ import { listingPremiumLine } from "../listing-metrics.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
 import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
-import { pickArbiterFromPool } from "../../arbiters/pool.js";
+import { pickArbiterFromPool, getTrustedArbiterPool, classifyArbiterProvenance } from "../../arbiters/pool.js";
 import {
   hasStateBExplained,
   markStateBExplained,
@@ -1668,6 +1668,7 @@ export function TradeDetail({
             </div>
           )}
         </div>
+        <ArbiterProvenanceBanner state={state} />
         {/* Match the vote tally's 3-column grid (below) exactly so the arbiter
             (middle) sits directly above the FINAL DECISION chip and the buyer /
             seller align over their vote columns. */}
@@ -2742,6 +2743,63 @@ export function TradeDetail({
           </div>
         )}
       </details>
+    </div>
+  );
+}
+
+// v2.3 — arbiter provenance ("close the arbiter door"). The trade's
+// communityArbiters ride in on CREATE, set by the creator's own client, and
+// the reducer only checks the LOCK arbiter is a member of THAT pool — never
+// that the pool itself is the community's real one. A stuffed pool lets a
+// party seat sock-puppet arbiters and rig disputes. This banner is the
+// informed-consent surface: a quiet green tick when every named arbiter is one
+// THIS device recognizes for the community, an amber warning the instant the
+// pool contains keys it doesn't. Soft by design (Pillar 2.7) — the locker's
+// Fund moment carries the louder version of the same check.
+function ArbiterProvenanceBanner({ state }: { state: EscrowState }) {
+  const pool = state.communityArbiters ?? [];
+  if (pool.length === 0) return null;
+  const trusted = getTrustedArbiterPool({ community: state.community });
+  const prov = classifyArbiterProvenance(pool, trusted);
+  const communityName = state.community
+    ? getCommunityBySlug(state.community)?.displayName ?? "this community"
+    : "this community";
+
+  if (prov.verified) {
+    return (
+      <div style={{
+        marginTop: 10, padding: "7px 10px", borderRadius: T.rs,
+        background: T.greenDim, border: `1px solid ${T.green}33`,
+        display: "flex", alignItems: "center", gap: 8,
+      }}>
+        <span style={{ fontSize: 11, color: T.green }}>✓</span>
+        <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.4 }}>
+          Community-verified arbiters — every name here is in {communityName}'s known pool.
+        </span>
+      </div>
+    );
+  }
+
+  // Has unrecognized members — the sock-puppet signal.
+  return (
+    <div style={{
+      marginTop: 10, padding: "9px 11px", borderRadius: T.rs,
+      background: T.amberDim, border: `1px solid ${T.amber}55`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <span style={{ fontSize: 12, color: T.amber }}>⚠</span>
+        <span style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
+          UNRECOGNIZED ARBITER{prov.unrecognized.length !== 1 ? "S" : ""}
+        </span>
+      </div>
+      <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
+        {prov.unrecognized.length} of {pool.length} arbiter{pool.length !== 1 ? "s" : ""} on this trade
+        {prov.unrecognized.length !== 1 ? " are" : " is"} not in {communityName}'s known pool
+        {prov.unrecognized.length > 0 && (
+          <> ({prov.unrecognized.map(shortParticipantPubkey).join(", ")})</>
+        )}. A neutral arbiter is what protects a dispute — if you don't know who set
+        these, treat the trade with extra care before locking sats.
+      </div>
     </div>
   );
 }

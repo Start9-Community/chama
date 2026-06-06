@@ -44,7 +44,7 @@ import {
 } from "./types.js";
 import { payoutRecipientFor } from "./recipients.js";
 import { validateVoteShareEnvelope } from "./holder-shares.js";
-import { arbiterVotePriority, substitutionEligibleAt } from "./arbiter-substitution.js";
+import { arbiterVotePriority, substitutionEligibleAt, clampSubstitutionGraceSeconds } from "./arbiter-substitution.js";
 
 // Re-export so existing callers (escrow-client, escrow-bridge, tests) keep
 // importing payoutRecipientFor from the state machine.
@@ -794,6 +794,12 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   // Arbiter substitution: carry the pooled-arbiter-share marker so the vote
   // path knows backups are eligible here. Absent ⇒ assigned-arbiter-only.
   next.lock.arbiterPoolShare = p.arbiterPoolShare;
+  // v2.3: carry the locker's committed substitution grace ceiling so
+  // substitutionEligibleAt replays it identically everywhere. Only persist a
+  // finite value (absent ⇒ legacy 4h default in the eligibility math).
+  if (typeof p.substitutionGraceSeconds === "number" && Number.isFinite(p.substitutionGraceSeconds)) {
+    next.lock.substitutionGraceSeconds = clampSubstitutionGraceSeconds(p.substitutionGraceSeconds);
+  }
   next.listingExpiresAt = state.listingExpiresAt ?? state.expiresAt;
   next.tradeTimeoutSeconds = tradeTimeoutSecondsFor(state);
   next.expiresAt = p.lockedAt + next.tradeTimeoutSeconds;

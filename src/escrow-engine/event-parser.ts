@@ -301,6 +301,15 @@ function validateLockPayload(data: unknown): data is LockPayload {
   if (d.arbiterPoolShare !== undefined && typeof d.arbiterPoolShare !== "boolean") {
     return false;
   }
+  // v2.3 substitution grace: optional, must be a finite number when present
+  // (a non-number could otherwise corrupt the eligibility math on replay).
+  // Range is clamped downstream in the reducer; here we only gate the type.
+  if (
+    d.substitutionGraceSeconds !== undefined &&
+    (typeof d.substitutionGraceSeconds !== "number" || !Number.isFinite(d.substitutionGraceSeconds))
+  ) {
+    return false;
+  }
   return (
     d.type === "escrow:lock" &&
     typeof d.notesHash === "string" &&

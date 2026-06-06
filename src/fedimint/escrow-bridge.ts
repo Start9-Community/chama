@@ -71,6 +71,11 @@ interface LockOptions {
   savedHandleId?: string;
   /** Menu basket snapshot. Required when locking a menu listing. */
   selectedItems?: SelectedMenuItem[];
+  /** v2.3: committed substitution grace ceiling (seconds). The hook resolves
+   *  this from the consensus-safe power-user override; absent ⇒ the legacy 4h
+   *  default. Rides into the signed LOCK so backup eligibility replays
+   *  identically everywhere. */
+  substitutionGraceSeconds?: number;
 }
 
 function amountMsatsForLock(state: EscrowState, selectedItems?: SelectedMenuItem[]): number {
@@ -248,6 +253,9 @@ export class EscrowFedimintBridge {
       shares,
       sharePolicy: HOLDER_ONLY_SHARE_POLICY,
       arbiterPoolShare: arbiterRecipients.length > 0,
+      ...(typeof opts.substitutionGraceSeconds === "number"
+        ? { substitutionGraceSeconds: opts.substitutionGraceSeconds }
+        : {}),
       sellerReceivesMsats: lockBundle.sellerReceivesMsats,
       arbiterFeeMsats: lockBundle.arbiterFeeMsats,
       buyerPubkey,

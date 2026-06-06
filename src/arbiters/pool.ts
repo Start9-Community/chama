@@ -125,6 +125,71 @@ export function normalizeTrustedArbiterInput(raw: string): string[] {
   return unique(splitConfiguredPubkeys(raw));
 }
 
+// ── Arbiter provenance (v2.3 — close the "arbiter door") ───────────────────
+//
+// A trade's `communityArbiters` ride in on the CREATE payload, set by the
+// creator's own client. The reducer only checks that the LOCK's chosen
+// arbiter is a member of THAT pool — never that the pool itself is the
+// community's real one. A hostile creator can therefore stuff the pool with
+// sock-puppet keys they control; in any dispute "the neutral arbiter" is
+// theirs, and a party who also seats the arbiter slot holds 2 of 3 shares.
+//
+// We close this with informed consent rather than a hard reducer reject
+// (which would turn version/registry drift into a DoS and a funds-stranding
+// footgun — the threat here is TRUST, not validity). classifyArbiterProvenance
+// is the pure heart: compare a trade's pool against the set THIS device
+// trusts for the community, and let the UI badge a clean trade or warn before
+// money goes at risk. The official community pool is the shared baseline, so
+// two honest clients on it always agree (green); a stuffed pool surfaces its
+// unrecognized keys to the counterparty the instant they look.
+
+export interface ArbiterProvenance {
+  /** Trade arbiters that ARE in this device's trusted pool for the community. */
+  recognized: string[];
+  /** Trade arbiters NOT in the trusted pool — the sock-puppet signal. */
+  unrecognized: string[];
+  /** True only when the trade names a non-empty pool AND every member is
+   *  recognized. An empty pool (raw/legacy escrow, no community arbiter) is
+   *  NOT "verified" — there is simply nothing to verify; see hasPool. */
+  verified: boolean;
+  /** Whether the trade carries any community arbiters at all. Lets the UI
+   *  distinguish "no community arbiter" (neutral) from "verified" (green)
+   *  from "has unrecognized members" (warn). */
+  hasPool: boolean;
+}
+
+/** Classify a trade's committed arbiter pool against a trusted reference set.
+ *  Pure: the caller resolves `trustedPool` (typically
+ *  getTrustedArbiterPool({ community })). Pubkeys are compared
+ *  case-insensitively; non-hex / npub inputs are normalized first so a trade
+ *  that stored npubs and a device that stored hex still match. */
+export function classifyArbiterProvenance(
+  communityArbiters: readonly string[] | null | undefined,
+  trustedPool: readonly string[],
+): ArbiterProvenance {
+  const trusted = new Set(
+    trustedPool
+      .map((pk) => normalizePubkey(pk) ?? pk.trim().toLowerCase())
+      .filter((pk) => !!pk),
+  );
+  const recognized: string[] = [];
+  const unrecognized: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of communityArbiters ?? []) {
+    const pk = normalizePubkey(raw) ?? raw.trim().toLowerCase();
+    if (!pk || seen.has(pk)) continue;
+    seen.add(pk);
+    (trusted.has(pk) ? recognized : unrecognized).push(pk);
+  }
+  const hasPool = recognized.length > 0 || unrecognized.length > 0;
+  return {
+    recognized,
+    unrecognized,
+    verified: hasPool && unrecognized.length === 0,
+    hasPool,
+  };
+}
+
 /**
  * v0.6.5: deterministic round-robin selection from a community arbiter
  * pool. Same escrow id always picks the same arbiter — important so

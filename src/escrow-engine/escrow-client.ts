@@ -662,6 +662,10 @@ export class EscrowClient {
     /** Arbiter substitution: true when the bridge encrypted the arbiter share
      *  to the deterministic priority order (assigned + backups). */
     arbiterPoolShare?: boolean;
+    /** v2.3: committed substitution grace ceiling (seconds). Rides in the
+     *  signed LOCK so backup eligibility replays identically everywhere.
+     *  Absent ⇒ legacy 4h default. */
+    substitutionGraceSeconds?: number;
   }): Promise<EscrowState> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
@@ -703,6 +707,9 @@ export class EscrowClient {
       shares: params.shares,
       sharePolicy: params.sharePolicy,
       arbiterPoolShare: params.arbiterPoolShare,
+      ...(typeof params.substitutionGraceSeconds === "number"
+        ? { substitutionGraceSeconds: params.substitutionGraceSeconds }
+        : {}),
       sellerReceivesMsats: params.sellerReceivesMsats,
       arbiterFeeMsats: params.arbiterFeeMsats,
       selectedItems: params.selectedItems,

@@ -100,6 +100,7 @@ import {
   disputeStartAt,
   substitutionEligibleAt,
   SUBSTITUTION_GRACE_MAX_SECONDS,
+  clampSubstitutionGraceSeconds,
 } from "./arbiter-substitution.js";
 import {
   EscrowClient,
@@ -278,6 +279,7 @@ import {
   BLF_OFFICIAL_ARBITERS,
   getTrustedArbiterPool,
   normalizeTrustedArbiterInput,
+  classifyArbiterProvenance,
 } from "../arbiters/pool.js";
 import {
   AMBIENT_ARBITER_FEE_BPS,
@@ -1896,6 +1898,68 @@ console.log("\n── ARBITER SUBSTITUTION (pooled share, grace window, priority
   assert(substitutionEligibleAt(shortState as any) === disputeAt + 1800,
     "substitution: short trade → backup eligible at half the remaining life");
 
+  // ── v2.3: committed substitution grace ceiling ─────────────────────────
+  // The locker commits a SHORTER ceiling; eligibility = dispute + min(grace,
+  // half-life). Long trade so half-life isn't the binding constraint.
+  {
+    const graced = {
+      ...state,
+      lock: { ...state.lock, substitutionGraceSeconds: 60 },
+    };
+    assert(substitutionEligibleAt(graced as any) === disputeAt + 60,
+      "v2.3 grace: committed 60s ceiling opens the floor a minute after dispute");
+    // Half-life still floors it: a 120s-remaining trade with a 60s grace →
+    // min(60, 60) = 60.
+    const gracedShort = {
+      ...state,
+      expiresAt: disputeAt + 120,
+      lock: { ...state.lock, substitutionGraceSeconds: 60 },
+    };
+    assert(substitutionEligibleAt(gracedShort as any) === disputeAt + 60,
+      "v2.3 grace: half-life and committed grace agree at 60");
+    // A committed grace ABOVE the 4h max is clamped down — never longer.
+    const gracedHuge = {
+      ...state,
+      lock: { ...state.lock, substitutionGraceSeconds: 999_999 },
+    };
+    assert(substitutionEligibleAt(gracedHuge as any) === disputeAt + SUBSTITUTION_GRACE_MAX_SECONDS,
+      "v2.3 grace: an over-max committed grace clamps to the 4h ceiling (never lengthens)");
+    // A committed 0 opens the floor immediately at dispute (still bounded by
+    // half-life, which is larger here).
+    const gracedZero = {
+      ...state,
+      lock: { ...state.lock, substitutionGraceSeconds: 0 },
+    };
+    assert(substitutionEligibleAt(gracedZero as any) === disputeAt,
+      "v2.3 grace: committed 0 → backup eligible at the dispute instant");
+    // Absent field ⇒ legacy 4h, byte-identical to pre-v2.3 (already asserted
+    // above via `state`, restated here against the clamp helper).
+    assert(clampSubstitutionGraceSeconds(undefined) === SUBSTITUTION_GRACE_MAX_SECONDS,
+      "v2.3 grace: absent committed grace defaults to the 4h ceiling");
+    assert(clampSubstitutionGraceSeconds(-5) === 0,
+      "v2.3 grace: negative grace clamps to 0");
+    assert(clampSubstitutionGraceSeconds(90) === 90,
+      "v2.3 grace: in-range grace passes through");
+  }
+
+  // The committed grace survives a real LOCK round-trip through the reducer.
+  {
+    const create = createEvent({ communityArbiters: POOL });
+    let s = (applyEvent(null, create) as any).state;
+    const lk = lockEvent(create.raw.id);
+    lk.payload.arbiterPoolShare = true;
+    lk.payload.substitutionGraceSeconds = 120;
+    s = (applyEvent(s, lk) as any).state;
+    assert(s.lock.substitutionGraceSeconds === 120,
+      "v2.3 grace: reducer persists the committed grace from the LOCK payload");
+    const bv = voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, lk.raw.id);
+    s = (applyEvent(s, bv) as any).state;
+    const sv = voteEvent(Role.SELLER, SELLER_PK, Outcome.REFUND, bv.raw.id);
+    s = (applyEvent(s, sv) as any).state;
+    assert(substitutionEligibleAt(s) === sv.raw.created_at + 120,
+      "v2.3 grace: end-to-end LOCK→dispute uses the committed 120s ceiling");
+  }
+
   const backup = order[1];
 
   // Too early → SUBSTITUTE_TOO_EARLY (1s before the boundary).
@@ -2963,6 +3027,55 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Kenya KES/Afribit carries the bootstrap official arbiter pool");
   assert(getTrustedArbiterPool({ community: "ke-kes-bitsacco" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
     "Kenya KES/Bitsacco carries the bootstrap official arbiter pool");
+
+  // ── v2.3: arbiter provenance — close the "arbiter door" ────────────────
+  console.log("\n── ARBITER PROVENANCE (v2.3) ──");
+  {
+    const OFFICIAL = BLF_OFFICIAL_ARBITERS;
+    const SOCK = "ab".repeat(32); // a key not in any trusted pool
+    const SOCK2 = "cd".repeat(32);
+
+    // All-official pool → verified, no warnings.
+    const clean = classifyArbiterProvenance(OFFICIAL, OFFICIAL);
+    assert(clean.verified === true, "provenance: all-official pool is verified");
+    assert(clean.hasPool === true, "provenance: non-empty pool reports hasPool");
+    assert(clean.unrecognized.length === 0, "provenance: all-official pool has no unrecognized members");
+    assert(clean.recognized.length === OFFICIAL.length, "provenance: every official key is recognized");
+
+    // Stuffed pool: one official + two sock puppets → NOT verified, both flagged.
+    const stuffed = classifyArbiterProvenance([OFFICIAL[0], SOCK, SOCK2], OFFICIAL);
+    assert(stuffed.verified === false, "provenance: a pool with sock puppets is NOT verified");
+    assert(stuffed.unrecognized.length === 2, "provenance: both sock puppets are flagged");
+    assert(stuffed.unrecognized.includes(SOCK) && stuffed.unrecognized.includes(SOCK2),
+      "provenance: the unrecognized list names the exact sock-puppet keys");
+    assert(stuffed.recognized.length === 1, "provenance: the genuine official key is still recognized");
+
+    // Fully hostile pool: every member is a sock puppet → all unrecognized.
+    const hostile = classifyArbiterProvenance([SOCK, SOCK2], OFFICIAL);
+    assert(hostile.verified === false && hostile.unrecognized.length === 2,
+      "provenance: an all-sock-puppet pool is fully unrecognized");
+
+    // Empty pool (raw/legacy escrow, no community arbiter) → neutral, not a warning.
+    const empty = classifyArbiterProvenance([], OFFICIAL);
+    assert(empty.verified === false, "provenance: empty pool is not 'verified' (nothing to verify)");
+    assert(empty.hasPool === false, "provenance: empty pool reports hasPool=false (neutral UI)");
+    assert(empty.unrecognized.length === 0 && empty.recognized.length === 0,
+      "provenance: empty pool produces no recognized/unrecognized entries");
+
+    // Mixed-case / duplicate inputs normalize and dedupe before classifying.
+    const messy = classifyArbiterProvenance(
+      [OFFICIAL[0].toUpperCase(), OFFICIAL[0], SOCK.toUpperCase()],
+      OFFICIAL,
+    );
+    assert(messy.recognized.length === 1, "provenance: case-variant duplicate official key dedupes to one recognized");
+    assert(messy.unrecognized.length === 1, "provenance: case-variant sock puppet still flagged once");
+
+    // The trade pool a verifying device compares against is its own trusted
+    // set: an operator who locally trusts a key sees it as recognized.
+    const withLocalTrust = classifyArbiterProvenance([SOCK], [...OFFICIAL, SOCK]);
+    assert(withLocalTrust.verified === true,
+      "provenance: a key in THIS device's trusted pool reads as recognized (operator-added)");
+  }
 
   // Lookup with valid + missing slug
   assert(getCommunityBySlug("sn-cfa") !== null, "Valid slug returns community");

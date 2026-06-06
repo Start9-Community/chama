@@ -153,6 +153,24 @@ function readCreateExpiryOverride(): number | null {
     return null;
   }
 }
+
+/** v2.3 power-user substitution-grace override (parallels the CREATE expiry
+ *  override). Committed into the LOCK so it's consensus-safe — every client
+ *  replays the same eligibility moment. Returns null unless
+ *  chama_substitution_grace_seconds holds a value in [0, 4h]; the reducer
+ *  clamps again, so this is just the device-side sanity gate. Lets a tester
+ *  drive short backup floors without waiting hours. */
+function readSubstitutionGraceOverride(): number | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem("chama_substitution_grace_seconds");
+    if (raw === null || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 && n <= 4 * 3600 ? Math.floor(n) : null;
+  } catch {
+    return null;
+  }
+}
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
@@ -1168,7 +1186,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     const client = requireClient();
     const bridge = requireBridge();
     try {
-      const result = await bridge.lockAndPublish(escrowId, opts);
+      // v2.3: fold in the consensus-safe substitution-grace override (if the
+      // power-user card set one) so it rides into the signed LOCK. Absent ⇒
+      // legacy 4h default.
+      const graceOverride = readSubstitutionGraceOverride();
+      const result = await bridge.lockAndPublish(escrowId, {
+        ...opts,
+        ...(graceOverride !== null ? { substitutionGraceSeconds: graceOverride } : {}),
+      });
       vibrate([60, 30, 60, 30, 120]);
       // Refresh balance after spending ecash
       refreshBalanceRef.current?.().catch(() => {});
@@ -1191,7 +1216,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     const client = requireClient();
     const bridge = requireBridge();
     try {
-      const result = await bridge.lockAndPublishWithEcash(escrowId, oobNotes, opts);
+      const graceOverride = readSubstitutionGraceOverride();
+      const result = await bridge.lockAndPublishWithEcash(escrowId, oobNotes, {
+        ...opts,
+        ...(graceOverride !== null ? { substitutionGraceSeconds: graceOverride } : {}),
+      });
       vibrate([60, 30, 60, 30, 120]);
       refreshBalanceRef.current?.().catch(() => {});
       return result;

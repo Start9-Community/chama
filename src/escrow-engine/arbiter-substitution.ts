@@ -31,8 +31,21 @@ import { pickArbiterFromPool } from "../arbiters/pool.js";
  *  to the same set so they can never diverge. */
 export const ARBITER_POOL_SHARE_CAP = 3;
 
-/** Max exclusivity for the assigned arbiter once a dispute starts. */
+/** Max exclusivity for the assigned arbiter once a dispute starts. Also the
+ *  ceiling a committed `substitutionGraceSeconds` is clamped to — a locker can
+ *  only ever make backups eligible SOONER than this, never later (a longer
+ *  window would just delay rescue of the locker's own funds, and healing
+ *  refunds at expiry regardless, so lengthening has no upside and we forbid
+ *  it). */
 export const SUBSTITUTION_GRACE_MAX_SECONDS = 4 * 3600;
+
+/** Clamp a requested/committed grace into the legal range [0, MAX]. Non-finite
+ *  / negative inputs fall back to the MAX default (legacy 4h behavior), so a
+ *  malformed field can never make the window longer than today's ceiling. */
+export function clampSubstitutionGraceSeconds(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return SUBSTITUTION_GRACE_MAX_SECONDS;
+  return Math.max(0, Math.min(SUBSTITUTION_GRACE_MAX_SECONDS, Math.floor(value)));
+}
 
 /** Low-level deterministic priority order. The LOCK builder calls this with
  *  the pubkeys it is about to commit (the arbiter isn't seated in state yet at
@@ -101,16 +114,20 @@ export function disputeStartAt(state: EscrowState): number | null {
 }
 
 /** The moment a BACKUP becomes eligible to cast the arbiter vote:
- *  disputeStartAt + min(4h, half the trade's remaining life). The adaptive
- *  floor keeps backups viable on short trades (a 2h-to-expiry dispute gives
- *  the assigned arbiter 1h, not never); already-expired edge floors at 0 so a
- *  merit resolution can still beat the expiry refund. Null while there is no
+ *  disputeStartAt + min(ceiling, half the trade's remaining life). The ceiling
+ *  is the locker's committed `substitutionGraceSeconds` (v2.3), clamped to
+ *  [0, 4h]; absent ⇒ the legacy 4h default, so old locks are unchanged. The
+ *  adaptive half-life floor keeps backups viable on short trades (a 2h-to-
+ *  expiry dispute gives the assigned arbiter 1h, not never); an already-expired
+ *  edge floors at 0 so a merit resolution can still beat the expiry refund.
+ *  Pure over committed state — every client converges. Null while there is no
  *  dispute. */
 export function substitutionEligibleAt(state: EscrowState): number | null {
   const start = disputeStartAt(state);
   if (start === null) return null;
+  const ceiling = clampSubstitutionGraceSeconds(state.lock?.substitutionGraceSeconds);
   const half = state.expiresAt
     ? Math.max(0, Math.floor((state.expiresAt - start) / 2))
-    : SUBSTITUTION_GRACE_MAX_SECONDS;
-  return start + Math.min(SUBSTITUTION_GRACE_MAX_SECONDS, half);
+    : ceiling;
+  return start + Math.min(ceiling, half);
 }

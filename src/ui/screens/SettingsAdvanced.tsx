@@ -353,6 +353,10 @@ export function SettingsAdvanced({
         <TestExpiryOverrideCard />
       )}
 
+      {(powerUserOn || isDev || simOn) && (
+        <TestSubstitutionGraceCard />
+      )}
+
       {!(powerUserOn || isDev) && (
         <div style={{
           padding: 24, textAlign: "center" as const,
@@ -717,6 +721,99 @@ function TestExpiryOverrideCard() {
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder="e.g. 1800"
+          inputMode="numeric"
+          style={{ ...inputStyle, flex: 1, fontFamily: T.mono, fontSize: 12 }}
+        />
+        <button
+          onClick={save}
+          disabled={!valid}
+          style={{
+            background: valid ? T.amberDim : "none",
+            border: `1px solid ${valid ? T.amber + "66" : T.border}`,
+            color: valid ? T.amber : T.muted,
+            fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+            padding: "8px 12px", borderRadius: T.rs,
+            cursor: valid ? "pointer" : "default",
+          }}
+        >
+          Set
+        </button>
+        <button
+          onClick={clear}
+          style={{
+            background: "none", border: `1px solid ${T.border}`, color: T.muted,
+            fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+            padding: "8px 12px", borderRadius: T.rs, cursor: "pointer",
+          }}
+        >
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Substitution-grace test lever (v2.3) ─────────────────────────────────
+// Writes chama_substitution_grace_seconds, committed into the LOCK by the
+// locking device. Consensus-safe like the expiry override: every client
+// replays the same committed grace, so the backup-arbiter floor opens at the
+// identical moment everywhere. Lets a tester drive a SHORT floor (e.g. 60s)
+// without manufacturing a long-expiry trade first. Power-user gated.
+const SUBSTITUTION_GRACE_OVERRIDE_KEY = "chama_substitution_grace_seconds";
+
+function readGraceOverrideRaw(): string {
+  try {
+    return typeof localStorage === "undefined"
+      ? ""
+      : localStorage.getItem(SUBSTITUTION_GRACE_OVERRIDE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function TestSubstitutionGraceCard() {
+  const [value, setValue] = useState<string>(() => readGraceOverrideRaw());
+  const active = readGraceOverrideRaw() !== "";
+  const parsed = Number(value);
+  const valid = Number.isFinite(parsed) && parsed >= 0 && parsed <= 4 * 3600;
+
+  const save = () => {
+    try {
+      if (!valid) return;
+      localStorage.setItem(SUBSTITUTION_GRACE_OVERRIDE_KEY, String(Math.floor(parsed)));
+      setValue(String(Math.floor(parsed)));
+    } catch { /* storage unavailable — no-op */ }
+  };
+  const clear = () => {
+    try {
+      localStorage.removeItem(SUBSTITUTION_GRACE_OVERRIDE_KEY);
+      setValue("");
+    } catch { /* no-op */ }
+  };
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${active ? T.amber : T.border}`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 600, color: active ? T.amber : T.muted,
+        fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
+      }}>
+        TEST SUBSTITUTION GRACE {active ? "· ACTIVE" : "(POWER USER)"}
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 12 }}>
+        Sets the grace ceiling (seconds, 0 – 4h) committed into trades LOCKED on
+        this device — how long the assigned arbiter keeps the dispute to itself
+        before a backup may step in. 60 opens the floor a minute after a dispute
+        instead of hours; still floored by half the trade's remaining life.
+        Clear it after testing.
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="e.g. 60"
           inputMode="numeric"
           style={{ ...inputStyle, flex: 1, fontFamily: T.mono, fontSize: 12 }}
         />

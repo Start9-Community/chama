@@ -402,6 +402,16 @@ export interface LockPayload {
    *  absent. Buyer/seller shares stay strictly holder-only. Old clients
    *  ignore this field and keep working in every non-substituted flow. */
   arbiterPoolShare?: boolean;
+  /** Arbiter substitution grace (v2.3): the locker's committed ceiling, in
+   *  seconds, on how long the assigned arbiter keeps EXCLUSIVE rights to the
+   *  arbiter vote after a dispute starts before a pool backup may step in.
+   *  Consensus-safe exactly like `expirySeconds`: it rides in the signed LOCK
+   *  so every client computes the identical eligibility moment. Clamped to
+   *  [0, SUBSTITUTION_GRACE_MAX_SECONDS] and still adaptively floored by half
+   *  the trade's remaining life (see substitutionEligibleAt). Absent ⇒ the
+   *  legacy 4h ceiling, byte-identical to pre-v2.3 behavior. Old clients
+   *  ignore the field. */
+  substitutionGraceSeconds?: number;
   /** Breakdown of amounts (2-way split since v0.1.71) */
   sellerReceivesMsats: number;
   arbiterFeeMsats: number;
@@ -779,6 +789,12 @@ export interface EscrowState {
      *  backup may cast the arbiter vote after the grace window. Absent ⇒
      *  assigned-arbiter-only (every pre-substitution lock). */
     arbiterPoolShare?: boolean;
+    /** Arbiter substitution grace ceiling (v2.3), seconds, as committed in the
+     *  LOCK. Read by substitutionEligibleAt as the max-exclusivity window for
+     *  the assigned arbiter (still floored by half the remaining life). Absent
+     *  ⇒ the legacy 4h default. Consensus-safe: every client replays the same
+     *  committed value. */
+    substitutionGraceSeconds?: number;
     /** PR 3: revealed payment handle for the trade. Populated by
      *  handleLock when the LockPayload carried handle/rail fields.
      *  null when the trade is a non-fiat vertical (marketplace digital,
