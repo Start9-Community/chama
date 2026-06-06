@@ -293,6 +293,17 @@ export function clearSeedCache(): void {
   cachedForPubkey = null;
 }
 
+/** v2.4 — read the in-memory BIP-39 mnemonic for the recovery-phrase reveal
+ *  (Me › Advanced). Returns the 12 words ONLY after getOrCreateSeed has run
+ *  this session (i.e. the wallet initialized); null otherwise, so the UI can
+ *  prompt the user to connect first. The words never leave the device here —
+ *  this is the user's own offline-backup escape hatch, the private key to the
+ *  ecash Chama never custodies. Returns a copy so callers can't mutate the
+ *  cache. */
+export function getCachedSeedWords(): string[] | null {
+  return cachedSeed ? [...cachedSeed] : null;
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // PUBLIC API
 // ══════════════════════════════════════════════════════════════════════════

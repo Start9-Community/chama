@@ -16,6 +16,8 @@ import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
 } from "../../payments/lightning-fees.js";
+import { getCachedSeedWords } from "../../fedimint/seed-manager.js";
+import { QRCode } from "../QRCode.js";
 
 // Settings → Advanced — the home of Power-user mode (formerly
 // "Sandbox mode" through v0.4.1) and the federation-switching tools
@@ -205,6 +207,11 @@ export function SettingsAdvanced({
           />
         )}
       </div>
+
+      {/* v2.4 — Recovery phrase. Visible to ALL users (not power-user gated):
+          backing up your own funds is a right, not an advanced toggle. Chama
+          is not a wallet — these 12 words are the private key to the ecash. */}
+      <RecoveryPhraseCard />
 
       {/* Power-user toggle */}
       <div style={{
@@ -669,6 +676,144 @@ function NwcPermissionCard({
       }}>
         {hint}
       </div>
+    </div>
+  );
+}
+
+// ── Recovery phrase (v2.4) ───────────────────────────────────────────────
+// Chama is not a wallet — it puts the user in total control. The 12-word
+// BIP-39 mnemonic is the private key to the ecash that passed through their
+// account; it lives NIP-44-encrypted on Nostr, but the user has every right to
+// hold it offline too (paper backup) so they can restore on any Fedimint
+// wallet even if they lose this device or their Nostr account. Hidden by
+// default behind a deliberate reveal; the words never leave the device unless
+// the user copies/QRs them on purpose.
+function RecoveryPhraseCard() {
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [showQr, setShowQr] = useState(false);
+  const words = getCachedSeedWords();
+  const phrase = words ? words.join(" ") : "";
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.border}`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+        letterSpacing: 1, marginBottom: 8,
+      }}>
+        RECOVERY PHRASE
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 12 }}>
+        Chama is not a wallet — it puts you in total control. These 12 words are
+        the private key to the ecash that passed through your account. Back them
+        up offline and you can restore your funds on any Fedimint wallet, even if
+        you lose this device or your Nostr account.
+      </div>
+
+      {!words ? (
+        <div style={{
+          padding: "10px 12px", borderRadius: T.rs,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 11, lineHeight: 1.5,
+        }}>
+          Connect your Chama first, then come back to reveal your recovery phrase.
+        </div>
+      ) : !revealed ? (
+        <>
+          <div style={{
+            padding: "10px 12px", borderRadius: T.rs, marginBottom: 12,
+            background: T.amberDim, border: `1px solid ${T.amber}44`,
+            color: T.amber, fontFamily: T.mono, fontSize: 10, lineHeight: 1.6,
+          }}>
+            ⚠ Anyone with these words can take your funds. Never type them into a
+            website, and never share them — Chama will never ask for them. Make
+            sure no one is watching your screen.
+          </div>
+          <button
+            onClick={() => setRevealed(true)}
+            style={{
+              width: "100%", padding: "11px 14px", borderRadius: T.rs,
+              background: T.accentDim, border: `1px solid ${T.accent}66`,
+              color: T.accent, fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+              cursor: "pointer", letterSpacing: 0.5,
+            }}
+          >
+            Reveal recovery phrase
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={{
+            display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6,
+            marginBottom: 12,
+          }}>
+            {words.map((word, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "baseline", gap: 6,
+                padding: "7px 10px", borderRadius: T.rs,
+                background: T.surface, border: `1px solid ${T.border}`,
+                fontFamily: T.mono,
+              }}>
+                <span style={{ fontSize: 9, color: T.muted, minWidth: 14, textAlign: "right" }}>{i + 1}</span>
+                <span style={{ fontSize: 12, color: T.text, fontWeight: 700 }}>{word}</span>
+              </div>
+            ))}
+          </div>
+
+          {showQr && (
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+              <QRCode data={phrase} size={200} />
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button
+              onClick={() => {
+                try {
+                  navigator.clipboard?.writeText(phrase);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                } catch { /* clipboard unavailable — words are on screen to transcribe */ }
+              }}
+              style={{
+                flex: 1, padding: "9px 12px", borderRadius: T.rs,
+                background: copied ? T.greenDim : T.surface,
+                border: `1px solid ${copied ? T.green + "66" : T.border}`,
+                color: copied ? T.green : T.muted,
+                fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+              }}
+            >
+              {copied ? "✓ Copied" : "Copy"}
+            </button>
+            <button
+              onClick={() => setShowQr((v) => !v)}
+              style={{
+                flex: 1, padding: "9px 12px", borderRadius: T.rs,
+                background: T.surface, border: `1px solid ${T.border}`,
+                color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+              }}
+            >
+              {showQr ? "Hide QR" : "Show QR"}
+            </button>
+            <button
+              onClick={() => { setRevealed(false); setShowQr(false); }}
+              style={{
+                flex: 1, padding: "9px 12px", borderRadius: T.rs,
+                background: T.surface, border: `1px solid ${T.border}`,
+                color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+              }}
+            >
+              Hide
+            </button>
+          </div>
+          <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, textAlign: "center" }}>
+            Write these on paper, in order. Copy and QR expose the phrase — use them only into your own backup.
+          </div>
+        </>
+      )}
     </div>
   );
 }

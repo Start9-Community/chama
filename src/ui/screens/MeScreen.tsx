@@ -48,6 +48,7 @@ import {
   describeSatsTrace,
   type SatsTraceEntry,
 } from "../../payments/sats-trace.js";
+import { getEcashExport } from "../../payments/ecash-exports.js";
 import { T } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
@@ -80,6 +81,7 @@ export function MeScreen({
   hasActiveCommitment,
   satsTrace,
   onRecoverSats,
+  onWithdrawEcash,
   onSignOut,
   communitySlug,
   onSelectCommunity,
@@ -102,6 +104,8 @@ export function MeScreen({
   hasActiveCommitment: boolean;
   satsTrace?: SatsTraceEntry | null;
   onRecoverSats: () => void;
+  /** v2.4 #56 — open the "withdraw as ecash" (fee-free Fedimint note) flow. */
+  onWithdrawEcash?: () => void;
   onSignOut: () => void;
   /** v2.3.1: the user's current Chama. The Browse pill is now view-only;
    *  this screen is the deliberate place to CHANGE it. */
@@ -132,6 +136,10 @@ export function MeScreen({
   // same line the switch guard and recovery banner use). The card stays as a
   // quiet "accumulating" note until the pile is worth the fees.
   const recoverWorthwhile = !isSmallLeftover && localRecoverableSats > 0;
+  // v2.4 #56 — a pending ecash export (generated but not yet confirmed
+  // imported). Surfaced even when the balance reads 0, so the user can always
+  // get back to the bearer note they minted.
+  const pendingEcashExport = getEcashExport();
   const isClaimPayoutRecovery = !isSmallLeftover && Boolean(satsTrace?.escrowId);
   const traceCopy = describeSatsTrace(satsTrace ?? null);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -250,6 +258,48 @@ export function MeScreen({
                 ? "Accumulating — too small to recover over Lightning yet"
                 : "Waiting for enough sats to recover"}
           </button>
+          {/* v2.4 #56 — fee-free ecash exit. Available for ANY balance,
+              including dust the LN "Recover" button can't economically move.
+              Spends the balance into a Fedimint note importable into Fedi or
+              any Fedimint wallet on this federation. */}
+          {onWithdrawEcash && (
+            <button
+              onClick={onWithdrawEcash}
+              style={{
+                width: "100%", padding: "11px", marginTop: 8,
+                background: T.surface, border: `1px solid ${T.teal}55`,
+                borderRadius: T.rs, color: T.teal,
+                fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer",
+              }}
+            >
+              Withdraw as ecash · no LN fees
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* v2.4 #56 — pending ecash export re-entry. After generating a note the
+          balance reads 0, so the SATS RECOVERY card hides; this is how the user
+          gets back to the bearer note they minted until they confirm import. */}
+      {pendingEcashExport && onWithdrawEcash && (
+        <div
+          onClick={onWithdrawEcash}
+          style={{
+            background: T.tealDim, border: `1px solid ${T.teal}66`,
+            borderRadius: T.r, padding: 20, marginBottom: 16, cursor: "pointer",
+          }}
+        >
+          <div style={{
+            fontSize: 11, fontWeight: 600, color: T.teal,
+            fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
+          }}>
+            PENDING ECASH EXPORT
+          </div>
+          <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.5 }}>
+            You minted{" "}
+            <BitcoinAmount sats={Math.floor(pendingEcashExport.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
+            {" "}as an ecash note{pendingEcashExport.federationLabel ? ` on ${pendingEcashExport.federationLabel}` : ""}. Tap to copy or scan it again, then confirm once it's imported.
+          </div>
         </div>
       )}
 

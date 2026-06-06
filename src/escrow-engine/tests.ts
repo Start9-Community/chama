@@ -160,6 +160,11 @@ import {
   stashPendingRedemption,
 } from "../fedimint/pending-redemptions.js";
 import {
+  stashEcashExport,
+  getEcashExport,
+  clearEcashExport,
+} from "../payments/ecash-exports.js";
+import {
   recoverSeedWordsFromEvents,
   queryUntilFound,
   FEDI_SEED_DECRYPT_RETRY_DELAYS_MS,
@@ -3017,6 +3022,29 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(DEFAULT_COMMUNITY_SLUG === "us-blf", "Default community is us-blf (BLF, v0.5.0)");
   assert(DEFAULT_RELAYS.length >= 5, "Default relay pool has at least 5 stable relays");
   (globalThis as any).localStorage.clear();
+
+  // ── v2.4 #56: ecash export stash (crash-safe withdraw-as-ecash) ──────────
+  console.log("\n── ECASH EXPORT STASH (v2.4) ──");
+  {
+    (globalThis as any).localStorage.clear();
+    setLocalStorageUserScope("npub_export_test_aaaa");
+    assert(getEcashExport() === null, "ecash-export: empty by default");
+    stashEcashExport({ notes: "AwEEtestnote", amountMsats: 1500, federationLabel: "BLF" });
+    const got = getEcashExport();
+    assert(
+      got !== null && got.notes === "AwEEtestnote" && got.amountMsats === 1500 && got.federationLabel === "BLF",
+      "ecash-export: stash roundtrips notes + amount + label",
+    );
+    // Scoped per npub — a pending export must never bleed to another user.
+    setLocalStorageUserScope("npub_export_test_bbbb");
+    assert(getEcashExport() === null, "ecash-export: a different npub sees no pending export (scoped)");
+    setLocalStorageUserScope("npub_export_test_aaaa");
+    clearEcashExport();
+    assert(getEcashExport() === null, "ecash-export: clear removes the pending export (user confirmed import)");
+    setLocalStorageUserScope(null);
+    (globalThis as any).localStorage.clear();
+  }
+
   assert(
     normalizeTrustedArbiterInput(` ${ARBITER_PK},${ARBITER_PK.toUpperCase()} invalid ${ARBITER2_PK} `).length === 2,
     "Trusted arbiter input normalizes, dedupes, and ignores invalid entries"

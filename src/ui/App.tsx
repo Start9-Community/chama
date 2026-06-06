@@ -68,6 +68,7 @@ import { FundWalletModal } from "./panels/FundWalletModal.js";
 import { AtomicFundingModal } from "./panels/AtomicFundingModal.js";
 import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
+import { EcashExportModal } from "./panels/EcashExportModal.js";
 import { addOrTouchPayoutDestination, listPayoutDestinations } from "../payments/payout-destinations.js";
 import {
   addOrTouchSavedNwcConnection,
@@ -215,6 +216,8 @@ export default function App() {
   const [toast, setToast] = useState<{ message: ReactNode; type: "success" | "error" | "info" } | null>(null);
   toastRef.current = setToast;
   const [showFundModal, setShowFundModal] = useState(false);
+  // v2.4 #56: "withdraw as ecash" modal (fee-free Fedimint note export).
+  const [showEcashExport, setShowEcashExport] = useState(false);
   const [autoLoginChecked, setAutoLoginChecked] = useState(false);
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<PendingDestroyConfirm | null>(null);
@@ -1258,6 +1261,23 @@ export default function App() {
           on the production path. claimAndRedeem stays as a building
           block + Sandbox path; production winners always go through
           this modal. */}
+      {/* v2.4 #56 — fee-free ecash exit. Spends the local balance into a
+          Fedimint bearer note; crash-safe stash + pending-export surface in Me
+          guard against loss. */}
+      {showEcashExport && (
+        <EcashExportModal
+          balanceMsats={fedimint.balanceMsats ?? 0}
+          federationLabel={
+            getCommunityBySlug(browseCommunity)?.displayName
+            ?? fedimint.federationName
+            ?? "your federation"
+          }
+          spendNotes={(amountMsats) => actions.spendNotes(amountMsats)}
+          onExported={() => { actions.refreshBalance().catch(() => {}); }}
+          onClose={() => setShowEcashExport(false)}
+        />
+      )}
+
       {pendingClaim && (
         <ClaimPayoutModal
           escrowId={pendingClaim.escrowId}
@@ -1911,6 +1931,7 @@ export default function App() {
             onOpenPayoutDestinations={() => setView("payout-destinations")}
             onOpenAdvanced={() => { setAdvancedFocusNwc(false); setView("advanced"); }}
             onSignOut={handleSignOut}
+            onWithdrawEcash={() => setShowEcashExport(true)}
             communitySlug={browseCommunity}
             onSelectCommunity={handleSelectCommunity}
           />
