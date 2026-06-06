@@ -34,6 +34,7 @@ import {
 import { getWinner } from "../../escrow-engine/state-machine.js";
 import { arbiterVotePriority, substitutionEligibleAt } from "../../escrow-engine/arbiter-substitution.js";
 import { BLF_OFFICIAL_ARBITERS } from "../../arbiters/pool.js";
+import { getPickerCommunities, getCommunityBySlug } from "../../communities/registry.js";
 import {
   MAIN_SURFACE_RECOVERY_MIN_SATS,
   formatStepInCountdown,
@@ -80,6 +81,8 @@ export function MeScreen({
   satsTrace,
   onRecoverSats,
   onSignOut,
+  communitySlug,
+  onSelectCommunity,
 }: {
   pubkey: string;
   kind0Enabled?: boolean;
@@ -100,6 +103,12 @@ export function MeScreen({
   satsTrace?: SatsTraceEntry | null;
   onRecoverSats: () => void;
   onSignOut: () => void;
+  /** v2.3.1: the user's current Chama. The Browse pill is now view-only;
+   *  this screen is the deliberate place to CHANGE it. */
+  communitySlug?: string | null;
+  /** Bound to handleSelectCommunity — switches Chama (with the same funds-at-
+   *  risk destroy-confirm guard the Browse pill used to trigger). */
+  onSelectCommunity?: (slug: string) => void;
 }) {
   const npubShort = pubkey.slice(0, 8) + "…" + pubkey.slice(-4);
   const [localKind0On, setLocalKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
@@ -168,6 +177,14 @@ export function MeScreen({
           </div>
         </div>
       </div>
+
+      {onSelectCommunity && (
+        <YourChamaCard
+          communitySlug={communitySlug ?? null}
+          hasActiveCommitment={hasActiveCommitment}
+          onSelectCommunity={onSelectCommunity}
+        />
+      )}
 
       {showLocalRecovery && (
         <div style={{
@@ -1410,6 +1427,115 @@ function voteText(outcome?: Outcome): string {
   if (outcome === Outcome.RELEASE) return "release";
   if (outcome === Outcome.REFUND) return "refund";
   return "pending";
+}
+
+// v2.3.1 — the deliberate "change your Chama" surface. The Browse pill is now
+// view-only; switching lives here so it's an intentional, between-trades act.
+// While the user is party to a live trade, switching is held back with a clear
+// reason (their locked shares live on the current Chama; a switch would strand
+// the claim until they switch back — the data-layer gate is tracked as a
+// follow-up). Idle → pick freely; the same funds-at-risk destroy-confirm guard
+// the pill used to fire still applies downstream via onSelectCommunity.
+function YourChamaCard({
+  communitySlug,
+  hasActiveCommitment,
+  onSelectCommunity,
+}: {
+  communitySlug: string | null;
+  hasActiveCommitment: boolean;
+  onSelectCommunity: (slug: string) => void;
+}) {
+  const [changing, setChanging] = useState(false);
+  const current = communitySlug ? getCommunityBySlug(communitySlug) : null;
+  const communities = [...getPickerCommunities()].sort((a, b) =>
+    a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" }),
+  );
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.border}`,
+      borderRadius: T.r, padding: 20, marginBottom: 16,
+    }}>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        marginBottom: 12,
+      }}>
+        <div style={{
+          fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1,
+        }}>
+          YOUR CHAMA
+        </div>
+        {!hasActiveCommitment && (
+          <button
+            onClick={() => setChanging((v) => !v)}
+            style={{
+              background: changing ? T.surface : T.accentDim,
+              border: `1px solid ${changing ? T.border : T.accent + "66"}`,
+              color: changing ? T.muted : T.accent,
+              fontFamily: T.mono, fontSize: 10, fontWeight: 800, letterSpacing: 0.5,
+              padding: "5px 10px", borderRadius: T.rs, cursor: "pointer",
+            }}
+          >
+            {changing ? "Cancel" : "Change →"}
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <span style={{ fontSize: 24, lineHeight: 1 }}>{current?.flagEmoji ?? "🌐"}</span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, fontWeight: 600 }}>
+            {current?.disambiguator ?? current?.displayName ?? "Global"}
+          </div>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
+            {current?.currency ?? "USD"}
+          </div>
+        </div>
+      </div>
+
+      {hasActiveCommitment && (
+        <div style={{
+          marginTop: 12, padding: "9px 11px", borderRadius: T.rs,
+          background: T.amberDim, border: `1px solid ${T.amber}44`,
+          fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
+        }}>
+          You have a live trade. Finish it before switching — your locked sats
+          live on this Chama, and a switch would put your claim on hold until you
+          switch back.
+        </div>
+      )}
+
+      {changing && !hasActiveCommitment && (
+        <div style={{
+          marginTop: 12, display: "flex", flexWrap: "wrap" as const, gap: 6,
+        }}>
+          {communities.map((c) => {
+            const active = c.slug === communitySlug;
+            return (
+              <button
+                key={c.slug}
+                onClick={() => {
+                  setChanging(false);
+                  if (!active) onSelectCommunity(c.slug);
+                }}
+                style={{
+                  padding: "7px 12px", borderRadius: 18,
+                  background: active ? T.tealDim : T.surface,
+                  border: `1px solid ${active ? T.teal + "66" : T.border}`,
+                  color: active ? T.teal : T.muted,
+                  fontFamily: T.mono, fontSize: 11, fontWeight: 600,
+                  cursor: active ? "default" : "pointer",
+                  whiteSpace: "nowrap" as const,
+                }}
+              >
+                {c.flagEmoji} {c.disambiguator ?? c.displayName} · {c.currency}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function buildMeDashboard(

@@ -260,6 +260,17 @@ export function SettingsAdvanced({
             }}>
               ROUTE
             </div>
+            {/* v2.3.1: disambiguate from Me › Your Chama. That surface switches
+                your COMMUNITY (registry-listed, friendly, sets your home). This
+                one switches the raw FEDERATION — for custom or non-listed feds
+                you paste yourself. Two layers, kept on purpose. */}
+            <div style={{
+              fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
+              marginBottom: 10,
+            }}>
+              For a custom or non-listed federation. To change your community
+              Chama, use Your Chama on the Me screen.
+            </div>
             {/* SwitchFederationPanel renders for both joined and pre-join
                 states — the shell's onSwitchFederation handler dispatches
                 init-vs-switch based on whether a fed is loaded. v0.1.85:

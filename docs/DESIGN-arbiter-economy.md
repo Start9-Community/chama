@@ -182,3 +182,103 @@ per-counterparty ratings are captured at claim/complete:
 3. Consensus admission events (apply → community vote → roster update).
 4. Duty-fee wiring on the dispute path; response-window rotation scoring.
 5. Bonds + slashing (last; needs ratings + admission + a community escrow).
+
+---
+
+## Maintainer field-read (2026-06-05) — refinements + open tensions
+
+Captured live while reading this doc the day v2.3 shipped. Each item is tagged
+ACCEPTED (folds cleanly into the arc), TENSION (good idea that fights another
+principle — resolve before building), or DECISION (a product call made here).
+
+### A. Arbiter JOIN must respect deterministic assignment — DECISION → v2.3.1
+The "arbiter door" guard validates membership and pool provenance, but in
+CREATED state the auto-assigned arbiter is only a *preview* — the slot is unseated
+until a JOIN or the LOCK seats it. So a *legit* pool member who is NOT the
+deterministically-assigned arbiter could front-run a JOIN and self-assign to a
+trade they want to sway. Provenance is happy (they're in the pool); deterministic
+assignment is quietly defeated. Fix: only `pickArbiterFromPool(pool, id,
+[buyer,seller])` (= priority 0) may JOIN-seat the arbiter slot pre-lock; any other
+pool member gets a loud `ARBITER_NOT_ASSIGNED` deny. Safe w.r.t. substitution and
+healing — backups never JOIN; they step in via *vote* after the grace.
+
+### B. Manual Chama switch is gated on ACTIVE COMMITMENT, not just balance — DECISION
+Switching federation while a party to a LOCKED/disputed trade strands the user's
+shares (they live on the trade's federation; claim hard-fails with FED_MISMATCH
+until they switch back). The balance guard misses this because a locked locker's
+balance is 0. Gate a manual switch on active-commitment (the same predicate that
+drives the in-escrow pill / recovery suppression), not just withdrawable balance.
+Idle → switch freely. "Between trades," enforced honestly.
+
+### C. Rating-TIERED assignment + amount caps (the FIFA-ref principle) — ACCEPTED
+Apply the Lending tier model to arbiter auto-assignment: tier arbiters by
+accumulated rating, and gate high-value trades to higher-tier arbiters. A new or
+low-rated arbiter accrues history on small-amount trades; high-value trades route
+only to vetted, high-tier arbiters. "A FIFA referee vs a small-town soccer ref —
+not the same risk to mess up." This is "graduated franchise" with teeth: priority
+AND amount-ceiling both lean on non-gameable history. Bootstrap arbiters still
+need blind trust for their first trades (no ratings yet), so the tier-0 ceiling is
+deliberately low.
+
+### D. "Tread lightly" surfacing for low/no-rating arbiters — ACCEPTED
+The trader-facing complement to (C): when a trade's arbiter has no/low ratings,
+surface it loudly at the lock moment — "this arbiter is still building a record;
+consider keeping this trade under X sats" — and optionally enforce a soft max
+trade amount as a default the trader can override. Protects the trader by default;
+lets small arbiters earn their record on low stakes. Pairs with the public arbiter
+dashboard.
+
+### E. Graduated slashing — self-selected no-show is worse — ACCEPTED (nuanced)
+If an arbiter publishes an availability signal (kind:38104) for a window and then
+no-shows in that window, slash harder than a passive absence — they opted in and
+broke it. Same for a backup who accepts then bails. BUT: keep a grace band for
+genuine life events (a first miss is a warning, not a slash; patterns are what
+get punished). The goal is seriousness without scaring off good people who
+occasionally have a bad week. Slashing scales with pattern, not a single miss.
+
+### F. Bond is a FIDELITY bond, not PoS — REFRAME (maintainer dislikes PoS)
+Important framing the maintainer is right to insist on: this is a *performance/
+fidelity bond* (like a contractor's surety bond or a court bond) — collateral
+forfeitable on proven misconduct. It is NOT proof-of-stake: no block production,
+no yield-from-staking, no consensus weight bought with capital. Sizing idea
+(accepted): set the bond near what an arbiter can earn in a period, so a diligent
+arbiter naturally earns it back before profiting — skin in the game without
+locking out the un-wealthy permanently.
+
+### G. Bond CUSTODY — held by top-rated chamacitos, not a vague "community escrow" — DECISION + TENSION
+The maintainer rejects "community-controlled escrow" as under-defined ("who are
+the VIP members?"). Preferred model: the bond is locked with the *highest-rated
+chamacitos in that community* — elected officials with a reputation to lose, "like
+senators / the house." This is elegant: custody is recursive-trust, anchored in
+the same legible reputation everything else uses. TENSION to resolve before build:
+top-rated holders could still collude; mitigate with the same provenance +
+revocation transparency (their custody role is public and itself revocable), and
+consider requiring k-of-n among them to move a bond so no single official can
+slash unilaterally.
+
+### H. Arbiter as community MODERATOR — ACCEPTED role, TENSION on pay
+Proposed second duty: arbiters also keep the community safe — flag/mark (not
+delete; deletion is too harsh and not ours to do on a Nostr-native protocol)
+listings that look harmful, weekly. Good: it makes "arbiter" a real, ongoing
+community-leadership role, which justifies real selection rigor. TENSION: the
+maintainer floated "pay them 1% on each trade" for this. That fights the locked
+principle **duty pays, not power** (BACKLOG: flat dispute fee, NOT a percentage of
+every assignment) — a per-trade cut re-introduces exactly the volume/assignment-
+grabbing incentive that motivates (A)'s front-running fix. Resolution to decide:
+keep the dispute fee flat, and fund the moderation role separately — a fixed
+community stipend (from a treasury / small listing fee), not a slice of every
+trade. Same total comp is fine; the *shape* matters, because incentives follow the
+shape.
+
+### I. Arbiter application form + FAQ CTA — ACCEPTED (V3 surface)
+A small CTA widget: "Become a community arbiter" → application form + FAQ. This is
+the human on-ramp to consensus admission (§3). Low-effort, high-signal: it makes
+the recruitment path visible instead of tribal knowledge. Wire after the signed
+roster exists so applications resolve into a real admission flow.
+
+### J. Signed kind:38104 roster is the keystone — CONFIRMED
+The maintainer independently landed on this while reading §0's parenthetical: the
+signed, replayable roster is what lets provenance become a *hard gate* safely.
+Promote it from "later" to the FIRST build step (already #1 in Build order). It
+unblocks the hard gate, tiered assignment lookups, and the admission flow.
+

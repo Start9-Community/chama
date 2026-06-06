@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   type EscrowState,
   EscrowStatus,
@@ -71,19 +72,24 @@ export function TradeCard({
   const communityChipLabel = listingCommunity
     ? (listingCommunity.disambiguator ?? listingCommunity.displayName)
     : null;
-  const sellerContextLine = sellerPubkey && state.category !== "marketplace"
-    ? `Seller · ${sellerName ?? shortPubkey(sellerPubkey)}`
-    : null;
-  // When the viewer is a participant in their OWN trade (the Me list), show the
-  // counterparty's id so otherwise-identical orders (same store, same title —
-  // e.g. two race-locked units of "Adidas sneakers") are told apart at a glance.
-  // The seller especially must distinguish a real sale from an oversold duplicate.
+  // v2.3.1 — history/audit presentation. On your OWN trade (the Me list) you
+  // already know your role — you have the seller dashboard, and arbiters get
+  // their own view — so the card shows just the COUNTERPARTY (the other side),
+  // never "· You", plus the unique trade ID for audit. Identical-looking orders
+  // (same npub, same title) are still told apart by the id. On Browse (non-
+  // participant) we keep the single "Seller · X" context line. This also fixes
+  // the v2.3 double-"Seller" line: a buyer-viewer rendered the counterparty line
+  // ("Seller · X") AND the seller-context line ("Seller · X").
   const viewerRole = pubkey === state.participants[Role.SELLER] ? Role.SELLER
     : pubkey === state.participants[Role.BUYER] ? Role.BUYER : null;
+  const isParticipant = viewerRole !== null;
   const counterpartyPk = viewerRole === Role.SELLER ? participants[Role.BUYER]
     : viewerRole === Role.BUYER ? sellerPubkey : null;
-  const counterpartyLine = viewerRole && counterpartyPk
+  const counterpartyLine = counterpartyPk
     ? `${viewerRole === Role.SELLER ? "Buyer" : "Seller"} · ${profileNameFor(profileNames, counterpartyPk, kind0Enabled) ?? shortPubkey(counterpartyPk)}`
+    : null;
+  const sellerContextLine = !isParticipant && sellerPubkey && state.category !== "marketplace"
+    ? `Seller · ${sellerName ?? shortPubkey(sellerPubkey)}`
     : null;
   const status = STATUS[state.status] ?? STATUS.CREATED;
   const timeLine = compactJoinHoldRemaining(state, nowSec) ?? compactTimeRemaining(state, nowSec);
@@ -275,7 +281,7 @@ export function TradeCard({
           {counterpartyLine && (
             <div style={{
               marginTop: -4,
-              marginBottom: 9,
+              marginBottom: 6,
               color: viewerRole === Role.SELLER ? T.purple : T.amber,
               fontFamily: T.mono,
               fontSize: 10,
@@ -288,6 +294,8 @@ export function TradeCard({
               {counterpartyLine}
             </div>
           )}
+
+          {isParticipant && <TradeIdLine id={state.id} />}
 
           {sellerContextLine && (
             <div style={{
@@ -420,6 +428,41 @@ export function TradeCard({
 
 function shortPubkey(pubkey: string): string {
   return pubkey.length > 13 ? `${pubkey.slice(0, 6)}…${pubkey.slice(-4)}` : pubkey;
+}
+
+// v2.3.1 — the unique trade ID, surfaced on the user's own trade cards for
+// audit. Two same-npub, same-title trades are still distinct by this id. Tap to
+// copy (stopPropagation so it doesn't open the trade). Display is the point;
+// copy is the bonus that makes it shareable for a dispute or support thread.
+function TradeIdLine({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div
+      onClick={(e) => {
+        e.stopPropagation();
+        try {
+          navigator.clipboard?.writeText(id);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        } catch { /* clipboard unavailable — display still serves the audit */ }
+      }}
+      title="Tap to copy trade ID"
+      style={{
+        marginTop: -2, marginBottom: 9,
+        display: "inline-flex", alignItems: "center", gap: 5, maxWidth: "100%",
+        color: T.muted, fontFamily: T.mono, fontSize: 9, lineHeight: 1.4,
+        cursor: "pointer",
+      }}
+    >
+      <span style={{ color: copied ? T.green : T.muted, flexShrink: 0 }}>
+        {copied ? "✓ copied" : "ID"}
+      </span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const, opacity: 0.85 }}>
+        {id}
+      </span>
+      <span aria-hidden="true" style={{ flexShrink: 0, opacity: 0.6 }}>⧉</span>
+    </div>
+  );
 }
 
 function shortCategoryLabel(category: string): string {

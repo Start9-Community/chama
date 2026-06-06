@@ -856,14 +856,31 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
   }
 }
 
-// Arbiter must be in communityArbiters pool when one exists
+// Arbiter must be in communityArbiters pool when one exists — AND (v2.3.1)
+// must be the deterministically-ASSIGNED arbiter, not just any pool member.
 {
   const create = createEvent({ communityArbiters: [ARBITER_PK, ARBITER2_PK] });
   const r1 = applyEvent(null, create);
   if (r1.ok) {
-    const goodArbiter = joinEvent(Role.ARBITER, ARBITER_PK, create.raw.id);
-    const ok = applyEvent(r1.state, goodArbiter);
-    assertOk(ok, "Arbiter from pool can JOIN");
+    // The assigned arbiter is priority 0 = pickArbiterFromPool(pool, id,
+    // [buyer, seller]). Compute it so the test is robust to the escrow id
+    // rather than assuming ARBITER_PK.
+    const assigned = pickArbiterFromPool(
+      r1.state.communityArbiters,
+      r1.state.id,
+      [r1.state.participants[Role.BUYER], r1.state.participants[Role.SELLER]],
+    )!;
+    const nonAssigned = [ARBITER_PK, ARBITER2_PK].find((pk) => pk !== assigned)!;
+
+    const goodArbiter = joinEvent(Role.ARBITER, assigned, create.raw.id);
+    assertOk(applyEvent(r1.state, goodArbiter),
+      "The deterministically-assigned arbiter can JOIN");
+
+    // v2.3.1: a LEGIT pool member who is NOT the assigned arbiter is denied —
+    // this closes pool-insider front-running of the arbiter slot.
+    const frontRunner = joinEvent(Role.ARBITER, nonAssigned, create.raw.id);
+    assertErr(applyEvent(r1.state, frontRunner), "ARBITER_NOT_ASSIGNED",
+      "A non-assigned pool member is rejected (no slot front-running)");
 
     const stranger = joinEvent(Role.ARBITER, "ff".repeat(32), create.raw.id);
     assertErr(applyEvent(r1.state, stranger), "ARBITER_NOT_IN_POOL",

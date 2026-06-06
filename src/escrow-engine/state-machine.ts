@@ -45,6 +45,7 @@ import {
 import { payoutRecipientFor } from "./recipients.js";
 import { validateVoteShareEnvelope } from "./holder-shares.js";
 import { arbiterVotePriority, substitutionEligibleAt, clampSubstitutionGraceSeconds } from "./arbiter-substitution.js";
+import { pickArbiterFromPool } from "../arbiters/pool.js";
 
 // Re-export so existing callers (escrow-client, escrow-bridge, tests) keep
 // importing payoutRecipientFor from the state machine.
@@ -490,6 +491,25 @@ function handleJoin(state: EscrowState, event: ParsedEscrowEvent<JoinPayload>): 
         && !state.communityArbiters.includes(event.pubkey)) {
       return err("ARBITER_NOT_IN_POOL",
         "Arbiter pubkey is not in this trade's communityArbiters pool",
+        event.raw.id
+      );
+    }
+    // v2.3.1 — deterministic-assignment integrity. Membership (above) is not
+    // enough: a LEGIT pool member who is NOT the arbiter this escrow id
+    // deterministically selects could front-run a JOIN and seat themselves on
+    // a trade they want to sway. Only priority 0 — pickArbiterFromPool(pool,
+    // id, [buyer, seller]) — may JOIN-seat the slot pre-lock. Backups never
+    // JOIN; they step in by VOTING after the grace window (substitution) or on
+    // an expired trade (healing), so this can't strand either path. Empty pool
+    // ⇒ assigned is undefined ⇒ no gate (legacy volunteer-arbiter trades).
+    const assignedArbiter = pickArbiterFromPool(
+      state.communityArbiters,
+      state.id,
+      [state.participants[Role.BUYER], state.participants[Role.SELLER]],
+    );
+    if (assignedArbiter && event.pubkey !== assignedArbiter) {
+      return err("ARBITER_NOT_ASSIGNED",
+        "Only the deterministically-assigned arbiter may join this trade; backups step in by voting after the grace window",
         event.raw.id
       );
     }

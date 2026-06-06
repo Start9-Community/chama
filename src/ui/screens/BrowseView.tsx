@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { type EscrowState } from "../../escrow-engine/types.js";
-import { getPickerCommunities, getCommunityBySlug, type Community } from "../../communities/registry.js";
+import { getCommunityBySlug, type Community } from "../../communities/registry.js";
 import { T, BROWSE_CATS, inputStyle } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
@@ -21,7 +21,7 @@ import { type AmountDisplayMode } from "../amount-display.js";
 // balance==0; destroy-confirm modal when balance>0).
 export function BrowseView({
   browseCategory, setBrowseCategory,
-  browseCommunity, onSelectCommunity,
+  browseCommunity,
   amountDisplayMode,
   matchingListings, nonMatchingListings,
   stockByListing,
@@ -34,7 +34,6 @@ export function BrowseView({
   browseCategory: string;
   setBrowseCategory: (s: string) => void;
   browseCommunity: string;
-  onSelectCommunity: (slug: string) => void;
   amountDisplayMode: AmountDisplayMode;
   matchingListings: EscrowState[];
   nonMatchingListings: EscrowState[];
@@ -50,11 +49,6 @@ export function BrowseView({
   onOpenEscrow: (id: string) => void;
   onLoadById: (id: string) => void | Promise<void>;
 }) {
-  const pickerCommunities = useMemo(
-    () => [...getPickerCommunities()].sort(compareBrowseCommunities),
-    [],
-  );
-  const [showCommunityPicker, setShowCommunityPicker] = useState(false);
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [customInviteInput, setCustomInviteInput] = useState("");
@@ -107,15 +101,18 @@ export function BrowseView({
           </div>
         </div>
         {homeCommunity && (
-          <button
+          // v2.3.1: view-only identity chip. The community SWITCHER moved to
+          // Me › Your Chama so switching is a deliberate, between-trades act
+          // (and reclaims the Browse real estate the dropdown used to eat).
+          // This just tells you which Chama you're browsing as.
+          <div
             title={browseCommunityButtonLabel(homeCommunity)}
-            onClick={() => setShowCommunityPicker((v) => !v)}
             style={{
               padding: "7px 10px", borderRadius: 18,
               background: T.surface, border: `1px solid ${T.border}`,
               fontFamily: T.mono, fontSize: 11,
               display: "flex", alignItems: "center", gap: 6,
-              color: T.text, cursor: "pointer", minWidth: 0,
+              color: T.text, minWidth: 0,
               maxWidth: 174, flexShrink: 0,
             }}
           >
@@ -124,13 +121,12 @@ export function BrowseView({
               minWidth: 0, display: "flex", flexDirection: "column",
               alignItems: "flex-start", lineHeight: 1.1,
             }}>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 122 }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 132 }}>
                 {homeCommunity.disambiguator ?? homeCommunity.displayName}
               </span>
               <span style={{ color: T.muted, fontSize: 9 }}>{homeCommunity.currency}</span>
             </span>
-            <span style={{ color: T.muted, fontSize: 9 }}>{showCommunityPicker ? "▲" : "▼"}</span>
-          </button>
+          </div>
         )}
       </div>
 
@@ -204,42 +200,6 @@ export function BrowseView({
           );
         })}
       </div>
-
-      {showCommunityPicker && (
-        <div style={{
-          display: "flex", gap: 6, marginBottom: 12,
-          overflowX: "auto",
-          scrollbarWidth: "none" as const,
-          WebkitOverflowScrolling: "touch" as const,
-          paddingBottom: 2,
-        }}>
-          {pickerCommunities.map(c => {
-            const active = browseCommunity === c.slug;
-            return (
-              <button
-                key={c.slug}
-                onClick={() => {
-                  setShowCommunityPicker(false);
-                  onSelectCommunity(c.slug);
-                }}
-                style={{
-                  flexShrink: 0,
-                  padding: "7px 13px", borderRadius: 18,
-                  background: active ? T.tealDim : T.surface,
-                  border: `1px solid ${active ? T.teal + "66" : T.border}`,
-                  color: active ? T.teal : T.muted,
-                  fontFamily: T.mono, fontSize: 11, fontWeight: 600,
-                  cursor: "pointer", transition: "all 0.15s",
-                  whiteSpace: "nowrap" as const,
-                  letterSpacing: 0,
-                }}
-              >
-                {c.flagEmoji} {browseCommunityButtonLabel(c)}
-              </button>
-            );
-          })}
-        </div>
-      )}
 
       {search && totalListings > 0 && filteredTotal === 0 && (
         <div style={{
@@ -417,24 +377,6 @@ export function BrowseView({
       </div>
     </div>
   );
-}
-
-function compareBrowseCommunities(a: Community, b: Community): number {
-  const byLabel = browseCommunitySortLabel(a).localeCompare(
-    browseCommunitySortLabel(b),
-    undefined,
-    { sensitivity: "base" },
-  );
-  if (byLabel !== 0) return byLabel;
-  const byCurrency = a.currency.localeCompare(b.currency, undefined, { sensitivity: "base" });
-  if (byCurrency !== 0) return byCurrency;
-  return a.slug.localeCompare(b.slug, undefined, { sensitivity: "base" });
-}
-
-function browseCommunitySortLabel(community: Community): string {
-  return community.displayName
-    .replace(/\s·\s[A-Z]{3}$/, "")
-    .replace(/\s·\s/g, " ");
 }
 
 function browseCommunityButtonLabel(community: Community): string {

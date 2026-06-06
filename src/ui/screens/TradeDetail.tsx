@@ -2768,7 +2768,7 @@ function ArbiterProvenanceBanner({ state }: { state: EscrowState }) {
   if (prov.verified) {
     return (
       <div style={{
-        marginTop: 10, padding: "7px 10px", borderRadius: T.rs,
+        marginTop: 10, marginBottom: 16, padding: "7px 10px", borderRadius: T.rs,
         background: T.greenDim, border: `1px solid ${T.green}33`,
         display: "flex", alignItems: "center", gap: 8,
       }}>
@@ -2783,7 +2783,7 @@ function ArbiterProvenanceBanner({ state }: { state: EscrowState }) {
   // Has unrecognized members — the sock-puppet signal.
   return (
     <div style={{
-      marginTop: 10, padding: "9px 11px", borderRadius: T.rs,
+      marginTop: 10, marginBottom: 16, padding: "9px 11px", borderRadius: T.rs,
       background: T.amberDim, border: `1px solid ${T.amber}55`,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>

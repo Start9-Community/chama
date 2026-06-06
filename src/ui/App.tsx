@@ -1911,6 +1911,8 @@ export default function App() {
             onOpenPayoutDestinations={() => setView("payout-destinations")}
             onOpenAdvanced={() => { setAdvancedFocusNwc(false); setView("advanced"); }}
             onSignOut={handleSignOut}
+            communitySlug={browseCommunity}
+            onSelectCommunity={handleSelectCommunity}
           />
         </div>
       ) : view === "saved-handles" ? (
@@ -2007,7 +2009,6 @@ export default function App() {
               browseCategory={browseCategory}
               setBrowseCategory={setBrowseCategory}
               browseCommunity={browseCommunity}
-              onSelectCommunity={handleSelectCommunity}
               amountDisplayMode={amountDisplayMode}
               matchingListings={matchingListings}
               nonMatchingListings={nonMatchingListings}
