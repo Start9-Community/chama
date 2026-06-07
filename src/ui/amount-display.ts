@@ -112,16 +112,18 @@ export function resolveEstimatedFiatCurrency({
     ?? normalizeFiatCurrency(listingCurrency);
 }
 
-export function shouldQuoteEstimatedFiat({
-  viewerCurrency,
-  listingCurrency,
-}: {
+export function shouldQuoteEstimatedFiat(_args: {
   viewerCurrency: string | null | undefined;
   listingCurrency: string | null | undefined;
 }): boolean {
-  const viewer = normalizeFiatCurrency(viewerCurrency);
-  if (!viewer) return false;
-  return viewer !== normalizeFiatCurrency(listingCurrency);
+  // Retired (see DECISIONS.md 2026-06-06). Fiat listings show the creator's
+  // own Chama currency to everyone; we no longer re-quote a listing in the
+  // viewer's currency via live FX — that implied a precision the seller never
+  // offered and rendered differently depending on whether rates had loaded.
+  // The universal cross-border reference is the sats (₿) amount, always shown.
+  // Sats-only listings with no native fiat still get their single estimated
+  // figure through the `!fiatPrimary` fallback at the call sites, not here.
+  return false;
 }
 
 export function normalizeFiatCurrency(currency: string | null | undefined): string | null {

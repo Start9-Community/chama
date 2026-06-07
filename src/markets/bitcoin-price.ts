@@ -1,3 +1,5 @@
+import { marketFetch } from "./market-fetch.js";
+
 export interface BitcoinPriceSnapshot {
   usd: number | null;
   updatedAt: number | null;
@@ -155,7 +157,7 @@ async function fetchPriceSource(source: PriceSource): Promise<PriceQuote | null>
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PRICE_TIMEOUT_MS);
   try {
-    const response = await fetch(source.url, {
+    const response = await marketFetch(source.url, {
       cache: "no-store",
       signal: controller.signal,
     });

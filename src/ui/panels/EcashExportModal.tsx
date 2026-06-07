@@ -174,7 +174,7 @@ export function EcashExportModal({
             </div>
 
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-              <QRCode data={notes} size={220} errorCorrectionLevel="L" />
+              <QRCode data={notes} size={240} margin={4} errorCorrectionLevel="L" />
             </div>
 
             <div style={{

@@ -12,3 +12,4 @@ tauri-build = { version = "2.4.1", features = [] }
 [dependencies]
 tauri = { version = "2.9.4", features = [] }
 tauri-plugin-shell = "2.3.2"
+tauri-plugin-http = "2"

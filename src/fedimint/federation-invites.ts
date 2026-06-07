@@ -167,3 +167,16 @@ export const PUBLIC_FEDI_APPROVED_FEDERATIONS: PublicFediFederation[] = [
     country: null,
   },
 ];
+
+// Regional default federations (v2.6). Countries WITHOUT a real local Chama
+// route to a sensible regional fed instead of all funneling onto BLF:
+//   Africa → Orange Club Africa, Latin America → LatNet, everywhere else → BLF.
+// Pulled by slug from the approved list above so the long invite string lives
+// in exactly one place.
+export const OCA_FEDERATION_NAME = "Orange Club Africa";
+export const OCA_FEDERATION_INVITE =
+  PUBLIC_FEDI_APPROVED_FEDERATIONS.find((f) => f.slug === "fedi-orange-club-africa")!.invite;
+
+export const LATNET_FEDERATION_NAME = "LatNet";
+export const LATNET_FEDERATION_INVITE =
+  PUBLIC_FEDI_APPROVED_FEDERATIONS.find((f) => f.slug === "fedi-latnet")!.invite;

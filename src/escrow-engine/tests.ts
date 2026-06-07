@@ -153,6 +153,7 @@ import {
   BITSACCO_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
+import { OCA_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
 import { adaptRealWallet, resetLocalFedimintWallet } from "../fedimint/sdk-adapter.js";
 import {
   clearAllPendingRedemptions,
@@ -3174,8 +3175,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   }
   assert(getCommunityBySlug("ke-kes")?.displayName === "Kenya · KES",
     "ke-kes displayName names Kenya KES");
-  assert(getCommunityBySlug("ke-kes")?.disambiguator === "Afribit",
-    "ke-kes disambiguator surfaces the Afribit backing route");
+  assert(getCommunityBySlug("ke-kes")?.disambiguator === "Afribit Kibera",
+    "ke-kes disambiguator surfaces the Afribit Kibera backing route");
   assert(getCommunityBySlug("ke-kes-bitsacco")?.displayName === "Kenya · KES",
     "ke-kes-bitsacco displayName names Kenya KES");
   assert(getCommunityBySlug("ke-kes-bitsacco")?.disambiguator === "Bitsacco",
@@ -3201,8 +3202,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Picker includes South Africa ZAR under Global");
   assert(picker.some(c => c.slug === "tz-tzs"),
     "Picker includes Tanzania TZS for first-run country selection");
-  assert(picker.some(c => c.slug === "ke-kes" && c.country === "KE" && c.disambiguator === "Afribit"),
-    "Picker includes Kenya KES as an Afribit-backed country Chama");
+  assert(picker.some(c => c.slug === "ke-kes" && c.country === "KE" && c.disambiguator === "Afribit Kibera"),
+    "Picker includes Kenya KES as an Afribit Kibera-backed country Chama");
   assert(picker.some(c => c.slug === "ke-kes-bitsacco" && c.country === "KE" && c.disambiguator === "Bitsacco"),
     "Picker includes Kenya KES as a Bitsacco-backed country Chama");
   assert(picker.some(c => c.slug === "cm-xaf"),
@@ -3438,8 +3439,8 @@ console.log("\n── BP / BLF RESOLVER ──");
   const snCfaInvite = getCommunityBySlug("sn-cfa")!.federationInvite!;
   assert(resolveFederationForCommunity("sn-cfa") === snCfaInvite,
     "sn-cfa → registry-pinned invite");
-  assert(snCfaInvite === BLF_FEDERATION_INVITE,
-    "sn-cfa pins BLF");
+  assert(snCfaInvite === OCA_FEDERATION_INVITE,
+    "sn-cfa pins OCA (v2.6 African regional default)");
 
   const keKesInvite = getCommunityBySlug("ke-kes")!.federationInvite!;
   assert(resolveFederationForCommunity("ke-kes") === keKesInvite,
@@ -5511,15 +5512,15 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
   assert(firstTime.kind === "switch-silent",
     "First-time user tap → switch-silent (one-tap join, no picker step)");
   if (firstTime.kind === "switch-silent") {
-    assert(firstTime.targetInvite === BLF_FEDERATION_INVITE,
-      "First-time tap on sn-cfa targets BLF (its pinned invite)");
+    assert(firstTime.targetInvite === OCA_FEDERATION_INVITE,
+      "First-time tap on sn-cfa targets OCA (its pinned invite)");
     assert(firstTime.displayName === "Senegal · CFA",
       "First-time tap carries the community displayName");
   }
 
   // Returning user already on the community's federation → identity-only.
   const sameFed = decideCommunityTapEffect({
-    slug: "sn-cfa", currentInvite: BLF_FEDERATION_INVITE, balanceMsats: 0,
+    slug: "sn-cfa", currentInvite: OCA_FEDERATION_INVITE, balanceMsats: 0,
   });
   assert(sameFed.kind === "identity-only",
     "Tap a community whose pinned invite matches current → identity-only");
@@ -5654,8 +5655,8 @@ console.log("\n── AUTO-INIT TARGET ──");
   if (claimedOrRecovered.kind === "use-home") {
     assert(claimedOrRecovered.slug === "sn-cfa",
       "use-home carries the home community slug");
-    assert(claimedOrRecovered.invite === BLF_FEDERATION_INVITE,
-      "use-home invite is the home community's pinned invite (sn-cfa → BLF)");
+    assert(claimedOrRecovered.invite === OCA_FEDERATION_INVITE,
+      "use-home invite is the home community's pinned invite (sn-cfa → OCA)");
   }
 
   // 3) Returning user, no active trade → sticky-community.
@@ -7788,9 +7789,9 @@ console.log("\n── CreateForm-derived mintUrl ──");
     community: "us-blf",
   }) === BLF_FEDERATION_INVITE,
     "No active route falls back to community-derived mintUrl");
-  // sn-cfa pins BLF for now — listings in sn-cfa go to BLF.
-  assert(resolveFederationForCommunity("sn-cfa") === BLF_FEDERATION_INVITE,
-    "sn-cfa listing → BLF invite (community-derived mintUrl)");
+  // sn-cfa pins OCA (v2.6 African regional default) — listings go to OCA.
+  assert(resolveFederationForCommunity("sn-cfa") === OCA_FEDERATION_INVITE,
+    "sn-cfa listing → OCA invite (community-derived mintUrl)");
   // us-blf pins BLF — listings in us-blf go to BLF.
   assert(resolveFederationForCommunity("us-blf") === BLF_FEDERATION_INVITE,
     "us-blf listing → BLF invite");
@@ -11429,8 +11430,8 @@ console.log("\n── AMOUNT DISPLAY MODE ──");
     "BTC-native public wallet services fall back to the listing route fiat for estimates",
   );
   assert(
-    shouldQuoteEstimatedFiat({ viewerCurrency: "XOF", listingCurrency: "TZS" }),
-    "Selected Chama fiat overrides stored listing fiat anchors for display quotes",
+    !shouldQuoteEstimatedFiat({ viewerCurrency: "XOF", listingCurrency: "TZS" }),
+    "Viewer-currency estimate retired: a cross-currency viewer sees the creator's currency, not a re-quote (DECISIONS.md 2026-06-06)",
   );
   assert(
     !shouldQuoteEstimatedFiat({ viewerCurrency: "TZS", listingCurrency: "TZS" }),

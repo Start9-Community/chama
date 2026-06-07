@@ -1057,3 +1057,88 @@ favorable outcome by paying more. The dispute cost is a known quantity before
 opening — users can price it honestly. Fast arbiter response is incentivized
 because the fee is already locked; slow response is just leaving money on the
 table.
+
+---
+
+## 2026-06-06 — Fiat listings show the creator's currency for everyone; viewer-currency "≈" retired
+
+**Context:** A listing carries a native fiat price in the creator's Chama
+currency — a Cotonou seller prices in XOF, a Dar seller in TZS. The headline
+already anchored on that native price, but a viewer whose own Chama used a
+different currency also saw a secondary "≈ {their currency}" line, converted
+live through FX rates. Two things were wrong with that second line. It implies a
+precision that doesn't exist — the seller will not accept the buyer's currency
+at mid-market rate, so it reads like a quote when it's a one-leg guess. And it
+depends on live FX, which means the same listing renders differently depending
+on whether rates loaded — broken entirely on Tauri (see the entry below), flaky
+on slow links.
+
+**Options considered:**
+- (a) **Keep the "≈" overlay** — convenient for cross-border viewers, but
+      dishonest about precision and non-deterministic across surfaces.
+- (b) **Creator currency for everyone, retire the "≈"** — one authoritative
+      fiat figure, identical for all viewers; sats (₿) stays the universal
+      cross-border reference since it's what actually settles.
+- (c) **Convert everything to the viewer's currency** — worst option; buries
+      the price the seller actually set behind an FX guess.
+
+**Decision:** Option (b). `shouldQuoteEstimatedFiat` returns false — the
+viewer-currency estimate is gone for any listing that carries a fiat price.
+Sats-only listings with no native fiat keep their single estimated figure;
+they have no creator price to anchor on and no second line to be redundant with.
+
+**Rationale:** Optimizes for honesty and determinism over convenience. Every
+viewer sees the same price the seller set, plus the same sats. No FX guesswork
+presented as a quote, and a listing looks identical with or without live rates.
+What we give up: a cross-border viewer no longer gets a glance-value in their own
+currency and has to read the sats (or learn the seller's currency). Worth it.
+
+**Implications:** Display-only — vote/escrow mechanics untouched. Removes a
+live-FX dependency from the render path, so listings survive offline/slow links
+and the Tauri rate-fetch gap intact. The two existing
+`shouldQuoteEstimatedFiat` unit assertions flip to expect suppression.
+
+**Status:** Active.
+
+---
+
+## 2026-06-06 — Market price/FX fetches go through the Tauri HTTP plugin on desktop
+
+**Context:** The Create form's sats↔fiat toggle was dead on the Tauri desktop
+build only — APK and browser both worked, Tauri showed sats and nothing else.
+The toggle isn't the bug: the BTC-price and FX-rate fetches never resolve under
+Tauri, so there's no rate to turn a typed fiat price into sats and the fiat
+fields have nothing to do. Why only Tauri — the APK serves from
+`https://localhost` and the browser from a real origin, and the public price
+APIs answer both because they send `Access-Control-Allow-Origin: *`. Tauri serves
+from a custom `tauri://` scheme; the system WebView (WebKitGTK / WKWebView)
+treats that as an opaque origin and blocks the cross-origin `fetch`, and no HTTP
+plugin was registered (`src-tauri/Cargo.toml` carried only `tauri-plugin-shell`)
+so the request had no way out of the WebView.
+
+**Options considered:**
+- (a) **Set a permissive CSP / hope the WebView allows it** — doesn't address
+      the opaque-origin block; WebKit still refuses, platform-dependent.
+- (b) **Proxy the price feeds through our own server** — reintroduces a server
+      Chama deliberately doesn't have; a liveness and trust dependency for a
+      cosmetic feature.
+- (c) **`@tauri-apps/plugin-http`, Tauri-only** — make the request from Rust
+      (reqwest), which isn't subject to WebView CORS; leave web/APK on the
+      global `fetch` untouched.
+
+**Decision:** Option (c). The two market modules (`markets/bitcoin-price.ts`,
+`markets/fiat-rates.ts`) route through the Tauri HTTP plugin when — and only
+when — `isTauriNativePlatform()` is true. The plugin is registered in the Rust
+shell and the price/FX hosts are allow-listed in the desktop capability.
+
+**Rationale:** Keeps Chama serverless, fixes the actual cause (origin/CORS, not
+CSP), and confines the change to the desktop surface so web and Android can't
+regress. Reuses the platform detector already used by the native bridge.
+
+**Implications:** One JS dependency, one Rust crate, and a capability allow-list
+that has to track the host list in the two market modules — if a price source is
+added there, its host must be added to the capability or it'll fail on desktop
+only. Web build and unit tests can't exercise the Rust side, so this needs a real
+`tauri:dev` / `tauri build` run to confirm the BTC pill resolves end-to-end.
+
+**Status:** Active.

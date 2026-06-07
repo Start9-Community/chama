@@ -17,8 +17,8 @@ interface QRCodeProps {
 export function QRCode({
   data,
   size = 220,
-  fgColor = "#a78bfa",
-  bgColor = "#111118",
+  fgColor = "#050505",
+  bgColor = "#ffffff",
   margin = 2,
   alt = "QR code",
   errorCorrectionLevel = "L",
@@ -75,7 +75,7 @@ export function QRCode({
         alignItems: "center", justifyContent: "center",
       }}>
         <div style={{
-          width: 24, height: 24, border: "2px solid #a78bfa",
+          width: 24, height: 24, border: "2px solid #888",
           borderTopColor: "transparent", borderRadius: "50%",
           animation: "spin 1s linear infinite",
         }} />

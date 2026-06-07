@@ -1,46 +1,60 @@
-import { useEffect, useMemo, useState, lazy, Suspense, type ReactNode } from "react";
+import { useEffect, useState, lazy, Suspense, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { T } from "../theme.js";
 import { NsecLogin } from "../panels/NsecLogin.js";
+import { BrandHeader } from "../components/BrandHeader.js";
+import { GlobeCountryPicker } from "./GlobeCountryPicker.js";
 import {
   getSignInEnvironment,
   isFediWebViewSignInEnvironment,
   shouldOfferNIP46Signer,
 } from "../sign-in-environment.js";
-import {
-  CENTRAL_AFRICA_COUNTRY_CODES,
-  EAST_AFRICA_COUNTRY_CODES,
-  WEST_AFRICA_COUNTRY_CODES,
-  getCommunityBySlug,
-  getPickerCommunities,
-  type Community,
-} from "../../communities/registry.js";
+import { getCommunityBySlug } from "../../communities/registry.js";
 import {
   getUserCommunitySlugRaw,
   setUserCommunitySlug,
 } from "../../communities/storage.js";
-import { sendCommunityRequestToGlobalArbiters } from "../../communities/community-request.js";
 
 const QRCode = lazy(() => import("../QRCode.js"));
-type RegionFilter = "east" | "west" | "central" | "global";
-type RegionChoice = {
-  id: RegionFilter;
-  label: string;
-  tint: string;
-};
-type RequestStatus = {
-  state: "idle" | "sending" | "sent" | "error";
-  message?: string;
-};
 
-const REGION_FILTERS: RegionChoice[] = [
-  { id: "west", label: "West Africa", tint: T.amber },
-  { id: "central", label: "Central Africa", tint: T.purple },
-  { id: "east", label: "East Africa", tint: T.teal },
-  { id: "global", label: "Global", tint: T.accent },
+// v2.6: the orientation moment. A brand-new user (no home community yet)
+// historically met "Choose your local market" cold — the app asked for a
+// commitment before it said what it was. The clearest description of Chama
+// (the four trade types) lived three taps deep inside Create. WelcomeIntro
+// surfaces that "what is this, what can I do, why is it safe" answer once,
+// before the picker, then flows straight into it. Browser-wide localStorage
+// (pre-identity, no npub yet) so it fires once per device; "Change" on a
+// returning account skips back to the picker, not here.
+const INTRO_SEEN_KEY = "chama_intro_seen";
+
+function readIntroSeen(): boolean {
+  try {
+    return typeof localStorage !== "undefined"
+      && localStorage.getItem(INTRO_SEEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markIntroSeen(): void {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(INTRO_SEEN_KEY, "1");
+  } catch {
+    // private mode / storage disabled — the intro just shows again next launch.
+  }
+}
+
+// The four things you can do, in the user's words. Mirrors the Create
+// wizard's trade-type cards (CreateForm) so the model a newcomer learns
+// here is the exact model they act on later — no re-teaching. Tints are
+// drawn from the theme palette (not the sacred buyer/seller/arbiter role
+// hexes) purely for glanceable variety.
+const INTRO_USE_CASES: { icon: string; title: string; blurb: string; tint: string }[] = [
+  { icon: "⚡", title: "Exchange",            blurb: "Swap cash for sats with someone local",   tint: T.accent },
+  { icon: "🧾", title: "Community Bill Pay",  blurb: "Pay a bill in exchange for sats",          tint: T.teal },
+  { icon: "🏪", title: "Marketplace",         blurb: "Sell goods, services, or digital items",   tint: T.purple },
+  { icon: "🤝", title: "Lending",             blurb: "Lend sats with clear repayment terms",     tint: T.green },
 ];
-// Base globe asset: Pixabay "World, Globe, Africa", stored locally for offline/native onboarding.
-const AFRICA_GLOBE_SRC = "/icons/africa-globe-base.png";
 
 export function ConnectScreen({
   onConnect, onConnectNIP46, onConnectNsec, loading, error, nip46Uri, nip46Waiting,
@@ -61,6 +75,8 @@ export function ConnectScreen({
   const isFediWebView = isFediWebViewSignInEnvironment(signInEnvironment);
   const offerNIP46Signer = shouldOfferNIP46Signer(signInEnvironment);
   const [homeSlug, setHomeSlug] = useState<string | null>(() => getUserCommunitySlugRaw());
+  // v2.6: gate the one-time orientation screen ahead of the market picker.
+  const [introSeen, setIntroSeen] = useState<boolean>(() => readIntroSeen());
   const [showAdvanced, setShowAdvanced] = useState(false);
   // v2.5: the recovery-key paste box, revealed by "I'm a returning Chama
   // citizen" on the platforms where pasting is the right path — no hint detour,
@@ -94,9 +110,24 @@ export function ConnectScreen({
   }, [returningSignInAttempted, loading, error]);
 
   if (!homeSlug || !homeCommunity) {
+    // First-ever launch on this device → orient before asking for a
+    // commitment. Once dismissed (or for a returning account re-picking
+    // a community), drop straight into the market picker.
+    if (!introSeen) {
+      return (
+        <OnboardingShell>
+          <WelcomeIntro
+            onContinue={() => {
+              markIntroSeen();
+              setIntroSeen(true);
+            }}
+          />
+        </OnboardingShell>
+      );
+    }
     return (
       <OnboardingShell>
-        <CountryChamaStep
+        <GlobeCountryPicker
           onSelect={(slug) => {
             setUserCommunitySlug(slug);
             setHomeSlug(slug);
@@ -168,8 +199,8 @@ export function ConnectScreen({
             display: "flex", justifyContent: "center", marginBottom: 14,
             padding: 12, background: "#111118", borderRadius: 12,
           }}>
-            <Suspense fallback={<div style={{ width: 200, height: 200 }} />}>
-              <QRCode data={nip46Uri} size={200} fgColor="#a78bfa" />
+            <Suspense fallback={<div style={{ width: 220, height: 220 }} />}>
+              <QRCode data={nip46Uri} size={220} margin={4} />
             </Suspense>
           </div>
           <a href={nip46Uri} style={{
@@ -337,445 +368,109 @@ function OnboardingShell({ children }: { children: ReactNode }) {
   );
 }
 
-function BrandHeader() {
-  return (
-    <div style={{ marginBottom: 24 }}>
-      <img
-        src="/icons/chama-woven-trust-lockup-horizontal.svg?v=0.9.4"
-        alt="Chama"
-        style={{
-          display: "block",
-          margin: "0 auto 18px",
-          width: "min(78vw, 300px)",
-          height: "auto",
-          maxWidth: "100%",
-          filter: "drop-shadow(0 0 32px #f7931a22)",
-        }}
-      />
-      <div style={{
-        fontSize: 10, color: T.muted, fontFamily: T.mono,
-        letterSpacing: 3, textTransform: "uppercase",
-      }}>
-        local money, bitcoin rails
-      </div>
-    </div>
-  );
-}
-
-function CountryChamaStep({ onSelect }: { onSelect: (slug: string) => void }) {
-  const communities = useMemo(() => getPickerCommunities(), []);
-  const [region, setRegion] = useState<RegionFilter | null>(null);
-  const [selectedCountryKey, setSelectedCountryKey] = useState<string | null>(null);
-  const [requestOpen, setRequestOpen] = useState(false);
-  const [requestedChama, setRequestedChama] = useState("");
-  const [requestNote, setRequestNote] = useState("");
-  const [requestStatus, setRequestStatus] = useState<RequestStatus>({ state: "idle" });
-  const selectedRegion = REGION_FILTERS.find((r) => r.id === region) ?? null;
-  const visible = region
-    ? communities
-        .filter((c) => regionForCommunity(c) === region)
-        .sort((a, b) => {
-          if (a.country === null && b.country !== null) return -1;
-          if (a.country !== null && b.country === null) return 1;
-          return countryLabel(a).localeCompare(countryLabel(b));
-        })
-    : [];
-  const countryChoices = countryChoicesForCommunities(visible);
-  const selectedCountryChoice = selectedCountryKey
-    ? countryChoices.find((choice) => choice.key === selectedCountryKey) ?? null
-    : null;
-  const requestReady = requestStatus.state !== "sending" && requestedChama.trim().length > 0;
-
-  const sendCommunityRequest = async () => {
-    setRequestStatus({ state: "sending" });
-    try {
-      const result = await sendCommunityRequestToGlobalArbiters({
-        requestedChama,
-        note: requestNote,
-      });
-      setRequestedChama("");
-      setRequestNote("");
-      setRequestStatus({
-        state: "sent",
-        message: `Request sent to ${result.sent} Chama arbiters.`,
-      });
-    } catch (e) {
-      setRequestStatus({
-        state: "error",
-        message: communityRequestErrorMessage(e),
-      });
-    }
-  };
-
+function WelcomeIntro({ onContinue }: { onContinue: () => void }) {
   return (
     <>
       <BrandHeader />
-      <div style={{
-        fontSize: 28, lineHeight: 1.1, color: T.text,
-        fontFamily: T.sans, fontWeight: 900, marginBottom: 10,
-      }}>
-        Choose your local market
-      </div>
-      <div style={{
-        maxWidth: 350, color: T.muted, fontFamily: T.sans,
-        fontSize: 14, lineHeight: 1.7, marginBottom: 20,
-      }}>
-        See offers in your currency, with local payment methods and
-        community backup.
-      </div>
 
       <div style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-        gap: 8, width: "100%", maxWidth: 420, marginBottom: 12,
+        fontSize: 27, lineHeight: 1.12, color: T.text,
+        fontFamily: T.sans, fontWeight: 900, marginBottom: 12,
+        maxWidth: 360,
       }}>
-        {REGION_FILTERS.map(({ id, label, tint }) => {
-          const active = region === id;
-          return (
-            <button
-              key={id}
-              onClick={() => {
-                setRegion(id);
-                setSelectedCountryKey(null);
-              }}
-              aria-pressed={active}
-              style={{
-                minHeight: 112,
-                padding: "10px 8px", borderRadius: T.rs,
-                background: active ? tint + "18" : T.surface,
-                border: `1px solid ${active ? tint + "88" : T.border}`,
-                color: active ? T.text : T.muted,
-                fontFamily: T.mono, fontSize: 10, fontWeight: 800,
-                cursor: "pointer",
-                display: "flex", flexDirection: "column",
-                alignItems: "center", justifyContent: "center", gap: 8,
-              }}
-            >
-              <MiniGlobe region={id} active={active} tint={tint} />
-              <span style={{ lineHeight: 1.2 }}>{label}</span>
-            </button>
-          );
-        })}
+        Trade bitcoin with your community
+      </div>
+      <div style={{
+        maxWidth: 340, color: T.muted, fontFamily: T.sans,
+        fontSize: 14, lineHeight: 1.6, marginBottom: 22,
+      }}>
+        Swap cash for sats, pay bills, sell, and lend — in your
+        local currency. <span style={{ color: T.text }}>Chama never
+        holds your money.</span>
       </div>
 
-      <div style={{ width: "100%", maxWidth: 380, marginBottom: 12 }}>
-        <button
-          onClick={() => {
-            setRequestOpen(!requestOpen);
-            setRequestStatus({ state: "idle" });
-          }}
-          style={{
-            width: "100%", padding: "10px 12px", borderRadius: T.rs,
-            background: "transparent", border: `1px dashed ${T.border}`,
-            color: T.muted, fontFamily: T.sans, fontSize: 12, fontWeight: 700,
-            cursor: "pointer",
-          }}
-        >
-          Chama not listed? Request it here
-        </button>
-
-        {requestOpen && (
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (requestStatus.state === "sending") return;
-              void sendCommunityRequest();
-            }}
+      <div style={{
+        display: "grid", gap: 8, width: "100%", maxWidth: 380,
+        marginBottom: 16,
+      }}>
+        {INTRO_USE_CASES.map(({ icon, title, blurb, tint }) => (
+          <div
+            key={title}
             style={{
-              marginTop: 10, padding: 12, borderRadius: T.r,
-              background: T.surface, border: `1px solid ${T.border}`,
-              display: "grid", gap: 10,
+              display: "flex", alignItems: "center", gap: 13,
+              padding: "11px 13px", borderRadius: T.r,
+              background: T.card, border: `1px solid ${T.border}`,
+              textAlign: "left",
             }}
           >
-            <input
-              value={requestedChama}
-              onChange={(event) => {
-                setRequestedChama(event.target.value);
-                if (requestStatus.state !== "sending") setRequestStatus({ state: "idle" });
-              }}
-              placeholder="Country or Chama"
-              autoComplete="country-name"
-              style={{
-                width: "100%", boxSizing: "border-box", padding: "11px 12px",
-                borderRadius: T.rs, border: `1px solid ${T.border}`,
-                background: T.card, color: T.text, fontFamily: T.sans,
-                fontSize: 13, outline: "none",
-              }}
-            />
-            <textarea
-              value={requestNote}
-              onChange={(event) => {
-                setRequestNote(event.target.value);
-                if (requestStatus.state !== "sending") setRequestStatus({ state: "idle" });
-              }}
-              placeholder="Optional note"
-              rows={2}
-              style={{
-                width: "100%", boxSizing: "border-box", padding: "11px 12px",
-                borderRadius: T.rs, border: `1px solid ${T.border}`,
-                background: T.card, color: T.text, fontFamily: T.sans,
-                fontSize: 13, outline: "none", resize: "vertical",
-              }}
-            />
-            <button
-              type="submit"
-              disabled={!requestReady}
-              style={{
-                width: "100%", padding: "11px 12px", borderRadius: T.rs,
-                background: requestReady ? T.accent : T.surface,
-                border: `1px solid ${requestReady ? T.accent : T.border}`,
-                color: requestReady ? T.bg : T.muted,
-                fontFamily: T.sans,
-                fontSize: 13, fontWeight: 900,
-                cursor: requestReady ? "pointer" : "default",
-              }}
-            >
-              {requestStatus.state === "sending" ? "Sending..." : "Send request"}
-            </button>
-            {requestStatus.message && (
-              <div style={{
-                color: requestStatus.state === "sent" ? T.green : T.red,
-                fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
-                textAlign: "left",
+            <span style={{
+              flexShrink: 0,
+              width: 38, height: 38, borderRadius: T.rs,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 19, lineHeight: 1,
+              background: tint + "1a", border: `1px solid ${tint}44`,
+            }}>
+              {icon}
+            </span>
+            <span style={{ minWidth: 0 }}>
+              <span style={{
+                display: "block", fontFamily: T.sans,
+                fontSize: 14, fontWeight: 800, color: T.text,
               }}>
-                {requestStatus.message}
-              </div>
-            )}
-          </form>
-        )}
+                {title}
+              </span>
+              <span style={{
+                display: "block", fontFamily: T.sans,
+                fontSize: 12, color: T.muted, marginTop: 1, lineHeight: 1.35,
+              }}>
+                {blurb}
+              </span>
+            </span>
+          </div>
+        ))}
       </div>
 
-      {region && (
-        <div style={{
-          width: "100%", maxWidth: 380,
-          animation: "fadeIn 0.18s ease-out",
+      {/* The differentiator, stated where it reassures: every trade is
+          2-of-3 escrow with a community arbiter, never custodied by us. */}
+      <div style={{
+        display: "flex", alignItems: "flex-start", gap: 11,
+        width: "100%", maxWidth: 380, marginBottom: 24,
+        padding: "12px 14px", borderRadius: T.r,
+        background: T.accentDim, border: `1px solid ${T.accent}44`,
+        textAlign: "left",
+      }}>
+        <span style={{ fontSize: 17, lineHeight: 1.2, flexShrink: 0 }}>🛡️</span>
+        <span style={{
+          fontFamily: T.sans, fontSize: 12, lineHeight: 1.5, color: T.text,
         }}>
-          <div style={{
-            textAlign: "left", margin: "2px 0 10px",
-            color: selectedRegion?.tint ?? T.accent,
-            fontFamily: T.mono, fontSize: 10, fontWeight: 800,
-            letterSpacing: 1, textTransform: "uppercase",
-          }}>
-            {selectedRegion?.label}
-          </div>
-          {selectedCountryChoice && selectedCountryChoice.communities.length > 1 && (
-            <button
-              onClick={() => setSelectedCountryKey(null)}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 6,
-                marginBottom: 10, padding: "6px 9px", borderRadius: T.rs,
-                background: T.surface, border: `1px solid ${T.border}`,
-                color: T.muted, fontFamily: T.mono, fontSize: 10,
-                cursor: "pointer",
-              }}
-            >
-              <span style={{ fontSize: 12, lineHeight: 1 }}>←</span>
-              {selectedCountryChoice.label}
-            </button>
-          )}
-          <div style={{ display: "grid", gap: 10, width: "100%" }}>
-            {(selectedCountryChoice?.communities ?? countryChoices).map((choice) => {
-              let countryChoice: CountryChoice | null = null;
-              let community: Community;
-              if (isCommunityChoice(choice)) {
-                community = choice;
-              } else {
-                countryChoice = choice;
-                community = defaultCommunityForCountryChoice(choice);
-              }
-              const hasRoutes = countryChoice !== null
-                && countryChoice.communities.length > 1
-                && countryChoice.key !== "KE";
-              const title = countryChoice === null
-                ? community.disambiguator ?? countryLabel(community)
-                : countryChoice.label;
-              const subtitle = countryChoice === null
-                ? community.displayName
-                : hasRoutes
-                  ? `${countryChoice.communities.length} Chamas`
-                  : community.disambiguator
-                    ? `${community.currency} · ${community.disambiguator}`
-                    : community.currency;
-              return (
-                <button
-                  key={countryChoice ? countryChoice.key : community.slug}
-                  onClick={() => {
-                    if (hasRoutes && countryChoice) {
-                      setSelectedCountryKey(countryChoice.key);
-                      return;
-                    }
-                    onSelect(community.slug);
-                  }}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "space-between",
-                    gap: 12, padding: "13px 14px", borderRadius: T.r,
-                    background: T.card, border: `1px solid ${T.border}`,
-                    color: T.text, cursor: "pointer", textAlign: "left",
-                  }}
-                >
-                  <span style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                    <span style={{ fontSize: 26, lineHeight: 1 }}>{community.flagEmoji}</span>
-                    <span style={{ minWidth: 0 }}>
-                      <span style={{
-                        display: "block", fontFamily: T.sans,
-                        fontSize: 14, fontWeight: 800,
-                      }}>
-                        {title}
-                      </span>
-                      <span style={{
-                        display: "block", fontFamily: T.mono,
-                        color: T.muted, fontSize: 10, marginTop: 2,
-                      }}>
-                        {subtitle}
-                      </span>
-                    </span>
-                  </span>
-                  <span style={{
-                    fontFamily: T.mono, color: T.accent,
-                    fontSize: 16, lineHeight: 1,
-                  }}>
-                    →
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+          <span style={{ fontWeight: 800 }}>Protected by 2-of-3 escrow.</span>{" "}
+          <span style={{ color: T.muted }}>
+            Your sats release only when both sides agree — or a community
+            arbiter steps in. Never held by Chama.
+          </span>
+        </span>
+      </div>
+
+      <button
+        onClick={onContinue}
+        style={{
+          width: "100%", maxWidth: 380, padding: "16px",
+          borderRadius: T.r, background: T.accent, border: "none",
+          color: T.bg, fontFamily: T.sans, fontSize: 15, fontWeight: 800,
+          cursor: "pointer",
+        }}
+      >
+        Choose my market →
+      </button>
+
+      <div style={{
+        marginTop: 14, fontSize: 10, color: T.muted, fontFamily: T.mono,
+        letterSpacing: 0.4, lineHeight: 1.6, maxWidth: 300,
+      }}>
+        Non-custodial · Nostr-native · No bank, no sign-up
+      </div>
     </>
   );
-}
-
-interface CountryChoice {
-  key: string;
-  label: string;
-  flagEmoji: string;
-  communities: Community[];
-}
-
-function countryChoicesForCommunities(communities: Community[]): CountryChoice[] {
-  const choices: CountryChoice[] = [];
-  const byKey = new Map<string, CountryChoice>();
-  for (const community of communities) {
-    const key = community.country ?? community.slug;
-    let choice = byKey.get(key);
-    if (!choice) {
-      choice = {
-        key,
-        label: community.pickerLabel ?? countryLabel(community),
-        flagEmoji: community.flagEmoji,
-        communities: [],
-      };
-      byKey.set(key, choice);
-      choices.push(choice);
-    }
-    choice.communities.push(community);
-  }
-  for (const choice of choices) {
-    choice.communities.sort(compareCommunityRoutes);
-  }
-  return choices;
-}
-
-function compareCommunityRoutes(a: Community, b: Community): number {
-  const byLabel = (a.disambiguator ?? a.displayName).localeCompare(
-    b.disambiguator ?? b.displayName,
-    undefined,
-    { sensitivity: "base" },
-  );
-  if (byLabel !== 0) return byLabel;
-  return a.slug.localeCompare(b.slug, undefined, { sensitivity: "base" });
-}
-
-function defaultCommunityForCountryChoice(choice: CountryChoice): Community {
-  if (choice.key === "KE") {
-    return choice.communities.find((community) => community.slug === "ke-kes")
-      ?? choice.communities[0]!;
-  }
-  return choice.communities[0]!;
-}
-
-function isCommunityChoice(choice: Community | CountryChoice): choice is Community {
-  return "slug" in choice;
-}
-
-function MiniGlobe({
-  region,
-  active,
-  tint,
-}: {
-  region: RegionFilter;
-  active: boolean;
-  tint: string;
-}) {
-  const isGlobal = region === "global";
-  const highlightPath = regionHighlightPath(region);
-  const clipId = `africa-globe-clip-${region}`;
-  return (
-    <svg
-      viewBox="0 0 100 100"
-      aria-hidden="true"
-      style={{
-        width: 68,
-        height: 68,
-        display: "block",
-        flexShrink: 0,
-        filter: active ? `drop-shadow(0 0 10px ${tint}55)` : "none",
-      }}
-    >
-      <defs>
-        <clipPath id={clipId}>
-          <circle cx="50" cy="50" r="46" />
-        </clipPath>
-      </defs>
-      <circle cx="50" cy="50" r="47" fill={active ? "#102a3f" : "#0c1e2c"} />
-      <g clipPath={`url(#${clipId})`}>
-        <image
-          href={AFRICA_GLOBE_SRC}
-          x="0"
-          y="0"
-          width="100"
-          height="100"
-          preserveAspectRatio="xMidYMid slice"
-          opacity="0.92"
-          style={{ filter: active ? "saturate(0.95) brightness(0.9)" : "saturate(0.8) brightness(0.78)" }}
-        />
-        <circle cx="50" cy="50" r="47" fill="#071018" opacity={isGlobal ? 0.02 : active ? 0.08 : 0.18} />
-        {!isGlobal && (
-          <>
-            <path
-              d={highlightPath}
-              fill="#ff3b30"
-              opacity="0.9"
-            />
-            <path
-              d={highlightPath}
-              fill="none"
-              stroke="#fff7"
-              strokeWidth="1.5"
-              strokeLinejoin="round"
-            />
-          </>
-        )}
-        <circle cx="33" cy="26" r="17" fill="#ffffff22" />
-      </g>
-      <circle cx="50" cy="50" r="46" fill="none" stroke={active ? tint : T.borderHi} strokeWidth="2.2" />
-      <circle cx="50" cy="50" r="42" fill="none" stroke="#ffffff22" strokeWidth="1" />
-    </svg>
-  );
-}
-
-function regionHighlightPath(region: RegionFilter): string {
-  if (region === "west") {
-    return "M29 43 C33 38 42 38 48 42 C46 47 46 51 49 55 C45 58 42 62 41 67 C35 65 30 60 27 54 C25 49 26 45 29 43 Z";
-  }
-  if (region === "east") {
-    return "M55 43 C62 44 68 48 76 53 C72 56 68 60 67 65 C65 70 60 73 56 69 C57 63 56 58 53 53 C54 49 55 46 55 43 Z";
-  }
-  if (region === "central") {
-    return "M42 53 C48 50 56 51 61 56 C61 62 55 67 48 66 C42 65 39 59 42 53 Z";
-  }
-  return "";
 }
 
 function ErrorBox({ children }: { children: string }) {
@@ -809,26 +504,4 @@ function friendlySignInError(message: string): string {
     return "We couldn't find a signer on this device. If you're returning with a recovery key, use More sign-in options below.";
   }
   return message;
-}
-
-function countryLabel(community: Community): string {
-  if (community.country === "TZ") return "Tanzania";
-  if (community.country === "KE") return "Kenya";
-  if (community.country === "SN") return "Senegal";
-  return community.displayName.replace(/\s(?:·|-)\s[A-Z]{3}$/, "");
-}
-
-function regionForCommunity(community: Community): RegionFilter {
-  if (community.country && (EAST_AFRICA_COUNTRY_CODES as readonly string[]).includes(community.country)) return "east";
-  if (community.country && (WEST_AFRICA_COUNTRY_CODES as readonly string[]).includes(community.country)) return "west";
-  if (community.country && (CENTRAL_AFRICA_COUNTRY_CODES as readonly string[]).includes(community.country)) return "central";
-  return "global";
-}
-
-function communityRequestErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/No Nostr signer|NIP-07|browser environment|Extension does not support/i.test(message)) {
-    return "Use Fedi, Amber, or a browser signer first so the arbiters know who sent it.";
-  }
-  return message || "Could not send the Chama request. Try again in a moment.";
 }

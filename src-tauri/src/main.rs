@@ -229,6 +229,12 @@ fn main() {
     let app = tauri::Builder::default()
         .append_invoke_initialization_script(init_script)
         .plugin(tauri_plugin_shell::init())
+        // HTTP plugin: lets the WebView's market-data fetches (BTC price, FX
+        // rates) run from Rust (reqwest) instead of the WebView, which blocks
+        // cross-origin requests from the custom tauri:// origin. See
+        // DECISIONS.md 2026-06-06. Scope is locked to the price/FX hosts in
+        // capabilities/default.json.
+        .plugin(tauri_plugin_http::init())
         .setup(move |app| {
             start_bridge_sidecar(app, &bridge_runtime)?;
             Ok(())

@@ -29,7 +29,12 @@ import {
   BITSACCO_FEDERATION_INVITE,
   BP_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
+  BLF_FEDERATION_NAME,
   GBF_FEDERATION_INVITE,
+  OCA_FEDERATION_INVITE,
+  OCA_FEDERATION_NAME,
+  LATNET_FEDERATION_INVITE,
+  LATNET_FEDERATION_NAME,
   PUBLIC_FEDI_APPROVED_FEDERATIONS,
   type PublicFediFederation,
 } from "../fedimint/federation-invites.js";
@@ -109,7 +114,7 @@ export const CENTRAL_AFRICA_COUNTRY_CODES = [
   "AO", "CM", "CF", "TD", "CG", "CD", "GQ", "GA", "ST",
 ] as const;
 
-interface CountryChamaSeed {
+export interface CountryChamaSeed {
   country: string;
   name: string;
   currency: string;
@@ -118,25 +123,63 @@ interface CountryChamaSeed {
   displayName?: string;
 }
 
-function flagEmojiForCountry(country: string): string {
+export function flagEmojiForCountry(country: string): string {
   const codePoints = country.toUpperCase().split("")
     .map(char => 127397 + char.charCodeAt(0));
   return String.fromCodePoint(...codePoints);
 }
 
-function blfCountryChama(seed: CountryChamaSeed): Community {
+// v2.6 regional default routing. A country WITHOUT a real local Chama
+// (no elected/bonded arbiters yet) shouldn't all funnel onto BLF — it routes
+// to a sensible regional federation so each region "feels the love":
+//   Africa → Orange Club Africa · Latin America → LatNet · everywhere else → BLF.
+// Deterministic and sticky on purpose — NOT a boot-time rotation: a user's
+// backing fed must never change underneath them (Pillar 2.1 stickiness, and
+// a changed fed under a held ecash balance would strand it). US keeps GBF via
+// its own registry entry; this resolver only feeds country shells/defaults.
+const AFRICA_COUNTRY_CODES: ReadonlySet<string> = new Set([
+  "DZ", "AO", "BJ", "BW", "BF", "BI", "CV", "CM", "CF", "TD", "KM", "CG",
+  "CD", "CI", "DJ", "EG", "GQ", "ER", "SZ", "ET", "GA", "GM", "GH", "GN",
+  "GW", "KE", "LS", "LR", "LY", "MG", "MW", "ML", "MR", "MU", "MA", "MZ",
+  "NA", "NE", "NG", "RW", "ST", "SN", "SC", "SL", "SO", "ZA", "SS", "SD",
+  "TZ", "TG", "TN", "UG", "ZM", "ZW",
+]);
+
+// Latin America + the wider non-US/Canada Americas → LatNet.
+const LATAM_COUNTRY_CODES: ReadonlySet<string> = new Set([
+  "AG", "AR", "BS", "BB", "BZ", "BO", "BR", "CL", "CO", "CR", "CU", "DM",
+  "DO", "EC", "SV", "GD", "GT", "GY", "HT", "HN", "JM", "MX", "NI", "PA",
+  "PY", "PE", "KN", "LC", "VC", "SR", "TT", "UY", "VE",
+]);
+
+/** The default backing federation for a country with no real local Chama.
+ *  Regional: Africa→OCA, Latin America→LatNet, else→BLF. */
+export function defaultFederationForCountry(
+  country: string | null,
+): { invite: string; name: string } {
+  const cc = (country ?? "").toUpperCase();
+  if (AFRICA_COUNTRY_CODES.has(cc)) return { invite: OCA_FEDERATION_INVITE, name: OCA_FEDERATION_NAME };
+  if (LATAM_COUNTRY_CODES.has(cc)) return { invite: LATNET_FEDERATION_INVITE, name: LATNET_FEDERATION_NAME };
+  return { invite: BLF_FEDERATION_INVITE, name: BLF_FEDERATION_NAME };
+}
+
+/** Build a country community on its REGIONAL default federation (see
+ *  defaultFederationForCountry). Used for the pre-seed country shells and for
+ *  the picker's generated full-ISO shells, so both route identically. */
+export function defaultCountryChama(seed: CountryChamaSeed): Community {
   const currency = seed.currency.toUpperCase();
+  const fed = defaultFederationForCountry(seed.country);
   return {
     slug: seed.slug ?? `${seed.country.toLowerCase()}-${currency.toLowerCase()}`,
     displayName: seed.displayName ?? `${seed.name} · ${currency}`,
     currency,
     countries: [seed.country],
     languages: seed.languages,
-    federationInvite: BLF_FEDERATION_INVITE,
+    federationInvite: fed.invite,
     flagEmoji: flagEmojiForCountry(seed.country),
     country: seed.country,
     browserReliable: true,
-    notes: IROH_LIMITATION_NOTE,
+    notes: `${IROH_LIMITATION_NOTE} Default route: ${fed.name}.`,
     disambiguator: null,
     hiddenFromPicker: false,
   };
@@ -153,7 +196,7 @@ const KENYA_AFRIBIT_CHAMA: Community = {
   country: "KE",
   browserReliable: true,
   notes: "Native Fedimint sidecar route wired for Afribit Kibera.",
-  disambiguator: "Afribit",
+  disambiguator: "Afribit Kibera",
   hiddenFromPicker: false,
 };
 
@@ -192,7 +235,7 @@ function publicFediWalletServiceChama(route: PublicFediFederation): Community {
 const PUBLIC_FEDI_WALLET_SERVICE_CHAMAS: Community[] =
   PUBLIC_FEDI_APPROVED_FEDERATIONS.map(publicFediWalletServiceChama);
 
-const SOUTH_AFRICA_GLOBAL_CHAMA: Community = blfCountryChama({
+const SOUTH_AFRICA_GLOBAL_CHAMA: Community = defaultCountryChama({
   country: "ZA",
   name: "South Africa",
   currency: "ZAR",
@@ -200,54 +243,54 @@ const SOUTH_AFRICA_GLOBAL_CHAMA: Community = blfCountryChama({
 });
 
 const EAST_AFRICA_COUNTRY_CHAMAS: Community[] = [
-  blfCountryChama({ country: "BI", name: "Burundi", currency: "BIF", languages: ["rn", "fr", "en"] }),
-  blfCountryChama({ country: "KM", name: "Comoros", currency: "KMF", languages: ["ar", "fr"] }),
-  blfCountryChama({ country: "DJ", name: "Djibouti", currency: "DJF", languages: ["fr", "ar"] }),
-  blfCountryChama({ country: "ER", name: "Eritrea", currency: "ERN", languages: ["ti", "ar", "en"] }),
-  blfCountryChama({ country: "ET", name: "Ethiopia", currency: "ETB", languages: ["am", "en"] }),
+  defaultCountryChama({ country: "BI", name: "Burundi", currency: "BIF", languages: ["rn", "fr", "en"] }),
+  defaultCountryChama({ country: "KM", name: "Comoros", currency: "KMF", languages: ["ar", "fr"] }),
+  defaultCountryChama({ country: "DJ", name: "Djibouti", currency: "DJF", languages: ["fr", "ar"] }),
+  defaultCountryChama({ country: "ER", name: "Eritrea", currency: "ERN", languages: ["ti", "ar", "en"] }),
+  defaultCountryChama({ country: "ET", name: "Ethiopia", currency: "ETB", languages: ["am", "en"] }),
   KENYA_AFRIBIT_CHAMA,
   KENYA_BITSACCO_CHAMA,
-  blfCountryChama({ country: "MG", name: "Madagascar", currency: "MGA", languages: ["mg", "fr"] }),
-  blfCountryChama({ country: "MW", name: "Malawi", currency: "MWK", languages: ["en", "ny"] }),
-  blfCountryChama({ country: "MU", name: "Mauritius", currency: "MUR", languages: ["en", "fr"] }),
-  blfCountryChama({ country: "MZ", name: "Mozambique", currency: "MZN", languages: ["pt"] }),
-  blfCountryChama({ country: "RW", name: "Rwanda", currency: "RWF", languages: ["rw", "en", "fr"] }),
-  blfCountryChama({ country: "SC", name: "Seychelles", currency: "SCR", languages: ["en", "fr"] }),
-  blfCountryChama({ country: "SO", name: "Somalia", currency: "SOS", languages: ["so", "ar"] }),
-  blfCountryChama({ country: "SS", name: "South Sudan", currency: "SSP", languages: ["en"] }),
-  blfCountryChama({ country: "UG", name: "Uganda", currency: "UGX", languages: ["en", "sw"] }),
-  blfCountryChama({ country: "ZM", name: "Zambia", currency: "ZMW", languages: ["en"] }),
-  blfCountryChama({ country: "ZW", name: "Zimbabwe", currency: "ZWG", languages: ["en", "sn", "nd"] }),
+  defaultCountryChama({ country: "MG", name: "Madagascar", currency: "MGA", languages: ["mg", "fr"] }),
+  defaultCountryChama({ country: "MW", name: "Malawi", currency: "MWK", languages: ["en", "ny"] }),
+  defaultCountryChama({ country: "MU", name: "Mauritius", currency: "MUR", languages: ["en", "fr"] }),
+  defaultCountryChama({ country: "MZ", name: "Mozambique", currency: "MZN", languages: ["pt"] }),
+  defaultCountryChama({ country: "RW", name: "Rwanda", currency: "RWF", languages: ["rw", "en", "fr"] }),
+  defaultCountryChama({ country: "SC", name: "Seychelles", currency: "SCR", languages: ["en", "fr"] }),
+  defaultCountryChama({ country: "SO", name: "Somalia", currency: "SOS", languages: ["so", "ar"] }),
+  defaultCountryChama({ country: "SS", name: "South Sudan", currency: "SSP", languages: ["en"] }),
+  defaultCountryChama({ country: "UG", name: "Uganda", currency: "UGX", languages: ["en", "sw"] }),
+  defaultCountryChama({ country: "ZM", name: "Zambia", currency: "ZMW", languages: ["en"] }),
+  defaultCountryChama({ country: "ZW", name: "Zimbabwe", currency: "ZWG", languages: ["en", "sn", "nd"] }),
 ];
 
 const WEST_AFRICA_COUNTRY_CHAMAS: Community[] = [
-  blfCountryChama({ country: "BJ", name: "Benin", currency: "XOF", languages: ["fr"] }),
-  blfCountryChama({ country: "BF", name: "Burkina Faso", currency: "XOF", languages: ["fr"] }),
-  blfCountryChama({ country: "CV", name: "Cabo Verde", currency: "CVE", languages: ["pt"] }),
-  blfCountryChama({ country: "CI", name: "Côte d'Ivoire", currency: "XOF", languages: ["fr"] }),
-  blfCountryChama({ country: "GM", name: "Gambia", currency: "GMD", languages: ["en"] }),
-  blfCountryChama({ country: "GH", name: "Ghana", currency: "GHS", languages: ["en"] }),
-  blfCountryChama({ country: "GN", name: "Guinea", currency: "GNF", languages: ["fr"] }),
-  blfCountryChama({ country: "GW", name: "Guinea-Bissau", currency: "XOF", languages: ["pt"] }),
-  blfCountryChama({ country: "LR", name: "Liberia", currency: "LRD", languages: ["en"] }),
-  blfCountryChama({ country: "ML", name: "Mali", currency: "XOF", languages: ["fr"] }),
-  blfCountryChama({ country: "MR", name: "Mauritania", currency: "MRU", languages: ["ar", "fr"] }),
-  blfCountryChama({ country: "NE", name: "Niger", currency: "XOF", languages: ["fr"] }),
-  blfCountryChama({ country: "NG", name: "Nigeria", currency: "NGN", languages: ["en"] }),
-  blfCountryChama({ country: "SL", name: "Sierra Leone", currency: "SLE", languages: ["en"] }),
-  blfCountryChama({ country: "TG", name: "Togo", currency: "XOF", languages: ["fr"] }),
+  defaultCountryChama({ country: "BJ", name: "Benin", currency: "XOF", languages: ["fr"] }),
+  defaultCountryChama({ country: "BF", name: "Burkina Faso", currency: "XOF", languages: ["fr"] }),
+  defaultCountryChama({ country: "CV", name: "Cabo Verde", currency: "CVE", languages: ["pt"] }),
+  defaultCountryChama({ country: "CI", name: "Côte d'Ivoire", currency: "XOF", languages: ["fr"] }),
+  defaultCountryChama({ country: "GM", name: "Gambia", currency: "GMD", languages: ["en"] }),
+  defaultCountryChama({ country: "GH", name: "Ghana", currency: "GHS", languages: ["en"] }),
+  defaultCountryChama({ country: "GN", name: "Guinea", currency: "GNF", languages: ["fr"] }),
+  defaultCountryChama({ country: "GW", name: "Guinea-Bissau", currency: "XOF", languages: ["pt"] }),
+  defaultCountryChama({ country: "LR", name: "Liberia", currency: "LRD", languages: ["en"] }),
+  defaultCountryChama({ country: "ML", name: "Mali", currency: "XOF", languages: ["fr"] }),
+  defaultCountryChama({ country: "MR", name: "Mauritania", currency: "MRU", languages: ["ar", "fr"] }),
+  defaultCountryChama({ country: "NE", name: "Niger", currency: "XOF", languages: ["fr"] }),
+  defaultCountryChama({ country: "NG", name: "Nigeria", currency: "NGN", languages: ["en"] }),
+  defaultCountryChama({ country: "SL", name: "Sierra Leone", currency: "SLE", languages: ["en"] }),
+  defaultCountryChama({ country: "TG", name: "Togo", currency: "XOF", languages: ["fr"] }),
 ];
 
 const CENTRAL_AFRICA_COUNTRY_CHAMAS: Community[] = [
-  blfCountryChama({ country: "AO", name: "Angola", currency: "AOA", languages: ["pt"] }),
-  blfCountryChama({ country: "CM", name: "Cameroon", currency: "XAF", languages: ["fr", "en"] }),
-  blfCountryChama({ country: "CF", name: "Central African Republic", currency: "XAF", languages: ["fr", "sg"] }),
-  blfCountryChama({ country: "TD", name: "Chad", currency: "XAF", languages: ["fr", "ar"] }),
-  blfCountryChama({ country: "CG", name: "Republic of the Congo", currency: "XAF", languages: ["fr"] }),
-  blfCountryChama({ country: "CD", name: "DR Congo", currency: "CDF", languages: ["fr", "ln", "sw"] }),
-  blfCountryChama({ country: "GQ", name: "Equatorial Guinea", currency: "XAF", languages: ["es", "fr", "pt"] }),
-  blfCountryChama({ country: "GA", name: "Gabon", currency: "XAF", languages: ["fr"] }),
-  blfCountryChama({ country: "ST", name: "Sao Tome and Principe", currency: "STN", languages: ["pt"] }),
+  defaultCountryChama({ country: "AO", name: "Angola", currency: "AOA", languages: ["pt"] }),
+  defaultCountryChama({ country: "CM", name: "Cameroon", currency: "XAF", languages: ["fr", "en"] }),
+  defaultCountryChama({ country: "CF", name: "Central African Republic", currency: "XAF", languages: ["fr", "sg"] }),
+  defaultCountryChama({ country: "TD", name: "Chad", currency: "XAF", languages: ["fr", "ar"] }),
+  defaultCountryChama({ country: "CG", name: "Republic of the Congo", currency: "XAF", languages: ["fr"] }),
+  defaultCountryChama({ country: "CD", name: "DR Congo", currency: "CDF", languages: ["fr", "ln", "sw"] }),
+  defaultCountryChama({ country: "GQ", name: "Equatorial Guinea", currency: "XAF", languages: ["es", "fr", "pt"] }),
+  defaultCountryChama({ country: "GA", name: "Gabon", currency: "XAF", languages: ["fr"] }),
+  defaultCountryChama({ country: "ST", name: "Sao Tome and Principe", currency: "STN", languages: ["pt"] }),
 ];
 
 /** v0.1.85 pre-seed list, expanded in v0.7.0 to make country-first
@@ -298,7 +341,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     currency: "XOF",
     countries: ["SN"],
     languages: ["fr", "wo"],
-    federationInvite: BLF_FEDERATION_INVITE,
+    federationInvite: OCA_FEDERATION_INVITE,
     flagEmoji: "🇸🇳",
     country: "SN",
     browserReliable: true,
@@ -330,8 +373,8 @@ export const COMMUNITY_REGISTRY: Community[] = [
     countries: ["TZ"],
     languages: ["sw", "en"],
     // Tanzania is user-facing identity first; until a Tanzania-specific
-    // federation is claimed, use the same proven BLF backing route.
-    federationInvite: BLF_FEDERATION_INVITE,
+    // federation is claimed, route to the African regional default (OCA).
+    federationInvite: OCA_FEDERATION_INVITE,
     flagEmoji: "🇹🇿",
     country: "TZ",
     browserReliable: true,
@@ -384,6 +427,50 @@ export const DEFAULT_COMMUNITY_SLUG = "us-blf";
  *  by callers via getCustomCommunities(). */
 export function getPickerCommunities(): Community[] {
   return COMMUNITY_REGISTRY.filter(c => !c.hiddenFromPicker);
+}
+
+/** All picker communities whose primary (`country`) or spanned
+ *  (`countries`) ISO 3166-1 alpha-2 code matches `code`. Returns 0, 1, or
+ *  many — e.g. Kenya → [Afribit, Bitsacco], US → [BLF, GBF]. The full-world
+ *  globe/country picker uses this to resolve a tapped country to its
+ *  Chama(s); 0 results means "no Chama here yet" (soft-landing / request),
+ *  >1 means a disambiguation step keyed on `disambiguator`. */
+export function getCommunitiesByCountry(code: string): Community[] {
+  const cc = code.toUpperCase();
+  return getPickerCommunities().filter(
+    c => c.country === cc || c.countries.includes(cc),
+  );
+}
+
+/** Federations that back a confirmed, vouched LOCAL community with real
+ *  arbiters/leaders today — the native Fedimint routes verified end-to-end
+ *  (Afribit + Bitsacco in Kenya, GBF in the US). A community backed by one
+ *  of these is a REAL local Chama: the picker lands the user straight in.
+ *
+ *  Everything else — BLF/BP defaults and the unconfirmed public-Fedi wallet
+ *  services — is NOT a local Chama yet: a flag exists, but the "arbiters" are
+ *  a couple of distant npubs, so the picker gives those countries the honest
+ *  soft-landing ("no local Chama here yet") instead of implying a ready local
+ *  arbiter network. Add invites here as community-led federations onboard
+ *  real, bonded arbiters (the graduated-trust / bond work is V3). */
+// Today only Kenya's on-the-ground communities (Afribit Kibera, Bitsacco)
+// qualify. GBF is intentionally NOT here: it's a real federation, but its
+// arbiters haven't gone through the (coming) elected + bonded + rated
+// process — and that bar applies to everyone, including Chama's own
+// operator. US therefore gets the same honest soft-landing as everywhere
+// else (still usable on GBF, just not claiming elected local arbiters).
+// Add an invite here only once its community completes the arbiter process.
+export const REAL_CHAMA_FEDERATION_INVITES: ReadonlySet<string> = new Set([
+  AFRIBIT_KIBERA_FEDERATION_INVITE,
+  BITSACCO_FEDERATION_INVITE,
+]);
+
+/** True when `community` is backed by a federation with real local arbiters
+ *  (see REAL_CHAMA_FEDERATION_INVITES). Drives the picker's "land directly"
+ *  vs "honest soft-landing" split. */
+export function isRealLocalChama(community: Community): boolean {
+  return community.federationInvite !== null
+    && REAL_CHAMA_FEDERATION_INVITES.has(community.federationInvite);
 }
 
 // ══════════════════════════════════════════════════════════════════════════

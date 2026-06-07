@@ -19,6 +19,19 @@
           "args": true
         }
       ]
+    },
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://mempool.space/*" },
+        { "url": "https://api.coinbase.com/*" },
+        { "url": "https://api.coingecko.com/*" },
+        { "url": "https://api.kraken.com/*" },
+        { "url": "https://www.bitstamp.net/*" },
+        { "url": "https://open.er-api.com/*" },
+        { "url": "https://api.exchangerate-api.com/*" },
+        { "url": "https://cdn.jsdelivr.net/*" }
+      ]
     }
   ]
 }

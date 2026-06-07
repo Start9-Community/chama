@@ -1000,18 +1000,21 @@ export default function App() {
               onScan={async (scanned) => {
                 setShowQRScanner(false);
                 if (scanned.startsWith("nsec1")) {
-                  if (confirm("Found an nsec key. Sign in with it?")) {
-                    (window as any).__chama_connect_nsec = scanned;
-                    try { await Preferences.set({ key: "chama_saved_nsec", value: scanned }); } catch {}
-                    // A scanned key is imported, never Chama-generated.
-                    try { await Preferences.set({ key: "chama_nsec_origin", value: "imported" }); } catch {}
-                    actions.connect();
-                  }
+                  // v2.5: the scan IS the consent (the user opened the scanner
+                  // to scan their key), and window.confirm() is a silent no-op
+                  // in the Capacitor/Tauri webview — so proceed and toast,
+                  // rather than gate behind a dialog that never fires.
+                  (window as any).__chama_connect_nsec = scanned;
+                  try { await Preferences.set({ key: "chama_saved_nsec", value: scanned }); } catch {}
+                  // A scanned key is imported, never Chama-generated.
+                  try { await Preferences.set({ key: "chama_nsec_origin", value: "imported" }); } catch {}
+                  setToast({ message: "⚡ Key scanned — signing you in.", type: "success" });
+                  actions.connect();
                 } else if (scanned.startsWith("nostrconnect://") || scanned.startsWith("bunker://")) {
                   navigator.clipboard?.writeText(scanned);
-                  alert("Scanned bunker URI copied to clipboard!");
+                  setToast({ message: "Signer URI copied to clipboard.", type: "success" });
                 } else {
-                  alert("Scanned: " + scanned.slice(0, 100));
+                  setToast({ message: "Unrecognized QR code.", type: "error" });
                 }
               }}
             />
@@ -2095,6 +2098,13 @@ const globalCss = `
      ~3-8s NWC pay window without forcing a percentage estimate. */
   @keyframes nwcProgressSweep{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
   *{box-sizing:border-box;margin:0;padding:0}
+  /* v2.5 polish: kill the browser's default tap-highlight (the blue/grey
+     flash on Android taps) and the default blue focus halo on buttons/links.
+     Keep accessibility intact: a subtle Chama focus ring still shows for
+     KEYBOARD navigation via :focus-visible, just not on mouse/touch. */
+  *{-webkit-tap-highlight-color:transparent}
+  button:focus:not(:focus-visible),a:focus:not(:focus-visible),[role="button"]:focus:not(:focus-visible){outline:none}
+  button:focus-visible,a:focus-visible,[role="button"]:focus-visible{outline:2px solid ${T.accent}aa;outline-offset:2px}
   input::placeholder{color:${T.muted}88}
   input:focus,select:focus{border-color:${T.accent}66!important}
   ::-webkit-scrollbar{width:4px}

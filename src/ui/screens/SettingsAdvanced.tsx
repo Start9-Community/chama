@@ -54,6 +54,8 @@ export function SettingsAdvanced({
   onSandboxFund?: () => void;
 }) {
   const [powerUserOn, setPowerUserOn] = useState(isPowerUserModeOn);
+  // v2.5: inline reset error (window.alert is a no-op in the webview).
+  const [resetError, setResetError] = useState<string | null>(null);
   // Toggle the flag — dev builds remain auto-on regardless
   useEffect(() => { setPowerUserMode(powerUserOn); }, [powerUserOn]);
 
@@ -313,7 +315,10 @@ export function SettingsAdvanced({
               balance is present — withdraw via Lightning first.
             </div>
             <button
-              onClick={() => onResetLocalWallet().catch((e: any) => alert(e?.message || "Reset failed"))}
+              onClick={() => {
+                setResetError(null);
+                onResetLocalWallet().catch((e: any) => setResetError(e?.message || "Reset failed"));
+              }}
               style={{
                 background: "none",
                 border: `1px solid ${T.border}`,
@@ -325,6 +330,16 @@ export function SettingsAdvanced({
             >
               ↺ Reset local Chama
             </button>
+            {resetError && (
+              <div style={{
+                marginTop: 10, padding: "9px 11px", borderRadius: T.rs,
+                background: T.redDim, border: `1px solid ${T.red}55`,
+                color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
+                wordBreak: "break-word" as const,
+              }}>
+                ⚠ {resetError}
+              </div>
+            )}
           </div>
         </>
       )}
@@ -776,7 +791,7 @@ function RecoveryPhraseCard() {
 
           {showQr && (
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-              <QRCode data={phrase} size={200} />
+              <QRCode data={phrase} size={240} margin={4} />
             </div>
           )}
 
@@ -926,7 +941,7 @@ function NsecRevealCard() {
 
           {showQr && nsec && (
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-              <QRCode data={nsec} size={200} />
+              <QRCode data={nsec} size={240} margin={4} />
             </div>
           )}
 

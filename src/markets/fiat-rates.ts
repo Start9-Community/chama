@@ -1,3 +1,5 @@
+import { marketFetch } from "./market-fetch.js";
+
 export interface FiatRatesSnapshot {
   rates: Record<string, number>;
   updatedAt: number | null;
@@ -112,7 +114,7 @@ async function fetchRatesSource(source: RatesSource): Promise<RatesQuote | null>
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), RATES_TIMEOUT_MS);
   try {
-    const response = await fetch(source.url, {
+    const response = await marketFetch(source.url, {
       cache: "no-store",
       signal: controller.signal,
     });

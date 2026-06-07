@@ -1459,6 +1459,9 @@ function Step2({
 }) {
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
+  // v2.5: inline photo-upload error. window.alert is a silent no-op in the
+  // Tauri/Capacitor webview, so a rejected image used to fail invisibly.
+  const [imageError, setImageError] = useState<string | null>(null);
   const menuItems = normalizeMenuItems(form, vertical);
   const hasMenu = menuItems.length > 0;
   const usingMenu = form.listingMode === "menu";
@@ -1650,9 +1653,10 @@ function Step2({
       const result = typeof reader.result === "string" ? reader.result : "";
       const imageDataUrl = normalizeImageDataUrl(file, result);
       if (!imageDataUrl || imageDataUrl.length > MAX_MENU_IMAGE_DATA_URL_CHARS) {
-        window.alert("That file does not look like a supported photo, or it is too large for this release. Try JPG, PNG, WebP, GIF, AVIF, HEIC, HEIF, or BMP.");
+        setImageError("That file doesn't look like a supported photo, or it's too large for this release. Try JPG, PNG, WebP, GIF, AVIF, HEIC, HEIF, or BMP.");
         return;
       }
+      setImageError(null);
       updateMenuItem(id, { imageDataUrl });
     };
     reader.readAsDataURL(file);
@@ -1660,6 +1664,19 @@ function Step2({
 
   return (
     <>
+      {imageError && (
+        <div
+          onClick={() => setImageError(null)}
+          style={{
+            marginBottom: 16, padding: "10px 12px", borderRadius: T.rs,
+            background: T.redDim, border: `1px solid ${T.red}55`,
+            color: T.red, fontFamily: T.mono, fontSize: 11, lineHeight: 1.5,
+            cursor: "pointer",
+          }}
+        >
+          ⚠ {imageError} <span style={{ color: T.muted }}>(tap to dismiss)</span>
+        </div>
+      )}
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
           LISTING STYLE

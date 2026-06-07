@@ -1,7 +1,7 @@
 {
   "name": "satoshi-nostr-app",
   "private": true,
-  "version": "2.5.0",
+  "version": "2.6.0",
   "type": "module",
   "description": "Chama — Nostr-native P2P escrow client. Non-custodial. No server.",
   "scripts": {
@@ -31,7 +31,9 @@
     "@fedimint/core": "0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031",
     "@fedimint/fedimint-client-wasm-bundler": "0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031",
     "@fedimint/transport-web": "0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031",
+    "@tauri-apps/plugin-http": "^2.5.9",
     "@types/qrcode": "^1.5.6",
+    "cobe": "^2.0.1",
     "jsqr": "^1.4.0",
     "nostr-tools": "^2.23.3",
     "qrcode": "^1.5.4",
