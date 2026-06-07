@@ -1081,7 +1081,12 @@ export default function App() {
   return (
     <div style={{
       background: T.bg, color: T.text, minHeight: "100dvh",
-      fontFamily: T.sans, maxWidth: detailMode ? 720 : 520, margin: "0 auto",
+      // v2.7 Stage 4: detail mode widens to 1120 so TradeDetail's built-in
+      // ≥980px two-column layout (listing pane + sticky trade-room/chat) can
+      // actually engage on desktop/landscape — it was previously throttled to
+      // 720px and never triggered. `.trade-detail-shell` caps + centers itself
+      // responsively (520 → 1040 → 1120); narrow/mobile is unaffected.
+      fontFamily: T.sans, maxWidth: detailMode ? 1120 : 520, margin: "0 auto",
       paddingBottom: effectiveShellPaddingBottom,
       paddingTop: shellPaddingTop,
     }}>

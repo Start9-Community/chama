@@ -671,7 +671,7 @@ export function TradeDetail({
   const showVerboseRouteEducation = false;
   const routeNote = state.status === EscrowStatus.CREATED
     ? framing.kind === "state-b"
-      ? `Cross-fed · ${framing.listingFlagEmoji} ${framing.listingCommunityName}`
+      ? `Trading on ${framing.listingFlagEmoji} ${framing.listingCommunityName}`
       : framing.sameFedSameCommunity
         ? "Same community"
         : "Same federation"
@@ -792,20 +792,17 @@ export function TradeDetail({
                 ))}
               </div>
             )}
-            <img
-              className="trade-lock-ring"
-              src="/icons/chama-woven-trust-mark-transparent-256.png"
-              alt=""
-              aria-hidden="true"
-              style={{
-                width: 128,
-                height: 128,
-                margin: "0 auto 18px",
-                display: "block",
-                objectFit: "contain",
-                filter: `drop-shadow(0 0 34px ${s.c}22)`,
-              }}
-            />
+            {/* v2.7 Stage 2: the decorative 128px woven-mark orb was removed —
+                it was the single biggest space-waster on the core screen and
+                conveyed nothing. The trade amount is the hero now; status lives
+                in the header Badge. A thin status-tinted rule keeps a subtle
+                brand/status accent without the vertical cost. */}
+            <div aria-hidden="true" style={{
+              width: 40, height: 3, borderRadius: 2,
+              margin: "2px auto 16px",
+              background: s.c,
+              boxShadow: `0 0 12px ${s.c}66`,
+            }} />
             <div className="trade-detail-amount-row" style={{
               textAlign: "center",
             }}>
@@ -1243,9 +1240,9 @@ export function TradeDetail({
           {myRole !== Role.SELLER && suggestedRail && (
             <div style={{ marginTop: 10, color: T.muted, fontSize: 11, lineHeight: 1.5 }}>
               {railMatch.shared.length > 0 ? (
-                <>You both use <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong> — the easiest rail to settle on before you lock.</>
+                <>You both use <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong> — the easiest payment method to settle on before you lock.</>
               ) : (
-                <>No saved handle matches the seller's rails yet. Suggested: <strong style={{ color: T.text }}>{suggestedRail.displayName}</strong>. Add it in Me → Saved handles to match faster.</>
+                <>None of your saved payment methods match the seller's yet. Suggested: <strong style={{ color: T.text }}>{suggestedRail.displayName}</strong>. Add it in Me → Saved handles to match faster.</>
               )}
             </div>
           )}
@@ -1663,8 +1660,8 @@ export function TradeDetail({
               {state.actingArbiter && state.actingArbiter !== participants[Role.ARBITER]
                 // Arbiter substitution: a pool backup's vote currently holds the
                 // arbiter slot (the assigned arbiter went absent past the floor).
-                ? `backup arbiter ${shortParticipantPubkey(state.actingArbiter)} stepped in`
-                : `${state.communityArbiters.length} backup arbiter${state.communityArbiters.length !== 1 ? "s" : ""}`}
+                ? `standby arbiter ${shortParticipantPubkey(state.actingArbiter)} stepped in`
+                : `${state.communityArbiters.length} arbiter${state.communityArbiters.length !== 1 ? "s" : ""} on standby`}
             </div>
           )}
         </div>
@@ -1690,6 +1687,56 @@ export function TradeDetail({
             );
           })}
         </div>
+
+        {/* v2.7: the trust story + B/A/S legend. Plain-language "why this is
+            safe" at the moment it matters, decoding the three coloured dots
+            above. Progressive disclosure (native <details>) so the shield +
+            label reassure always, the detail is one tap away — no permanent
+            clutter on an already-busy screen. */}
+        <details style={{
+          marginTop: 14,
+          background: T.surface,
+          border: `1px solid ${T.border}`,
+          borderRadius: T.r,
+          overflow: "hidden",
+        }}>
+          <summary style={{
+            cursor: "pointer", listStyle: "none",
+            padding: "11px 14px",
+            display: "flex", alignItems: "center", gap: 9,
+            fontFamily: T.sans, fontSize: 13, fontWeight: 700, color: T.text,
+          }}>
+            <span style={{ fontSize: 15, lineHeight: 1 }}>🛡️</span>
+            How your money is protected
+            <span style={{ marginLeft: "auto", color: T.muted, fontSize: 11, fontFamily: T.mono }}>▾</span>
+          </summary>
+          <div style={{ padding: "0 14px 14px", fontFamily: T.sans }}>
+            <div style={{ fontSize: 12.5, color: T.muted, lineHeight: 1.6, marginBottom: 12 }}>
+              The sats are locked in{" "}
+              <strong style={{ color: T.text }}>2-of-3 escrow</strong> — no one
+              can move them alone. Releasing needs{" "}
+              <strong style={{ color: T.text }}>2 of the 3</strong> to agree
+              (normally the buyer and seller).{" "}
+              <strong style={{ color: T.text }}>Chama never holds your money.</strong>
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {([
+                { c: ROLE_COLOR.buyer, k: "Buyer", d: "the person buying in this trade" },
+                { c: ROLE_COLOR.arbiter, k: "Arbiter", d: "a neutral tiebreaker — only votes if the two sides disagree" },
+                { c: ROLE_COLOR.seller, k: "Seller", d: "the person selling" },
+              ] as const).map(({ c, k, d }) => (
+                <div key={k} style={{ display: "flex", alignItems: "baseline", gap: 9, fontSize: 12, lineHeight: 1.45 }}>
+                  <span style={{ width: 9, height: 9, borderRadius: "50%", background: c, flexShrink: 0, transform: "translateY(1px)" }} />
+                  <span>
+                    <strong style={{ color: T.text }}>{k}</strong>
+                    <span style={{ color: T.muted }}> — {d}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </details>
+
         {(state.status === EscrowStatus.LOCKED || state.status === EscrowStatus.APPROVED ||
           state.status === EscrowStatus.CLAIMED || state.status === EscrowStatus.COMPLETED) && (
           <div className="trade-vote-decisions" style={{
@@ -1783,8 +1830,8 @@ export function TradeDetail({
             LOCK WINDOW EXPIRED
           </div>
           {samePubkey(expiredJoinHold.pubkey, pubkey)
-            ? `Your ${roleDisplayName(expiredJoinHold.role).toLowerCase()} reservation expired before LOCK was published. Join again when you are ready. No sats moved.`
-            : `${roleDisplayName(expiredJoinHold.role)} ${expiredJoinHold.pubkey.slice(0, 8)}... joined, but no LOCK was published before the window closed. Ask them to join again. No sats moved.`}
+            ? `Your ${roleDisplayName(expiredJoinHold.role).toLowerCase()} reservation expired before the trade locked. Join again when you are ready. No sats moved.`
+            : `${roleDisplayName(expiredJoinHold.role)} ${expiredJoinHold.pubkey.slice(0, 8)}... joined, but the trade didn't lock before the window closed. Ask them to join again. No sats moved.`}
         </div>
       )}
 
@@ -1928,7 +1975,7 @@ export function TradeDetail({
               : menuOrderNotFinal
               ? `${roleDisplayName(menuSelectorRole)} is still editing. Lock opens after they press Ready.`
               : participants.buyer
-              ? "Spending from your Chama will split shares and publish LOCK in one step."
+              ? "Funds the trade and locks it into 2-of-3 escrow in one step."
               : "Waiting for buyer to acknowledge the trade…"}
           </div>
 
@@ -2169,7 +2216,7 @@ export function TradeDetail({
             textAlign: "center", marginTop: 8,
             fontSize: 9, color: T.muted, fontFamily: T.mono,
           }}>
-            Real 2-of-3 Shamir split · ecash spent from your Chama
+            Held safely in 2-of-3 escrow — it takes 2 of 3 to release
           </div>
         </div>
         );
@@ -2560,7 +2607,7 @@ export function TradeDetail({
               textAlign: "center", marginTop: 8,
               fontSize: 10, color: T.amber, fontFamily: T.mono,
             }}>
-              Claim already published — retry only settles/pays out after wallet balance confirms
+              Claim already sent — retrying only completes the payout once your wallet confirms
             </div>
           )}
         </div>
@@ -2589,14 +2636,23 @@ export function TradeDetail({
           letterSpacing: 1,
           listStyle: "none",
         }}>
-          ADVANCED EVENT CHAIN · {state.eventChain.length} events · {state.chatMessages.length} chat messages
+          TRADE TIMELINE · {state.eventChain.length} step{state.eventChain.length !== 1 ? "s" : ""} · {state.chatMessages.length} message{state.chatMessages.length !== 1 ? "s" : ""}
         </summary>
         <div style={{ marginTop: 12 }}>
           {state.eventChain.map((evt) => (
             <div key={evt.raw.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
               <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.green }} />
-              <span style={{ fontSize: 11, fontFamily: T.mono, color: T.muted }}>
-                kind:{evt.kind} — {evt.payload.type.replace("escrow:", "")}
+              <span style={{ fontSize: 11, fontFamily: T.sans, color: T.muted }}>
+                {({
+                  "escrow:create": "Listing created",
+                  "escrow:join": "Joined the trade",
+                  "escrow:lock": "Sats locked in escrow",
+                  "escrow:vote": "Voted on the outcome",
+                  "escrow:resolve": "Outcome resolved",
+                  "escrow:claim": "Payout claimed",
+                  "escrow:cancel": "Cancelled",
+                } as Record<string, string>)[evt.payload.type]
+                  ?? evt.payload.type.replace("escrow:", "").replace(/_/g, " ")}
               </span>
               <span style={{ fontSize: 9, fontFamily: T.mono, color: T.border, marginLeft: "auto" }}>
                 {evt.raw.id.slice(0, 8)}…
@@ -2650,11 +2706,11 @@ export function TradeDetail({
                 width: "100%",
               }}
             >
-              {rebroadcasting ? "RE-BROADCASTING…" : "↻ RE-BROADCAST / HEAL THIS TRADE"}
+              {rebroadcasting ? "RE-SENDING…" : "↻ RE-SEND TO RELAYS · HEAL THIS TRADE"}
             </button>
             <p style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, margin: "8px 2px 0" }}>
               {rebroadcastResult
-                ?? "Re-publishes this trade's full event chain to today's relays. Money stays in escrow either way."}
+                ?? "Re-sends this trade's full history to today's relays. Your sats stay safely in escrow either way."}
             </p>
             {rebroadcastDone && (
               <div style={{ marginTop: 10, padding: "10px 12px", background: T.card, border: `1px solid ${T.accent}`, borderRadius: T.r }}>
@@ -2911,7 +2967,7 @@ function detailNextStep({
       return {
         kicker: "READY TO FUND",
         title: "Fund this exact order when you are ready.",
-        body: "Chama will mint the ecash escrow, split the Shamir shares, and publish the lock in one step.",
+        body: "Chama locks your sats into 2-of-3 escrow in one step — held safely until the trade settles.",
         tone: "accent",
         color: T.accent,
         amountMsats: lockAmountMsats,
@@ -2954,7 +3010,7 @@ function detailNextStep({
       title: claimRetryBlocked ? "This claim needs recovery, not another retry." : "Claim your sats from escrow.",
       body: claimRetryBlocked
         ? "The federation consumed the notes before local settlement finished. Use the recovery surface if a balance appears."
-        : "Chama will settle the ecash and route payout through the best available path for this environment.",
+        : "Chama releases your sats and sends them out the best available way.",
       tone: claimRetryBlocked ? "red" : "accent",
       color: claimRetryBlocked ? T.red : T.accent,
       amountMsats: state.amountMsats,
@@ -2965,7 +3021,7 @@ function detailNextStep({
     return {
       kicker: "COMPLETE",
       title: "This trade is settled.",
-      body: "The event chain is preserved below for auditability. Ratings will plug into this moment next.",
+      body: "Your full trade history is saved below. Ratings will plug into this moment next.",
       tone: "green",
       color: T.green,
       amountMsats: state.amountMsats,
@@ -3021,7 +3077,7 @@ function detailNextStep({
   return {
     kicker: "TRADE ROOM",
     title: STATUS[state.status]?.l ?? state.status,
-    body: "Follow the active controls below. Chama keeps the event trail available for auditability.",
+    body: "Follow the controls below. Your full trade history stays available.",
     tone: "teal",
     color: T.teal,
     amountMsats: state.amountMsats,

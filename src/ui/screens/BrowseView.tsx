@@ -214,12 +214,25 @@ export function BrowseView({
 
       {totalListings === 0 ? (
         <div style={{
-          textAlign: "center", padding: "48px 16px",
-          color: T.muted, fontFamily: T.mono, fontSize: 12, lineHeight: 1.6,
+          textAlign: "center", padding: "44px 20px", fontFamily: T.sans,
         }}>
-          {fedimintJoined
-            ? "No open listings yet. Tap Create below to publish one."
-            : "Open the Chama selector above to see listings."}
+          {fedimintJoined ? (
+            <>
+              <div style={{ fontSize: 40, marginBottom: 14, lineHeight: 1 }}>🤝</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 8 }}>
+                Be the first to post here
+              </div>
+              <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6, maxWidth: 300, margin: "0 auto" }}>
+                No open offers in your community yet. Tap{" "}
+                <strong style={{ color: T.accent }}>Create</strong> below to post
+                one — buyers and sellers nearby will see it.
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6 }}>
+              Pick your Chama above to see what's trading.
+            </div>
+          )}
         </div>
       ) : (
         <>
@@ -276,7 +289,7 @@ export function BrowseView({
                   letterSpacing: 0, textTransform: "uppercase",
                   whiteSpace: "nowrap" as const,
                 }}>
-                  {filteredNonMatchingListings.length} listing{filteredNonMatchingListings.length !== 1 ? "s" : ""} on other routes
+                  {filteredNonMatchingListings.length} listing{filteredNonMatchingListings.length !== 1 ? "s" : ""} in other communities
                 </div>
                 <div style={{ flex: 1, height: 1, background: T.border }} />
               </div>

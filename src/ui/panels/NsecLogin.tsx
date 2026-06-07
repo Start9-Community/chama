@@ -40,7 +40,20 @@ export function NsecLogin({
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [inputError, setInputError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const autoSubmittedKeyRef = useRef<string | null>(null);
+  const copyResetRef = useRef<number | null>(null);
+
+  // Copy the generated key with a brief "Copied ✓" confirmation — the
+  // reassurance that the most important string in the app actually made it to
+  // the clipboard.
+  const handleCopyKey = () => {
+    if (!generatedNsec) return;
+    navigator.clipboard?.writeText(generatedNsec);
+    setCopied(true);
+    if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
+    copyResetRef.current = window.setTimeout(() => setCopied(false), 1800);
+  };
 
   const handleGenerate = async () => {
     setMode("create");
@@ -281,48 +294,61 @@ export function NsecLogin({
 
       {generatedActive && (
         <div style={{
-          marginBottom: 10, padding: 12,
+          marginBottom: 12, padding: 16,
           background: T.amberDim, border: `1px solid ${T.amber}55`,
-          borderRadius: T.rs, textAlign: "left",
+          borderRadius: T.r, textAlign: "left",
         }}>
-          <div style={{
-            fontSize: 10, color: T.amber, fontFamily: T.mono,
-            fontWeight: 800, letterSpacing: 0.8, marginBottom: 8,
-          }}>
-            SAVE THIS RECOVERY KEY
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
+            <span style={{ fontSize: 18, lineHeight: 1 }}>🔑</span>
+            <span style={{ fontSize: 15, fontWeight: 800, color: T.text, fontFamily: T.sans }}>
+              Save your recovery key
+            </span>
           </div>
           <div style={{
-            fontSize: 10, color: T.text, fontFamily: T.mono,
+            fontSize: 13, color: T.muted, fontFamily: T.sans,
+            lineHeight: 1.55, marginBottom: 12,
+          }}>
+            This is the{" "}
+            <span style={{ color: T.text, fontWeight: 700 }}>
+              only key to your account and the money in it
+            </span>. Chama never sees it and can't reset it — if you lose it,
+            no one can get your account back. Keep it somewhere safe, like a
+            password manager.
+          </div>
+          <div style={{
+            fontSize: 11, color: T.text, fontFamily: T.mono,
             lineHeight: 1.55, wordBreak: "break-all",
-            padding: 10, background: T.bg, border: `1px solid ${T.border}`,
-            borderRadius: T.rs, marginBottom: 8,
+            padding: 12, background: T.bg, border: `1px solid ${T.border}`,
+            borderRadius: T.rs, marginBottom: 11,
           }}>
             {generatedNsec}
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <button
-              onClick={() => navigator.clipboard?.writeText(generatedNsec)}
+              onClick={handleCopyKey}
               style={{
-                padding: "8px 10px", background: T.surface,
-                border: `1px solid ${T.border}`, borderRadius: T.rs,
-                color: T.text, fontFamily: T.mono, fontSize: 10,
-                fontWeight: 700, cursor: "pointer",
+                padding: "9px 14px", flexShrink: 0,
+                background: copied ? T.greenDim : T.surface,
+                border: `1px solid ${copied ? T.green : T.borderHi}`,
+                borderRadius: T.rs, color: copied ? T.green : T.text,
+                fontFamily: T.sans, fontSize: 12, fontWeight: 700,
+                cursor: "pointer", transition: "all 0.15s",
               }}
             >
-              Copy
+              {copied ? "Copied ✓" : "Copy key"}
             </button>
             <label style={{
-              display: "flex", alignItems: "center", gap: 7,
-              color: T.text, fontSize: 10, fontFamily: T.mono,
+              display: "flex", alignItems: "center", gap: 8,
+              color: T.text, fontSize: 13, fontFamily: T.sans, fontWeight: 600,
               cursor: "pointer", userSelect: "none" as const,
             }}>
               <input
                 type="checkbox"
                 checked={backupConfirmed}
                 onChange={(e) => setBackupConfirmed(e.target.checked)}
-                style={{ accentColor: T.accent, width: 14, height: 14, cursor: "pointer" }}
+                style={{ accentColor: T.accent, width: 16, height: 16, cursor: "pointer" }}
               />
-              I saved it
+              I've saved it
             </label>
           </div>
         </div>
@@ -354,12 +380,16 @@ export function NsecLogin({
       )}
       {!minimalPaste && (
         <div style={{
-          fontSize: 9, color: T.muted, fontFamily: T.mono,
+          fontSize: 10, color: T.muted, fontFamily: T.sans,
           textAlign: "center", marginTop: 10, lineHeight: 1.5,
         }}>
-          {isNative
-            ? "Your recovery key stays on this device, encrypted in secure storage."
-            : "Your recovery key stays in this browser."}
+          {generatedActive
+            ? (isNative
+                ? "Saved on this device, encrypted — but keep your own copy too, in case you lose the phone."
+                : "Chama doesn't keep this for you — your saved copy is the only way back in.")
+            : (isNative
+                ? "Your recovery key stays on this device, encrypted in secure storage."
+                : "Your recovery key stays in this browser.")}
         </div>
       )}
     </div>
