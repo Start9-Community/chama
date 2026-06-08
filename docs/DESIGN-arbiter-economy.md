@@ -282,3 +282,71 @@ signed, replayable roster is what lets provenance become a *hard gate* safely.
 Promote it from "later" to the FIRST build step (already #1 in Build order). It
 unblocks the hard gate, tiered assignment lookups, and the admission flow.
 
+---
+
+## v3 sharpening (2026-06-07) — presence bond, fairness by reputation
+
+Locked in DECISIONS.md (2026-06-07, "Arbiter v3: presence bond
+(slash-to-cover), fairness by reputation"). This section is the design-home
+version: it tightens §3–§5, resolves the §3.3 staking tension, and extends
+the Invariants list. It does not change the build order — bonds stay last.
+
+### Two invariants to add alongside Invariants 1–4
+
+5. **Presence/fairness split.** The protocol verifies presence ONLY — "did the
+   assigned arbiter's eligible vote land before `substitutionEligibleAt`?" is
+   objective and replayable from the event chain. Fairness (was the ruling
+   right?) is the arbiter's job, is subjective, and is governed by
+   reputation/ratings + community revocation (§5) — never auto-slashed. The
+   protocol does not adjudicate its own adjudicator.
+6. **Slashing is post-hoc.** No trade ever waits on bond movement. The trade
+   plane settles at backup speed (deterministic eligibility → backup votes →
+   done); the bond plane settles at custodian speed (k-of-n, whenever). The
+   presence proof is permanent, so deferred judgment loses nothing. Backup pay
+   has two legs with two latencies: dispute fee rides trade settlement, the
+   call-out bonus rides custodian signatures. Slow custodians delay only the
+   bonus + treasury remainder — parties are already whole.
+
+### Slash-to-cover (refines §3.3 bonded admission and §4 duty pay)
+
+- **Standing bond, locked once** into k-of-n custody by the community's
+  top-rated chamacitos (field-read G), reusing the holder-only/SSS construct.
+  NOT re-posted per dispute: the per-dispute "earmark" is a **lien recorded in
+  Nostr state, not a fund move** — zero live arbiter action at dispute time,
+  which kills the stake-per-dispute idea (the arbiter is offline exactly
+  then).
+- **On a proven no-show:** dispute fee (1.5%) = work-pay → routes to the
+  ACTING backup (parties owed it anyway; substitution costs them nothing).
+  Forfeited bond = absence penalty → **capped** call-out bonus to the backup
+  (full-bond-to-backup is a jackpot incentive to engineer no-shows);
+  remainder → community treasury. On small trades the bonus, not the 1.5%,
+  is what makes standby worth staffing. Never to the parties (they were made
+  whole by the substitute; paying them re-creates the rejected parent-escrow
+  design).
+- **Challenge window before movement:** custodians publish intent-to-slash,
+  wait 24–48h (free — see invariant 6). Custody is protocol-manual (SSS
+  shares are inert; k human keys must act) but client-automatable: a
+  custodian's client may verify the replayable proof and co-sign by opt-in
+  policy. The tap is not the safety mechanism; the window and k independent
+  relay views are.
+- **Epistemic honesty about absence:** in an open relay world, absence is only
+  "absent from my view" — a present vote can be eclipsed, and a true no-show
+  can forge a backdated vote during the window (`created_at` is
+  self-asserted). A single miss is never fully adjudicable. This is WHY
+  graduated, pattern-based slashing (field-read E) is load-bearing: first
+  miss → warning + ding (cheap if wrong); repeated "eclipses" go statistically
+  implausible. The mechanism absorbs what the epistemics can't settle.
+
+### Federation binding (rule, not hope)
+
+Bond, primary, backups, and custodians all bind to the **community's
+federation** — senators are that community's top-rated chamacitos, so they
+hold its fed by construction. Cross-fed trades (regional routing) never move
+the bond; they only consume presence. Two-rail payout on substitution:
+dispute fee in trade-settlement terms, bonus in bond-fed ecash. The bond
+inherits the community fed's guardian risk (long-lived ecash dies with its
+mint); sizing (≈ one period's duty earnings, field-read F) bounds it, and
+top-up cadence doubles as a fed liveness check. Top-up before new high-value
+assignments; exit reclaims only with no open assignments (active-commitment
+guard).
+

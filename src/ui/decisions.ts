@@ -88,6 +88,12 @@ export type CommunityTapEffect =
       displayName: string;
       balanceMsats: number;
       currentInvite: string;
+    }
+  | {
+      kind: "blocked-active-commitment";
+      slug: string;
+      displayName: string;
+      activeCommitmentCount: number;
     };
 
 export interface CommunityTapInputs {
@@ -97,6 +103,11 @@ export interface CommunityTapInputs {
   currentInvite: string | null;
   /** Live balance from fedimint state. */
   balanceMsats: number;
+  /** V3 #72: count of live buyer/seller commitments (open escrows the user
+   *  must stay reachable for). Balance alone is blind here — during LOCKED
+   *  the wallet shows 0 (ecash spent into SSS shares) while the user is at
+   *  their MOST committed. Optional so legacy callers/tests read as 0. */
+  activeCommitmentCount?: number;
 }
 
 export function decideCommunityTapEffect(inputs: CommunityTapInputs): CommunityTapEffect {
@@ -115,6 +126,22 @@ export function decideCommunityTapEffect(inputs: CommunityTapInputs): CommunityT
   // needed: a wallet that doesn't exist yet can't hold funds.
   if (!inputs.currentInvite) {
     return { kind: "switch-silent", slug: inputs.slug, targetInvite, displayName };
+  }
+
+  // V3 #72: a live buyer/seller commitment outranks EVERYTHING — including
+  // the destroy-confirm below. Switching feds mid-trade can't steal the sats
+  // (the escrow lives on Nostr + its fed), but it CAN make the user miss
+  // votes, claims, and dispute windows. And the balance guard can't catch
+  // this: during LOCKED the wallet correctly shows 0. Hard block with honest
+  // copy — no destructive override is offered while a trade is live.
+  // ("Switch anytime BETWEEN trades, never during one.")
+  if ((inputs.activeCommitmentCount ?? 0) > 0) {
+    return {
+      kind: "blocked-active-commitment",
+      slug: inputs.slug,
+      displayName,
+      activeCommitmentCount: inputs.activeCommitmentCount ?? 0,
+    };
   }
 
   // Returning user, fed differs. Only a MATERIAL recoverable balance should
@@ -852,6 +879,11 @@ export type ListingTapEffect =
       displayName: string;
       balanceMsats: number;
       currentInvite: string;
+    }
+  | {
+      kind: "blocked-active-commitment";
+      displayName: string;
+      activeCommitmentCount: number;
     };
 
 export interface ListingTapInputs {
@@ -864,6 +896,10 @@ export interface ListingTapInputs {
   currentInvite: string | null;
   /** Live OPFS balance. */
   balanceMsats: number;
+  /** V3 #72: live buyer/seller commitments — same guard as the community
+   *  tap. A foreign-listing tap silently switches the wallet's fed, which
+   *  must never happen out from under a live trade. Optional → 0. */
+  activeCommitmentCount?: number;
 }
 
 function resolveListingInvite(listing: { mintUrl: string; community: string | null }): string {
@@ -926,6 +962,16 @@ export function decideListingTapEffect(inputs: ListingTapInputs): ListingTapEffe
 
   if (inputs.currentInvite === targetInvite) {
     return { kind: "matching" };
+  }
+  // V3 #72 (same invariant as the community tap): a foreign-listing tap
+  // dispatches a silent fed switch — never while a live trade needs the
+  // user on the current fed. Matching listings above are unaffected.
+  if (inputs.currentInvite && (inputs.activeCommitmentCount ?? 0) > 0) {
+    return {
+      kind: "blocked-active-commitment",
+      displayName,
+      activeCommitmentCount: inputs.activeCommitmentCount ?? 0,
+    };
   }
   // Same material-balance dust line as decideCommunityTapEffect: dust never
   // blocks a listing-fed switch; only a recoverable-worth balance guards.

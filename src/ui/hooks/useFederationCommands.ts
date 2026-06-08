@@ -33,6 +33,9 @@ import { decideCommunityTapEffect } from "../decisions.js";
 export interface FederationCommandsDeps {
   fedimint: FedimintState;
   actions: UseEscrowActions;
+  /** V3 #72: live buyer/seller commitments — a manual switch is blocked
+   *  while any are open (balance alone is blind during LOCKED). */
+  activeCommitmentCount: number;
   setToast: (t: { message: ReactNode; type: "success" | "error" | "info" }) => void;
   setBrowseCommunity: (slug: string) => void;
   setPendingDestroyConfirm: (
@@ -52,7 +55,10 @@ export interface FederationCommands {
 }
 
 export function useFederationCommands(deps: FederationCommandsDeps): FederationCommands {
-  const { fedimint, actions, setToast, setBrowseCommunity, setPendingDestroyConfirm } = deps;
+  const {
+    fedimint, actions, activeCommitmentCount,
+    setToast, setBrowseCommunity, setPendingDestroyConfirm,
+  } = deps;
 
   const handleSelectCommunity = async (slug: string) => {
     // Capture previous state BEFORE any mutation so we can revert on
@@ -72,7 +78,21 @@ export function useFederationCommands(deps: FederationCommandsDeps): FederationC
       slug,
       currentInvite: previousInvite,
       balanceMsats: fedimint.balanceMsats ?? 0,
+      activeCommitmentCount,
     });
+
+    // V3 #72: live trades anchor the user to their current fed. Block BEFORE
+    // any identity/filter mutation — a blocked tap must leave zero trace.
+    if (effect.kind === "blocked-active-commitment") {
+      const n = effect.activeCommitmentCount;
+      setToast({
+        message: n === 1
+          ? "⚡ A live trade needs you on this Chama. Finish or resolve it, then switch."
+          : `⚡ ${n} live trades need you on this Chama. Finish or resolve them, then switch.`,
+        type: "error",
+      });
+      return;
+    }
 
     // Every tap is an identity choice (v0.1.87: filter-only kind retired
     // along with the "All communities" pill). Update community + Browse

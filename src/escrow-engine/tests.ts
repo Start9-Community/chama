@@ -107,7 +107,7 @@ import {
   type Signer,
   type UnsignedEvent,
 } from "./escrow-client.js";
-import { RelayManager } from "./relay-manager.js";
+import { RelayManager, RelayStatus } from "./relay-manager.js";
 
 // PR 2 imports
 import {
@@ -395,7 +395,15 @@ import {
 
 // v0.3.0 Phase 6 — Trinity Ring participant order (theme.ts)
 // v0.3.1 Phase 2 — extends §43 with a grep tripwire over src/ui/
-import { TRINITY_RING_ORDER } from "../ui/theme.js";
+import {
+  TRINITY_RING_ORDER,
+  T,
+  STATUS,
+  inputStyle,
+  applyThemeMode,
+  normalizeThemeMode,
+  resolveThemeMode,
+} from "../ui/theme.js";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -414,6 +422,22 @@ import {
 } from "./envelope.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
 import { generateSecretKey, getPublicKey, nip19, nip44 } from "nostr-tools";
+import { finalizeEvent } from "nostr-tools/pure";
+import {
+  ARBITER_ROSTER_KIND,
+  buildArbiterRosterEvent,
+  parseArbiterRosterEvent,
+  resolveRosterAuthority,
+  selectLatestRoster,
+  writeCachedRosterEvent,
+  readRosterPool,
+  fetchAndCacheCommunityRoster,
+} from "../arbiters/roster.js";
+import {
+  buildArbiterApplicationEvent,
+  parseArbiterApplicationEvent,
+  collectArbiterApplications,
+} from "../arbiters/applications.js";
 
 /** Build a minimal NIP-44 encrypt/decrypt pair for a given private key,
  *  using nostr-tools v2 NIP-44. The "encrypt as me to recipient" function
@@ -5580,6 +5604,68 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
     assert(destroyConfirm.currentInvite === BP_FEDERATION_INVITE,
       "Destroy-confirm carries the active invite for cancel-revert");
   }
+
+  // V3 #72: a live buyer/seller commitment blocks the switch — and the
+  // balance guard alone could never catch this, because during LOCKED the
+  // wallet correctly reads 0 (ecash spent into SSS shares).
+  const blockedByCommitment = decideCommunityTapEffect({
+    slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 0,
+    activeCommitmentCount: 1,
+  });
+  assert(blockedByCommitment.kind === "blocked-active-commitment",
+    "Live commitment blocks a different-fed switch even at balance 0 (the LOCKED blindspot)");
+  if (blockedByCommitment.kind === "blocked-active-commitment") {
+    assert(blockedByCommitment.activeCommitmentCount === 1,
+      "Blocked effect carries the commitment count for honest toast copy");
+  }
+
+  // Commitment outranks the destroy-confirm: no destructive override is
+  // offered while a trade is live.
+  const blockedOverDestroy = decideCommunityTapEffect({
+    slug: "us-blf", currentInvite: BP_FEDERATION_INVITE, balanceMsats: 5_000_000,
+    activeCommitmentCount: 2,
+  });
+  assert(blockedOverDestroy.kind === "blocked-active-commitment",
+    "Commitment outranks material balance — blocked, not destroy-confirm");
+
+  // Same fed → identity-only regardless of commitments (no fed change, no risk).
+  const sameFedWithCommitment = decideCommunityTapEffect({
+    slug: "sn-cfa", currentInvite: OCA_FEDERATION_INVITE, balanceMsats: 0,
+    activeCommitmentCount: 3,
+  });
+  assert(sameFedWithCommitment.kind === "identity-only",
+    "Commitments never block staying — same-fed tap stays identity-only");
+
+  // First-time user can't have commitments on a fed they never joined; the
+  // optional field defaults to 0 for legacy callers (covered above).
+
+  // V3 #72, listing-tap face: a foreign-route listing dispatches the same
+  // silent fed switch — blocked under a live commitment; matching listings
+  // are untouched.
+  const listingBlocked = decideListingTapEffect({
+    listing: { mintUrl: "", community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+    activeCommitmentCount: 1,
+  });
+  assert(listingBlocked.kind === "blocked-active-commitment",
+    "Foreign-listing tap is blocked while a live commitment anchors the user");
+  const listingMatchingWithCommitment = decideListingTapEffect({
+    listing: { mintUrl: BP_FEDERATION_INVITE, community: null },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+    activeCommitmentCount: 1,
+  });
+  assert(listingMatchingWithCommitment.kind === "matching",
+    "Same-fed listings stay tappable during a live commitment");
+  const listingNoCommitment = decideListingTapEffect({
+    listing: { mintUrl: "", community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+    activeCommitmentCount: 0,
+  });
+  assert(listingNoCommitment.kind === "switch-silent",
+    "Zero commitments → foreign-listing tap switch-silent unchanged");
 
   // Custom-invite override is bypassed — community-tap honors the
   // community's pinned invite even if a custom override is set elsewhere.
@@ -11448,6 +11534,52 @@ console.log("\n── AMOUNT DISPLAY MODE ──");
   );
 }
 
+// ── 42a-bis. THEME PALETTE SWAP (#50, DECISIONS.md 2026-06-07) ──────────
+//
+// The whole UI reads T at render time; theming swaps the palette IN PLACE.
+// The one footgun is module-load capture — STATUS and inputStyle copy T
+// values when theme.ts loads, so applyThemeMode must rebuild them. These
+// asserts pin that contract: after a swap, the derivations track the new
+// palette, and a swap back restores the dark brand exactly.
+console.log("\n── THEME PALETTE SWAP ──");
+{
+  const darkBg = T.bg;
+  const darkAccent = T.accent;
+  applyThemeMode("light");
+  assert(T.bg !== darkBg, "applyThemeMode(light) swaps the palette in place");
+  assert(
+    STATUS.COMPLETED.c === T.green && STATUS.COMPLETED.bg === T.greenDim,
+    "STATUS entries are rebuilt to the active palette on swap",
+  );
+  assert(
+    STATUS.APPROVED.c === T.accent,
+    "STATUS accent tracks the light accent, not the module-load capture",
+  );
+  assert(
+    (inputStyle as { background?: string }).background === T.surface &&
+      (inputStyle as { color?: string }).color === T.text,
+    "inputStyle is rebuilt to the active palette on swap",
+  );
+  applyThemeMode("dark");
+  assert(
+    T.bg === darkBg && T.accent === darkAccent,
+    "Swapping back restores the dark brand palette exactly",
+  );
+  assert(
+    STATUS.APPROVED.c === T.accent && STATUS.CANCELLED.bg === T.surface,
+    "STATUS tracks T again after the restore",
+  );
+  assert(
+    normalizeThemeMode("garbage") === "dark" && normalizeThemeMode(null) === "dark",
+    "Unknown stored theme modes fall back to dark (the brand default)",
+  );
+  const sysResolved = resolveThemeMode("system");
+  assert(
+    sysResolved === "dark" || sysResolved === "light",
+    "System mode resolves to a concrete palette even without matchMedia (node)",
+  );
+}
+
 // ── 42b. SIGN-IN OPTION ENVIRONMENT GATE ────────────────────────────────
 //
 // NIP-46 is a strong privacy candidate for desktop if the signer flow
@@ -13520,6 +13652,229 @@ console.log("\n── RELAY MANAGER — one-shot fetch isolation ──");
     fetched.length === 1 && fetched[0].id === "seed-event",
     "fetchOnce ignores unrelated live-subscription events while seed recovery is running"
   );
+}
+
+// ── FIRST-ACK PUBLISH (field fix: slow Create→Publish) ─────────────────
+//
+// publish() sends the EVENT frame to every connected relay immediately,
+// then used to await ALL of them (Promise.allSettled) — so one zombie
+// "connected" relay held every publish hostage for the full 8s timeout
+// even after healthy relays ACKed in milliseconds. These asserts pin the
+// fix: resolve on the FIRST accept; zero accepts still rejects.
+console.log("\n── FIRST-ACK PUBLISH ──");
+{
+  const rm = new RelayManager([]);
+  const mkRelay = (url: string) => ({ url, status: RelayStatus.CONNECTED });
+  (rm as any).relays.set("wss://fast.test", mkRelay("wss://fast.test"));
+  (rm as any).relays.set("wss://zombie.test", mkRelay("wss://zombie.test"));
+
+  let zombieSettled = false;
+  (rm as any).publishToSingleRelay = (relay: { url: string }) =>
+    relay.url === "wss://fast.test"
+      ? Promise.resolve({ accepted: true, message: "" })
+      : new Promise(resolve => setTimeout(() => {
+          zombieSettled = true;
+          resolve({ accepted: false, message: "Timeout on wss://zombie.test" });
+        }, 200));
+
+  const publishStart = Date.now();
+  const result = await rm.publish({ id: "a1".repeat(32) } as any);
+  const publishElapsedMs = Date.now() - publishStart;
+  assert(result.accepted === 1, "First-ACK publish returns as soon as one relay accepts");
+  assert(
+    !zombieSettled && publishElapsedMs < 150,
+    `Publish does not wait for the zombie relay (resolved in ${publishElapsedMs}ms, straggler still pending)`,
+  );
+
+  // Durability bar unchanged: zero accepts still rejects after all settle.
+  (rm as any).publishToSingleRelay = () =>
+    Promise.resolve({ accepted: false, message: "blocked: nope" });
+  let rejectedAll = false;
+  try {
+    await rm.publish({ id: "b2".repeat(32) } as any);
+  } catch {
+    rejectedAll = true;
+  }
+  assert(rejectedAll, "Zero accepts still rejects the publish (accepted>=1 durability bar unchanged)");
+
+  // Let the zombie's timer settle so the runner exits without a dangling handle.
+  await new Promise(resolve => setTimeout(resolve, 250));
+}
+
+// ── SIGNED ARBITER ROSTER — kind:38120 (V3 keystone, field-read J) ──────
+//
+// The roster lands on 38120, NOT the 38104 the design notes used — 38104 is
+// RESOLVE on the escrow wire. Hybrid authority: registry steward pin first,
+// shell creator fallback. Replaceable: newest created_at wins, ties break to
+// the smaller event id. Cache is re-verified on every read.
+console.log("\n── SIGNED ARBITER ROSTER ──");
+{
+  const stewardSk = generateSecretKey();
+  const stewardPk = getPublicKey(stewardSk);
+  const intruderSk = generateSecretKey();
+  const arbA = getPublicKey(generateSecretKey());
+  const arbB = getPublicKey(generateSecretKey());
+
+  const rosterKindNumber: number = ARBITER_ROSTER_KIND;
+  assert(rosterKindNumber === 38120 && rosterKindNumber !== Number(EscrowEventKind.RESOLVE),
+    "Roster kind 38120 stays clear of the escrow wire band (38104 is RESOLVE)");
+
+  // Build → sign → parse round-trip.
+  const unsigned = buildArbiterRosterEvent({
+    community: "ke-kes",
+    arbiters: [arbA, arbB, arbA],
+    createdAt: 1_900_000_000,
+  });
+  const signed = finalizeEvent(unsigned, stewardSk) as unknown as NostrEvent;
+  const parsed = parseArbiterRosterEvent(signed);
+  assert(parsed.ok, "Signed roster parses + verifies");
+  if (parsed.ok) {
+    assert(parsed.roster.community === "ke-kes", "Roster community round-trips via the d tag");
+    assert(parsed.roster.arbiters.length === 2 && parsed.roster.arbiters[0] === arbA,
+      "Roster dedupes arbiters and preserves order");
+    assert(parsed.roster.signer === stewardPk, "Roster signer is the event author");
+  }
+
+  // Tampering: flip a byte in content → signature must fail.
+  const tampered = { ...signed, content: signed.content.replace("ke-kes", "ke-keS") } as NostrEvent;
+  const tamperedResult = parseArbiterRosterEvent(tampered);
+  assert(!tamperedResult.ok, "Tampered roster content fails (d-tag mismatch or signature)");
+
+  // Authority: hybrid resolution prefers the pin, falls back to creator.
+  const onlyCreator = resolveRosterAuthority({ stewardPubkey: null, creatorPubkey: stewardPk });
+  assert(onlyCreator.length === 1 && onlyCreator[0] === stewardPk,
+    "Hybrid authority: creator fallback when no steward pin exists");
+  const pinned = resolveRosterAuthority({ stewardPubkey: arbA, creatorPubkey: stewardPk });
+  assert(pinned[0] === arbA && pinned[1] === stewardPk,
+    "Hybrid authority: steward pin outranks the creator fallback");
+
+  // selectLatestRoster: intruder-signed roster is ignored even when newer.
+  const intruderRoster = finalizeEvent(buildArbiterRosterEvent({
+    community: "ke-kes",
+    arbiters: [getPublicKey(intruderSk)],
+    createdAt: 1_900_000_500,
+  }), intruderSk) as unknown as NostrEvent;
+  const best = selectLatestRoster([signed, intruderRoster], [stewardPk]);
+  assert(!!best && best.signer === stewardPk && best.arbiters[0] === arbA,
+    "Unauthorized roster is ignored even when newer — authority gates selection");
+
+  // Replaceable: a newer steward-signed roster supersedes the older one.
+  const newer = finalizeEvent(buildArbiterRosterEvent({
+    community: "ke-kes",
+    arbiters: [arbB],
+    createdAt: 1_900_001_000,
+  }), stewardSk) as unknown as NostrEvent;
+  const latest = selectLatestRoster([signed, newer], [stewardPk]);
+  assert(!!latest && latest.arbiters.length === 1 && latest.arbiters[0] === arbB,
+    "Newest authorized roster wins (replaceable semantics)");
+
+  // Cache → readRosterPool re-verifies on read; wrong authority reads empty.
+  writeCachedRosterEvent("ke-kes", newer);
+  const pool = readRosterPool("ke-kes", [stewardPk]);
+  assert(pool.length === 1 && pool[0] === arbB,
+    "Cached roster feeds the pool after re-verification on read");
+  const wrongAuthorityPool = readRosterPool("ke-kes", [arbA]);
+  assert(wrongAuthorityPool.length === 0,
+    "Cache is worthless without authority — re-verified on every read");
+
+  // Build-time validation: non-hex arbiters and oversize rosters refuse.
+  let threwOnNpub = false;
+  try {
+    buildArbiterRosterEvent({ community: "ke-kes", arbiters: ["npub1notahexkey"] });
+  } catch {
+    threwOnNpub = true;
+  }
+  assert(threwOnNpub, "Roster builder refuses non-hex arbiter keys");
+
+  // fetchAndCacheCommunityRoster — the relay sync used on community switch.
+  const fetchedNewer = finalizeEvent(buildArbiterRosterEvent({
+    community: "sn-cfa",
+    arbiters: [arbA],
+    createdAt: 1_900_002_000,
+  }), stewardSk) as unknown as NostrEvent;
+  const viaFetch = await fetchAndCacheCommunityRoster({
+    community: "sn-cfa",
+    authority: [stewardPk],
+    query: async () => [fetchedNewer],
+  });
+  assert(!!viaFetch && viaFetch.eventId === fetchedNewer.id,
+    "fetchAndCache picks the relay's authorized roster and caches it");
+  const cachedPool = readRosterPool("sn-cfa", [stewardPk]);
+  assert(cachedPool.length === 1 && cachedPool[0] === arbA,
+    "Fetched roster is cached for sync pool reads (getTrustedArbiterPool path)");
+  const viaFailedRelay = await fetchAndCacheCommunityRoster({
+    community: "sn-cfa",
+    authority: [stewardPk],
+    query: async () => { throw new Error("relay down"); },
+  });
+  assert(!!viaFailedRelay && viaFailedRelay.eventId === fetchedNewer.id,
+    "Relay failure falls back to the cached roster instead of throwing");
+  const noAuthority = await fetchAndCacheCommunityRoster({
+    community: "sn-cfa",
+    authority: [],
+    query: async () => [fetchedNewer],
+  });
+  assert(noAuthority === null, "No authority anchor → no roster, never a guess");
+
+  // ── #74: arbiter applications (kind:38121) — the on-ramp ──
+  const applicantSk = generateSecretKey();
+  const applicantPk = getPublicKey(applicantSk);
+  const appUnsigned = buildArbiterApplicationEvent({
+    community: "ke-kes",
+    statement: "Kibera shopkeeper, 3 languages, online evenings.",
+    createdAt: 1_900_003_000,
+  });
+  const appSigned = finalizeEvent(appUnsigned, applicantSk) as unknown as NostrEvent;
+  const appParsed = parseArbiterApplicationEvent(appSigned);
+  assert(
+    !!appParsed && appParsed.applicant === applicantPk && appParsed.community === "ke-kes",
+    "Signed application parses with applicant + community intact",
+  );
+
+  // Newest-per-applicant + roster-filter + ordering.
+  const appOlder = finalizeEvent(buildArbiterApplicationEvent({
+    community: "ke-kes",
+    statement: "older statement",
+    createdAt: 1_900_002_500,
+  }), applicantSk) as unknown as NostrEvent;
+  const rosteredSk = generateSecretKey();
+  const rosteredPk = getPublicKey(rosteredSk);
+  const rosteredApp = finalizeEvent(buildArbiterApplicationEvent({
+    community: "ke-kes",
+    statement: "already on the roster",
+    createdAt: 1_900_003_500,
+  }), rosteredSk) as unknown as NostrEvent;
+  const collected = collectArbiterApplications(
+    [appOlder, appSigned, rosteredApp],
+    { excludePubkeys: [rosteredPk] },
+  );
+  assert(
+    collected.length === 1 && collected[0].applicant === applicantPk &&
+      collected[0].statement.startsWith("Kibera"),
+    "Review list keeps each applicant's NEWEST application and filters rostered keys",
+  );
+
+  // Tampered application drops silently. JSON round-trip strips nostr-tools'
+  // verifiedSymbol memo that finalizeEvent stamps (and that object spread
+  // copies!) — relay-delivered events arrive symbol-free exactly like this,
+  // so THIS is the real verification path.
+  const appTampered = JSON.parse(JSON.stringify({
+    ...appSigned,
+    content: appSigned.content.replace("Kibera", "Nairobi"),
+  })) as NostrEvent;
+  assert(
+    parseArbiterApplicationEvent(appTampered) === null,
+    "Tampered application fails signature verification and is dropped",
+  );
+
+  // Builder refuses empty + oversized statements.
+  let threwEmpty = false;
+  try {
+    buildArbiterApplicationEvent({ community: "ke-kes", statement: "   " });
+  } catch {
+    threwEmpty = true;
+  }
+  assert(threwEmpty, "Application builder refuses an empty statement");
 }
 
 console.log("\n── ESCROW CLIENT — Browse listing hydration ──");

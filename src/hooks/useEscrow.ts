@@ -134,6 +134,17 @@ import type { LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
 import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
+import {
+  buildArbiterRosterEvent,
+  fetchAndCacheCommunityRoster,
+  resolveRosterAuthority,
+  writeCachedRosterEvent,
+} from "../arbiters/roster.js";
+import {
+  ARBITER_APPLICATION_KIND,
+  buildArbiterApplicationEvent,
+  collectArbiterApplications,
+} from "../arbiters/applications.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
@@ -504,6 +515,23 @@ export interface UseEscrowActions {
   refreshBalance: () => Promise<void>;
   /** Read and store the current wallet balance. */
   getBalance: () => Promise<number>;
+  /** V3 roster keystone: fetch + verify + cache the community's signed
+   *  kind:38120 arbiter roster. No-op when the community has no authority
+   *  anchor or no client. Safe to fire-and-forget on community changes. */
+  refreshCommunityRoster: (community: string) => Promise<void>;
+  /** Steward path: build, sign, publish, and cache this community's roster.
+   *  Throws when not connected. Authority is enforced by VERIFIERS — an
+   *  unauthorized publish is simply ignored by every other client. */
+  publishCommunityRoster: (community: string, arbiters: string[]) => Promise<void>;
+  /** V3 #74: publish a signed arbiter application (kind:38121) for a
+   *  community. Anyone signed-in may apply; the steward reviews. */
+  applyAsArbiter: (community: string, statement: string) => Promise<void>;
+  /** V3 #74 steward review: fetch + verify a community's applications,
+   *  newest per applicant, already-rostered keys excluded. */
+  fetchArbiterApplications: (
+    community: string,
+    excludePubkeys?: string[],
+  ) => Promise<{ applicant: string; statement: string; createdAt: number }[]>;
   /**
    * Wipe the local Fedimint wallet's IndexedDB and reset in-memory state.
    * Use this to recover from a "No modification allowed" seed-mismatch error
@@ -2724,6 +2752,51 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const bridge = requireBridge();
       await bridge.payInvoice(bolt11, meta);
       refreshBalanceRef.current?.().catch(() => {});
+    },
+    refreshCommunityRoster: async (community: string) => {
+      const client = clientRef.current;
+      if (!client || !community) return;
+      const entry = getCommunityBySlug(community);
+      const authority = resolveRosterAuthority({
+        stewardPubkey: entry?.stewardPubkey ?? null,
+        creatorPubkey: entry?.creatorPubkey ?? null,
+      });
+      if (authority.length === 0) return;
+      await fetchAndCacheCommunityRoster({
+        community,
+        authority,
+        query: (filter, timeoutMs) => client.queryOnce(filter as any, timeoutMs),
+      });
+    },
+    publishCommunityRoster: async (community: string, arbiters: string[]) => {
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Not connected");
+      const unsigned = buildArbiterRosterEvent({ community, arbiters });
+      const signed = await signer.signEvent(unsigned as any);
+      await client.publishRaw(signed);
+      writeCachedRosterEvent(community, signed);
+    },
+    applyAsArbiter: async (community: string, statement: string) => {
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Not connected");
+      const unsigned = buildArbiterApplicationEvent({ community, statement });
+      const signed = await signer.signEvent(unsigned as any);
+      await client.publishRaw(signed);
+    },
+    fetchArbiterApplications: async (community: string, excludePubkeys?: string[]) => {
+      const client = clientRef.current;
+      if (!client || !community) return [];
+      const events = await client.queryOnce(
+        { kinds: [ARBITER_APPLICATION_KIND], "#d": [community], limit: 50 } as any,
+        5_000,
+      );
+      return collectArbiterApplications(events, { excludePubkeys }).map(app => ({
+        applicant: app.applicant,
+        statement: app.statement,
+        createdAt: app.createdAt,
+      }));
     },
     spendNotes: async (amountMsats: number, meta?: ChamaOperationMeta) => {
       const bridge = requireBridge();

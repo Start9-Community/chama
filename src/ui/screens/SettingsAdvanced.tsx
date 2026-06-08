@@ -5,6 +5,9 @@ import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { isPowerUserModeOn, setPowerUserMode } from "../powerUserMode.js";
 import { SwitchFederationPanel } from "../panels/SwitchFederationPanel.js";
 import { isSimModeOn } from "../../sim/simMode.js";
+import { getCommunityBySlug } from "../../communities/registry.js";
+import { resolveRosterAuthority } from "../../arbiters/roster.js";
+import { normalizeTrustedArbiterInput, readVerifiedRosterPool } from "../../arbiters/pool.js";
 import { isNwcConnectionString } from "../../payments/nwc.js";
 import {
   addOrTouchSavedNwcConnection,
@@ -38,11 +41,26 @@ export function SettingsAdvanced({
   onResetLocalWallet,
   onSandboxFund,
   focusNwc = false,
+  communitySlug,
+  userPubkey,
+  onPublishRoster,
+  onFetchApplications,
 }: {
   fedimint: FedimintState;
   onBack: () => void;
   onSwitchFederation: (inviteCode: string, opts?: { force?: boolean }) => Promise<void>;
   onResetLocalWallet: () => Promise<void>;
+  /** V3 roster keystone: the active community + the signed-roster publish
+   *  path. The steward card renders only when userPubkey is in the
+   *  community's roster authority (registry pin or shell creator). */
+  communitySlug?: string | null;
+  userPubkey?: string | null;
+  onPublishRoster?: (community: string, arbiters: string[]) => Promise<void>;
+  /** V3 #74: steward review — fetch the community's signed applications. */
+  onFetchApplications?: (
+    community: string,
+    excludePubkeys?: string[],
+  ) => Promise<{ applicant: string; statement: string; createdAt: number }[]>;
   /** When true (arrived via the "Change" link on the trade-page NWC banner),
    *  open expanded on the NWC wallets section and scroll it into view. */
   focusNwc?: boolean;
@@ -215,6 +233,13 @@ export function SettingsAdvanced({
           backing up your own funds is a right, not an advanced toggle. Chama
           is not a wallet — these 12 words are the private key to the ecash. */}
       <RecoveryPhraseCard />
+
+      <StewardRosterCard
+        communitySlug={communitySlug ?? null}
+        userPubkey={userPubkey ?? null}
+        onPublishRoster={onPublishRoster}
+        onFetchApplications={onFetchApplications}
+      />
 
       {/* v2.5 — Account key (nsec). Revealed ONLY when Chama generated the key:
           an imported key is the user's to back up where they made it; a NIP-46
@@ -1366,6 +1391,197 @@ function FediWeblnProbeCard() {
         >
           {copied ? "✓ Copied" : "Copy readout"}
         </button>
+      )}
+    </div>
+  );
+}
+
+// ── V3 roster keystone: steward publish surface ─────────────────────────────
+// Renders ONLY when the signed-in user is in the community's roster
+// authority (registry steward pin, else the shell creator) — everyone else
+// never sees it. Publishing signs a kind:38120 replaceable event; verifiers
+// everywhere re-check authority + signature, so a stray publish from a
+// non-authority key is ignored by every other client (and by this one).
+function StewardRosterCard({
+  communitySlug,
+  userPubkey,
+  onPublishRoster,
+  onFetchApplications,
+}: {
+  communitySlug: string | null;
+  userPubkey: string | null;
+  onPublishRoster?: (community: string, arbiters: string[]) => Promise<void>;
+  onFetchApplications?: (
+    community: string,
+    excludePubkeys?: string[],
+  ) => Promise<{ applicant: string; statement: string; createdAt: number }[]>;
+}) {
+  const [draft, setDraft] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [applications, setApplications] = useState<
+    { applicant: string; statement: string; createdAt: number }[] | null
+  >(null);
+  const [appsBusy, setAppsBusy] = useState(false);
+
+  if (!communitySlug || !userPubkey || !onPublishRoster) return null;
+  const entry = getCommunityBySlug(communitySlug);
+  const authority = resolveRosterAuthority({
+    stewardPubkey: entry?.stewardPubkey ?? null,
+    creatorPubkey: entry?.creatorPubkey ?? null,
+  });
+  if (!authority.includes(userPubkey.toLowerCase())) return null;
+
+  const current = readVerifiedRosterPool(communitySlug);
+  const displayName = entry?.displayName ?? communitySlug;
+
+  const publish = async () => {
+    const arbiters = normalizeTrustedArbiterInput(draft);
+    if (arbiters.length === 0) {
+      setError("Paste at least one arbiter key (npub or hex, one per line).");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setStatus(null);
+    try {
+      await onPublishRoster(communitySlug, arbiters);
+      setStatus(`Signed roster published — ${arbiters.length} arbiter${arbiters.length === 1 ? "" : "s"} for ${displayName}.`);
+      setDraft("");
+    } catch (e: any) {
+      setError(e?.message || "Publish failed — check relays and try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.border}`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 700, color: T.muted, fontFamily: T.mono,
+        letterSpacing: 1, marginBottom: 8,
+      }}>
+        COMMUNITY ARBITER ROSTER · STEWARD
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.sans, lineHeight: 1.5, marginBottom: 10 }}>
+        You hold the roster authority for {displayName}. Publishing signs the
+        community's recognized-arbiter list (kind:38120) — every Chama client
+        verifies it against your key and treats it as the strongest provenance
+        source. Newest roster replaces the old one.
+      </div>
+      {current.length > 0 && (
+        <div style={{
+          fontSize: 10, color: T.text, fontFamily: T.mono, lineHeight: 1.6,
+          padding: "8px 10px", borderRadius: T.rs, marginBottom: 10,
+          background: T.surface, border: `1px solid ${T.border}`,
+        }}>
+          Current verified roster ({current.length}):{" "}
+          {current.map(pk => `${pk.slice(0, 8)}…${pk.slice(-4)}`).join(" · ")}
+        </div>
+      )}
+      <textarea
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        placeholder={"npub1… or hex, one arbiter per line"}
+        rows={3}
+        style={{
+          width: "100%", boxSizing: "border-box", resize: "vertical",
+          padding: "10px 12px", borderRadius: T.rs, marginBottom: 8,
+          background: T.surface, border: `1px solid ${T.border}`,
+          color: T.text, fontFamily: T.mono, fontSize: 11, lineHeight: 1.5,
+        }}
+      />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button
+          onClick={publish}
+          disabled={busy}
+          style={{
+            padding: "10px 14px", borderRadius: T.rs,
+            border: `1px solid ${T.accent}66`, background: T.accentDim,
+            color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+            cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1,
+          }}
+        >
+          {busy ? "Publishing…" : "Sign + publish roster"}
+        </button>
+        {onFetchApplications && (
+          <button
+            onClick={async () => {
+              setAppsBusy(true);
+              setError(null);
+              try {
+                setApplications(await onFetchApplications(communitySlug, current));
+              } catch (e: any) {
+                setError(e?.message || "Couldn't fetch applications.");
+              } finally {
+                setAppsBusy(false);
+              }
+            }}
+            disabled={appsBusy}
+            style={{
+              padding: "10px 14px", borderRadius: T.rs,
+              border: `1px solid ${T.teal}66`, background: T.tealDim,
+              color: T.teal, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+              cursor: appsBusy ? "default" : "pointer", opacity: appsBusy ? 0.6 : 1,
+            }}
+          >
+            {appsBusy ? "Fetching…" : "Review applications"}
+          </button>
+        )}
+      </div>
+      {applications && (
+        <div style={{ marginTop: 10 }}>
+          {applications.length === 0 ? (
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
+              No pending applications for {displayName} (already-rostered keys are filtered out).
+            </div>
+          ) : applications.map(app => (
+            <div
+              key={app.applicant}
+              style={{
+                padding: "8px 10px", borderRadius: T.rs, marginBottom: 6,
+                background: T.surface, border: `1px solid ${T.border}`,
+              }}
+            >
+              <div style={{
+                display: "flex", justifyContent: "space-between",
+                alignItems: "center", gap: 8, marginBottom: 4,
+              }}>
+                <span style={{ fontSize: 10, color: T.teal, fontFamily: T.mono, fontWeight: 800 }}>
+                  {app.applicant.slice(0, 8)}…{app.applicant.slice(-4)}
+                </span>
+                <button
+                  onClick={() => setDraft(d => (d.trim() ? `${d.trim()}\n${app.applicant}` : app.applicant))}
+                  style={{
+                    padding: "4px 9px", borderRadius: 999,
+                    border: `1px solid ${T.green}66`, background: T.greenDim,
+                    color: T.green, fontFamily: T.mono, fontSize: 10, fontWeight: 800,
+                    cursor: "pointer",
+                  }}
+                >
+                  + Add to roster
+                </button>
+              </div>
+              <div style={{ fontSize: 11, color: T.text, fontFamily: T.sans, lineHeight: 1.5 }}>
+                {app.statement}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {status && (
+        <div style={{ marginTop: 8, fontSize: 11, color: T.green, fontFamily: T.mono }}>
+          ✓ {status}
+        </div>
+      )}
+      {error && (
+        <div style={{ marginTop: 8, fontSize: 11, color: T.red, fontFamily: T.mono }}>
+          ⚠ {error}
+        </div>
       )}
     </div>
   );

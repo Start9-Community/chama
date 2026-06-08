@@ -1142,3 +1142,209 @@ only. Web build and unit tests can't exercise the Rust side, so this needs a rea
 `tauri:dev` / `tauri build` run to confirm the BTC pill resolves end-to-end.
 
 **Status:** Active.
+
+---
+
+## 2026-06-07 — Light mode via in-place palette swap, not CSS variables
+
+**Context:** #50 asks for dark/light theming. The entire UI styles itself with
+inline styles reading a single static `T` token object (`import { T }`), and a
+recon pass found **198 call sites** that build colors by string-concatenating an
+alpha onto a token (`` `${T.accent}aa` ``, `T.green + "18"`). There are no
+`React.memo`/`PureComponent` barriers anywhere in `src/ui`, all 16 `useMemo`s
+are data-shaping (none close over styles), and only three things capture token
+values at module load: `STATUS` and `inputStyle` in theme.ts, and the
+`globalCss` template in App.tsx. index.html hardcodes the boot background and
+`theme-color`.
+
+**Options considered:**
+- (a) **CSS custom properties** — the "modern" answer; instant switching. But
+      `var(--accent)` + `"aa"` is not a color: all 198 concat sites would need
+      `color-mix()` (WebView-support risk on older field devices in exactly the
+      markets Chama serves) or an explosion of per-alpha tokens. Biggest diff,
+      real compatibility risk.
+- (b) **Theme via React context** — type-safe, but abandons the codebase's
+      `import { T }` idiom and threads a hook through every component. Hundreds
+      of mechanical edits, no offsetting benefit.
+- (c) **Two palettes, swap in place** — `T` stays the one export;
+      `applyThemeMode()` `Object.assign`s DARK or LIGHT into it, rebuilds the
+      three module-load captures (`STATUS`, `inputStyle`, `globalCss` becomes a
+      function), and a root-level state bump repaints the whole tree (no memo
+      barriers — audited, not assumed). Mode persists like the amount-display
+      preference; a tiny pre-bundle script in index.html applies the saved mode
+      to the boot background so light users don't get a dark flash.
+
+**Decision:** Option (c), with modes `dark | light | system` (system follows
+`prefers-color-scheme` with a change listener). Dark stays the default — it's
+the brand. Toggle lives in Me. Role colors (PHILOSOPHY §5.2) stay identical in
+both palettes — sacred means sacred. QR codes and the scanner overlay stay
+universal black-on-white in both modes; a backup QR's job is to scan, not to
+match the wallpaper.
+
+**Rationale:** The 198 concat sites keep working untouched — the swap happens
+underneath the idiom instead of fighting it. The whole diff concentrates in
+theme.ts, the Me toggle, and index.html. Light-palette hues are darkened where
+needed (green/amber/teal/purple/accent text on white) to keep contrast honest.
+
+**Implications:** The palette is now the single source of truth and module-load
+capture is the one footgun: any future `const FOO = { x: T.accent }` at module
+scope will go stale on switch. Rule: read `T` at render time, or rebuild the
+constant inside `applyThemeMode()`. A unit test pins T/STATUS/inputStyle
+staying in sync across a swap.
+
+**Status:** Active.
+
+---
+
+## 2026-06-07 — Arbiter v3: presence bond (slash-to-cover), fairness by reputation
+
+**Context:** The arbiter economy (DESIGN-arbiter-economy.md §3–5) needs the
+bond question settled before V3 builds it. The crystallization: the protocol
+can objectively, replayably verify exactly ONE thing about an arbiter —
+**presence** (did the assigned arbiter's eligible vote land before
+`substitutionEligibleAt = disputeStart + min(4h, half remaining life)`?).
+**Fairness** — whether the ruling was right — is the arbiter's whole job and is
+inherently subjective. A protocol that auto-slashes on "wrong" rulings is a
+protocol adjudicating its own adjudicator.
+
+**Options considered:**
+- (a) **Bond in a parent escrow, redistributed to buyer/seller on a bad
+      outcome** (earlier idea) — complex design for little arbiter reward, and
+      it pays the wrong people: the parties were already made whole by the
+      substitute. Rejected.
+- (b) **Stake-per-dispute** — arbiter posts collateral when a dispute opens.
+      Fatal flaw: the no-show case is precisely the case where the arbiter is
+      offline, so the stake never gets posted exactly when it matters.
+      Rejected.
+- (c) **Standing presence bond, slash-to-cover** — locked ONCE into a k-of-n
+      community-custody escrow held by the community's top-rated chamacitos
+      (field-read G "senators"), reusing the same holder-only/SSS construct as
+      the trade escrow. Per-dispute "earmark" is a lien recorded in Nostr
+      state, not a fund move — zero live arbiter action at dispute time.
+      Movement happens only on a proven no-show, and a no-show's forfeiture
+      funds the SUBSTITUTE (capped call-out bonus → backup; remainder →
+      community treasury), never the parties.
+
+**Decision:** Option (c). Presence is measured by the bond; fairness is
+measured by reputation/ratings + community revocation (§5) and is never
+auto-slashed. On a substitution: the dispute fee (1.5%) is work-pay and routes
+to the ACTING backup, not the absent primary — parties already owed it, so a
+substitution costs them nothing extra. The forfeited bond is the absence
+penalty: capped bonus to the backup (a full-bond jackpot would make backups
+*want* primary no-shows), remainder to treasury. On small trades the bonus,
+not the tiny 1.5%, is what makes standby worth staffing.
+
+Refinements locked in from the 2026-06-07 design review:
+
+1. **Slashing is post-hoc — no trade ever waits on bond movement.** The trade
+   plane is fast and deterministic (backup eligibility replays from the event
+   chain; the backup votes; the trade settles with no bond dependency). The
+   bond plane is slow and human (k-of-n signatures, whenever). The presence
+   proof is permanent, so the evidence is as strong next week as today. The
+   backup's pay has two legs with two latencies: dispute fee rides trade
+   settlement, bonus rides custodian signatures. If custodians are slow, the
+   only delayed thing is the bonus and the treasury remainder — the parties
+   are already whole. The liveness dependency lands on the least time-critical
+   leg by construction.
+2. **Custody is protocol-manual, client-automatable.** SSS shares are inert
+   data; nothing executes itself — k humans' keys must act (the same reason
+   vote-flip died). But a custodian's CLIENT may verify the replayable proof
+   deterministically and surface one-tap co-sign, or auto-co-sign under an
+   opt-in policy. The key still signs; the human delegates judgment to a
+   verifier they chose. Safety does not come from the manual tap.
+3. **Safety comes from a challenge window + epistemic humility.** Before any
+   movement, custodians publish an intent-to-slash and wait (24–48h — free,
+   since slashing is post-hoc). And state the hard truth: **absence is never
+   provable in an open relay world** — only "absent from my view." A present
+   arbiter's vote can be eclipsed from custodian relays; a true no-show can
+   forge a *backdated* vote during the challenge window (`created_at` is
+   self-asserted). A single miss is therefore never fully adjudicable — which
+   is exactly why graduated, pattern-based slashing (field-read E) is not
+   softness but epistemic honesty: first miss → warning + reputation ding
+   (cheap if wrong); "my votes keep getting eclipsed" becomes statistically
+   implausible by the third occurrence. The mechanism absorbs the epistemics.
+4. **Federation binding is a rule, not a hope.** Bond, primary, backups, and
+   custodians all bind to the COMMUNITY's federation — senators are top-rated
+   chamacitos of that community, so they hold its fed by construction. A
+   cross-fed trade (regional routing) never moves the bond; it only consumes
+   presence. Two-rail payout on substitution: dispute fee in trade-settlement
+   terms, bonus in bond-fed ecash. The bond inherits the community fed's
+   guardian risk (long-lived ecash dies with its mint); sizing keeps that
+   bounded and top-up cadence doubles as a fed liveness check.
+
+Sizing: bond ≈ one period's expected duty earnings (disputes/period × avg
+dispute fee) — a diligent arbiter earns it back before profiting (field-read
+F: fidelity bond, NOT proof-of-stake). Tier-0 arbiters get low bond + low
+trade-amount ceiling (field-reads C/D) so capital doesn't lock out newcomers.
+Drawn-down bonds top up before new high-value assignments; an exiting arbiter
+reclaims once no open assignments remain (active-commitment guard).
+
+**Rationale:** Asks the protocol to verify only what it can verify. Keeps the
+arbiter's judgment accountable to humans (ratings, revocation), not to code.
+Pays the worker, punishes the absentee, and never turns either into a party
+windfall or a backup jackpot.
+
+**Implications:** Adds two invariants to DESIGN-arbiter-economy.md alongside
+the existing four (presence/fairness split; post-hoc slashing). Resolves the
+§3.3 "stake before each dispute" tension with the standing-bond lien. No code
+changes in this entry — documentation only.
+
+**Status:** Active (design). Implementation gated on the Ratings primitive +
+signed `kind:38104` roster + community-custody escrow (Build order §1–5;
+bonds remain last).
+
+---
+
+## 2026-06-07 — Expiry auto-refund is exploitable: a ghosting seller can keep fiat + sats
+
+**Context:** The attack, verified in code: seller locks sats (exchange,
+bill-pay, lending — the seller is the locker per `recipients.ts`) → buyer
+sends fiat and votes RELEASE → seller goes silent until expiry → the protocol
+refunds the locker. The seller keeps BOTH the fiat and the sats. Pure-inaction
+theft, zero cost, no forged message required. Pre-expiry the performing buyer
+has no path to win: `handleVote` returns `ARBITER_TOO_EARLY` unless BOTH
+buyer and seller voted, so a silent seller means the arbiter can never honor
+the buyer's standing RELEASE. At expiry the protocol actively pays the thief:
+`maybeAutoRefundExpired` auto-votes REFUND and pooled-lock healing
+(REFUND-only by invariant) finishes the job — to the locker.
+DESIGN-arbiter-substitution.md already conceded the symptom: "the expiry
+auto-refund, which always pays the locker regardless of who was right."
+
+**Options considered:**
+- (a) **Status quo** — correct for true abandonment (nobody performed), but
+      catastrophic for one-sided performance. Unacceptable once stated.
+- (b) **Auto-RELEASE at expiry when the buyer voted RELEASE** — rewards a
+      lying buyer who votes without paying; violates the healing invariant
+      (healing must never grant an arbitrary payout). Rejected.
+- (c) **Turn one-sided performance into a contest, not an abandonment:**
+      (1) suppress auto-refund and healing-REFUND when
+      `votes[buyer] === RELEASE` — a standing RELEASE from the non-locker
+      means someone claims to have performed; (2) relax `ARBITER_TOO_EARLY`
+      so that when one side voted RELEASE and the other has been silent past
+      a deadline, the arbiter MAY rule. The performing buyer gets a path to
+      win against a silent seller.
+
+**Decision:** Option (c) — designed, deliberately NOT implemented in this
+round. Documentation only.
+
+**Rationale:** The expiry default ("refund the locker") encodes "nobody
+performed." A standing RELEASE vote from the non-locker falsifies that
+assumption, so the default must yield to adjudication. The caveat is priced
+in: a buyer could vote RELEASE without paying to force a dispute — but that
+routes to the arbiter (the correct venue) and costs the lying buyer
+reputation; strictly better than today's costless seller theft. The symmetric
+safe case is preserved: buyer never voted (didn't pay) + seller silent →
+auto-refund to the seller remains correct. Invariants preserved: healing
+stays REFUND-only (it is *suppressed*, never flipped to RELEASE), and no
+settled vote is ever rewritten.
+
+**Implications:** This flaw is the strongest argument FOR the presence bond
+(entry above): the only thing protecting a performing buyer from a ghosting
+seller is an arbiter who shows up. It also sharpens the case for
+notifications (#88) — fewer innocent no-shows make the remaining silence
+legible as intent. Implementation (separate PR): `state-machine.ts`
+(`ARBITER_TOO_EARLY` relaxation + healing suppression) and
+`escrow-client.ts` (`maybeAutoRefundExpired` guard), with permutation tests
+across all four categories × who-voted-what × expiry.
+
+**Status:** Active — flaw acknowledged; fix designed, not yet implemented.

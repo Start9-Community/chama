@@ -1,6 +1,9 @@
 [package]
 name = "chama"
-version = "2.0.3"
+# Crate version is decorative — the shipped bundle version comes from
+# tauri.conf.json, which points at ../package.json (single source of truth,
+# bumped by scripts/release.sh). Kept loosely in sync to avoid confusion.
+version = "2.7.0"
 description = "Chama desktop shell"
 authors = ["Chama"]
 edition = "2021"

@@ -58,6 +58,14 @@ export interface Community {
    *  falls through to BP per resolveFederationForCommunity — used only
    *  for legacy/wire-stale slugs; every pre-seeded entry pins explicitly. */
   federationInvite: string | null;
+  /** V3 roster anchor (hybrid authority, see arbiters/roster.ts): the hex
+   *  pubkey allowed to sign this community's kind:38120 arbiter roster.
+   *  Curated communities pin one here; permissionless shells fall back to
+   *  creatorPubkey. Absent ⇒ rosters for this community stay unverifiable. */
+  stewardPubkey?: string | null;
+  /** V3 roster anchor fallback: the npub/hex of whoever created a custom
+   *  community shell (recorded by addCustomCommunity going forward). */
+  creatorPubkey?: string | null;
   /** Single flag emoji for the community pill. 🌎 / 🌍 are valid for
    *  scope-less or regional communities. */
   flagEmoji: string;
@@ -317,6 +325,9 @@ export const COMMUNITY_REGISTRY: Community[] = [
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "BLF",
     hiddenFromPicker: false,
+    // V3 roster authority (maintainer's steward key, pinned 2026-06-08):
+    // npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6
+    stewardPubkey: "22f7161f76e075b9e0a250a447884ac09b04b636effd7c703a92394ed3fb39e8",
   },
   {
     slug: "us-gbf",
@@ -504,6 +515,8 @@ export interface AddCustomCommunityInput {
   languages?: string[];
   /** Optional disambiguator suffix. */
   disambiguator?: string | null;
+  /** V3 roster anchor fallback — the creating user's hex pubkey. */
+  creatorPubkey?: string | null;
 }
 
 /** Read all user-added communities from localStorage. Silently returns []
@@ -555,6 +568,10 @@ export function addCustomCommunity(input: AddCustomCommunityInput): Community {
     notes: "user-added",
     disambiguator: input.disambiguator ?? null,
     hiddenFromPicker: false,
+    // V3 roster anchor fallback: record who created this shell so a
+    // permissionless community can still have a verifiable arbiter roster
+    // (hybrid authority — registry pin wins where one exists).
+    creatorPubkey: input.creatorPubkey ?? null,
   };
   const all = getCustomCommunities().filter(c => c.slug !== slug);
   all.push(entry);

@@ -49,7 +49,7 @@ import {
   type SatsTraceEntry,
 } from "../../payments/sats-trace.js";
 import { getEcashExport } from "../../payments/ecash-exports.js";
-import { T } from "../theme.js";
+import { T, type ThemeMode } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { readKind0Toggle, writeKind0Toggle } from "../nostr-profiles.js";
@@ -68,6 +68,8 @@ export function MeScreen({
   pubkey,
   kind0Enabled,
   onKind0EnabledChange,
+  themeMode,
+  onThemeModeChange,
   myTrades,
   allTrades,
   ratings,
@@ -85,10 +87,14 @@ export function MeScreen({
   onSignOut,
   communitySlug,
   onSelectCommunity,
+  onApplyAsArbiter,
 }: {
   pubkey: string;
   kind0Enabled?: boolean;
   onKind0EnabledChange?: (enabled: boolean) => void;
+  /** #50 dark/light theming — current mode + setter (App owns the state). */
+  themeMode?: ThemeMode;
+  onThemeModeChange?: (mode: ThemeMode) => void;
   myTrades: EscrowState[];
   allTrades?: EscrowState[];
   /** Aggregate rating data. v0.2.0 always null (no rating events yet);
@@ -113,6 +119,9 @@ export function MeScreen({
   /** Bound to handleSelectCommunity — switches Chama (with the same funds-at-
    *  risk destroy-confirm guard the Browse pill used to trigger). */
   onSelectCommunity?: (slug: string) => void;
+  /** V3 #74: publish a signed arbiter application (kind:38121) for the
+   *  user's current community. Absent ⇒ the CTA card doesn't render. */
+  onApplyAsArbiter?: (community: string, statement: string) => Promise<void>;
 }) {
   const npubShort = pubkey.slice(0, 8) + "…" + pubkey.slice(-4);
   const [localKind0On, setLocalKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
@@ -419,11 +428,55 @@ export function MeScreen({
         background: T.card, border: `1px solid ${T.border}`,
         borderRadius: T.r, padding: 0, marginBottom: 16, overflow: "hidden",
       }}>
+        {themeMode && onThemeModeChange && (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 10, padding: "14px 16px", borderBottom: `1px solid ${T.border}`,
+          }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+                Appearance
+              </div>
+              <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+                Auto follows your device
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {(["dark", "light", "system"] as ThemeMode[]).map(mode => {
+                const active = themeMode === mode;
+                const label = mode === "system" ? "Auto" : mode === "dark" ? "Dark" : "Light";
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => onThemeModeChange(mode)}
+                    style={{
+                      padding: "6px 10px", borderRadius: 999,
+                      border: `1px solid ${active ? T.accent + "66" : T.border}`,
+                      background: active ? T.accentDim : T.surface,
+                      color: active ? T.accent : T.muted,
+                      fontFamily: T.mono, fontSize: 10, fontWeight: 800,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <SettingsRow label="Payment handles" hint="Saved handles for fast trade-time fill" onClick={onOpenSavedHandles} />
         <SettingsRow label="Payout destinations" hint="Lightning addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
         <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
         <SettingsRow label="Sign out" hint={null} onClick={onSignOut} danger />
       </div>
+
+      {communitySlug && onApplyAsArbiter && (
+        <ArbiterCtaCard
+          communitySlug={communitySlug}
+          onApply={onApplyAsArbiter}
+        />
+      )}
 
       <MeTradeHistory
         trades={visibleTrades}
@@ -1862,5 +1915,124 @@ function SettingsRow({ label, hint, onClick, danger }: {
       </div>
       <span style={{ color: T.muted, fontSize: 16 }}>›</span>
     </button>
+  );
+}
+
+// ── V3 #74: the arbiter on-ramp — CTA + FAQ + signed application ────────────
+// Field-read I: "a small CTA widget... the human on-ramp to consensus
+// admission. It makes the recruitment path visible instead of tribal
+// knowledge." Publishing signs a kind:38121 event the community's roster
+// steward reviews; the FAQ is honest that community-wide admission VOTING
+// comes later (kind:38122 reserved).
+function ArbiterCtaCard({
+  communitySlug,
+  onApply,
+}: {
+  communitySlug: string;
+  onApply: (community: string, statement: string) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [statement, setStatement] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const community = getCommunityBySlug(communitySlug);
+  const displayName = community?.displayName ?? communitySlug;
+
+  const submit = async () => {
+    if (!statement.trim()) {
+      setError("Tell the community why — the statement IS the application.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setStatus(null);
+    try {
+      await onApply(communitySlug, statement);
+      setStatus("Application signed and published. The community steward reviews it from their roster surface.");
+      setStatement("");
+    } catch (e: any) {
+      setError(e?.message || "Couldn't publish the application. Check relays and retry.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.border}`,
+      borderRadius: T.r, marginBottom: 16, overflow: "hidden",
+    }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          width: "100%", padding: "14px 16px",
+          background: "none", border: "none", cursor: "pointer", textAlign: "left",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+            ⚖ Become a community arbiter
+          </div>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+            Keep {displayName} trades fair — duty pays
+          </div>
+        </div>
+        <span style={{ color: T.muted, fontSize: 16 }}>{open ? "▾" : "›"}</span>
+      </button>
+      {open && (
+        <div style={{ padding: "0 16px 16px" }}>
+          <div style={{
+            fontSize: 11, color: T.muted, fontFamily: T.sans, lineHeight: 1.6,
+            padding: "10px 12px", borderRadius: T.rs, marginBottom: 10,
+            background: T.surface, border: `1px solid ${T.border}`,
+          }}>
+            Arbiters are the community's neutral third key. You vote only when
+            buyer and seller disagree, inside a response window — and the
+            dispute fee (1.5%, split-paid by both parties) is yours for the
+            work. Show up and rule fairly: presence will be bonded and
+            fairness is your public rating. Today the community steward
+            reviews applications and signs the roster; community-wide
+            admission voting comes in a later release.
+          </div>
+          <textarea
+            value={statement}
+            onChange={e => setStatement(e.target.value)}
+            placeholder={`Why you? Languages, availability, how ${displayName} knows you…`}
+            rows={3}
+            maxLength={800}
+            style={{
+              width: "100%", boxSizing: "border-box", resize: "vertical",
+              padding: "10px 12px", borderRadius: T.rs, marginBottom: 8,
+              background: T.surface, border: `1px solid ${T.border}`,
+              color: T.text, fontFamily: T.sans, fontSize: 12, lineHeight: 1.5,
+            }}
+          />
+          <button
+            onClick={submit}
+            disabled={busy}
+            style={{
+              padding: "10px 14px", borderRadius: T.rs,
+              border: `1px solid ${T.teal}66`, background: T.tealDim,
+              color: T.teal, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+              cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1,
+            }}
+          >
+            {busy ? "Publishing…" : "Sign + send application"}
+          </button>
+          {status && (
+            <div style={{ marginTop: 8, fontSize: 11, color: T.green, fontFamily: T.mono }}>
+              ✓ {status}
+            </div>
+          )}
+          {error && (
+            <div style={{ marginTop: 8, fontSize: 11, color: T.red, fontFamily: T.mono }}>
+              ⚠ {error}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

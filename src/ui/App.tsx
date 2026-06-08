@@ -24,7 +24,10 @@ import {
 import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
 
-import { BROWSE_CATS, T, TRINITY_RING_ORDER } from "./theme.js";
+import {
+  BROWSE_CATS, T, TRINITY_RING_ORDER,
+  applyThemeMode, readThemeMode, writeThemeMode, type ThemeMode,
+} from "./theme.js";
 import {
   decideAutoInitTarget,
   decideListingTapEffect,
@@ -199,6 +202,10 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const urlEscrowOpenAttemptedRef = useRef(false);
   const [detailBackView, setDetailBackView] = useState<View>("browse");
+  // V3 #75: set when a listing-tap silently switched the wallet onto the
+  // listing's fed (identity stayed home). Consumed by maybeSnapBackHome()
+  // when the user backs out of the detail view.
+  const visitedForeignFedRef = useRef(false);
   const [browseCategory, setBrowseCategory] = useState<string>("all");
   // Per the "every user has a home" doctrine (§2.1, locked for v0.2.0):
   // every user — first-time or returning — gets a community from the
@@ -288,6 +295,37 @@ export default function App() {
     setAmountDisplayModeState(mode);
     writeAmountDisplayMode(mode);
   };
+  // #50 dark/light theming: theme.ts swapped the palette into T at module
+  // load; this state exists so a toggle (or an OS scheme change in "system"
+  // mode) repaints the tree. Inline styles re-read T on every render and
+  // there are no memo barriers in src/ui, so one root bump is enough.
+  const [themeMode, setThemeModeState] = useState<ThemeMode>(readThemeMode);
+  const [, setThemeEpoch] = useState(0);
+  const setThemeMode = (mode: ThemeMode) => {
+    writeThemeMode(mode);
+    applyThemeMode(mode);
+    setThemeModeState(mode);
+    setThemeEpoch(e => e + 1);
+  };
+  useEffect(() => {
+    if (themeMode !== "system" || typeof globalThis.matchMedia !== "function") return;
+    const mq = globalThis.matchMedia("(prefers-color-scheme: light)");
+    const onChange = () => {
+      applyThemeMode("system");
+      setThemeEpoch(e => e + 1);
+    };
+    mq.addEventListener?.("change", onChange);
+    return () => mq.removeEventListener?.("change", onChange);
+  }, [themeMode]);
+  // V3 roster keystone: whenever the user lands on a community, refresh its
+  // signed kind:38120 arbiter roster (fetch → verify against the hybrid
+  // authority → cache). Fire-and-forget; no-op for communities without an
+  // anchor. The cached roster feeds getTrustedArbiterPool as the strongest
+  // source, so Create stamps roster-backed pools without any await here.
+  useEffect(() => {
+    if (!connected || !browseCommunity) return;
+    actions.refreshCommunityRoster(browseCommunity).catch(() => {});
+  }, [connected, browseCommunity]);
   // Browser-support banner state lives in a dedicated hook so the
   // per-pubkey scoping (Bug E from v0.1.85 smoke testing) stays
   // testable in isolation and App.tsx stays an orchestrator.
@@ -838,7 +876,19 @@ export default function App() {
       listing: { mintUrl: local.mintUrl, community: local.community },
       currentInvite: getActiveInvite(),
       balanceMsats: fedimint.balanceMsats ?? 0,
+      activeCommitmentCount,
     });
+
+    // V3 #72 (listing-tap face of the same gate): a foreign-route listing
+    // would silently switch the wallet's fed — never out from under a live
+    // trade. Matching listings fall through untouched.
+    if (effect.kind === "blocked-active-commitment") {
+      setToast({
+        message: "That listing runs on another Chama — finish your live trade here first.",
+        type: "info",
+      });
+      return;
+    }
 
     // Always background-refetch so the detail screen sees fresh state
     // by the time it renders. Mirrors the pre-v0.2.0 behavior.
@@ -867,6 +917,11 @@ export default function App() {
           } else {
             await actions.initFedimint(effect.targetInvite);
           }
+          // V3 #75: this was a listing-tap VISIT — identity stays home, only
+          // the wallet's fed moved. Remember it so backing out of the detail
+          // view can snap the wallet back to the home fed (unless a live
+          // commitment has anchored the user here by then).
+          visitedForeignFedRef.current = true;
           setDetailBackView(safeBackView);
           setSelectedId(id);
           setView("detail");
@@ -956,9 +1011,34 @@ export default function App() {
   // own hook so the orchestrator stays an orchestrator. The hook
   // encapsulates the dispatch + revert logic; decision logic
   // (decideCommunityTapEffect) lives in src/ui/decisions.ts.
+  // V3 #75: snap the wallet back to the HOME fed after a listing-tap visit.
+  // Fires on back-out from the detail view. Self-healing by re-resolving
+  // everything at fire time: if the user committed to a trade on the visited
+  // fed (hasActiveCommitment), or home can't resolve, or we're already on
+  // home's fed, it quietly does nothing. Failure is soft — the user stays on
+  // the visited fed and the Me switcher / Reconnect remain the manual paths.
+  const maybeSnapBackHome = () => {
+    if (!visitedForeignFedRef.current) return;
+    visitedForeignFedRef.current = false;
+    if (hasActiveCommitment) return; // anchored here now; #72's gate owns the rest
+    const homeSlug = getUserCommunitySlugRaw();
+    const home = homeSlug ? getCommunityBySlug(homeSlug) : null;
+    const homeInvite = home?.federationInvite;
+    if (!home || !homeInvite || getActiveInvite() === homeInvite) return;
+    void (async () => {
+      try {
+        await actions.switchFederation(homeInvite);
+        setToast({ message: `Back home on ${home.displayName}.`, type: "info" });
+      } catch (e: any) {
+        console.warn("[chama] snap-back to home failed:", e?.message || e);
+      }
+    })();
+  };
+
   const { handleSelectCommunity, handlePasteCustomInvite } = useFederationCommands({
     fedimint,
     actions,
+    activeCommitmentCount,
     setToast,
     setBrowseCommunity,
     setPendingDestroyConfirm: queueDestroyConfirm,
@@ -968,6 +1048,9 @@ export default function App() {
     if (t === "browse") setView("browse");
     else if (t === "create") setView("create");
     else if (t === "me") setView("me");
+    // V3 #75: leaving a visited trade via the bottom nav counts as backing
+    // out — same snap-back as the detail back button.
+    if (view === "detail") maybeSnapBackHome();
   };
 
   // ── Not connected → show connect screen ──
@@ -989,7 +1072,7 @@ export default function App() {
         background: T.bg, color: T.text, minHeight: "100dvh", fontFamily: T.sans,
         paddingTop: shellPaddingTop,
       }}>
-        <style>{globalCss}</style>
+        <style>{globalCss()}</style>
         <SimModePill />
         <SimEntryModal />
         {loginSuccess && <LoginSuccessSplash />}
@@ -1090,7 +1173,7 @@ export default function App() {
       paddingBottom: effectiveShellPaddingBottom,
       paddingTop: shellPaddingTop,
     }}>
-      <style>{globalCss}</style>
+      <style>{globalCss()}</style>
       <SimModePill />
       <SimEntryModal />
 
@@ -1521,7 +1604,7 @@ export default function App() {
             fundingInProgress={midFunding}
             claimBlockedReason={selectedClaimBlockedReason}
             disableNwc={fediWebView}
-            onBack={() => { setView(detailBackView); setSelectedId(null); }}
+            onBack={() => { setView(detailBackView); setSelectedId(null); maybeSnapBackHome(); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
               () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
               (e: any) => {
@@ -1608,6 +1691,7 @@ export default function App() {
               setToast({ message: "Trade forgotten on this device — money stays in escrow.", type: "success" });
               setView(detailBackView);
               setSelectedId(null);
+              maybeSnapBackHome();
             }}
             // #7 multi-unit storefront: buy N units from a parent listing →
             // spawn the buyer's own child escrow and open it so they fund + lock
@@ -1910,6 +1994,11 @@ export default function App() {
             pubkey={pubkey!}
             kind0Enabled={kind0Enabled}
             onKind0EnabledChange={setKind0Enabled}
+            themeMode={themeMode}
+            onThemeModeChange={setThemeMode}
+            onApplyAsArbiter={async (community, statement) => {
+              await actions.applyAsArbiter(community, statement);
+            }}
             myTrades={myTrades}
             allTrades={visibleTrades}
             ratings={null /* v0.2.0: no rating events yet; v0.2.1 wires the aggregator */}
@@ -1999,6 +2088,14 @@ export default function App() {
             focusNwc={advancedFocusNwc}
             onBack={() => setView("me")}
             onSandboxFund={() => setShowFundModal(true)}
+            communitySlug={browseCommunity}
+            userPubkey={pubkey}
+            onPublishRoster={async (community, arbiters) => {
+              await actions.publishCommunityRoster(community, arbiters);
+            }}
+            onFetchApplications={async (community, exclude) =>
+              actions.fetchArbiterApplications(community, exclude)
+            }
             onSwitchFederation={async (inviteCode, opts) => {
               try {
                 setToast({ message: "Joining Chama…", type: "info" });
@@ -2091,7 +2188,10 @@ export default function App() {
 // Helpers — global CSS + login splash
 // ══════════════════════════════════════════════════════════════════════════
 
-const globalCss = `
+// Function, not a const string: the template interpolates T (focus ring), and
+// a module-scope capture would go stale when the palette swaps (#50). Called
+// per render so it always reflects the active theme.
+const globalCss = () => `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800;900&display=swap');
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}

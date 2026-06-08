@@ -10,6 +10,7 @@
 import { nip19 } from "nostr-tools";
 import { getCommunityBySlug } from "../communities/registry.js";
 import { BLF_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
+import { readRosterPool, resolveRosterAuthority } from "./roster.js";
 
 export const TRUSTED_ARBITERS_STORAGE_KEY = "chama_trusted_arbiters";
 export const TRUSTED_ARBITERS_ENV_KEY = "VITE_CHAMA_TRUSTED_ARBITERS";
@@ -114,11 +115,34 @@ export function getTrustedArbiterPool(options: TrustedArbiterPoolOptions = {}): 
   );
 
   return unique([
+    // V3 keystone: the community's SIGNED kind:38120 roster is the strongest
+    // source — cached locally, re-verified against the hybrid authority
+    // (registry steward pin, else shell creator) on every read. Empty when
+    // no verifiable roster exists; the device pools below carry on alone.
+    ...readVerifiedRosterPool(options.community),
     ...readOfficialPool(options.community),
     ...readLocalPool(options.community),
     ...readEnvPool(options.community),
   ])
     .filter((pk) => !excluded.has(pk));
+}
+
+/** Roster-sourced pool with the hybrid authority resolved from the registry.
+ *  Exported so provenance surfaces can show WHICH arbiters are roster-backed
+ *  (vs device-trusted) when #73's tier badges land. */
+export function readVerifiedRosterPool(community?: string | null): string[] {
+  if (!community) return [];
+  try {
+    const entry = getCommunityBySlug(community);
+    const authority = resolveRosterAuthority({
+      stewardPubkey: entry?.stewardPubkey ?? null,
+      creatorPubkey: entry?.creatorPubkey ?? null,
+    });
+    if (authority.length === 0) return [];
+    return readRosterPool(community, authority);
+  } catch {
+    return [];
+  }
 }
 
 export function normalizeTrustedArbiterInput(raw: string): string[] {

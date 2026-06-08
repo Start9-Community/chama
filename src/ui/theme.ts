@@ -9,7 +9,19 @@
 import type { CSSProperties } from "react";
 import { Role } from "../escrow-engine/types.js";
 
-export const T = {
+// ── Dark / light theming (#50, DECISIONS.md 2026-06-07) ─────────────────────
+// The whole UI reads `T` at render time (inline styles, ~200 alpha-concat
+// sites like `${T.accent}aa`). Theming therefore swaps the palette IN PLACE
+// (`Object.assign(T, …)`) and the App root re-renders — no CSS variables, no
+// context, no component edits. The one footgun: anything that captures a T
+// value at module load goes stale on switch. STATUS / inputStyle below are
+// rebuilt by refreshThemeDerived(); don't add new module-scope captures —
+// read T at render time instead.
+
+export type ThemeMode = "dark" | "light" | "system";
+export const THEME_STORAGE_KEY = "chama_theme_mode";
+
+const DARK = {
   bg: "#0a0a0f", surface: "#111118", card: "#16161f",
   border: "#1e1e2e", borderHi: "#2a2a3e",
   text: "#e8e6e0", muted: "#6b6980",
@@ -19,10 +31,91 @@ export const T = {
   purple: "#a78bfa", purpleDim: "#a78bfa22",
   teal: "#2dd4bf", tealDim: "#2dd4bf22",
   amber: "#fbbf24", amberDim: "#fbbf2422",
+};
+
+// Light palette: solids are darkened for contrast on paper (small bold mono
+// text everywhere), while the Dim tints keep the BRIGHT hue at low alpha so
+// fills stay warm. Role colors are not here — they're sacred and identical in
+// both modes (PHILOSOPHY §5.2).
+const LIGHT: typeof DARK = {
+  bg: "#f4f3ee", surface: "#ffffff", card: "#faf9f4",
+  border: "#e3e1d6", borderHi: "#cfccbe",
+  text: "#1d1c24", muted: "#6e6c7e",
+  accent: "#c47308", accentDim: "#f7931a24",
+  green: "#15803d", greenDim: "#22c55e21",
+  red: "#dc2626", redDim: "#ef444421",
+  purple: "#7048e8", purpleDim: "#a78bfa28",
+  teal: "#0f766e", tealDim: "#2dd4bf26",
+  amber: "#b45309", amberDim: "#fbbf2430",
+};
+
+export const T = {
+  ...DARK,
   r: 12, rs: 8,
   mono: "'JetBrains Mono','SF Mono','Fira Code',monospace",
   sans: "'DM Sans',-apple-system,sans-serif",
 };
+
+export function normalizeThemeMode(value: unknown): ThemeMode {
+  return value === "light" || value === "system" ? value : "dark";
+}
+
+export function readThemeMode(): ThemeMode {
+  try {
+    return normalizeThemeMode(globalThis.localStorage?.getItem(THEME_STORAGE_KEY));
+  } catch {
+    return "dark";
+  }
+}
+
+export function writeThemeMode(mode: ThemeMode): void {
+  try {
+    globalThis.localStorage?.setItem(THEME_STORAGE_KEY, mode);
+  } catch {
+    // Cosmetic preference only; storage failure should not block trading.
+  }
+}
+
+export function resolveThemeMode(mode: ThemeMode): "dark" | "light" {
+  if (mode !== "system") return mode;
+  try {
+    return globalThis.matchMedia?.("(prefers-color-scheme: light)").matches
+      ? "light"
+      : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+let resolvedTheme: "dark" | "light" = "dark";
+
+/** The currently painted palette ("dark" | "light") after system resolution. */
+export function activeResolvedTheme(): "dark" | "light" {
+  return resolvedTheme;
+}
+
+/**
+ * Swap the active palette into T, rebuild the module-load derivations, and
+ * sync the document chrome (boot background, color-scheme, theme-color).
+ * Callers must trigger a React re-render afterwards (the App root does).
+ */
+export function applyThemeMode(mode: ThemeMode): void {
+  resolvedTheme = resolveThemeMode(mode);
+  Object.assign(T, resolvedTheme === "light" ? LIGHT : DARK);
+  refreshThemeDerived();
+  try {
+    const doc = globalThis.document;
+    if (doc) {
+      doc.documentElement.style.background = T.bg;
+      if (doc.body) doc.body.style.background = T.bg;
+      doc.documentElement.style.colorScheme = resolvedTheme;
+      doc.querySelector('meta[name="theme-color"]')
+        ?.setAttribute("content", resolvedTheme === "light" ? LIGHT.bg : "#000000");
+    }
+  } catch {
+    // No DOM (tests/SSR) — palette swap above is all that matters there.
+  }
+}
 
 // v0.1.66.33: human-first status vocabulary + three visual modes.
 //   mode "active"   → filled pill, pulsing dot (user action required)
@@ -100,3 +193,26 @@ export const inputStyle: CSSProperties = {
   borderRadius: T.rs, color: T.text,
   fontFamily: T.sans, fontSize: 14, outline: "none", boxSizing: "border-box",
 };
+
+// STATUS and inputStyle capture T values at module load; rebuild them in
+// place on every palette swap so importers' references stay live.
+function refreshThemeDerived(): void {
+  Object.assign(STATUS.CREATED,      { c: T.teal,   bg: T.tealDim });
+  Object.assign(STATUS.LOCKED,       { c: T.purple, bg: T.purpleDim });
+  Object.assign(STATUS.APPROVED,     { c: T.accent, bg: T.accentDim });
+  Object.assign(STATUS.CLAIMED,      { c: T.amber,  bg: T.amberDim });
+  Object.assign(STATUS.CLAIM_FAILED, { c: T.red,    bg: T.redDim });
+  Object.assign(STATUS.COMPLETED,    { c: T.green,  bg: T.greenDim });
+  Object.assign(STATUS.EXPIRED,      { c: T.red,    bg: T.redDim });
+  Object.assign(STATUS.CANCELLED,    { c: T.muted,  bg: T.surface });
+  Object.assign(inputStyle, {
+    background: T.surface,
+    border: `1px solid ${T.border}`,
+    color: T.text,
+  });
+}
+
+// Apply the persisted mode at module load — before the first React render, so
+// a light-mode user never sees a dark first paint (index.html handles the
+// pre-bundle moment).
+applyThemeMode(readThemeMode());

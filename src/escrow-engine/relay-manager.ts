@@ -414,31 +414,56 @@ export class RelayManager {
     // being processed as a new event when it comes back to us.
     this.seenEventIds.add(event.id);
 
-    const results = await Promise.allSettled(
-      connected.map(relay => this.publishToSingleRelay(relay, event))
-    );
+    // First-ACK semantics (field report: slow Create→Publish). The EVENT
+    // frame goes out to EVERY connected relay immediately — each
+    // publishToSingleRelay sends before it waits for its OK — so waiting
+    // for stragglers adds zero propagation; it only delays the caller. The
+    // old Promise.allSettled meant one zombie "connected" relay held every
+    // publish hostage for the full PUBLISH_TIMEOUT_MS (8s) even after
+    // healthy relays ACKed in milliseconds. Resolve on the FIRST accept —
+    // the durability bar is unchanged (at least one relay has the event,
+    // same accepted>=1 rule as before); stragglers settle in the background
+    // and are logged for relay health. Zero accepts still rejects with the
+    // same error as before.
+    const sends = connected.map(relay => this.publishToSingleRelay(relay, event));
 
-    let accepted = 0;
-    let rejected = 0;
-    const errors: string[] = [];
+    return await new Promise((resolve, reject) => {
+      let settledCount = 0;
+      let accepted = 0;
+      let rejected = 0;
+      const errors: string[] = [];
+      let resolvedEarly = false;
 
-    for (const result of results) {
-      if (result.status === "fulfilled" && result.value.accepted) {
-        accepted++;
-      } else if (result.status === "fulfilled") {
-        rejected++;
-        errors.push(result.value.message);
-      } else {
-        rejected++;
-        errors.push(result.reason?.message || "Unknown error");
+      for (const send of sends) {
+        // publishToSingleRelay never rejects (timeouts resolve as
+        // {accepted:false, message}), so .then is exhaustive here.
+        void send.then(result => {
+          settledCount++;
+          if (result.accepted) {
+            accepted++;
+          } else {
+            rejected++;
+            errors.push(result.message);
+          }
+
+          if (!resolvedEarly && result.accepted) {
+            resolvedEarly = true;
+            resolve({ accepted, rejected, errors: [...errors] });
+            return;
+          }
+
+          if (settledCount === sends.length) {
+            if (!resolvedEarly && accepted === 0) {
+              reject(new Error(`All ${rejected} relays rejected the event: ${errors.join("; ")}`));
+            } else if (resolvedEarly && rejected > 0) {
+              console.debug(
+                `[chama] publish ${event.id.slice(0, 8)}…: ${accepted}/${sends.length} relays accepted; stragglers: ${errors.join("; ")}`,
+              );
+            }
+          }
+        });
       }
-    }
-
-    if (accepted === 0) {
-      throw new Error(`All ${rejected} relays rejected the event: ${errors.join("; ")}`);
-    }
-
-    return { accepted, rejected, errors };
+    });
   }
 
   private async waitForConnectedRelays(timeoutMs: number): Promise<RelayConnection[]> {
