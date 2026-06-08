@@ -69,6 +69,13 @@ export interface Community {
   /** Single flag emoji for the community pill. 🌎 / 🌍 are valid for
    *  scope-less or regional communities. */
   flagEmoji: string;
+  /** Optional Browse-tile chip accent (hex). Lets two different federations
+   *  read as distinct at a glance instead of all sharing the neutral grey
+   *  chip. Hand-picked from a SAFE palette that never collides with the
+   *  sacred role colors (buyer/seller/arbiter) or the status pills — a fed is
+   *  an identity, not a role. Absent ⇒ neutral grey (the default). The amber
+   *  "off-route" tile state still overrides this. */
+  chipAccent?: string | null;
   /** ISO country code for the primary flag-display country. `null` for
    *  global / regional aggregators. */
   country: string | null;
@@ -321,6 +328,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     flagEmoji: "🌍",
     country: null,
     pickerLabel: "Bitcoin Life Federation",
+    chipAccent: "#6366f1", // indigo — distinct from arbiter cyan + buyer magenta
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "BLF",
@@ -339,6 +347,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     flagEmoji: "🇺🇸",
     country: "US",
     pickerLabel: "Global Bitcoin Federation",
+    chipAccent: "#0d9488", // deep teal — distinct from BLF indigo, not a role hue
     browserReliable: true,
     notes: "Native Fedimint sidecar route verified end-to-end against GBF.",
     disambiguator: "GBF",
@@ -583,6 +592,46 @@ export function addCustomCommunity(input: AddCustomCommunityInput): Community {
     throw e instanceof Error ? e : new Error(String(e));
   }
   return entry;
+}
+
+/** After first sign-in, stamp the now-known creator pubkey onto custom
+ *  community shells generated PRE-login. The globe picker runs before any
+ *  signer exists, so its generated shells (addCustomCommunity in
+ *  GlobeCountryPicker.selectDefault) land with creatorPubkey null — and
+ *  resolveRosterAuthority falls back to creatorPubkey, so a null leaves those
+ *  permissionless communities with no verifiable kind:38120 arbiter roster
+ *  authority, ever. Re-persisting each through addCustomCommunity's same-slug
+ *  overwrite path anchors it to the first connecting identity (the person who
+ *  walked this device through onboarding), making the shell roster-eligible.
+ *
+ *  Idempotent: a shell that already carries a creatorPubkey is left untouched,
+ *  so this is safe to call on every connect. Returns the slugs it stamped. */
+export function claimGeneratedShellCreator(pubkey: string): string[] {
+  const hex = (pubkey || "").trim();
+  if (!hex) return [];
+  const stamped: string[] = [];
+  for (const c of getCustomCommunities()) {
+    if (c.creatorPubkey) continue;       // already anchored — leave it
+    if (!c.federationInvite) continue;   // addCustomCommunity requires fed1…
+    try {
+      addCustomCommunity({
+        slug: c.slug,
+        displayName: c.displayName,
+        currency: c.currency,
+        country: c.country,
+        flagEmoji: c.flagEmoji,
+        federationInvite: c.federationInvite,
+        browserReliable: c.browserReliable,
+        languages: c.languages,
+        disambiguator: c.disambiguator,
+        creatorPubkey: hex,
+      });
+      stamped.push(c.slug);
+    } catch {
+      // A single malformed shell must not block stamping the rest.
+    }
+  }
+  return stamped;
 }
 
 /** Remove a user-added community by slug. No-op if the slug isn't user-added. */

@@ -3,6 +3,7 @@ import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 
 import { useEscrow } from "../hooks/useEscrow.js";
+import type { AggregateRatings, RatingThumb } from "../reputation/ratings.js";
 import {
   type EscrowState,
   type SelectedMenuItem,
@@ -21,8 +22,17 @@ import {
   isNativeBridgeModeOn,
   isTestnetMode,
 } from "../fedimint/index.js";
-import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../communities/registry.js";
+import {
+  getCommunityBySlug,
+  DEFAULT_COMMUNITY_SLUG,
+  claimGeneratedShellCreator,
+} from "../communities/registry.js";
 import { getUserCommunitySlugRaw } from "../communities/storage.js";
+import {
+  getPendingCommunityReport,
+  setPendingCommunityReport,
+  clearPendingCommunityReport,
+} from "../communities/community-request.js";
 
 import {
   BROWSE_CATS, T, TRINITY_RING_ORDER,
@@ -229,6 +239,34 @@ export default function App() {
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<PendingDestroyConfirm | null>(null);
   const [autoInitDone, setAutoInitDone] = useState(false);
+  // Reputation (kind:38123): my own aggregate (feeds seller graduation + the Me
+  // dashboard) and the (trade, ratee) slots I've already rated (drives the
+  // one-tap capture's "rated" state). Both null/empty until connected — exactly
+  // today's behavior, so the graduation gate degrades closed on any fetch miss.
+  const [myRatings, setMyRatings] = useState<AggregateRatings | null>(null);
+  const [myGivenRatings, setMyGivenRatings] = useState<Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>>([]);
+  useEffect(() => {
+    if (!pubkey) { setMyRatings(null); setMyGivenRatings([]); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [summary, given] = await Promise.all([
+          actions.fetchRatingSummary(pubkey),
+          actions.fetchMyGivenRatings(),
+        ]);
+        if (!cancelled) { setMyRatings(summary); setMyGivenRatings(given); }
+      } catch { /* leave null — graduation stays closed, same as before */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pubkey]);
+  const handleRateCounterparty = async (tradeId: string, ratee: string, thumb: RatingThumb) => {
+    await actions.rateCounterparty(tradeId, ratee, thumb);
+    const lc = ratee.toLowerCase();
+    // Optimistic: flip the one-tap to "rated" immediately (the slot is
+    // replaceable, so a later re-fetch converges on the same value).
+    setMyGivenRatings(prev => [...prev.filter(r => !(r.tradeId === tradeId && r.ratee === lc)), { tradeId, ratee: lc, thumb }]);
+  };
   // v0.2.0 item 1: brief inline overlay during silent re-init triggered
   // by listing-tap. Sub-second on a healthy fed; modal-free.
   const [switchingToCommunity, setSwitchingToCommunity] = useState<{ displayName: string } | null>(null);
@@ -386,6 +424,35 @@ export default function App() {
     if (!connected) return;
     setBrowseCommunity(getUserCommunitySlugRaw() ?? DEFAULT_COMMUNITY_SLUG);
     setKind0Enabled(readKind0Toggle(pubkey));
+  }, [connected, pubkey]);
+
+  // v2.7 onboarding completion — two pre-login deferrals settle once a signer
+  // exists (the globe picker runs before sign-in):
+  //   1. Stamp this identity onto any pre-login generated country shells, so
+  //      their permissionless arbiter rosters become verifiable (creatorPubkey
+  //      was null before we knew who the user was). Idempotent.
+  //   2. Publish the deferred "no Chama here — make one" community report and
+  //      clear it. Read-then-clear guards against a double send; on a hard
+  //      failure we re-stash it (the sender only throws when zero arbiters were
+  //      reached, so there's no partial-send dup risk) to retry next connect.
+  useEffect(() => {
+    if (!connected || !pubkey) return;
+    try { claimGeneratedShellCreator(pubkey); } catch { /* storage-only, non-fatal */ }
+    const pending = getPendingCommunityReport();
+    if (!pending) return;
+    clearPendingCommunityReport();
+    actions.publishCommunityReport(pending)
+      .then((r) => setToast({
+        message: `You're on the map — request sent to ${r.sent} Chama arbiter${r.sent === 1 ? "" : "s"}.`,
+        type: "success",
+      }))
+      .catch((e: any) => {
+        setPendingCommunityReport(pending);
+        console.warn("[chama] Deferred community report failed; will retry next connect:", e);
+      });
+    // actions/setToast intentionally omitted — fire once per connect, not per
+    // actions-identity churn (actions is rebuilt every render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, pubkey]);
 
   // Auto-login: on native platforms, check for saved nsec in secure storage
@@ -641,7 +708,7 @@ export default function App() {
   // ships with the aggregator returning null (no rating events being
   // published yet) → gate is closed for everyone. v0.2.1 wires the
   // aggregator and the gate naturally opens for qualifying sellers.
-  const userCanSubscribe = canOfferSubscription({ ratings: null });
+  const userCanSubscribe = canOfferSubscription({ ratings: myRatings });
 
   // v0.2.0 item 4: browse two-section layout. matchingListings render
   // first as normal cards; nonMatchingListings render below an
@@ -1594,6 +1661,8 @@ export default function App() {
             onAmountDisplayModeChange={setAmountDisplayMode}
             kind0Enabled={kind0Enabled}
             profileNames={nostrProfiles}
+            onRateCounterparty={handleRateCounterparty}
+            myGivenRatings={myGivenRatings}
             // v0.3.1 Phase 3 (Q4 scope): same boot-probe flag the
             // ChamaBar's "unreachable" pill reads from. Fund + Claim
             // buttons disable with the "Federation unreachable —
@@ -2001,7 +2070,9 @@ export default function App() {
             }}
             myTrades={myTrades}
             allTrades={visibleTrades}
-            ratings={null /* v0.2.0: no rating events yet; v0.2.1 wires the aggregator */}
+            ratings={myRatings}
+            onRateCounterparty={handleRateCounterparty}
+            myGivenRatings={myGivenRatings}
             balanceMsats={fedimint.balanceMsats ?? 0}
             hasActiveCommitment={hasActiveCommitment}
             satsTrace={displayedSatsTrace}

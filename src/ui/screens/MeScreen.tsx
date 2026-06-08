@@ -40,6 +40,8 @@ import {
   formatStepInCountdown,
   type AggregateRatings,
 } from "../decisions.js";
+import { counterpartyToRate, type RatingThumb } from "../../reputation/ratings.js";
+import { RatingTap } from "../components/RatingTap.js";
 import {
   lightningPayoutReserveSats,
   maxLightningPayoutSats,
@@ -88,6 +90,8 @@ export function MeScreen({
   communitySlug,
   onSelectCommunity,
   onApplyAsArbiter,
+  onRateCounterparty,
+  myGivenRatings,
 }: {
   pubkey: string;
   kind0Enabled?: boolean;
@@ -100,6 +104,10 @@ export function MeScreen({
   /** Aggregate rating data. v0.2.0 always null (no rating events yet);
    *  v0.2.1 wires the aggregator. */
   ratings: AggregateRatings | null;
+  /** Reputation (kind:38123): one-tap rate a counterparty on a settled trade,
+   *  and the slots already rated (so a rated trade drops its history one-tap). */
+  onRateCounterparty?: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
+  myGivenRatings?: Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>;
   onOpenTrade: (id: string) => void;
   onSellerEditListing?: (id: string) => void;
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
@@ -486,6 +494,8 @@ export function MeScreen({
         onFilter={setTradeFilter}
         pubkey={pubkey}
         onOpenTrade={onOpenTrade}
+        onRateCounterparty={onRateCounterparty}
+        myGivenRatings={myGivenRatings}
       />
     </div>
   );
@@ -501,6 +511,8 @@ function MeTradeHistory({
   onFilter,
   pubkey,
   onOpenTrade,
+  onRateCounterparty,
+  myGivenRatings,
 }: {
   trades: EscrowState[];
   totalCount: number;
@@ -509,6 +521,8 @@ function MeTradeHistory({
   onFilter: (filter: MeTradeFilter) => void;
   pubkey: string;
   onOpenTrade: (id: string) => void;
+  onRateCounterparty?: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
+  myGivenRatings?: Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>;
 }) {
   const activeFilterLabel = ME_TRADE_FILTERS.find((filter) => filter.id === activeFilter)?.label ?? "All";
 
@@ -587,11 +601,26 @@ function MeTradeHistory({
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {trades.map((s, i) => (
-            <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.05}s both` }}>
-              <TradeCard state={s} pubkey={pubkey} onSelect={() => onOpenTrade(s.id)} />
-            </div>
-          ))}
+          {trades.map((s, i) => {
+            // v1 ratings: a settled-but-UNRATED trade keeps a one-tap thumb in
+            // history (the "rate later" path for users who bolt with their sats).
+            // Once rated, the tap drops — the slot is replaceable, so it reappears
+            // nowhere and double-rating is impossible.
+            const ratee = onRateCounterparty && s.status === EscrowStatus.COMPLETED
+              ? counterpartyToRate(s, pubkey)
+              : null;
+            const alreadyRated = ratee
+              ? (myGivenRatings ?? []).some(r => r.tradeId === s.id && r.ratee === ratee.toLowerCase())
+              : false;
+            return (
+              <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.05}s both` }}>
+                <TradeCard state={s} pubkey={pubkey} onSelect={() => onOpenTrade(s.id)} />
+                {ratee && !alreadyRated && onRateCounterparty && (
+                  <RatingTap tradeId={s.id} ratee={ratee} onRate={onRateCounterparty} />
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </section>

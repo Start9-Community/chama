@@ -1383,3 +1383,55 @@ before disputing" messaging, surfaced at the exact contest moment so the
 cross-version divergence is mitigated where it bites).
 
 **Status:** Active — **implemented in v2.9.0**.
+
+---
+
+## 2026-06-08 — Ratings primitive: binary, generic-ratee, trade-backed (kind:38123)
+
+**Context:** The arbiter economy (DESIGN-arbiter-economy.md §5) and the existing
+`canOfferSubscription` graduation gate both wait on a reputation primitive that
+never existed — `AggregateRatings` was a `{count, positive, negative}` shape fed
+`null` everywhere, and the Me dashboard shows a permanent "No ratings yet."
+Implementing it unblocks seller graduation now and tiered arbiter assignment /
+the arbiter dashboard later (#73).
+
+**Options considered:**
+- (a) **Stars / multi-dimension.** Finer signal, but makes the rater stop and
+      think (friction → skipped ratings), doesn't fit the binary graduation gate,
+      and is noisier / more gameable.
+- (b) **Binary 👍/👎, one tap, zero required text.** Drops straight into the
+      `{count, positive, negative}` scaffold; a rating gets *given*, not skipped.
+      Optional one-line reason is a later add.
+
+**Decision:** Option (b). One generic event — `kind:38123`, **purely additive**
+(old clients never query it, so it ships whenever ready; no coordinated-release
+dance, unlike v2.9). A rating is **self-signed by the rater**, tags the settled
+trade + ratee + thumb, and is **replaceable per (rater, trade, ratee)** so a rater
+can rate both counterparties of a trade and re-rating overwrites (no ballot-
+stuffing one trade). One generic ratee covers buyer, seller, AND arbiter with one
+event and one aggregator; v1 *capture* is principal↔principal (arbiter-rating
+capture rides with the arbiter dashboard, #73).
+
+**Integrity (no server):** a rating only counts if it references a **settled**
+escrow (`resolvedOutcome` present) that **both** the rater and ratee actually took
+part in (a stepped-in `actingArbiter` counts). Verifiers drop anything else — a
+rating on a trade you weren't in, or that never settled, is inert. Sybil cost =
+completing a real settled escrow (locking real sats), the same bootstrap posture
+as the signed roster.
+
+**Capture (two-part, non-blocking):** a one-tap on the COMPLETED trade screen —
+never a gate between the user and their sats — AND a one-tap on every settled-but-
+unrated trade in Me › history, because people bolt the instant they have their
+sats. Both land on the same replaceable slot, so "rate now" and "rate later"
+converge.
+
+**Implications:** New `src/reputation/ratings.ts` (build/parse/verify +
+`aggregateRatings` / `aggregateVerifiedRatings`, all pure/replay-deterministic),
+`useEscrow` publish/fetch wiring, `RatingTap` component, and the two capture
+placements. `canOfferSubscription` + the Me dashboard now read real data;
+`AggregateRatings` is owned by the reputation layer (decisions.ts re-exports).
+Deferred to #73: rating-tiered assignment, amount caps, "tread lightly," the
+arbiter dashboard, and the franchise widening that real history will allow.
+
+**Status:** Active — v1 implemented (primitive + capture + the two scaffolded
+consumers); tiered-assignment consumers (#73) deferred.

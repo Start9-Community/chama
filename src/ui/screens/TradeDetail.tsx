@@ -33,6 +33,8 @@ import { useFiatRates } from "../hooks/useFiatRates.js";
 import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
 import { pickArbiterFromPool, getTrustedArbiterPool, classifyArbiterProvenance } from "../../arbiters/pool.js";
 import { isPerformanceContest } from "../../escrow-engine/arbiter-substitution.js";
+import { counterpartyToRate, type RatingThumb } from "../../reputation/ratings.js";
+import { RatingTap } from "../components/RatingTap.js";
 import {
   hasStateBExplained,
   markStateBExplained,
@@ -97,6 +99,7 @@ export function TradeDetail({
   disableNwc = false, onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
   onPrewarmFunding, onRebroadcast, onForget, onPurchase, stockLeft, isOversoldOrder = false,
+  onRateCounterparty, myGivenRatings,
 }: {
   state: EscrowState; pubkey: string;
   /** User's home community slug — drives State A vs State B subtitle
@@ -139,6 +142,9 @@ export function TradeDetail({
   // 8–16 s, making the screen look frozen.
   onVote: (outcome: Outcome) => Promise<void>;
   onClaim: () => Promise<void>;
+  /** Reputation (kind:38123): one-tap rate the counterparty on a settled trade. */
+  onRateCounterparty?: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
+  myGivenRatings?: Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>;
   onJoin: (
     role: Role,
     opts?: { selectedItems?: SelectedMenuItem[]; amountMsats?: number; orderFinalized?: boolean },
@@ -1568,6 +1574,25 @@ export function TradeDetail({
             {nextStep.title}
           </div>
         </div>
+
+        {/* Ratings (kind:38123): one-tap rate the counterparty the moment the
+            trade settles — non-blocking, and the same slot is re-tappable from
+            Me history if they bolt with their sats first. */}
+        {state.status === EscrowStatus.COMPLETED && onRateCounterparty && (() => {
+          const ratee = counterpartyToRate(state, pubkey);
+          if (!ratee) return null;
+          const ratedThumb = (myGivenRatings ?? []).find(
+            r => r.tradeId === state.id && r.ratee === ratee.toLowerCase(),
+          )?.thumb;
+          return (
+            <RatingTap
+              tradeId={state.id}
+              ratee={ratee}
+              ratedThumb={ratedThumb}
+              onRate={onRateCounterparty}
+            />
+          );
+        })()}
 
         {showBuyerAttempts && (
           <div style={{

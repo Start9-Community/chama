@@ -135,6 +135,11 @@ import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
 import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
 import {
+  sendCommunityRequestToGlobalArbiters,
+  type CommunityRequestInput,
+  type CommunityRequestSendResult,
+} from "../communities/community-request.js";
+import {
   buildArbiterRosterEvent,
   fetchAndCacheCommunityRoster,
   resolveRosterAuthority,
@@ -145,6 +150,14 @@ import {
   buildArbiterApplicationEvent,
   collectArbiterApplications,
 } from "../arbiters/applications.js";
+import {
+  RATING_KIND,
+  buildRatingEvent,
+  parseRatingEvent,
+  aggregateVerifiedRatings,
+  type RatingThumb,
+  type AggregateRatings,
+} from "../reputation/ratings.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
@@ -532,6 +545,22 @@ export interface UseEscrowActions {
     community: string,
     excludePubkeys?: string[],
   ) => Promise<{ applicant: string; statement: string; createdAt: number }[]>;
+  /** Publish a community report ("no Chama here yet — make one") captured
+   *  during pre-login onboarding, now that a signer exists. Uses the active
+   *  signer (the globe picker had none), so the deferred report can finally
+   *  be signed + sent to the global arbiters. */
+  publishCommunityReport: (
+    input: CommunityRequestInput,
+  ) => Promise<CommunityRequestSendResult>;
+  /** Ratings (kind:38123): publish a one-tap 👍/👎 about a counterparty of a
+   *  settled trade. Additive — old clients never query it. */
+  rateCounterparty: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
+  /** Aggregate VERIFIED ratings about a pubkey ({count, positive, negative}),
+   *  each checked against the settled trade THIS client knows. */
+  fetchRatingSummary: (ratee: string) => Promise<AggregateRatings>;
+  /** The (trade, ratee) the signed-in user has already rated, newest thumb per
+   *  slot — drives "already rated" vs an active one-tap on the capture surfaces. */
+  fetchMyGivenRatings: () => Promise<Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>>;
   /**
    * Wipe the local Fedimint wallet's IndexedDB and reset in-memory state.
    * Use this to recover from a "No modification allowed" seed-mismatch error
@@ -2785,6 +2814,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const signed = await signer.signEvent(unsigned as any);
       await client.publishRaw(signed);
     },
+    publishCommunityReport: async (input: CommunityRequestInput) => {
+      const signer = signerRef.current;
+      if (!signer) throw new Error("Not connected");
+      // Reuse the active signer (NsecSigner et al.) — detectSigner() can't see
+      // an nsec login, so the sender must be handed the signer explicitly.
+      return sendCommunityRequestToGlobalArbiters(input, { signer });
+    },
     fetchArbiterApplications: async (community: string, excludePubkeys?: string[]) => {
       const client = clientRef.current;
       if (!client || !community) return [];
@@ -2797,6 +2833,48 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         statement: app.statement,
         createdAt: app.createdAt,
       }));
+    },
+    rateCounterparty: async (tradeId: string, ratee: string, thumb: RatingThumb) => {
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Not connected");
+      const unsigned = buildRatingEvent({ tradeId, ratee, thumb });
+      const signed = await signer.signEvent(unsigned as any);
+      await client.publishRaw(signed);
+    },
+    fetchRatingSummary: async (ratee: string): Promise<AggregateRatings> => {
+      const client = clientRef.current;
+      if (!client || !ratee) return { count: 0, positive: 0, negative: 0 };
+      const events = await client.queryOnce(
+        { kinds: [RATING_KIND], "#p": [ratee.toLowerCase()], limit: 500 } as any,
+        5_000,
+      );
+      // Each rating is verified against the trade THIS client knows: a rating on
+      // a trade we can't see, or one that never settled, never counts.
+      return aggregateVerifiedRatings(events as any, ratee, (id) => client.getState(id));
+    },
+    fetchMyGivenRatings: async (): Promise<Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>> => {
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) return [];
+      const me = (await signer.getPublicKey()).toLowerCase();
+      const events = await client.queryOnce(
+        { kinds: [RATING_KIND], authors: [me], limit: 500 } as any,
+        5_000,
+      );
+      // Newest thumb per (trade, ratee): what the one-tap surfaces read to show
+      // "rated" instead of an active button.
+      const latest = new Map<string, { tradeId: string; ratee: string; thumb: RatingThumb; at: number }>();
+      for (const e of events as any[]) {
+        const r = parseRatingEvent(e);
+        if (!r || r.rater !== me) continue;
+        const key = `${r.tradeId}:${r.ratee}`;
+        const ex = latest.get(key);
+        if (!ex || r.createdAt > ex.at) {
+          latest.set(key, { tradeId: r.tradeId, ratee: r.ratee, thumb: r.thumb, at: r.createdAt });
+        }
+      }
+      return [...latest.values()].map(({ tradeId, ratee, thumb }) => ({ tradeId, ratee, thumb }));
     },
     spendNotes: async (amountMsats: number, meta?: ChamaOperationMeta) => {
       const bridge = requireBridge();

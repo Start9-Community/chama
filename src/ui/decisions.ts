@@ -28,6 +28,7 @@ import {
 } from "../escrow-engine/types.js";
 import { arbiterVotePriority, substitutionEligibleAt } from "../escrow-engine/arbiter-substitution.js";
 import { payoutRecipientFor } from "../escrow-engine/recipients.js";
+import type { AggregateRatings } from "../reputation/ratings.js";
 
 // One dust line, defined in the payments layer so the UI decision code and the
 // data-layer switch guards can't drift apart (see balanceBlocksFederationSwitch).
@@ -396,12 +397,9 @@ export function displayCounterpartyName(inputs: CounterpartyDisplayInputs): stri
 // toggle. When ratings ship in v0.2.1+, the gate naturally opens for
 // qualifying sellers without any further wiring.
 
-export interface AggregateRatings {
-  count: number;
-  positive: number;
-  negative: number;
-  // No vertical breakdown in v0.2.0 (per Q5 confirmation); add later.
-}
+// AggregateRatings is owned by the reputation layer (reputation/ratings.ts);
+// re-exported here so existing consumers (MeScreen, App) keep their import path.
+export type { AggregateRatings };
 
 const SUBSCRIPTION_MIN_POSITIVE = 5;
 const SUBSCRIPTION_MAX_NEGATIVE = 0;

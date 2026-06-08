@@ -12,7 +12,7 @@ import {
   addCustomCommunity,
   getCommunityBySlug,
 } from "../../communities/registry.js";
-import { sendCommunityRequestToGlobalArbiters } from "../../communities/community-request.js";
+import { setPendingCommunityReport } from "../../communities/community-request.js";
 
 // v2.6: the full-world "Hey Chama, where's home?" picker (PHILOSOPHY.md §6).
 // A spinning globe hero + a searchable, full-world country list. Every country
@@ -24,19 +24,12 @@ import { sendCommunityRequestToGlobalArbiters } from "../../communities/communit
 // currency on a default federation (BLF) — with honest copy ("no local Chama
 // here yet") plus the channel to request one / become a leader. No user is
 // ever made to think a ready local arbiter network exists when it doesn't.
-
-type RequestStatus = {
-  state: "idle" | "sending" | "sent" | "error";
-  message?: string;
-};
-
-function requestErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/No Nostr signer|NIP-07|browser environment|Extension does not support/i.test(message)) {
-    return "Use Fedi, Amber, or a browser signer first so the arbiters know who sent it.";
-  }
-  return message || "Could not send the Chama request. Try again in a moment.";
-}
+//
+// The picker runs BEFORE sign-in, so a "report / no Chama here" tap can't sign
+// the request yet. Rather than erroring on the missing signer, we stash the
+// report (setPendingCommunityReport) and land the user in sign-in; App's
+// post-login effect publishes it the moment a signer exists. The friction
+// becomes the "sign in to put yourself on the map" onboarding beat.
 
 export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => void }) {
   const countries = useMemo(() => getAllPickerCountries(), []);
@@ -54,7 +47,6 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestedChama, setRequestedChama] = useState("");
   const [requestNote, setRequestNote] = useState("");
-  const [requestStatus, setRequestStatus] = useState<RequestStatus>({ state: "idle" });
 
   const q = query.trim().toLowerCase();
   const results = q
@@ -62,25 +54,19 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
         (c) => c.name.toLowerCase().includes(q) || c.code.toLowerCase() === q,
       )
     : [];
-  const requestReady =
-    requestStatus.state !== "sending" && requestedChama.trim().length > 0;
+  const requestReady = requestedChama.trim().length > 0;
 
-  const sendCommunityRequest = async () => {
-    setRequestStatus({ state: "sending" });
-    try {
-      const result = await sendCommunityRequestToGlobalArbiters({
-        requestedChama,
-        note: requestNote,
-      });
-      setRequestedChama("");
-      setRequestNote("");
-      setRequestStatus({
-        state: "sent",
-        message: `Request sent to ${result.sent} Chama arbiters.`,
-      });
-    } catch (e) {
-      setRequestStatus({ state: "error", message: requestErrorMessage(e) });
-    }
+  // Both report forms (the country soft-landing and the main "Chama not
+  // listed?" one) behave identically: stash the report, then advance into
+  // sign-in. A tapped country lands on its own shell; the un-scoped main form
+  // lands on Global · USD (the user can switch with "Change" later). The
+  // signed publish happens post-login (App.tsx).
+  const queueReportAndContinue = () => {
+    const chama = requestedChama.trim();
+    if (!chama) return;
+    setPendingCommunityReport({ requestedChama: chama, note: requestNote });
+    if (selected) selectDefault(selected);
+    else onSelect(DEFAULT_COMMUNITY_SLUG);
   };
 
   const openCountry = (c: PickerCountry) => {
@@ -90,7 +76,6 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
     }
     // >1 live Chama → disambiguate; 0 → honest soft-landing.
     setSelected(c);
-    setRequestStatus({ state: "idle" });
     setRequestedChama(c.realChamas.length === 0 ? c.name : "");
   };
 
@@ -123,13 +108,12 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
 
   const backToList = () => {
     setSelected(null);
-    setRequestStatus({ state: "idle" });
     setRequestedChama("");
   };
 
   const requestProps = {
     requestedChama, setRequestedChama, requestNote, setRequestNote,
-    requestStatus, setRequestStatus, sendCommunityRequest, requestReady,
+    onSubmit: queueReportAndContinue, requestReady,
   };
 
   // ── Country detail: disambiguation (>1 live Chama) or soft-landing ──
@@ -294,7 +278,7 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
 
       <div style={{ width: "100%", maxWidth: 380, marginTop: 16 }}>
         <button
-          onClick={() => { setRequestOpen(!requestOpen); setRequestStatus({ state: "idle" }); }}
+          onClick={() => setRequestOpen(!requestOpen)}
           style={{
             width: "100%", padding: "10px 12px", borderRadius: T.rs,
             background: "transparent", border: `1px dashed ${T.border}`,
@@ -397,24 +381,22 @@ type RequestFormProps = {
   setRequestedChama: Dispatch<SetStateAction<string>>;
   requestNote: string;
   setRequestNote: Dispatch<SetStateAction<string>>;
-  requestStatus: RequestStatus;
-  setRequestStatus: Dispatch<SetStateAction<RequestStatus>>;
-  sendCommunityRequest: () => Promise<void>;
+  /** Stash the report + advance into sign-in (the signed publish is deferred
+   *  to post-login — the picker has no signer). */
+  onSubmit: () => void;
   requestReady: boolean;
   submitLabel?: string;
 };
 
 function RequestForm({
   requestedChama, setRequestedChama, requestNote, setRequestNote,
-  requestStatus, setRequestStatus, sendCommunityRequest, requestReady,
-  submitLabel = "Send request",
+  onSubmit, requestReady, submitLabel = "Send request",
 }: RequestFormProps) {
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        if (requestStatus.state === "sending") return;
-        void sendCommunityRequest();
+        if (requestReady) onSubmit();
       }}
       style={{
         marginTop: 10, padding: 12, borderRadius: T.r,
@@ -424,10 +406,7 @@ function RequestForm({
     >
       <input
         value={requestedChama}
-        onChange={(event) => {
-          setRequestedChama(event.target.value);
-          if (requestStatus.state !== "sending") setRequestStatus({ state: "idle" });
-        }}
+        onChange={(event) => setRequestedChama(event.target.value)}
         placeholder="Country or Chama"
         autoComplete="country-name"
         style={{
@@ -439,10 +418,7 @@ function RequestForm({
       />
       <textarea
         value={requestNote}
-        onChange={(event) => {
-          setRequestNote(event.target.value);
-          if (requestStatus.state !== "sending") setRequestStatus({ state: "idle" });
-        }}
+        onChange={(event) => setRequestNote(event.target.value)}
         placeholder="Optional note (e.g. “I can run this — make me a leader”)"
         rows={2}
         style={{
@@ -464,16 +440,8 @@ function RequestForm({
           cursor: requestReady ? "pointer" : "default",
         }}
       >
-        {requestStatus.state === "sending" ? "Sending…" : submitLabel}
+        {submitLabel}
       </button>
-      {requestStatus.message && (
-        <div style={{
-          color: requestStatus.state === "sent" ? T.green : T.red,
-          fontFamily: T.mono, fontSize: 10, lineHeight: 1.5, textAlign: "left",
-        }}>
-          {requestStatus.message}
-        </div>
-      )}
     </form>
   );
 }

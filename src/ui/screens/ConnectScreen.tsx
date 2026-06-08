@@ -14,6 +14,7 @@ import {
   getUserCommunitySlugRaw,
   setUserCommunitySlug,
 } from "../../communities/storage.js";
+import { getPendingCommunityReport } from "../../communities/community-request.js";
 
 const QRCode = lazy(() => import("../QRCode.js"));
 
@@ -137,6 +138,12 @@ export function ConnectScreen({
     );
   }
 
+  // v2.7: if the user tapped "no Chama here — report it" on the globe (which
+  // runs pre-signer), the report is stashed and we reframe sign-in as the
+  // moment it gets sent. Read fresh each render so a report queued after mount
+  // (picker → here, same ConnectScreen instance) is reflected.
+  const pendingReport = getPendingCommunityReport();
+
   return (
     <OnboardingShell>
       <BrandHeader />
@@ -175,14 +182,22 @@ export function ConnectScreen({
         </button>
       </div>
 
-      <div style={{
-        maxWidth: 330, fontSize: 14, color: T.muted, lineHeight: 1.8,
-        fontFamily: T.sans, marginBottom: 26,
-      }}>
-        Send money home. Earn with Community Bill Pay.
-        <br />
-        <span style={{ color: T.text }}>Trade locally with Bitcoin rails underneath.</span>
-      </div>
+      {pendingReport ? (
+        <div style={{ width: "100%", maxWidth: 360, marginBottom: 26 }}>
+          <InstructionBox>
+            {`Sign in to put yourself on the map. The moment you connect, we'll tell the Chama arbiters that ${pendingReport.requestedChama} wants in.`}
+          </InstructionBox>
+        </div>
+      ) : (
+        <div style={{
+          maxWidth: 330, fontSize: 14, color: T.muted, lineHeight: 1.8,
+          fontFamily: T.sans, marginBottom: 26,
+        }}>
+          Send money home. Earn with Community Bill Pay.
+          <br />
+          <span style={{ color: T.text }}>Trade locally with Bitcoin rails underneath.</span>
+        </div>
+      )}
 
       {error && <ErrorBox>{friendlySignInError(error)}</ErrorBox>}
 

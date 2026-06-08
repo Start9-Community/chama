@@ -109,6 +109,65 @@ function cleanRequestText(value: string, maxLength: number): string {
     .slice(0, maxLength);
 }
 
+// ── Deferred report (pre-login capture → post-login publish) ─────────────────
+// The first-run globe picker runs BEFORE sign-in, so a "no Chama here / report
+// it" tap has no signer to sign the request. Instead of erroring, we stash the
+// intent browser-wide (pre-identity — no npub yet, so NOT user-scoped) and
+// publish it the moment a signer exists (App.tsx post-login effect →
+// useEscrow.publishCommunityReport). Turns the signer gap into the Pillar-2.7
+// "sign in to put yourself on the map" onboarding beat. Single slot,
+// last-write-wins — one pending report is enough.
+const PENDING_REPORT_STORAGE_KEY = "chama_pending_report";
+
+/** Stash a community report to publish after the user signs in. No-op on an
+ *  empty request or when storage is unavailable (private mode). */
+export function setPendingCommunityReport(input: CommunityRequestInput): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const requestedChama = cleanRequestText(input.requestedChama, 96);
+    if (!requestedChama) return;
+    const note = cleanRequestText(input.note ?? "", 240);
+    localStorage.setItem(
+      PENDING_REPORT_STORAGE_KEY,
+      JSON.stringify({ requestedChama, note }),
+    );
+  } catch {
+    // private mode / storage disabled — the report just isn't queued.
+  }
+}
+
+/** Read the pending community report, or null if none / unreadable. */
+export function getPendingCommunityReport(): CommunityRequestInput | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem(PENDING_REPORT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const requestedChama =
+      parsed && typeof parsed.requestedChama === "string"
+        ? parsed.requestedChama.trim()
+        : "";
+    if (!requestedChama) return null;
+    return {
+      requestedChama,
+      note: typeof parsed.note === "string" && parsed.note ? parsed.note : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Drop the pending community report (after a successful publish). */
+export function clearPendingCommunityReport(): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(PENDING_REPORT_STORAGE_KEY);
+    }
+  } catch {
+    // no-op
+  }
+}
+
 function waitForConnectedRelay(manager: RelayManager, timeoutMs: number): Promise<void> {
   if (manager.getConnectedCount() > 0) return Promise.resolve();
 

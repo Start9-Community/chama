@@ -252,11 +252,20 @@ export function TradeCard({
                 </span>
               </span>
             )}
-            {listingCommunity && (
+            {listingCommunity && (() => {
+              // Per-fed chip accent (registry-driven). Amber "off-route" state
+              // wins — that's routing info, more important than which fed.
+              // On-route/neutral: use the community's accent if it has one,
+              // else the legacy neutral grey.
+              const accent = !isAmber ? (listingCommunity.chipAccent ?? null) : null;
+              const chipColor = isAmber ? T.amber : (accent ?? T.muted);
+              const chipBorder = isAmber ? T.amber + "33" : (accent ? accent + "55" : T.border);
+              const chipBg = accent ? accent + "1a" : T.surface;
+              return (
               <span style={{
                 fontSize: 10, padding: "3px 8px", borderRadius: 999,
-                background: T.surface, color: isAmber ? T.amber : T.muted,
-                border: `1px solid ${isAmber ? T.amber + "33" : T.border}`,
+                background: chipBg, color: chipColor,
+                border: `1px solid ${chipBorder}`,
                 fontFamily: T.mono, fontWeight: 700,
                 display: "inline-flex", alignItems: "center", gap: 3,
                 maxWidth: "100%",
@@ -266,7 +275,8 @@ export function TradeCard({
                   {communityChipLabel}
                 </span>
               </span>
-            )}
+              );
+            })()}
           </div>
 
           <div style={{

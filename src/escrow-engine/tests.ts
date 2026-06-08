@@ -125,6 +125,7 @@ import {
   getCustomCommunityBySlug,
   addCustomCommunity,
   removeCustomCommunity,
+  claimGeneratedShellCreator,
 } from "../communities/registry.js";
 import {
   getUserCommunitySlug,
@@ -137,6 +138,9 @@ import {
   buildCommunityRequestMessage,
   getCommunityRequestRecipients,
   sendCommunityRequestToGlobalArbiters,
+  setPendingCommunityReport,
+  getPendingCommunityReport,
+  clearPendingCommunityReport,
 } from "../communities/community-request.js";
 import {
   resolveFederationForCommunity,
@@ -441,6 +445,17 @@ import {
   parseArbiterApplicationEvent,
   collectArbiterApplications,
 } from "../arbiters/applications.js";
+import {
+  RATING_KIND,
+  buildRatingEvent,
+  parseRatingEvent,
+  verifyRatingForTrade,
+  aggregateRatings,
+  aggregateVerifiedRatings,
+  ratingReplaceableKey,
+  counterpartyToRate,
+  type Rating,
+} from "../reputation/ratings.js";
 
 /** Build a minimal NIP-44 encrypt/decrypt pair for a given private key,
  *  using nostr-tools v2 NIP-44. The "encrypt as me to recipient" function
@@ -3562,6 +3577,84 @@ console.log("\n── PERMISSIONLESS COMMUNITY ADDITION ──");
   // (picker callers compose: pre-seed + custom themselves)
   assert(getPickerCommunities().every(c => c.notes !== "user-added"),
     "getPickerCommunities returns only pre-seeds");
+}
+
+// ── 14c. PRE-LOGIN SHELL creatorPubkey STAMPING (v2.7) ───────────────────
+// Pre-login globe shells land with creatorPubkey null (no signer yet).
+// claimGeneratedShellCreator stamps the first connecting identity onto them so
+// their permissionless arbiter rosters become verifiable.
+console.log("\n── PRE-LOGIN SHELL CREATOR STAMPING ──");
+{
+  (globalThis as any).localStorage.clear();
+  const PK_A = "a".repeat(64);
+  const PK_B = "b".repeat(64);
+  const shellInvite = "fed1qtest_generated_shell_invite_for_creator_stamp_test";
+
+  // Two pre-login shells (creatorPubkey omitted → null) + one already-anchored.
+  addCustomCommunity({
+    slug: "xk-eur", displayName: "Kosovo · EUR", currency: "EUR",
+    country: "XK", flagEmoji: "🇽🇰", federationInvite: shellInvite,
+  });
+  addCustomCommunity({
+    slug: "bt-btn", displayName: "Bhutan · BTN", currency: "BTN",
+    country: "BT", flagEmoji: "🇧🇹", federationInvite: shellInvite,
+  });
+  addCustomCommunity({
+    slug: "fm-usd", displayName: "Micronesia · USD", currency: "USD",
+    country: "FM", flagEmoji: "🇫🇲", federationInvite: shellInvite,
+    creatorPubkey: PK_B,
+  });
+  assert(getCustomCommunityBySlug("xk-eur")?.creatorPubkey == null,
+    "Pre-login shell starts with no creatorPubkey");
+
+  const stamped = claimGeneratedShellCreator(PK_A);
+  assert(stamped.includes("xk-eur") && stamped.includes("bt-btn"),
+    "Stamps every unanchored shell");
+  assert(!stamped.includes("fm-usd"), "Leaves an already-anchored shell untouched");
+  assert(getCustomCommunityBySlug("xk-eur")?.creatorPubkey === PK_A,
+    "Unanchored shell now carries the connecting pubkey");
+  assert(getCustomCommunityBySlug("fm-usd")?.creatorPubkey === PK_B,
+    "Pre-anchored shell keeps its original creator");
+  // Field fidelity through the overwrite path.
+  assert(getCustomCommunityBySlug("bt-btn")?.currency === "BTN"
+    && getCustomCommunityBySlug("bt-btn")?.federationInvite === shellInvite,
+    "Re-persist preserves the shell's payload");
+  assert(getCustomCommunities().length === 3, "Stamping doesn't duplicate shells");
+
+  // Idempotent: a second pass with a different key changes nothing (all anchored).
+  const second = claimGeneratedShellCreator(PK_B);
+  assert(second.length === 0, "Second pass stamps nothing — already anchored");
+  assert(getCustomCommunityBySlug("xk-eur")?.creatorPubkey === PK_A,
+    "Idempotent — a later sign-in can't re-claim an anchored shell");
+  assert(claimGeneratedShellCreator("").length === 0, "Empty pubkey is a no-op");
+}
+
+// ── 14d. DEFERRED COMMUNITY REPORT STORAGE (v2.7) ────────────────────────
+// The globe runs pre-signer; a report is stashed browser-wide and published
+// after sign-in. Round-trip the storage primitive.
+console.log("\n── DEFERRED COMMUNITY REPORT STORAGE ──");
+{
+  (globalThis as any).localStorage.clear();
+  assert(getPendingCommunityReport() === null, "No pending report initially");
+
+  setPendingCommunityReport({ requestedChama: "  Bhutan  ", note: "  I can run this  " });
+  const stashed = getPendingCommunityReport();
+  assert(stashed?.requestedChama === "Bhutan", "Pending report trims the requested chama");
+  assert(stashed?.note === "I can run this", "Pending report trims the note");
+
+  // Last-write-wins, and an empty note round-trips as undefined.
+  setPendingCommunityReport({ requestedChama: "Palau" });
+  const reStashed = getPendingCommunityReport();
+  assert(reStashed?.requestedChama === "Palau", "Re-stash overwrites (last write wins)");
+  assert(reStashed?.note === undefined, "Empty note reads back as undefined");
+
+  // Empty request is a no-op (can't queue a nameless report).
+  setPendingCommunityReport({ requestedChama: "   " });
+  assert(getPendingCommunityReport()?.requestedChama === "Palau",
+    "Empty requested chama doesn't overwrite an existing report");
+
+  clearPendingCommunityReport();
+  assert(getPendingCommunityReport() === null, "Cleared report reads back null");
 }
 
 // ── 15. BP / BLF RESOLVER ────────────────────────────────────────────────
@@ -13997,6 +14090,126 @@ console.log("\n── SIGNED ARBITER ROSTER ──");
     threwEmpty = true;
   }
   assert(threwEmpty, "Application builder refuses an empty statement");
+}
+
+// ── Ratings primitive (kind:38123) — the reputation keystone ──
+console.log("\n── Ratings primitive (kind:38123) ──");
+{
+  const raterSk = generateSecretKey();
+  const raterPk = getPublicKey(raterSk);
+  const rateePk = "dd".repeat(32);
+  const TRADE = "rate-trade-001";
+
+  // Round-trip a signed thumbs-up.
+  const upUnsigned = buildRatingEvent({ tradeId: TRADE, ratee: rateePk, thumb: "up", createdAt: 1_900_010_000 });
+  assert(upUnsigned.kind === RATING_KIND, "rating: builder stamps kind:38123");
+  assert(upUnsigned.tags.find(t => t[0] === "d")?.[1] === ratingReplaceableKey(TRADE, rateePk),
+    "rating: d-tag is the (trade, ratee) replaceable key");
+  const upSigned = finalizeEvent(upUnsigned, raterSk) as unknown as NostrEvent;
+  const up = parseRatingEvent(upSigned);
+  assert(!!up && up.rater === raterPk && up.ratee === rateePk && up.tradeId === TRADE && up.thumb === "up",
+    "rating: a signed thumbs-up parses with rater/ratee/trade/thumb intact");
+
+  // Tampering (flip the thumb in content) fails signature verification.
+  const tampered = JSON.parse(JSON.stringify({
+    ...upSigned, content: upSigned.content.replace('"up"', '"down"'),
+  })) as NostrEvent;
+  assert(parseRatingEvent(tampered) === null, "rating: a tampered thumb fails signature verification and drops");
+
+  // You cannot rate yourself.
+  const selfSigned = finalizeEvent(
+    buildRatingEvent({ tradeId: TRADE, ratee: raterPk, thumb: "up" }), raterSk,
+  ) as unknown as NostrEvent;
+  assert(parseRatingEvent(selfSigned) === null, "rating: a self-rating is rejected (rater === ratee)");
+
+  // Builder guards.
+  let threwThumb = false;
+  try { buildRatingEvent({ tradeId: TRADE, ratee: rateePk, thumb: "meh" as any }); } catch { threwThumb = true; }
+  assert(threwThumb, "rating: builder refuses a non-up/down thumb");
+
+  // ── verifyRatingForTrade: cross-trade integrity ──
+  const settled = (over: Partial<EscrowState> = {}): EscrowState => ({
+    id: TRADE,
+    category: "p2p-trade",
+    status: EscrowStatus.COMPLETED,
+    resolvedOutcome: Outcome.RELEASE,
+    participants: { [Role.BUYER]: raterPk, [Role.SELLER]: rateePk, [Role.ARBITER]: ARBITER_PK },
+    ...over,
+  } as unknown as EscrowState);
+  const r = (over: Partial<Rating> = {}): Rating => ({
+    tradeId: TRADE, rater: raterPk, ratee: rateePk, thumb: "up", createdAt: 1_900_010_000, eventId: "ev1", ...over,
+  });
+  assert(verifyRatingForTrade(r(), settled()) === true,
+    "rating: a settled trade where rater+ratee were both parties verifies");
+  assert(verifyRatingForTrade(r(), null) === false,
+    "rating: an unknown trade (null) never verifies — no vouching for what you can't see");
+  assert(verifyRatingForTrade(r(), settled({ resolvedOutcome: null })) === false,
+    "rating: an UNSETTLED trade never verifies (nobody performed yet)");
+  assert(verifyRatingForTrade(r({ rater: "99".repeat(32) }), settled()) === false,
+    "rating: a rater who wasn't a party is dropped");
+  assert(verifyRatingForTrade(r({ ratee: "99".repeat(32) }), settled()) === false,
+    "rating: a ratee who wasn't a party is dropped");
+  assert(verifyRatingForTrade(r({ tradeId: "other" }), settled()) === false,
+    "rating: a trade-id mismatch is dropped");
+  // A stepped-in backup arbiter counts as a party; the arbiter is a ratee like any other.
+  const backupPk = "ab".repeat(32);
+  assert(verifyRatingForTrade(r({ ratee: backupPk }), settled({ actingArbiter: backupPk })) === true,
+    "rating: a stepped-in backup arbiter (actingArbiter) counts as a participant");
+  assert(verifyRatingForTrade(r({ ratee: ARBITER_PK }), settled()) === true,
+    "rating: the arbiter is a ratee like any other (one generic primitive)");
+
+  // ── aggregateRatings: dedup per (rater, trade), newest wins, filter ratee ──
+  const A = "rater-A", B = "rater-B";
+  const agg = aggregateRatings([
+    r({ rater: A, tradeId: "t1", thumb: "up", createdAt: 10 }),
+    r({ rater: A, tradeId: "t1", thumb: "down", createdAt: 20, eventId: "newer" }), // overwrites A:t1 → down
+    r({ rater: A, tradeId: "t2", thumb: "up", createdAt: 30 }),                     // distinct trade → counts
+    r({ rater: B, tradeId: "t1", thumb: "up", createdAt: 40 }),                     // distinct rater → counts
+    r({ rater: B, tradeId: "t1", thumb: "up", createdAt: 5, eventId: "older" }),    // older dup → ignored
+    r({ ratee: "99".repeat(32), rater: A, tradeId: "t9", thumb: "up" }),            // other ratee → ignored
+  ], rateePk);
+  assert(agg.count === 3 && agg.positive === 2 && agg.negative === 1,
+    `rating: aggregation dedups per (rater,trade), newest wins, filters other ratees (got ${JSON.stringify(agg)})`);
+
+  // ── aggregateVerifiedRatings: parse → verify → aggregate, drops unverifiable ──
+  const goodSk = generateSecretKey(); const goodPk = getPublicKey(goodSk);
+  const goodEvent = finalizeEvent(
+    buildRatingEvent({ tradeId: TRADE, ratee: rateePk, thumb: "up", createdAt: 1_900_011_000 }), goodSk,
+  ) as unknown as NostrEvent;
+  const tradeFor = (id: string) => id === TRADE
+    ? settled({ participants: { [Role.BUYER]: goodPk, [Role.SELLER]: rateePk, [Role.ARBITER]: ARBITER_PK } })
+    : null;
+  const aggV = aggregateVerifiedRatings([goodEvent, upSigned], rateePk, tradeFor);
+  // goodEvent's rater is a party of TRADE → counts. upSigned's rater is NOT a
+  // party in this mapping → dropped.
+  assert(aggV.count === 1 && aggV.positive === 1,
+    `rating: aggregateVerifiedRatings counts only ratings backed by a settled trade the rater was in (got ${JSON.stringify(aggV)})`);
+
+  // ── Feeds the existing graduation gate verbatim ──
+  const fivePositive = aggregateRatings(
+    Array.from({ length: 5 }, (_, i) => r({ rater: `rater-${i}`, tradeId: `tg${i}`, thumb: "up" })),
+    rateePk,
+  );
+  assert(canOfferSubscription({ ratings: fivePositive }) === true,
+    "rating: 5 positive / 0 negative graduates a seller (feeds canOfferSubscription unchanged)");
+  const withANegative = aggregateRatings(
+    [...Array.from({ length: 5 }, (_, i) => r({ rater: `rater-${i}`, tradeId: `tn${i}`, thumb: "up" })),
+     r({ rater: "rater-x", tradeId: "tneg", thumb: "down" })],
+    rateePk,
+  );
+  assert(canOfferSubscription({ ratings: withANegative }) === false,
+    "rating: any negative keeps the seller below the v1 graduation bar");
+
+  // ── counterpartyToRate: who the one-tap rates (buyer↔seller; arbiter is v1-deferred) ──
+  // settled() seats BUYER=raterPk, SELLER=rateePk, ARBITER=ARBITER_PK.
+  assert(counterpartyToRate(settled(), raterPk) === rateePk,
+    "rating: the buyer rates the seller");
+  assert(counterpartyToRate(settled(), rateePk) === raterPk,
+    "rating: the seller rates the buyer");
+  assert(counterpartyToRate(settled(), ARBITER_PK) === null,
+    "rating: the arbiter has no principal counterparty to rate in v1");
+  assert(counterpartyToRate(settled(), "99".repeat(32)) === null,
+    "rating: a non-participant has nobody to rate");
 }
 
 console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
