@@ -44,7 +44,7 @@ import {
 } from "./types.js";
 import { payoutRecipientFor } from "./recipients.js";
 import { validateVoteShareEnvelope } from "./holder-shares.js";
-import { arbiterVotePriority, substitutionEligibleAt, clampSubstitutionGraceSeconds } from "./arbiter-substitution.js";
+import { arbiterVotePriority, substitutionEligibleAt, clampSubstitutionGraceSeconds, oneSidedEscalationAt, isPerformanceContest } from "./arbiter-substitution.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
 
 // Re-export so existing callers (escrow-client, escrow-bridge, tests) keep
@@ -906,18 +906,30 @@ function handleVote(state: EscrowState, event: ParsedEscrowEvent<VotePayload>): 
       // stranded the trade. Any pool backup may now cast the healing vote,
       // REFUND ONLY (healing's sole legitimate outcome), no grace floor —
       // the assigned arbiter had the trade's entire life to act.
-      if (p.outcome !== Outcome.REFUND) {
+      //
+      // v2.9: that REFUND-only rule is correct for ABANDONMENT, but a
+      // performance CONTEST — a standing RELEASE from the non-locker — is not
+      // abandonment. There a backup rules on MERIT (RELEASE or REFUND) with no
+      // grace floor (still post-expiry, assigned arbiter is gone), and the
+      // expiry auto-refund is suppressed (isPerformanceContest), so this ruling
+      // is the resolution. Without this carve-out the constraint would force a
+      // refund to a ghosting locker.
+      if (!isPerformanceContest(state) && p.outcome !== Outcome.REFUND) {
         return err("INVALID_HEAL_OUTCOME",
           "Healing votes on an expired trade must be REFUND", event.raw.id);
       }
     } else {
       const buyerVote = state.votes[Role.BUYER];
       const sellerVote = state.votes[Role.SELLER];
-      if (buyerVote === undefined || sellerVote === undefined) {
+      const bothVoted = buyerVote !== undefined && sellerVote !== undefined;
+      // v2.9: a one-sided standing RELEASE (locker silent) is a valid contest a
+      // BACKUP may rule on — substitutionEligibleAt is non-null then (via
+      // disputeStartAt's second arm). Two-sided disputes are unchanged.
+      if (!bothVoted && oneSidedEscalationAt(state) === null) {
         return err("ARBITER_TOO_EARLY",
           "Arbiter can only vote after both buyer and seller have voted", event.raw.id);
       }
-      if (buyerVote === sellerVote) {
+      if (bothVoted && buyerVote === sellerVote) {
         return err("ARBITER_NOT_NEEDED",
           "Arbiter vote not needed — buyer and seller agree", event.raw.id);
       }
@@ -961,15 +973,22 @@ function handleVote(state: EscrowState, event: ParsedEscrowEvent<VotePayload>): 
   if (voterRole === Role.ARBITER && !isHealing) {
     const buyerVote = state.votes[Role.BUYER];
     const sellerVote = state.votes[Role.SELLER];
+    const bothVoted = buyerVote !== undefined && sellerVote !== undefined;
 
-    if (buyerVote === undefined || sellerVote === undefined) {
-      return err("ARBITER_TOO_EARLY",
-        "Arbiter can only vote after both buyer and seller have voted",
-        event.raw.id
-      );
-    }
-
-    if (buyerVote === sellerVote) {
+    if (!bothVoted) {
+      // v2.9: a silent locker against a standing RELEASE no longer freezes the
+      // arbiter. Once the escalation window opens (always before expiry — the
+      // half-life floor guarantees it) the assigned arbiter MAY rule, giving a
+      // performer a path to win against a ghosting locker. Outside that window
+      // the old "wait for both" rule still holds.
+      const escalateAt = oneSidedEscalationAt(state);
+      if (escalateAt === null || event.raw.created_at < escalateAt) {
+        return err("ARBITER_TOO_EARLY",
+          "Arbiter can only vote after both buyer and seller have voted",
+          event.raw.id
+        );
+      }
+    } else if (buyerVote === sellerVote) {
       return err("ARBITER_NOT_NEEDED",
         "Arbiter vote not needed — buyer and seller agree",
         event.raw.id
@@ -1567,10 +1586,15 @@ export function canVote(state: EscrowState, pubkey: string, nowSec?: number): { 
   if (role === Role.ARBITER && !isHealing) {
     const buyerVote = state.votes[Role.BUYER];
     const sellerVote = state.votes[Role.SELLER];
-    if (buyerVote === undefined || sellerVote === undefined) {
-      return { canVote: false, reason: "Waiting for buyer and seller to vote first" };
-    }
-    if (buyerVote === sellerVote) {
+    const bothVoted = buyerVote !== undefined && sellerVote !== undefined;
+    if (!bothVoted) {
+      // v2.9: mirror handleVote — a standing RELEASE past its escalation window
+      // lets the arbiter rule against a ghosting locker.
+      const escalateAt = oneSidedEscalationAt(state);
+      if (escalateAt === null || now < escalateAt) {
+        return { canVote: false, reason: "Waiting for buyer and seller to vote first" };
+      }
+    } else if (buyerVote === sellerVote) {
       return { canVote: false, reason: "Buyer and seller agree — arbiter not needed" };
     }
   }

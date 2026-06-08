@@ -32,6 +32,7 @@ import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
 import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
 import { pickArbiterFromPool, getTrustedArbiterPool, classifyArbiterProvenance } from "../../arbiters/pool.js";
+import { isPerformanceContest } from "../../escrow-engine/arbiter-substitution.js";
 import {
   hasStateBExplained,
   markStateBExplained,
@@ -1392,9 +1393,34 @@ export function TradeDetail({
         const remaining = state.expiresAt - now;
         const isExpired = remaining <= 0;
         const isUrgent = remaining > 0 && remaining < 7200;
+        // v2.9: a standing RELEASE from the non-locker (the performer) means the
+        // deadline NO LONGER auto-refunds the locker — an arbiter decides. The
+        // old "auto-refunds at expiry" copy would be a lie in that state, so the
+        // banner flips. The version note is the companion to the v2.9 consensus
+        // change (relaxed vote acceptance): a dispute only settles the same for
+        // everyone if all parties are on the latest client. (DECISIONS
+        // 2026-06-07/08 — expiry exploit + coordinated release.)
+        const contested = isPerformanceContest(state);
         return (
           <div style={{ marginBottom: 12 }}>
-            {isExpired ? (
+            {contested ? (
+              <div style={{
+                padding: "12px 14px", borderRadius: 8, textAlign: "center",
+                background: T.amberDim, border: `1px solid ${T.amber}44`,
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: T.amber, fontFamily: T.mono }}>
+                  {isExpired ? "⏰ EXPIRED — an arbiter decides" : "⚖️ A release vote is in"}
+                </div>
+                <div style={{ fontSize: 11, color: T.text, fontFamily: T.sans, marginTop: 6 }}>
+                  {isExpired
+                    ? "Someone voted to release, so this won't auto-refund — an arbiter rules on who's right."
+                    : "At the deadline this goes to an arbiter, not an automatic refund."}
+                </div>
+                <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 6 }}>
+                  Make sure everyone in this trade is on the latest Chama, so the decision settles the same for all.
+                </div>
+              </div>
+            ) : isExpired ? (
               <div style={{
                 padding: "14px 16px", borderRadius: 8, textAlign: "center",
                 background: T.redDim, border: `1px solid ${T.red}44`,

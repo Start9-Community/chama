@@ -1347,4 +1347,39 @@ legible as intent. Implementation (separate PR): `state-machine.ts`
 `escrow-client.ts` (`maybeAutoRefundExpired` guard), with permutation tests
 across all four categories × who-voted-what × expiry.
 
-**Status:** Active — flaw acknowledged; fix designed, not yet implemented.
+**Implemented (v2.9.0, 2026-06-08).** Shipped as designed, with two refinements
+surfaced during the build:
+- Suppression keys on the **non-locker** via `payoutRecipientFor(state, RELEASE)`
+  (one source of truth), not literally `votes[buyer]` — so the marketplace
+  inversion (buyer locks, seller performs) is covered by construction. The
+  locker's own RELEASE stays out of scope (locker-favorable, not theft).
+- Suppression **lifts** the moment an arbiter rules REFUND
+  (`isPerformanceContest` → false), so a buyer who votes RELEASE without paying
+  cannot freeze the locker's funds forever: the arbiter's REFUND ruling + the
+  locker's expiry refund still complete a legitimate 2-of-3. And `disputeStartAt`
+  gained a **second arm** (returns `oneSidedEscalationAt` for a one-sided RELEASE)
+  so backups unfreeze through the same gate — a ghosting locker + a no-show
+  assigned arbiter cannot win either.
+
+The escalation clock reuses the substitution formula re-anchored on the lone
+RELEASE vote (`oneSidedEscalationAt = releaseVoteAt + min(clamp(grace,0..4h, else
+4h), half remaining life)`), always strictly before expiry. New helpers
+(`oneSidedReleaseAnchor`, `oneSidedEscalationAt`, `isPerformanceContest`) are pure
+/ replay-deterministic. Touches `arbiter-substitution.ts`, `state-machine.ts`
+(`handleVote` + `canVote`), `escrow-client.ts` (`maybeAutoRefundExpired`). 2277/2277
+tests pass (+22 v2.9 permutation asserts: exploit-closed, freeze-lifted,
+abandonment-still-REFUND-only, marketplace inversion, locker-own-RELEASE excluded,
+escalation < expiry). A 4-lens adversarial review (theft / freeze / 2-of-3+purity
+/ consensus) found zero defects.
+
+Because relaxing `ARBITER_TOO_EARLY` changes which votes are **accepted** (not
+additive like `expirySeconds`), this ships as its own **coordinated release
+(v2.9.0)** — never folded into the additive v2.8. The UI companion ships in the
+same release: TradeDetail's expiry banner is now **contest-aware** (via
+`isPerformanceContest`) — when the non-locker holds a standing RELEASE it stops
+claiming "auto-refunds at expiry" (now false) and instead says an arbiter
+decides, plus the "make sure everyone's on the latest Chama" note (the "update
+before disputing" messaging, surfaced at the exact contest moment so the
+cross-version divergence is mitigated where it bites).
+
+**Status:** Active — **implemented in v2.9.0**.

@@ -101,6 +101,9 @@ import {
   substitutionEligibleAt,
   SUBSTITUTION_GRACE_MAX_SECONDS,
   clampSubstitutionGraceSeconds,
+  oneSidedEscalationAt,
+  oneSidedReleaseAnchor,
+  isPerformanceContest,
 } from "./arbiter-substitution.js";
 import {
   EscrowClient,
@@ -2079,7 +2082,11 @@ console.log("\n── ARBITER SUBSTITUTION (pooled share, grace window, priority
       "substitution: without the pooled-share marker a backup stays NOT_PARTICIPANT");
   }
 
-  // Dispute gates still precede the clock.
+  // Dispute gates and the clock. v2.9: a ONE-SIDED standing RELEASE from the
+  // non-locker (buyer here) opens the escalation path, so a backup that jumps in
+  // before its eligibility is gated by the CLOCK (SUBSTITUTE_TOO_EARLY — its
+  // window opens later than the assigned arbiter's), not by the dispute gate.
+  // When buyer+seller AGREE, the arbiter is still simply not needed.
   {
     const create = createEvent({ communityArbiters: POOL });
     let agree = (applyEvent(null, create) as any).state;
@@ -2092,8 +2099,8 @@ console.log("\n── ARBITER SUBSTITUTION (pooled share, grace window, priority
       voteEvent(Role.ARBITER, arbiterPriorityOrder(agree)[1], Outcome.RELEASE, a1.raw.id),
       a1.raw.created_at + SUBSTITUTION_GRACE_MAX_SECONDS + 60,
     );
-    assertErr(applyEvent(agree, oneVoteBackup), "ARBITER_TOO_EARLY",
-      "substitution: backup before both sides voted → ARBITER_TOO_EARLY");
+    assertErr(applyEvent(agree, oneVoteBackup), "SUBSTITUTE_TOO_EARLY",
+      "substitution: a backup jumping a one-sided RELEASE before its window → SUBSTITUTE_TOO_EARLY (v2.9)");
     const a2 = voteEvent(Role.SELLER, SELLER_PK, Outcome.RELEASE, a1.raw.id);
     agree = (applyEvent(agree, a2) as any).state;
     const agreeBackup = retimeEvent(
@@ -2216,10 +2223,15 @@ console.log("\n── ARBITER SUBSTITUTION (pooled share, grace window, priority
       }
     }
 
-    // RELEASE is not a legitimate healing outcome for a backup.
-    const badHeal = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.RELEASE, prevId), disputeAt + 10);
-    assertErr(applyEvent(expired, badHeal), "INVALID_HEAL_OUTCOME",
-      "healing-sub: a backup's healing vote must be REFUND");
+    // v2.9: `expired` here is a CONTEST (buyer RELEASE, seller REFUND — the
+    // non-locker holds a standing RELEASE), not abandonment. A backup may now
+    // rule on MERIT, so a RELEASE ruling is VALID — it gives the performing
+    // buyer a path to win instead of the old auto-REFUND-to-locker. (REFUND-only
+    // healing still holds for genuine ABANDONMENT — see the v2.9 expiry-exploit
+    // block below, where a no-standing-RELEASE trade still rejects a RELEASE heal.)
+    const meritRelease = retimeEvent(voteEvent(Role.ARBITER, backup, Outcome.RELEASE, prevId), disputeAt + 10);
+    assert((applyEvent(expired, meritRelease) as any).ok !== false,
+      "healing-sub: a backup may rule RELEASE on a CONTESTED expired trade (v2.9 merit ruling)");
 
     // No grace floor in healing: a vote long BEFORE the live-dispute boundary
     // timestamp is still accepted once the trade is expired.
@@ -2286,6 +2298,116 @@ console.log("\n── ARBITER SUBSTITUTION (pooled share, grace window, priority
       && (healPrompt as any).outcomes[0] === Outcome.REFUND,
       "healing-sub: votePrompt offers the backup REFUND-only healing buttons");
   }
+}
+
+// ── 5b-v2.9. Expiry auto-refund exploit — performance contest, not abandonment ─
+// DECISIONS 2026-06-07 "Expiry auto-refund is exploitable": a ghosting LOCKER
+// (the seller in exchange/bill-pay/lending) used to keep BOTH fiat and sats —
+// the performer voted RELEASE, the locker went silent, and the expiry refund
+// paid the locker. v2.9 turns one-sided performance into a CONTEST: the refund
+// default is suppressed while the non-locker holds a standing RELEASE, and the
+// arbiter (assigned, then backups) gets a path to rule before expiry.
+console.log("\n── v2.9 expiry-exploit: performance contest ──");
+{
+  const POOL9 = [ARBITER_PK, ARBITER2_PK, "ff".repeat(32)];
+
+  // Headline: seller locks (p2p default), buyer (non-locker) votes RELEASE,
+  // seller stays silent.
+  const create = createEvent({ communityArbiters: POOL9 });
+  let s = (applyEvent(null, create) as any).state;
+  const lk = lockEvent(create.raw.id); lk.payload.arbiterPoolShare = true;
+  s = (applyEvent(s, lk) as any).state;
+  const lockedAt = s.expiresAt - 86400;
+  const bRel = retimeEvent(voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, lk.raw.id), lockedAt + 60);
+  const contested = (applyEvent(s, bRel) as any).state;
+
+  // Pure helpers: the one-sided arm opens, strictly before expiry, and feeds
+  // disputeStartAt so backups are reachable through the same clock.
+  const escAt = oneSidedEscalationAt(contested);
+  assert(escAt !== null, "v2.9: a one-sided standing RELEASE opens an escalation window");
+  assert(escAt! < contested.expiresAt, "v2.9: the escalation window opens strictly BEFORE expiry (half-life floor)");
+  assert(disputeStartAt(contested) === escAt, "v2.9: disputeStartAt's second arm returns the escalation deadline (unfreezes backups)");
+  assert(isPerformanceContest(contested) === true, "v2.9: a standing RELEASE from the non-locker is a CONTEST, not abandonment");
+  assert(oneSidedReleaseAnchor(contested)?.nonLockerRole === Role.BUYER, "v2.9: the anchor identifies the buyer as the non-locker (p2p)");
+
+  // The assigned arbiter is frozen BEFORE the window, free AFTER it.
+  const tooEarly = retimeEvent(voteEvent(Role.ARBITER, ARBITER_PK, Outcome.RELEASE, bRel.raw.id), escAt! - 60);
+  assertErr(applyEvent(contested, tooEarly), "ARBITER_TOO_EARLY",
+    "v2.9: the assigned arbiter still waits out the escalation window");
+
+  // WIN PATH: arbiter rules RELEASE → buyer + arbiter = 2-of-3 → the performer
+  // wins and the ghosting seller gets nothing.
+  const arbRel = retimeEvent(voteEvent(Role.ARBITER, ARBITER_PK, Outcome.RELEASE, bRel.raw.id), escAt! + 5);
+  const ruled = applyEvent(contested, arbRel);
+  if (assertOk(ruled, "v2.9: once the window opens the assigned arbiter MAY rule RELEASE against a silent locker")) {
+    assert(ruled.state.votes[Role.ARBITER] === Outcome.RELEASE, "v2.9: the arbiter slot holds the RELEASE ruling");
+    const resolved = applyEvent(ruled.state, resolveEvent(Outcome.RELEASE, [Role.BUYER, Role.ARBITER], true, arbRel.raw.id));
+    if (assertOk(resolved, "v2.9: RESOLVE lands RELEASE on the contested trade")) {
+      assert(resolved.state.resolvedOutcome === Outcome.RELEASE
+        && payoutRecipientFor(resolved.state, Outcome.RELEASE)!.pubkey === BUYER_PK,
+        "v2.9: the performing buyer wins — the exploit (seller keeps fiat + sats) is closed");
+    }
+  }
+
+  // LIFT: an arbiter REFUND ruling LIFTS suppression, so a genuine merit-refund
+  // can complete a 2-of-3 — a lying buyer can't freeze the locker's funds.
+  const arbRef = retimeEvent(voteEvent(Role.ARBITER, ARBITER_PK, Outcome.REFUND, bRel.raw.id), escAt! + 5);
+  const ruledRef = applyEvent(contested, arbRef);
+  if (assertOk(ruledRef, "v2.9: the arbiter may instead rule REFUND (the buyer never actually performed)")) {
+    assert(isPerformanceContest(ruledRef.state) === false,
+      "v2.9: an arbiter REFUND ruling LIFTS suppression — no permanent freeze of the locker's funds");
+  }
+
+  // Suppression survives into an unresolved expiry: a backup can still rule
+  // RELEASE (the performer wins even if the assigned arbiter ghosts too).
+  const cexpired = { ...contested, status: EscrowStatus.EXPIRED } as EscrowState;
+  assert(isPerformanceContest(cexpired) === true, "v2.9: the contest survives into expiry while unresolved");
+  const backupPk = arbiterPriorityOrder(cexpired)[1];
+  const backupRel = retimeEvent(voteEvent(Role.ARBITER, backupPk, Outcome.RELEASE, bRel.raw.id), cexpired.expiresAt + 60);
+  assertOk(applyEvent(cexpired, backupRel),
+    "v2.9: a backup may rule RELEASE on the contested expired trade (performer still wins if the assigned arbiter ghosts)");
+
+  // Abandonment is unchanged: no standing RELEASE → REFUND-only healing holds.
+  const abCreate = createEvent({ communityArbiters: POOL9 });
+  let ab = (applyEvent(null, abCreate) as any).state;
+  const abLock = lockEvent(abCreate.raw.id); abLock.payload.arbiterPoolShare = true;
+  ab = (applyEvent(ab, abLock) as any).state;
+  const abExpired = { ...ab, status: EscrowStatus.EXPIRED } as EscrowState;
+  assert(isPerformanceContest(abExpired) === false, "v2.9: a zero-vote expired trade is abandonment, not a contest");
+  const abBackup = arbiterPriorityOrder(abExpired)[1];
+  const abRelHeal = retimeEvent(voteEvent(Role.ARBITER, abBackup, Outcome.RELEASE, abLock.raw.id), abExpired.expiresAt + 60);
+  assertErr(applyEvent(abExpired, abRelHeal), "INVALID_HEAL_OUTCOME",
+    "v2.9: abandonment still heals REFUND-only — a backup RELEASE heal is rejected");
+  const abRefHeal = retimeEvent(voteEvent(Role.ARBITER, abBackup, Outcome.REFUND, abLock.raw.id), abExpired.expiresAt + 60);
+  assertOk(applyEvent(abExpired, abRefHeal), "v2.9: abandonment REFUND heal is accepted (sats route home to the locker)");
+
+  // The LOCKER's OWN RELEASE (counterparty silent) is out of scope — it is
+  // locker-favorable, not theft, so the patch must NOT widen to cover it.
+  const lrCreate = createEvent({ communityArbiters: POOL9 });
+  let lr = (applyEvent(null, lrCreate) as any).state;
+  const lrLock = lockEvent(lrCreate.raw.id); lrLock.payload.arbiterPoolShare = true;
+  lr = (applyEvent(lr, lrLock) as any).state;
+  const sRel = retimeEvent(voteEvent(Role.SELLER, SELLER_PK, Outcome.RELEASE, lrLock.raw.id), (lr.expiresAt - 86400) + 60);
+  lr = (applyEvent(lr, sRel) as any).state;
+  assert(isPerformanceContest(lr) === false,
+    "v2.9: the LOCKER's own RELEASE (buyer silent) is NOT a contest — the patch isn't widened");
+  assert(oneSidedEscalationAt(lr) === null, "v2.9: no escalation clock for a locker-side RELEASE");
+
+  // Marketplace inversion: payoutRecipientFor drives role selection. recipients.ts
+  // says marketplace BUYER locks and the SELLER is the performer/non-locker, so
+  // the contest must key on the SELLER's RELEASE there — proven at the pure
+  // predicate layer so the per-category map is never hand-rolled.
+  const mkt = (votes: Record<string, Outcome>) => ({
+    category: "marketplace",
+    participants: { [Role.BUYER]: BUYER_PK, [Role.SELLER]: SELLER_PK, [Role.ARBITER]: ARBITER_PK },
+    votes,
+  } as unknown as EscrowState);
+  assert(payoutRecipientFor(mkt({}), Outcome.RELEASE)!.role === Role.SELLER,
+    "v2.9: marketplace RELEASE pays the SELLER (the buyer is the locker)");
+  assert(isPerformanceContest(mkt({ [Role.SELLER]: Outcome.RELEASE })) === true,
+    "v2.9: marketplace — the SELLER's standing RELEASE is the contest (inversion handled by construction)");
+  assert(isPerformanceContest(mkt({ [Role.BUYER]: Outcome.RELEASE })) === false,
+    "v2.9: marketplace — the BUYER (locker) voting RELEASE is NOT a contest");
 }
 
 // ── 5c. Locker released at RESOLVE — won-by-other trades stop counting ────

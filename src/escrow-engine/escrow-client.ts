@@ -51,7 +51,7 @@ import {
 import { applyEvent, replayEventChain, canVote, getWinner, payoutRecipientFor, type TransitionResult } from "./state-machine.js";
 import { buildChildCreateParams, remainingStock, unsoldStock, isSoldOut, isLastUnitContested } from "./storefront.js";
 import { HOLDER_ONLY_SHARE_POLICY, shareIndexForRole } from "./holder-shares.js";
-import { arbiterVotePriority, arbiterPriorityOrder } from "./arbiter-substitution.js";
+import { arbiterVotePriority, arbiterPriorityOrder, isPerformanceContest } from "./arbiter-substitution.js";
 import type { VoteShareEnvelope } from "./types.js";
 import { EscrowNotifier } from "./notifier.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
@@ -1945,6 +1945,17 @@ export class EscrowClient {
 
     const now = Math.floor(Date.now() / 1000);
     if (now <= state.expiresAt) return;
+
+    // v2.9: never auto-refund a ghosting LOCKER against a standing RELEASE from
+    // the non-locker — that is the performance-contest theft (DECISIONS
+    // 2026-06-07: "Expiry auto-refund is exploitable"). The contest is resolved
+    // by an arbiter ruling (assigned or backup), not by a blind auto-refund.
+    // Suppression lifts once an arbiter rules REFUND (isPerformanceContest goes
+    // false), so a genuine merit-refund still completes the 2-of-3.
+    if (isPerformanceContest(state)) {
+      console.debug(`[escrow] ${escrowId} expired but contested (standing RELEASE) — suppressing auto-refund`);
+      return;
+    }
 
     // Check if we're a participant who can vote
     const myPubkey = await this.signer.getPublicKey();

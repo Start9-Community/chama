@@ -25,6 +25,7 @@
 
 import { Role, EscrowEventKind, Outcome, type EscrowState, type VotePayload } from "./types.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
+import { payoutRecipientFor } from "./recipients.js";
 
 /** Pool members who hold a copy of the arbiter share AND may vote: the
  *  assigned arbiter + 2 backups. Share-holding and vote-eligibility are capped
@@ -94,10 +95,17 @@ export function arbiterVotePriority(state: EscrowState, pubkey: string): number 
   return idx === -1 ? null : idx;
 }
 
-/** When the dispute started: the created_at of the LATER of buyer's and
- *  seller's votes, but only when both exist and disagree. Null otherwise
- *  (no dispute → no substitution clock). Derived from the event chain so it
- *  replays identically everywhere. */
+/** When the dispute started, the anchor for the substitution clock. Two arms,
+ *  both pure over the event chain so they replay identically everywhere:
+ *   1. Two-sided: the created_at of the LATER of buyer's and seller's votes,
+ *      when both exist and disagree.
+ *   2. One-sided (v2.9): a standing RELEASE from the non-locker with the locker
+ *      SILENT has no two-sided start, but once its escalation window opens the
+ *      dispute is DEEMED to start then (= oneSidedEscalationAt). This unfreezes
+ *      substitutionEligibleAt so BACKUP arbiters become reachable through the
+ *      same gate — otherwise a ghosting locker plus a no-show assigned arbiter
+ *      would still win the expiry refund.
+ *  Null when neither arm applies (no dispute → no substitution clock). */
 export function disputeStartAt(state: EscrowState): number | null {
   let buyer: { outcome: Outcome; at: number } | null = null;
   let seller: { outcome: Outcome; at: number } | null = null;
@@ -109,8 +117,10 @@ export function disputeStartAt(state: EscrowState): number | null {
     if (p.role === Role.BUYER && !buyer) buyer = { outcome: p.outcome, at };
     else if (p.role === Role.SELLER && !seller) seller = { outcome: p.outcome, at };
   }
-  if (!buyer || !seller || buyer.outcome === seller.outcome) return null;
-  return Math.max(buyer.at, seller.at);
+  if (buyer && seller && buyer.outcome !== seller.outcome) {
+    return Math.max(buyer.at, seller.at);
+  }
+  return oneSidedEscalationAt(state);
 }
 
 /** The moment a BACKUP becomes eligible to cast the arbiter vote:
@@ -130,4 +140,79 @@ export function substitutionEligibleAt(state: EscrowState): number | null {
     ? Math.max(0, Math.floor((state.expiresAt - start) / 2))
     : ceiling;
   return start + Math.min(ceiling, half);
+}
+
+// ── One-sided RELEASE escalation — the ghosting-locker fix (v2.9) ───────────
+//
+// The expiry default ("refund the locker") encodes "nobody performed." A
+// standing RELEASE from the NON-LOCKER — the party who does NOT hold the locked
+// sats: the buyer who sent fiat in exchange/bill-pay/lending, the SELLER who
+// shipped goods in marketplace (buyer locks there) — falsifies that: someone
+// claims to have performed. recipients.payoutRecipientFor(state, RELEASE) IS the
+// non-locker by construction, so the marketplace inversion is handled without a
+// hand-rolled per-category map (one source of truth). The locker's OWN RELEASE
+// is deliberately out of scope: a locker conceding then going silent gets
+// refunded against their stated intent, but that is locker-favorable, not theft.
+
+/** The non-locker's standing-RELEASE anchor when the locker is SILENT (the
+ *  one-sided case that the two-sided disputeStart arm misses). Carries the
+ *  RELEASE vote's created_at — the anchor for the escalation clock. Null if the
+ *  non-locker has not voted RELEASE, the locker HAS voted (then it is a
+ *  two-sided dispute → disputeStartAt arm 1), or no such RELEASE vote is in the
+ *  chain. Pure over committed state. */
+export function oneSidedReleaseAnchor(
+  state: EscrowState,
+): { nonLockerRole: Role; releaseVoteAt: number } | null {
+  const nonLocker = payoutRecipientFor(state, Outcome.RELEASE);
+  const locker = payoutRecipientFor(state, Outcome.REFUND);
+  if (!nonLocker || !locker) return null;
+  if (state.votes[locker.role] !== undefined) return null;          // locker not silent → two-sided
+  if (state.votes[nonLocker.role] !== Outcome.RELEASE) return null; // no standing RELEASE
+  const nonLockerPk = state.participants[nonLocker.role];
+  if (!nonLockerPk) return null;
+  for (const ve of state.eventChain) {
+    if (ve.kind !== EscrowEventKind.VOTE || ve.pubkey !== nonLockerPk) continue;
+    const p = ve.payload as VotePayload | undefined;
+    if (p?.outcome !== Outcome.RELEASE) continue;
+    const at = (ve as { raw?: { created_at?: number } }).raw?.created_at ?? 0;
+    return { nonLockerRole: nonLocker.role, releaseVoteAt: at };
+  }
+  return null;
+}
+
+/** When the arbiter's window over a ONE-SIDED standing RELEASE opens: the
+ *  RELEASE vote's created_at + min(committed grace clamped to [0,4h] (else the
+ *  4h default), half the trade's remaining life at that anchor). Identical
+ *  formula to substitutionEligibleAt, re-anchored on the lone RELEASE vote so
+ *  no second patience knob exists. The half-life floor keeps it strictly before
+ *  expiry, so a performer can win before the expiry refund. Null when there is
+ *  no one-sided standing RELEASE. */
+export function oneSidedEscalationAt(state: EscrowState): number | null {
+  const anchor = oneSidedReleaseAnchor(state);
+  if (!anchor) return null;
+  const ceiling = clampSubstitutionGraceSeconds(state.lock?.substitutionGraceSeconds);
+  const half = state.expiresAt
+    ? Math.max(0, Math.floor((state.expiresAt - anchor.releaseVoteAt) / 2))
+    : ceiling;
+  return anchor.releaseVoteAt + Math.min(ceiling, half);
+}
+
+/** Suppression predicate (v2.9): a standing RELEASE from the non-locker means
+ *  the trade is a performance CONTEST, not abandonment, so the expiry/healing
+ *  REFUND default must NOT auto-pay the locker. It LIFTS the moment an arbiter
+ *  affirmatively rules REFUND (votes[ARBITER] === REFUND) — that lets the
+ *  locker's expiry refund complete a legitimate 2-of-3 REFUND; without the lift,
+ *  a buyer could vote RELEASE without paying and freeze the locker's funds
+ *  forever. Covers the one-sided case (locker silent) AND the two-sided
+ *  RELEASE/REFUND split with an absent arbiter — the same theft. Pure over
+ *  committed state. */
+export function isPerformanceContest(state: EscrowState): boolean {
+  // payoutRecipientFor is null only when a participant is unseated, which can
+  // only happen pre-LOCK. Suppression is evaluated only post-LOCK (a contest
+  // needs a recorded vote), so a null here is the honest "no contest" answer,
+  // never a silently-disabled guard.
+  const nonLocker = payoutRecipientFor(state, Outcome.RELEASE);
+  if (!nonLocker || state.votes[nonLocker.role] !== Outcome.RELEASE) return false;
+  if (state.votes[Role.ARBITER] === Outcome.REFUND) return false; // arbiter adjudicated against the claim
+  return true;
 }
