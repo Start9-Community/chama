@@ -252,16 +252,21 @@ if [ "$APPLIED" != "$NEW_VERSION" ]; then
   exit 1
 fi
 
-# Keep Tauri metadata in lockstep. Gradle derives versionName/versionCode from
-# package.json automatically; src-tauri/tauri.conf.json does NOT — the v2.0.3
-# desktop assets were nearly built with stale 1.3.0 metadata because of this.
-# Targeted line-replace (no reformat) of the top-level "version" field; the
-# git add -A below commits it with the bump.
+# Keep Tauri metadata in lockstep. Since v2.8.0, src-tauri/tauri.conf.json
+# points its version at ../package.json (Tauri reads the field from that
+# file), so it is STRUCTURALLY in sync and must be left alone — the v2.8.0
+# desktop CI gates failed precisely because this step regex-stomped the
+# pointer with a literal version and the workflow's version guard caught the
+# disagreement. Only legacy literal versions still get the targeted rewrite.
 node -e '
   const fs = require("fs");
   const v = require("./package.json").version;
   const p = "src-tauri/tauri.conf.json";
   let s = fs.readFileSync(p, "utf8");
+  if (/"version"\s*:\s*"\.\.\/package\.json"/.test(s)) {
+    console.log("   tauri.conf.json points at package.json — self-syncing, untouched.");
+    process.exit(0);
+  }
   const next = s.replace(/("version"\s*:\s*")[^"]+(")/, "$1" + v + "$2");
   if (next !== s) { fs.writeFileSync(p, next); console.log("   synced tauri.conf.json -> v" + v); }
   else if (!s.includes("\"version\": \"" + v + "\"")) { process.exit(1); }
