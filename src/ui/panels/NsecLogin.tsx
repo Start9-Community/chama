@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { T } from "../theme.js";
 import { validateRecoveryKeyInput } from "../../escrow-engine/nsec-signer.js";
@@ -10,6 +10,7 @@ export function NsecLogin({
   friendlySecondary,
   allowCreate = true,
   minimalPaste = false,
+  choiceFooter,
 }: {
   onSubmit: (nsec: string, remember: boolean, wasGenerated: boolean) => void;
   defaultOpen?: boolean;
@@ -22,6 +23,11 @@ export function NsecLogin({
   };
   allowCreate?: boolean;
   minimalPaste?: boolean;
+  // Overrides the choice-mode footer copy. ConnectScreen swaps in
+  // recovery-specific guidance once "I'm a returning Chama citizen" reveals
+  // the paste box, so the "we'll create a key" line never sits above a box
+  // that's asking for an existing one.
+  choiceFooter?: ReactNode;
 }) {
   const isNative = Capacitor.isNativePlatform();
   const [showNsec, setShowNsec] = useState(isNative || defaultOpen || friendly);
@@ -188,8 +194,10 @@ export function NsecLogin({
           fontSize: 10, color: T.muted, fontFamily: T.sans,
           textAlign: "center", marginTop: 12, lineHeight: 1.5,
         }}>
-          Chama creates a private recovery key on this device. Save it once
-          so you can restore your account later.
+          {choiceFooter ?? (
+            <>Chama creates a private recovery key on this device. Save it once
+            so you can restore your account later.</>
+          )}
         </div>
         {generateError && <InlineError>{generateError}</InlineError>}
       </div>

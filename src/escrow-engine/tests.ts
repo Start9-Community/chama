@@ -120,6 +120,7 @@ import {
   EAST_AFRICA_COUNTRY_CODES,
   WEST_AFRICA_COUNTRY_CODES,
   getCommunityBySlug,
+  communityForInvite,
   getPickerCommunities,
   getCustomCommunities,
   getCustomCommunityBySlug,
@@ -445,6 +446,7 @@ import {
   parseArbiterApplicationEvent,
   collectArbiterApplications,
 } from "../arbiters/applications.js";
+import { notificationForTransition } from "../notifications/trade-notifications.js";
 import {
   RATING_KIND,
   buildRatingEvent,
@@ -3161,6 +3163,32 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Global · USD uses the Africa-facing globe emoji");
   assert(getCommunityBySlug("us-blf")?.disambiguator === "BLF",
     "Global USD shows BLF as its backing route in onboarding");
+
+  // #103: communityForInvite keeps a listing's community LABEL honest with the
+  // fed it's minted on (so the Browse chip + the off-route amber can't disagree).
+  {
+    const blfInvite = getCommunityBySlug("us-blf")!.federationInvite!;
+    const gbfInvite = getCommunityBySlug("us-gbf")!.federationInvite!;
+    assert(blfInvite !== gbfInvite, "BLF and GBF are genuinely different feds");
+    assert(communityForInvite(blfInvite)?.federationInvite === blfInvite,
+      "communityForInvite resolves a community that actually backs the BLF fed");
+    assert(communityForInvite(gbfInvite)?.federationInvite === gbfInvite,
+      "communityForInvite resolves a community that actually backs the GBF fed");
+    assert(communityForInvite("fed1qnonexistent_unknown_invite") === null,
+      "communityForInvite returns null for an unknown invite (custom feds keep their label)");
+    assert(communityForInvite(null) === null && communityForInvite("") === null,
+      "communityForInvite is null-safe");
+    // The create-time correction: a listing stamped while browseCommunity (GBF
+    // label) disagreed with the wallet fed (BLF) gets re-resolved to a BLF-
+    // backed community, so its chip and its off-route amber agree.
+    const drifted = getCommunityBySlug("us-gbf")!; // header label
+    const walletFed = blfInvite;                   // actual minted fed
+    const corrected = drifted.federationInvite !== walletFed
+      ? communityForInvite(walletFed)?.slug
+      : drifted.slug;
+    assert(corrected != null && getCommunityBySlug(corrected)?.federationInvite === walletFed,
+      "Label/fed drift is corrected: a GBF-labeled listing minted on BLF stamps a BLF community");
+  }
   assert(PUBLIC_FEDI_APPROVED_FEDERATIONS.length === 9,
     "Baked public Fedi-approved list carries the screenshot wallet services beyond GBF's existing route");
   assert(getCommunityBySlug("fedi-victoria-btc")?.federationInvite === PUBLIC_FEDI_APPROVED_FEDERATIONS.find(r => r.slug === "fedi-victoria-btc")?.invite,
@@ -14090,6 +14118,84 @@ console.log("\n── SIGNED ARBITER ROSTER ──");
     threwEmpty = true;
   }
   assert(threwEmpty, "Application builder refuses an empty statement");
+}
+
+// ── #88 Trade notifications — the pure "should this buzz?" core ──
+console.log("\n── Trade notifications (notificationForTransition) ──");
+{
+  const BUYER = "11".repeat(32);
+  const SELLER = "22".repeat(32);
+  const ARB = "33".repeat(32);
+  const STRANGER = "44".repeat(32);
+  // p2p-trade: seller locks → buyer is the RELEASE (non-locker) recipient.
+  const mk = (over: Partial<EscrowState>): EscrowState => ({
+    id: "sm_notif_demo_0001",
+    category: "p2p-trade",
+    status: EscrowStatus.CREATED,
+    participants: { [Role.BUYER]: BUYER, [Role.SELLER]: SELLER, [Role.ARBITER]: ARB },
+    votes: {},
+    resolvedOutcome: null,
+    communityArbiters: [ARB],
+    ...over,
+  }) as EscrowState;
+
+  const created = mk({ status: EscrowStatus.CREATED });
+  const locked = mk({ status: EscrowStatus.LOCKED });
+
+  // 1) LOCKED → only the non-locker (buyer) is told; the locker (seller) isn't.
+  const buyerLocked = notificationForTransition(created, locked, BUYER);
+  assert(buyerLocked?.tag === "sm_notif_demo_0001:locked",
+    "LOCKED notifies the non-locker (buyer) — sats are live, their move");
+  assert(notificationForTransition(created, locked, SELLER) === null,
+    "LOCKED does NOT notify the locker (seller) — they did the action");
+  assert(notificationForTransition(created, locked, STRANGER) === null,
+    "A non-participant is never notified");
+
+  // Guard: first observation (prev null) never fires — no cold-load buzz storm.
+  assert(notificationForTransition(null, locked, BUYER) === null,
+    "No notification on first observation (prev null) — avoids cold-replay spam");
+
+  // 2) APPROVED → the winner (release recipient = buyer) is told to claim.
+  const approved = mk({ status: EscrowStatus.APPROVED, resolvedOutcome: Outcome.RELEASE,
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.RELEASE } });
+  assert(notificationForTransition(locked, approved, BUYER)?.tag === "sm_notif_demo_0001:approved",
+    "APPROVED notifies the winner that their claim is ready");
+  // Refund-resolved → the refund recipient (seller, the locker) is the winner.
+  const refunded = mk({ status: EscrowStatus.APPROVED, resolvedOutcome: Outcome.REFUND,
+    votes: { [Role.BUYER]: Outcome.REFUND, [Role.SELLER]: Outcome.REFUND } });
+  assert(notificationForTransition(locked, refunded, SELLER)?.tag === "sm_notif_demo_0001:approved",
+    "APPROVED-by-refund notifies the refund recipient (seller)");
+
+  // 3) Dispute opens (buyer≠seller) while LOCKED → ONLY the arbiter is summoned.
+  const disputed = mk({ status: EscrowStatus.LOCKED,
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND } });
+  assert(notificationForTransition(locked, disputed, ARB)?.tag === "sm_notif_demo_0001:dispute",
+    "A fresh dispute summons the arbiter — the antidote to no-shows");
+  assert(notificationForTransition(locked, disputed, BUYER) === null,
+    "The dispute notification targets the arbiter, not the parties");
+  // Agreement (both RELEASE) is NOT a dispute.
+  const agreed = mk({ status: EscrowStatus.LOCKED,
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.RELEASE } });
+  assert(notificationForTransition(locked, agreed, ARB) === null,
+    "Agreement is not a dispute — the arbiter isn't summoned");
+
+  // 4) + 5) Terminal moments → the two parties (not strangers).
+  assert(notificationForTransition(locked, mk({ status: EscrowStatus.COMPLETED }), BUYER)?.tag
+    === "sm_notif_demo_0001:completed", "COMPLETED tells the parties it settled");
+  assert(notificationForTransition(locked, mk({ status: EscrowStatus.EXPIRED }), SELLER)?.tag
+    === "sm_notif_demo_0001:expired", "EXPIRED tells the parties to look");
+
+  // No-op transition (same status, same votes) → nothing.
+  assert(notificationForTransition(locked, mk({ status: EscrowStatus.LOCKED }), BUYER) === null,
+    "An unchanged re-observation (relay replay) never re-buzzes");
+
+  // A stepped-in pool arbiter (actingArbiter) is still recognized as the arbiter.
+  const subArb = "55".repeat(32);
+  const disputedSub = mk({ status: EscrowStatus.LOCKED, actingArbiter: subArb,
+    communityArbiters: [ARB, subArb],
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND } });
+  assert(notificationForTransition(locked, disputedSub, subArb)?.tag === "sm_notif_demo_0001:dispute",
+    "A backup pool arbiter is summoned to a dispute too");
 }
 
 // ── Ratings primitive (kind:38123) — the reputation keystone ──

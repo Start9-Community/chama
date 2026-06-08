@@ -52,6 +52,11 @@ import {
 } from "../../payments/sats-trace.js";
 import { getEcashExport } from "../../payments/ecash-exports.js";
 import { T, type ThemeMode } from "../theme.js";
+import {
+  notificationsEnabled,
+  setNotificationsEnabled,
+  ensureNotificationPermission,
+} from "../../notifications/notify-service.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { readKind0Toggle, writeKind0Toggle } from "../nostr-profiles.js";
@@ -473,6 +478,7 @@ export function MeScreen({
             </div>
           </div>
         )}
+        <NotificationsRow />
         <SettingsRow label="Payment handles" hint="Saved handles for fast trade-time fill" onClick={onOpenSavedHandles} />
         <SettingsRow label="Payout destinations" hint="Lightning addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
         <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
@@ -1916,6 +1922,51 @@ function isDoneTrade(trade: EscrowState): boolean {
     trade.status === EscrowStatus.COMPLETED ||
     trade.status === EscrowStatus.EXPIRED ||
     trade.status === EscrowStatus.CANCELLED
+  );
+}
+
+// #88: single on/off for trade-event notifications (locked / claim ready /
+// dispute / settled). Default on; the OS permission is the real gate, so
+// flipping it on proactively asks. Self-contained — no prop threading.
+function NotificationsRow() {
+  const [on, setOn] = useState<boolean>(() => notificationsEnabled());
+  const toggle = () => {
+    const next = !on;
+    setOn(next);
+    setNotificationsEnabled(next);
+    if (next) void ensureNotificationPermission();
+  };
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      gap: 10, padding: "14px 16px", borderBottom: `1px solid ${T.border}`,
+    }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+          Notifications
+        </div>
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+          Locked · claim ready · disputes · settled
+        </div>
+      </div>
+      <button
+        onClick={toggle}
+        role="switch"
+        aria-checked={on}
+        style={{
+          width: 46, height: 26, borderRadius: 999, position: "relative",
+          border: `1px solid ${on ? T.green + "66" : T.border}`,
+          background: on ? T.green + "33" : T.surface,
+          cursor: "pointer", transition: "background 0.15s, border-color 0.15s",
+        }}
+      >
+        <span style={{
+          position: "absolute", top: 2, left: on ? 22 : 2,
+          width: 20, height: 20, borderRadius: "50%",
+          background: on ? T.green : T.muted, transition: "left 0.15s",
+        }} />
+      </button>
+    </div>
   );
 }
 

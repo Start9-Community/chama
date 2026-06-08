@@ -16,9 +16,13 @@ name: Desktop release
 # setup-node that ci.yml already trusts. Rust comes from the runner's
 # rustup, releases are managed with the preinstalled `gh` CLI.
 #
-# Windows is deliberately absent for now: the fedimint-bridge sidecar build
-# script is bash and the bundle is unsigned; add a windows-latest matrix leg
-# (git-bash runs the script) + signing once those are sorted.
+# Publishing policy: Windows (NSIS) + Linux (deb/AppImage) bundles are
+# attached to the release. The macOS dmg is BUILD-ONLY — it still compiles on
+# every tag as a validation gate, but it is NOT staged or uploaded, because an
+# unsigned, un-notarized dmg hits Gatekeeper's "damaged" dead-end on modern
+# macOS with no click-through for a normal user (unlike Windows SmartScreen,
+# which the user CAN bypass via More info → Run anyway). Flip the macOS upload
+# back on once Developer-ID signing + notarization land (#107).
 
 on:
   push:
@@ -85,9 +89,11 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            label: macOS (Apple Silicon)
+            label: macOS (Apple Silicon, build-only)
             bundles: dmg
-            upload_glob: src-tauri/target/release/bundle/dmg/*.dmg
+            # Build-only validation: the dmg compiles every tag but is not
+            # staged or uploaded (see header — unsigned dmg = "damaged" wall).
+            upload_glob: ""
           - os: ubuntu-22.04
             label: Linux (x86_64)
             bundles: deb,appimage
@@ -169,28 +175,32 @@ jobs:
       # legible for non-technical downloaders. Each leg only emits its own
       # bundles; nullglob skips the rest. (The "1-/2-/3-/4-" prefix is the
       # only lever that beats Linux's natural alphabetical lead.)
+      # macOS is build-only (see header): skip staging so its dmg never reaches
+      # the upload. Windows + Linux stage under plain-language, ordinal-prefixed
+      # names — GitHub sorts release assets alphabetically with no manual
+      # reorder, so the filename IS the sort key (force Windows ahead of the two
+      # Linux files). Each leg only emits its own bundles; nullglob skips the
+      # rest. Ordinals start at 1-Windows now that macOS isn't published.
       - name: Stage bundles with ordered, friendly names
+        if: runner.os != 'macOS'
         run: |
           set -euo pipefail
           shopt -s nullglob
           VER="${GITHUB_REF_NAME#v}"
           mkdir -p release-assets
-          for f in src-tauri/target/release/bundle/dmg/*.dmg; do
-            cp "$f" "release-assets/Chama-${VER}-1-macOS-Apple-Silicon.dmg"
-          done
           for f in src-tauri/target/release/bundle/nsis/*.exe; do
-            cp "$f" "release-assets/Chama-${VER}-2-Windows-x64-Setup.exe"
+            cp "$f" "release-assets/Chama-${VER}-1-Windows-x64-Setup.exe"
           done
           for f in src-tauri/target/release/bundle/deb/*.deb; do
-            cp "$f" "release-assets/Chama-${VER}-3-Linux-Debian-Ubuntu.deb"
+            cp "$f" "release-assets/Chama-${VER}-2-Linux-Debian-Ubuntu.deb"
           done
           for f in src-tauri/target/release/bundle/appimage/*.AppImage; do
-            cp "$f" "release-assets/Chama-${VER}-4-Linux-AppImage-any-distro.AppImage"
+            cp "$f" "release-assets/Chama-${VER}-3-Linux-AppImage-any-distro.AppImage"
           done
           echo "Staged:"; ls -la release-assets
 
       - name: Upload to draft GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os != 'macOS'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -198,5 +208,5 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --draft --verify-tag \
               --title "Chama desktop $TAG" \
-              --notes "Unsigned desktop bundles for $TAG. APK + web remain the primary surfaces; see zapstore notes for the release story."
+              --notes "Desktop bundles for $TAG: Windows (NSIS) + Linux (deb/AppImage). These are unsigned — Windows shows a one-time SmartScreen 'unrecognized app' notice you can click through (More info -> Run anyway). The macOS dmg is held until it's signed + notarized (#107). APK + web remain the primary surfaces; see the zapstore notes for the release story."
           gh release upload "$TAG" release-assets/* --clobber

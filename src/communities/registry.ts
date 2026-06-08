@@ -437,6 +437,24 @@ export function getCommunityBySlug(slug: string | null | undefined): Community |
   return getCustomCommunityBySlug(slug);
 }
 
+/** The best community whose backing federation matches a given invite.
+ *  Used at create time (#103) to keep a listing's community LABEL honest with
+ *  the fed it's actually minted on: `browseCommunity` (the header pill) can
+ *  drift from the wallet's loaded fed during a foreign-listing visit, which
+ *  used to stamp a listing with one chama's label but another's fed — so the
+ *  Browse chip read "GBF" while the off-route amber tint (which tracks the real
+ *  fed) never fired. Prefers a curated, picker-visible entry; deterministic. */
+export function communityForInvite(invite: string | null | undefined): Community | null {
+  if (!invite) return null;
+  const visible = COMMUNITY_REGISTRY.find(
+    c => c.federationInvite === invite && !c.hiddenFromPicker,
+  );
+  if (visible) return visible;
+  const anyPreSeed = COMMUNITY_REGISTRY.find(c => c.federationInvite === invite);
+  if (anyPreSeed) return anyPreSeed;
+  return getCustomCommunities().find(c => c.federationInvite === invite) ?? null;
+}
+
 /** Default community when the user hasn't picked one yet. The stable
  *  us-blf slug now presents as Global · USD while ChamaBar exposes the
  *  backing federation name for users who want that detail. */

@@ -235,6 +235,9 @@ fn main() {
         // DECISIONS.md 2026-06-06. Scope is locked to the price/FX hosts in
         // capabilities/default.json.
         .plugin(tauri_plugin_http::init())
+        // #88 desktop notifications: trade-event buzzes (counterparty locked,
+        // claim ready, a dispute needs the arbiter, settled/timed out).
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             start_bridge_sidecar(app, &bridge_runtime)?;
             Ok(())

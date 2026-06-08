@@ -254,6 +254,13 @@ export function ConnectScreen({
             <NsecLogin
               onSubmit={onConnectNsec}
               friendly
+              // Once "I'm a returning Chama citizen" reveals the paste box
+              // below, the create-a-key footer no longer applies — swap in
+              // recovery guidance so the copy matches what the box is asking
+              // for. Create mode (paste box hidden) keeps the original line.
+              choiceFooter={showRecoveryKey
+                ? "Paste the recovery key you saved when you first set up Chama — it's the only way back into your account."
+                : undefined}
               friendlySecondary={{
                 label: loading ? "Connecting..." : "I'm a returning Chama citizen",
                 // v2.5: device-aware — desktop browser kicks the NIP-07

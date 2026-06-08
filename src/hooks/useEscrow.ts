@@ -150,6 +150,7 @@ import {
   buildArbiterApplicationEvent,
   collectArbiterApplications,
 } from "../arbiters/applications.js";
+import { maybeNotifyTransition } from "../notifications/notify-service.js";
 import {
   RATING_KIND,
   buildRatingEvent,
@@ -758,6 +759,17 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       console.info(`[chama] Hid expired unfunded escrow ${escrowId} from local state; saved pointer kept for relay recovery`);
       return;
     }
+
+    // #88: buzz the user on a meaningful state transition. stateRef mirrors the
+    // committed `state`, so at call time it holds the PRIOR state of this escrow
+    // — exactly the prev→next we compare. Fire-and-forget: maybeNotifyTransition
+    // is deduped, enable-gated, and permission-gated internally, so it never
+    // double-fires (even under StrictMode re-invokes) or blocks the update.
+    maybeNotifyTransition(
+      stateRef.current?.escrows.get(escrowId),
+      escrowState,
+      stateRef.current?.pubkey,
+    );
 
     setState(prev => {
       const next = new Map(prev.escrows);

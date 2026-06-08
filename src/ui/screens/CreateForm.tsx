@@ -36,7 +36,7 @@ import { useState, useEffect, type WheelEvent } from "react";
 import { type MenuItem } from "../../escrow-engine/types.js";
 import { randomId } from "../../storage/random-id.js";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
-import { getCommunityBySlug, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
+import { getCommunityBySlug, communityForInvite, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
 import {
   getUserCommunitySlug,
   getUserCommunitySlugRaw,
@@ -913,9 +913,19 @@ export function CreateForm({
     setSubmitting(true);
     try {
       const amountMsats = baseSats * 1000;
-      const mintUrl = resolveCreateMintUrl({ activeInvite, community });
+      // #103: stamp the community LABEL honest with the fed this listing is
+      // actually minted on. browseCommunity (the header pill) can drift from
+      // the wallet's loaded fed during a foreign-listing visit; if it has,
+      // re-resolve to the community backing the active fed so the Browse chip
+      // and the off-route amber tint (which keys off the real fed) can never
+      // disagree. No drift → browseCommunity is kept untouched.
+      const effectiveCommunity =
+        activeInvite && getCommunityBySlug(community)?.federationInvite !== activeInvite
+          ? (communityForInvite(activeInvite)?.slug ?? community)
+          : community;
+      const mintUrl = resolveCreateMintUrl({ activeInvite, community: effectiveCommunity });
       const communityArbiters = getTrustedArbiterPool({
-        community,
+        community: effectiveCommunity,
         excludePubkeys: [userPubkey],
       });
       const params: any = {
@@ -943,7 +953,7 @@ export function CreateForm({
           return undefined;
         })(),
         category: vertical,
-        community,
+        community: effectiveCommunity,
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
         communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,
