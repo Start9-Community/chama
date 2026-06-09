@@ -1407,7 +1407,7 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
     fiatAmount: 50, fiatCurrency: "USD", category: "marketplace", mintUrl: "fed11qparent",
     platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, arbiterFeeMsats: 1_000_000,
     paymentMethods: ["Zelle"], expirySeconds: 86400, communityArbiters: [ARBITER_PK],
-    fulfillment: "physical", stock: 5, createdAt: NOW,
+    fulfillment: "physical", stock: 5, country: "KE", createdAt: NOW,
   })) as any).state as EscrowState;
 
   // ── buildChildCreateParams: maps parent → child params, prices by qty ──
@@ -1418,6 +1418,7 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
   assert(cp.amountMsats === 100_000_000, "child params: per-unit price × quantity (50M × 2)");
   assert(cp.fiatAmount === 100, "child params: fiat scales by quantity (50 × 2)");
   assert(cp.fiatCurrency === "USD", "child params: inherits fiat currency");
+  assert(cp.country === "KE", "child params: inherits parent's self-describing country (B3)");
   assert(cp.category === "marketplace", "child params: inherits category");
   assert(cp.mintUrl === "fed11qparent", "child params: inherits the parent's federation (mintUrl)");
   assert(cp.arbiterFeeMsats === 1_000_000, "child params: flat arbiter fee is NOT scaled by quantity");

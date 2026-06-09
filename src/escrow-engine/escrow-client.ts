@@ -372,6 +372,10 @@ export class EscrowClient {
     /** PR 2: community slug from the static registry. Optional —
      *  pre-registry trades work but won't show a community pill. */
     community?: string;
+    /** v3.1 B3: self-describing listing — ISO alpha-2 country stamped on the
+     *  CREATE so a device that can't resolve the community slug still renders a
+     *  flag + currency. Display-only; never hashed / replay/consensus-bound. */
+    country?: string;
     mintUrl: string;
     paymentMethods?: string[];
     items?: CreatePayload["items"];
@@ -424,6 +428,9 @@ export class EscrowClient {
       category: params.category,
       fulfillment,
       community: params.community,
+      // v3.1 B3: carry the ISO country so receivers who don't know this
+      // community can still self-describe (flag + currency) from the wire.
+      country: params.country,
       mintUrl: params.mintUrl,
       platformFeeBps: this.config.defaultPlatformFeeBps!,
       platformFeePubkey: this.config.platformFeePubkey || pubkey,

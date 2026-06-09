@@ -98,7 +98,7 @@ export function TradeDetail({
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
   disableNwc = false, onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
-  onPrewarmFunding, onRebroadcast, onForget, onPurchase, stockLeft, isOversoldOrder = false,
+  onPrewarmFunding, onRebroadcast, onForget, onLeave, onPurchase, stockLeft, isOversoldOrder = false,
   onRateCounterparty, myGivenRatings,
 }: {
   state: EscrowState; pubkey: string;
@@ -196,6 +196,10 @@ export function TradeDetail({
    *  unrecoverable ghosts. Money stays in escrow; re-loadable by ID. App
    *  navigates back to the list after this resolves. */
   onForget?: (escrowId: string) => void;
+  /** v3.1 B2: buyer "leave / cancel my join" PRE-lock (status CREATED, before any
+   *  funding). Purely local — releases the reservation on this device + navigates
+   *  back to Browse. No sats are ever escrowed pre-lock, so nothing to unwind. */
+  onLeave?: (escrowId: string) => void;
   /** #7 multi-unit storefront: buy `quantity` units from THIS parent listing.
    *  Spawns a child purchase escrow and navigates to it (App handles that), so
    *  the buyer locks the child via the normal flow. */
@@ -226,6 +230,8 @@ export function TradeDetail({
   // Two-tap confirm for the vote-#1 "cancel this trade" hatch (a quiet link
   // shouldn't end a trade on one mis-tap). Reset per trade below.
   const [cancelArmed, setCancelArmed] = useState(false);
+  // v3.1 B2: two-tap confirm for the buyer's PRE-lock "leave this trade" link.
+  const [leaveArmed, setLeaveArmed] = useState(false);
   const [joining, setJoining] = useState(false);
   const [locking, setLocking] = useState(false);
   // Advanced "re-broadcast / heal" — idle → broadcasting → a result line.
@@ -453,10 +459,12 @@ export function TradeDetail({
   const canJoinTrade = canJoinAsBuyer || canJoinAsSeller || canJoinAsArbiter;
   const prewarmedEscrowRef = useRef<string | null>(null);
 
-  // Disarm the cancel hatch whenever the viewed trade (or its vote state)
-  // changes — an armed confirm must never carry across trades.
+  // Disarm the cancel/leave hatches whenever the viewed trade (or its vote
+  // state) changes — an armed confirm must never carry across trades. (No `key`
+  // on TradeDetail, so the component instance is reused between trades.)
   useEffect(() => {
     setCancelArmed(false);
+    setLeaveArmed(false);
   }, [state.id, state.votes[Role.BUYER], state.votes[Role.SELLER]]);
 
   useEffect(() => {
@@ -1698,6 +1706,35 @@ export function TradeDetail({
             </div>
           )}
         </div>
+
+        {/* v3.1 B2: pre-lock exit for a joined buyer waiting on the locker. No sats
+            are escrowed until LOCK, so this just releases the reservation locally +
+            returns to Browse. Gated to the JOINED buyer (not the locker, not the
+            initiator). Distinct from the post-lock cancel hatch below. */}
+        {state.status === EscrowStatus.CREATED && myRole === Role.BUYER && !canILock
+          && state.initiator.pubkey !== pubkey && onLeave && (
+          <button
+            type="button"
+            onClick={() => {
+              if (!leaveArmed) { setLeaveArmed(true); return; }
+              setLeaveArmed(false);
+              onLeave(state.id);
+            }}
+            style={{
+              width: "100%", marginTop: 12, padding: "9px 10px",
+              background: leaveArmed ? T.amberDim : "none",
+              border: leaveArmed ? `1px solid ${T.amber}66` : `1px dashed ${T.border}`,
+              borderRadius: T.rs,
+              color: leaveArmed ? T.amber : T.muted,
+              fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            {leaveArmed
+              ? "Leave this trade? Your reservation frees up — no sats were ever locked. Tap again to confirm."
+              : "← Leave this trade"}
+          </button>
+        )}
 
         {/* Ratings (kind:38123): one-tap rate the counterparty the moment the
             trade settles — non-blocking, and the same slot is re-tappable from

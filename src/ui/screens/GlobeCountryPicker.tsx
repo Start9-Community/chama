@@ -47,6 +47,8 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestedChama, setRequestedChama] = useState("");
   const [requestNote, setRequestNote] = useState("");
+  // v3.1 A3: optional federation-owner credential captured at community request.
+  const [fedInvite, setFedInvite] = useState("");
 
   const q = query.trim().toLowerCase();
   const results = q
@@ -64,7 +66,12 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
   const queueReportAndContinue = () => {
     const chama = requestedChama.trim();
     if (!chama) return;
-    setPendingCommunityReport({ requestedChama: chama, note: requestNote });
+    setPendingCommunityReport({
+      requestedChama: chama,
+      note: fedInvite.trim()
+        ? `${requestNote}${requestNote.trim() ? "\n\n" : ""}Federation operator — invite + steward key: ${fedInvite.trim()}`
+        : requestNote,
+    });
     if (selected) selectDefault(selected);
     else onSelect(DEFAULT_COMMUNITY_SLUG);
   };
@@ -113,6 +120,7 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
 
   const requestProps = {
     requestedChama, setRequestedChama, requestNote, setRequestNote,
+    fedInvite, setFedInvite,
     onSubmit: queueReportAndContinue, requestReady,
   };
 
@@ -381,6 +389,8 @@ type RequestFormProps = {
   setRequestedChama: Dispatch<SetStateAction<string>>;
   requestNote: string;
   setRequestNote: Dispatch<SetStateAction<string>>;
+  fedInvite: string;
+  setFedInvite: Dispatch<SetStateAction<string>>;
   /** Stash the report + advance into sign-in (the signed publish is deferred
    *  to post-login — the picker has no signer). */
   onSubmit: () => void;
@@ -390,6 +400,7 @@ type RequestFormProps = {
 
 function RequestForm({
   requestedChama, setRequestedChama, requestNote, setRequestNote,
+  fedInvite, setFedInvite,
   onSubmit, requestReady, submitLabel = "Send request",
 }: RequestFormProps) {
   return (
@@ -428,6 +439,23 @@ function RequestForm({
           fontSize: 13, outline: "none", resize: "vertical",
         }}
       />
+      {/* v3.1 A3: federation-owner credential — the premier "proof of work" anchor path. */}
+      <div style={{ display: "grid", gap: 5 }}>
+        <div style={{ fontSize: 10.5, color: "#5AC8FA", fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
+          🏰 RUN YOUR OWN FEDERATION?
+        </div>
+        <input
+          value={fedInvite}
+          onChange={(event) => setFedInvite(event.target.value)}
+          placeholder="Paste invite + steward key — the strongest anchor path (optional)"
+          style={{
+            width: "100%", boxSizing: "border-box", padding: "11px 12px",
+            borderRadius: T.rs, border: `1px solid ${T.border}`,
+            background: T.card, color: T.text, fontFamily: T.mono,
+            fontSize: 12, outline: "none",
+          }}
+        />
+      </div>
       <button
         type="submit"
         disabled={!requestReady}

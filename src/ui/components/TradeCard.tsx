@@ -164,6 +164,11 @@ export function TradeCard({
       overflow: "hidden",
       position: "relative", isolation: "isolate",
     }}>
+      {/* v3.1.1: the storefront watermark renders on every Store tile. The dark
+          navy field that used to expose a square over the amber off-route tint
+          is now keyed to TRUE ALPHA in the asset (transparent PNG), so it never
+          paints — clean over any backdrop (dark OR amber), no `isAmber` gate
+          needed. The approved screen-blend glow on dark tiles is unchanged. */}
       {isMarketStore && (
         <div aria-hidden="true" style={{
           position: "absolute", inset: 0, zIndex: -1,
@@ -171,14 +176,18 @@ export function TradeCard({
           backgroundRepeat: "no-repeat",
           // Storefront-with-₿ emblem in the tile's right zone, vertically centred
           // and clear of the left-aligned title/price. Fixed size so it reads the
-          // same on wide and narrow cards. contrast() crushes the icon's residual
-          // dark field to black so it drops out cleanly under `screen` — only the
-          // neon (and the Bitcoin glyph) shows.
+          // same on wide and narrow cards. The asset's dark field is already
+          // transparent, so contrast() now just punches up the neon; `screen`
+          // lets only the storefront (and the Bitcoin glyph) glow over the card.
           backgroundPosition: "right 20px center",
           backgroundSize: "auto 128px",
           filter: "contrast(1.4)",
-          mixBlendMode: "screen",
-          opacity: 0.65,
+          // Dark tiles keep the neon screen-glow (approved look). Off-route amber
+          // tiles drop to normal blend so the storefront can't screen-lift the
+          // warm wash into a halo, and render quieter — they're a de-emphasised
+          // route, so the storefront reads as a faint ghost, not a beacon.
+          mixBlendMode: isAmber ? "normal" : "screen",
+          opacity: isAmber ? 0.28 : 0.65,
           pointerEvents: "none",
         }} />
       )}

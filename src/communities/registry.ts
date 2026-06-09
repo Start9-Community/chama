@@ -139,6 +139,11 @@ export interface CountryChamaSeed {
 }
 
 export function flagEmojiForCountry(country: string): string {
+  // v3.1 B3 guard: `country` can arrive on an untrusted wire CREATE (it bypasses
+  // validateCreatePayload), so anything that isn't a 2-letter ISO code would
+  // render regional-indicator garbage ("foo" → 🇫🇴🇴, "12" → 🇖🇗). Reject those
+  // and fall back to a neutral globe.
+  if (!/^[A-Za-z]{2}$/.test(country)) return "🌐";
   const codePoints = country.toUpperCase().split("")
     .map(char => 127397 + char.charCodeAt(0));
   return String.fromCodePoint(...codePoints);

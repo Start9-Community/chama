@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { type EscrowState } from "../../escrow-engine/types.js";
 import { getCommunityBySlug, type Community } from "../../communities/registry.js";
-import { T, BROWSE_CATS, inputStyle } from "../theme.js";
+import { T, ROLE_COLOR, BROWSE_CATS, inputStyle } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
 import { type NostrProfileNameMap } from "../nostr-profiles.js";
@@ -30,6 +30,7 @@ export function BrowseView({
   kind0Enabled = false, profileNames,
   isFirstTime, onPasteCustomInvite,
   onOpenEscrow, onLoadById,
+  onCreate, onRecruitArbiter,
 }: {
   browseCategory: string;
   setBrowseCategory: (s: string) => void;
@@ -48,9 +49,13 @@ export function BrowseView({
   onPasteCustomInvite: (invite: string) => void | Promise<void>;
   onOpenEscrow: (id: string) => void;
   onLoadById: (id: string) => void | Promise<void>;
+  /** v3.1 A2: Browse on-ramps — pencil opens Create, "?" recruits arbiters. */
+  onCreate: () => void;
+  onRecruitArbiter: () => void;
 }) {
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showRecruit, setShowRecruit] = useState(false);
   const [customInviteInput, setCustomInviteInput] = useState("");
 
   const totalListings = matchingListings.length + nonMatchingListings.length;
@@ -100,7 +105,31 @@ export function BrowseView({
             {browseSummary}
           </div>
         </div>
-        {homeCommunity && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          {/* v3.1 A2: Browse on-ramps — pencil = create a trade, "?" = arbiter recruitment. */}
+          <button
+            type="button" onClick={onCreate}
+            title="Create a trade" aria-label="Create a trade"
+            style={{
+              width: 36, height: 36, borderRadius: 999, flexShrink: 0,
+              background: T.surface, border: `1px solid ${T.border}`,
+              color: T.text, fontSize: 16, cursor: "pointer", lineHeight: 1,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}
+          >✏️</button>
+          <button
+            type="button" onClick={() => setShowRecruit(s => !s)}
+            title="Become a community arbiter" aria-label="Arbiter recruitment"
+            style={{
+              width: 36, height: 36, borderRadius: 999, flexShrink: 0,
+              background: showRecruit ? `${ROLE_COLOR.arbiter}22` : T.surface,
+              border: `1px solid ${showRecruit ? ROLE_COLOR.arbiter : T.border}`,
+              color: showRecruit ? ROLE_COLOR.arbiter : T.muted,
+              fontFamily: T.mono, fontSize: 16, fontWeight: 800, cursor: "pointer", lineHeight: 1,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}
+          >?</button>
+          {homeCommunity && (
           // v2.3.1: view-only identity chip. The community SWITCHER moved to
           // Me › Your Chama so switching is a deliberate, between-trades act
           // (and reclaims the Browse real estate the dropdown used to eat).
@@ -128,7 +157,40 @@ export function BrowseView({
             </span>
           </div>
         )}
+        </div>
       </div>
+
+      {showRecruit && (
+        <div style={{
+          marginBottom: 12, padding: "12px 14px",
+          background: T.surface, border: `1px solid ${ROLE_COLOR.arbiter}55`,
+          borderRadius: T.r,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 15, lineHeight: 1 }}>⚖️</span>
+            <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 800, color: ROLE_COLOR.arbiter, letterSpacing: 0.5 }}>
+              BECOME A COMMUNITY ARBITER
+            </span>
+          </div>
+          <div style={{ fontFamily: T.sans, fontSize: 12, color: T.muted, lineHeight: 1.5, marginBottom: 10 }}>
+            Arbiters are neutral tiebreakers — you only vote when the two sides disagree. Strong arbiters anchor a community's trust, and federation operators make the best anchors of all.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={onRecruitArbiter} style={{
+              flex: 1, padding: "9px 12px", borderRadius: T.rs,
+              background: `${ROLE_COLOR.arbiter}22`, border: `1px solid ${ROLE_COLOR.arbiter}66`,
+              color: ROLE_COLOR.arbiter, fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+              cursor: "pointer",
+            }}>Apply in Me → Arbiter →</button>
+            <button type="button" onClick={() => setShowRecruit(false)} style={{
+              padding: "9px 12px", borderRadius: T.rs,
+              background: "transparent", border: `1px solid ${T.border}`,
+              color: T.muted, fontFamily: T.mono, fontSize: 12, fontWeight: 700,
+              cursor: "pointer",
+            }}>Later</button>
+          </div>
+        </div>
+      )}
 
       <div style={{
         display: "flex", gap: 8, alignItems: "center",

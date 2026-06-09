@@ -167,6 +167,8 @@ export interface ChildCreateParams {
   category: string;
   fulfillment?: "physical" | "service" | "digital";
   community?: string;
+  /** v3.1 B3: ISO country carried from the parent so children self-describe too. */
+  country?: string;
   mintUrl: string;
   paymentMethods?: string[];
   arbiterFeeMsats?: number;
@@ -211,6 +213,8 @@ export function buildChildCreateParams(
     category: parent.category,
     fulfillment: parent.fulfillment,
     ...(parent.community ? { community: parent.community } : {}),
+    // v3.1 B3: inherit the parent's self-describing country stamp.
+    ...(parent.country ? { country: parent.country } : {}),
     mintUrl: parent.mintUrl,
     ...(parent.paymentMethods ? { paymentMethods: parent.paymentMethods } : {}),
     arbiterFeeMsats: parent.fees.arbiterMsats,

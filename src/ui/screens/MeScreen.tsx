@@ -2016,6 +2016,7 @@ function ArbiterCtaCard({
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fedInvite, setFedInvite] = useState("");
   const community = getCommunityBySlug(communitySlug);
   const displayName = community?.displayName ?? communitySlug;
 
@@ -2028,9 +2029,15 @@ function ArbiterCtaCard({
     setError(null);
     setStatus(null);
     try {
-      await onApply(communitySlug, statement);
+      // v3.1 A3: fed operators are the strongest anchors — carry the invite +
+      // steward key inside the statement text (no kind:38121 schema change).
+      const fullStatement = fedInvite.trim()
+        ? `${statement.trim()}\n\nFederation operator — invite + steward key: ${fedInvite.trim()}`
+        : statement;
+      await onApply(communitySlug, fullStatement);
       setStatus("Application signed and published. The community steward reviews it from their roster surface.");
       setStatement("");
+      setFedInvite("");
     } catch (e: any) {
       setError(e?.message || "Couldn't publish the application. Check relays and retry.");
     } finally {
@@ -2089,6 +2096,30 @@ function ArbiterCtaCard({
               color: T.text, fontFamily: T.sans, fontSize: 12, lineHeight: 1.5,
             }}
           />
+          {/* v3.1 A3: federation-owner credential — the premier "proof of work"
+              anchor path. Form + copy only; the invite rides in the statement. */}
+          <div style={{
+            marginBottom: 8, padding: "10px 12px", borderRadius: T.rs,
+            background: `${ROLE_COLOR.arbiter}0f`, border: `1px solid ${ROLE_COLOR.arbiter}33`,
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: ROLE_COLOR.arbiter, fontFamily: T.mono, marginBottom: 4, letterSpacing: 0.5 }}>
+              🏰 RUN YOUR OWN FEDERATION?
+            </div>
+            <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.sans, lineHeight: 1.45, marginBottom: 8 }}>
+              Federation operators are the strongest anchors — the premier proof-of-work path. Paste your invite + steward key and the steward can fast-track you.
+            </div>
+            <input
+              value={fedInvite}
+              onChange={e => setFedInvite(e.target.value)}
+              placeholder="fed1… invite + steward npub / key (optional)"
+              style={{
+                width: "100%", boxSizing: "border-box",
+                padding: "9px 11px", borderRadius: T.rs,
+                background: T.surface, border: `1px solid ${T.border}`,
+                color: T.text, fontFamily: T.mono, fontSize: 12,
+              }}
+            />
+          </div>
           <button
             onClick={submit}
             disabled={busy}

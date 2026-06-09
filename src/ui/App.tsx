@@ -1762,6 +1762,17 @@ export default function App() {
               setSelectedId(null);
               maybeSnapBackHome();
             }}
+            onLeave={(escrowId) => {
+              // v3.1 B2: pre-lock leave — drop the reservation locally + go back.
+              // No sats are escrowed before LOCK, so there's nothing to unwind; the
+              // on-relay JOIN hold expires on its own, and LOCK is self-describing
+              // (carries the buyer pubkey), so the counterparty is never blocked.
+              actions.forgetEscrow(escrowId);
+              setToast({ message: "You've left the trade. Your reservation frees up on its own — none of your sats were ever locked.", type: "success" });
+              setView(detailBackView);
+              setSelectedId(null);
+              maybeSnapBackHome();
+            }}
             // #7 multi-unit storefront: buy N units from a parent listing →
             // spawn the buyer's own child escrow and open it so they fund + lock
             // it via the normal flow. The parent stays a perpetual offer.
@@ -2228,6 +2239,8 @@ export default function App() {
               pubkey={pubkey!}
               kind0Enabled={kind0Enabled}
               profileNames={nostrProfiles}
+              onCreate={() => switchTab("create")}
+              onRecruitArbiter={() => switchTab("me")}
               onOpenEscrow={openEscrow}
               onLoadById={async (id) => {
                 try {
