@@ -3373,16 +3373,16 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
 
   // Picker filter excludes hiddenFromPicker entries
   const picker = getPickerCommunities();
-  assert(picker.length === 56,
-    "Picker shows Global, GBF, Fedi-approved wallet services, South Africa, two Kenya routes, plus every East/West/Central Africa country Chama");
-  assert(picker[0]?.slug === DEFAULT_COMMUNITY_SLUG,
-    "Picker starts with Global USD on BLF (active pill visible first)");
+  assert(picker.length === 55,
+    "Picker shows GBF, Fedi-approved wallet services, South Africa, two Kenya routes, plus every East/West/Central Africa country Chama (Global/BLF now hidden — it's the L3 backup, not a place you pick)");
+  assert(picker[0]?.slug !== "us-blf",
+    "Picker no longer leads with BLF — it's the hidden L3 backup; everyone starts at a country/community (L1/L2)");
   assert(!picker.some(c => c.slug === "sv-usd"),
     "Picker excludes sv-usd");
   assert(!picker.some(c => c.slug === "global-usd"),
     "Picker excludes legacy BP global-usd");
-  assert(picker.some(c => c.slug === "us-blf"),
-    "Picker includes us-blf as the Global USD route");
+  assert(!picker.some(c => c.slug === "us-blf"),
+    "Picker EXCLUDES us-blf — the hidden L3 backup fed (still wire-resolvable so existing listings render)");
   assert(picker.some(c => c.slug === "fedi-bitcoin-principles"),
     "Picker includes Bitcoin Principles as a public Fedi wallet service");
   assert(PUBLIC_FEDI_APPROVED_FEDERATIONS.every(route => picker.some(c => c.slug === route.slug)),

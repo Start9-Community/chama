@@ -332,7 +332,11 @@ export const COMMUNITY_REGISTRY: Community[] = [
     browserReliable: true,
     notes: IROH_LIMITATION_NOTE,
     disambiguator: "BLF",
-    hiddenFromPicker: false,
+    // v3.1 A1: BLF is the Level-3 backup fed that silently backs every not-yet-
+    // served country — not a place you pick. Hidden from the picker but still
+    // wire-resolvable (existing listings render) and its arbiter pool is intact
+    // (readOfficialPool keys off federationInvite, before the hiddenFromPicker check).
+    hiddenFromPicker: true,
     // V3 roster authority (maintainer's steward key, pinned 2026-06-08):
     // npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6
     stewardPubkey: "22f7161f76e075b9e0a250a447884ac09b04b636effd7c703a92394ed3fb39e8",

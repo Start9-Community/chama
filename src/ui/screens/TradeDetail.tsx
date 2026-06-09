@@ -1352,13 +1352,9 @@ export function TradeDetail({
               );
             })}
           </div>
-          {myRole !== Role.SELLER && suggestedRail && (
+          {myRole !== Role.SELLER && suggestedRail && railMatch.shared.length > 0 && (
             <div style={{ marginTop: 10, color: T.muted, fontSize: 11, lineHeight: 1.5 }}>
-              {railMatch.shared.length > 0 ? (
-                <>You both use <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong> — the easiest payment method to settle on before you lock.</>
-              ) : (
-                <>None of your saved payment methods match the seller's yet. Suggested: <strong style={{ color: T.text }}>{suggestedRail.displayName}</strong>. Add it in Me → Saved handles to match faster.</>
-              )}
+              You both use <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong> — the easiest payment method to settle on before you lock.
             </div>
           )}
         </div>
