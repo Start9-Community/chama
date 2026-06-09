@@ -7,7 +7,7 @@ import {
   getEffectiveParticipantsAt,
   getJoinHoldRemainingSeconds,
 } from "../../escrow-engine/types.js";
-import { getCommunityBySlug } from "../../communities/registry.js";
+import { getCommunityBySlug, flagEmojiForCountry } from "../../communities/registry.js";
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER, fmtSats } from "../theme.js";
 import { listingPremiumLine } from "../listing-metrics.js";
@@ -300,6 +300,24 @@ export function TradeCard({
               </span>
               );
             })()}
+            {/* v3.1 (B3): self-describing fallback — when the community slug isn't
+                resolvable on this device, show the stamped country's flag + currency
+                so a custom/not-yet-curated community (the Canada bug) still reads. */}
+            {!listingCommunity && state.country && (
+              <span style={{
+                fontSize: 10, padding: "3px 8px", borderRadius: 999,
+                background: T.surface, color: T.muted,
+                border: `1px solid ${T.border}`,
+                fontFamily: T.mono, fontWeight: 700,
+                display: "inline-flex", alignItems: "center", gap: 3,
+                maxWidth: "100%",
+              }}>
+                <span style={{ fontSize: 10, lineHeight: 1 }}>{flagEmojiForCountry(state.country)}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {listingCurrency ?? state.country}
+                </span>
+              </span>
+            )}
           </div>
 
           <div style={{

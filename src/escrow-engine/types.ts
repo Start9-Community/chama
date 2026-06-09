@@ -223,6 +223,11 @@ export interface CreatePayload {
    *  backwards compatibility with pre-registry trades — those flow
    *  through Browse as cross-community listings without a pill. */
   community?: string;
+  /** v3.1 (B3): ISO alpha-2 country of the listing's community, stamped so a
+   *  custom / not-yet-curated community renders a flag + currency on OTHER
+   *  devices (where getCommunityBySlug returns null). Display-only — additive,
+   *  never hashed (notesHash is LOCK-only) or replay/consensus-bound. */
+  country?: string;
   /** Fedimint federation invite code */
   mintUrl: string;
   /** Platform fee in basis points */
@@ -699,6 +704,10 @@ export interface EscrowState {
   /** Community slug. Null for pre-registry trades (no community tag
    *  on CREATE) — Browse renders these without a community pill. */
   community: string | null;
+  /** v3.1 (B3): ISO alpha-2 country for the self-describing flag/currency
+   *  fallback when the community slug isn't resolvable on this device. Display
+   *  only — additive. */
+  country?: string | null;
   /** Fedimint mint URL / invite code */
   mintUrl: string;
 

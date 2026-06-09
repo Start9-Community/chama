@@ -970,6 +970,9 @@ export function CreateForm({
         })(),
         category: vertical,
         community: effectiveCommunity,
+        // v3.1 (B3): stamp the community's ISO country so the listing self-describes
+        // its flag + currency on devices that don't know this (custom) community.
+        country: getCommunityBySlug(effectiveCommunity)?.country ?? undefined,
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
         communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,

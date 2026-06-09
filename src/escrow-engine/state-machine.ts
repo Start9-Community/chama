@@ -313,6 +313,7 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
     items,
     fulfillment,
     community: p.community ?? null,
+    country: p.country ?? null,
     mintUrl: p.mintUrl,
     // #7 multi-unit storefront (Stage 1): carried through, no behavior yet.
     ...(p.stock !== undefined ? { stock: p.stock } : {}),
