@@ -2273,6 +2273,16 @@ const globalCss = () => `
      left-to-right on a dim track, giving live feedback during the
      ~3-8s NWC pay window without forcing a percentage estimate. */
   @keyframes nwcProgressSweep{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
+  /* v3.1 stage 4: progress-spine motion. spine-beam sweeps a bright energy beam
+     rightward along the active connector (toward the next milestone) over a dim
+     wire; spine-pulse is the soft glow ring breathing on the current node. Always
+     rightward. Under reduced-motion the beam parks mid-wire and the glow goes static. */
+  @keyframes spine-beam{0%{transform:translateX(-120%)}100%{transform:translateX(280%)}}
+  @keyframes spine-pulse{0%{box-shadow:0 0 0 0 var(--spine-glow,transparent)}100%{box-shadow:0 0 0 7px transparent}}
+  @media (prefers-reduced-motion: reduce){
+    .spine-node-live{animation:none!important}
+    .spine-beam{animation:none!important;transform:translateX(80%)!important}
+  }
   *{box-sizing:border-box;margin:0;padding:0}
   /* v2.5 polish: kill the browser's default tap-highlight (the blue/grey
      flash on Android taps) and the default blue focus halo on buttons/links.

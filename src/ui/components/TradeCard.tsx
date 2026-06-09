@@ -16,6 +16,7 @@ import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
 import { profileNameFor, type NostrProfileNameMap } from "../nostr-profiles.js";
+import { STORE_WATERMARK } from "../assets/store-watermark.js";
 import {
   estimateFiatForMsats,
   formatEstimatedFiatForMsats,
@@ -69,6 +70,9 @@ export function TradeCard({
   const sellerPubkey = state.participants[Role.SELLER]
     ?? (state.initiator.role === Role.SELLER ? state.initiator.pubkey : null);
   const sellerName = profileNameFor(profileNames, sellerPubkey, kind0Enabled);
+  // A "Store" tile = a marketplace listing with a seller (same condition as the
+  // Store badge below). These get a faint Satoshi Market storefront watermark.
+  const isMarketStore = state.category === "marketplace" && !!sellerPubkey;
   const communityChipLabel = listingCommunity
     ? (listingCommunity.disambiguator ?? listingCommunity.displayName)
     : null;
@@ -158,7 +162,26 @@ export function TradeCard({
       borderRadius: T.r, padding: 14, cursor: "pointer",
       transition: "border-color 0.2s",
       overflow: "hidden",
+      position: "relative", isolation: "isolate",
     }}>
+      {isMarketStore && (
+        <div aria-hidden="true" style={{
+          position: "absolute", inset: 0, zIndex: -1,
+          backgroundImage: `url(${STORE_WATERMARK})`,
+          backgroundRepeat: "no-repeat",
+          // Storefront-with-₿ emblem in the tile's right zone, vertically centred
+          // and clear of the left-aligned title/price. Fixed size so it reads the
+          // same on wide and narrow cards. contrast() crushes the icon's residual
+          // dark field to black so it drops out cleanly under `screen` — only the
+          // neon (and the Bitcoin glyph) shows.
+          backgroundPosition: "right 20px center",
+          backgroundSize: "auto 128px",
+          filter: "contrast(1.4)",
+          mixBlendMode: "screen",
+          opacity: 0.65,
+          pointerEvents: "none",
+        }} />
+      )}
       {marketplaceImages.length > 0 && (
         <div style={{
           display: "grid",

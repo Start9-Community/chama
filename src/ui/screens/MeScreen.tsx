@@ -51,7 +51,7 @@ import {
   type SatsTraceEntry,
 } from "../../payments/sats-trace.js";
 import { getEcashExport } from "../../payments/ecash-exports.js";
-import { T, type ThemeMode } from "../theme.js";
+import { T, ROLE_COLOR, type ThemeMode } from "../theme.js";
 import {
   notificationsEnabled,
   setNotificationsEnabled,
@@ -1141,7 +1141,7 @@ function ArbiterDashboardPanel({
       }}>
         <div>
           <div style={{
-            fontFamily: T.mono, color: T.teal, fontSize: 10,
+            fontFamily: T.mono, color: ROLE_COLOR.arbiter, fontSize: 10,
             fontWeight: 900, letterSpacing: 1, textTransform: "uppercase",
           }}>
             Arbiter dashboard
@@ -1179,7 +1179,7 @@ function ArbiterDashboardPanel({
         <DashboardMetric
           label="Watching"
           value={dashboard.arbiterWatching.length}
-          tone={T.teal}
+          tone={ROLE_COLOR.arbiter}
           active={queue === "watching"}
           onClick={() => setQueue("watching")}
         />
@@ -1525,7 +1525,7 @@ function arbiterQueueTrades(dashboard: MeDashboardModel, queue: ArbiterQueueKey)
 
 function arbiterQueueTone(queue: ArbiterQueueKey): string {
   if (queue === "needs") return T.red;
-  if (queue === "watching") return T.teal;
+  if (queue === "watching") return ROLE_COLOR.arbiter;
   return T.green;
 }
 
@@ -2094,8 +2094,8 @@ function ArbiterCtaCard({
             disabled={busy}
             style={{
               padding: "10px 14px", borderRadius: T.rs,
-              border: `1px solid ${T.teal}66`, background: T.tealDim,
-              color: T.teal, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+              border: `1px solid ${ROLE_COLOR.arbiter}66`, background: `${ROLE_COLOR.arbiter}22`,
+              color: ROLE_COLOR.arbiter, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
               cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1,
             }}
           >

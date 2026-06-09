@@ -159,11 +159,14 @@ async function prepareChatImage(file: File): Promise<ChatImageAttachment> {
   throw new Error("That image is too large for encrypted chat. Try a tighter screenshot.");
 }
 
-export function ChatPanel({ state, myRole, onSend, embedded = false }: {
+export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader = false }: {
   state: EscrowState;
   myRole: Role | null;
   onSend: (message: SendChatInput) => void;
   embedded?: boolean;
+  /** v3.1: suppress the internal "CHAT" header when the panel sits inside a
+   *  disclosure row that already supplies the label (avoids a doubled header). */
+  hideHeader?: boolean;
 }) {
   const [msg, setMsg] = useState("");
   const [attachment, setAttachment] = useState<ChatImageAttachment | null>(null);
@@ -228,6 +231,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false }: {
       overflow: "hidden",
     }}>
       {/* Header */}
+      {!hideHeader && (
       <div style={{
         padding: embedded ? "16px 0 10px" : "12px 16px",
         borderBottom: `1px solid ${T.border}`,
@@ -242,6 +246,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false }: {
           {" · private"}
         </div>
       </div>
+      )}
 
       {/* Messages */}
       <div style={{

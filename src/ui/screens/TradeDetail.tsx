@@ -236,6 +236,10 @@ export function TradeDetail({
   // Inline two-tap forget confirm (no native confirm() — it's a no-op in the
   // Tauri/Capacitor webview, which made the button look frozen).
   const [forgetArmed, setForgetArmed] = useState(false);
+  // v3.1 stage 2 — elastic deal slot collapse override (null = follow auto rule).
+  const [dealSlotOpen, setDealSlotOpen] = useState<boolean | null>(null);
+  const [votesRowOpen, setVotesRowOpen] = useState<boolean | null>(null);
+  const [chatRowOpen, setChatRowOpen] = useState<boolean | null>(null);
   // #7 multi-unit storefront: buyer "Buy N units" quantity + in-flight flag.
   const [buyQty, setBuyQty] = useState(1);
   const [purchasing, setPurchasing] = useState(false);
@@ -667,9 +671,19 @@ export function TradeDetail({
     ? T.green
     : state.resolvedOutcome === Outcome.REFUND
       ? T.amber
-      : T.teal; // pending: tie the "awaiting decision" chip to the teal Arbiter above it
+      : ROLE_COLOR.arbiter; // pending: the "awaiting decision" chip wears the arbiter's #5AC8FA — it's the arbiter's call.
   const decisionLabel = state.resolvedOutcome ? "final decision" : "awaiting decision";
   const decisionValue = state.resolvedOutcome ?? "pending";
+  // v3.1 stage 2 — elastic deal slot: auto-open at fund (CREATED) & dispute.
+  const dealAutoOpen = state.status === EscrowStatus.CREATED
+    || (releaseVoteCount > 0 && refundVoteCount > 0 && !state.resolvedOutcome);
+  const dealOpen = dealSlotOpen ?? dealAutoOpen;
+  const dealBuyerName = profileNameFor(profileNames, participants[Role.BUYER], kind0Enabled);
+  const dealSellerName = profileNameFor(profileNames, participants[Role.SELLER], kind0Enabled);
+  // v3.1 stage 2 — disclosure rows: votes open once any vote is in / it's
+  // resolved; chat open while LOCKED (the work surface). null = follow the rule.
+  const votesOpen = votesRowOpen ?? (releaseVoteCount + refundVoteCount > 0 || !!state.resolvedOutcome);
+  const chatOpen = chatRowOpen ?? (state.status === EscrowStatus.LOCKED);
   const heroImages = [
     ...(renderedMenuRows.length > 0 ? renderedMenuRows : menuItems),
   ].filter(item => !!item.imageDataUrl).slice(0, 2);
@@ -766,6 +780,100 @@ export function TradeDetail({
           <Badge status={statusKey} />
         </div>
       </div>
+
+      {/* Zone 1 — progress spine: Reserved → Locked → Settled. Stable stations so
+          it's learnable; the middle node carries the deal's health (amber when
+          disputed, red when closed). Static here — motion lands in a later stage. */}
+      {(() => {
+        const spineAccent = myRole ? ROLE_COLOR[myRole as keyof typeof ROLE_COLOR] : T.accent;
+        const isClosed = state.status === EscrowStatus.EXPIRED || state.status === EscrowStatus.CANCELLED;
+        // Only "disputed" while UNRESOLVED — votes aren't cleared after an arbiter
+        // decides, so without this gate a settled trade keeps flashing amber.
+        const isDisputed = releaseVoteCount > 0 && refundVoteCount > 0 && !state.resolvedOutcome;
+        const reached =
+          state.status === EscrowStatus.APPROVED ||
+          state.status === EscrowStatus.CLAIMED ||
+          state.status === EscrowStatus.COMPLETED ? 2
+          : state.status === EscrowStatus.LOCKED ? 1
+          // A LOCKED→EXPIRED trade locked real sats before timing out — show it
+          // reached Locked (then closes red), not reset to Reserved. notesHash is
+          // how the heal path detects a post-lock expiry (see detailNextStep).
+          : (isClosed && state.lock?.notesHash) ? 1
+          : 0;
+        const stations = [
+          { key: "reserved", label: "Reserved" },
+          { key: "locked", label: isClosed ? "Closed" : isDisputed ? "Disputed" : "Locked" },
+          { key: "settled", label: "Settled" },
+        ];
+        return (
+          <div className="trade-progress-spine" style={{
+            display: "flex", alignItems: "flex-start", margin: "0 4px 18px",
+          }}>
+            {stations.flatMap((st, i) => {
+              const special = i === 1 ? (isClosed ? T.red : isDisputed ? T.amber : null) : null;
+              const current = i === reached && !isClosed;
+              const lit = !!special || i <= reached;
+              const nodeColor = special ?? (lit ? spineAccent : T.border);
+              // Stage 4 motion: the current node breathes a soft glow ring; the
+              // connector toward the NEXT milestone flows rightward. (--spine-glow
+              // carries the node's colour into the keyframe.)
+              const pulses = current;
+              const node = (
+                <div key={st.key} style={{
+                  display: "flex", flexDirection: "column", alignItems: "center",
+                  gap: 6, flex: "0 0 auto", width: 66,
+                }}>
+                  <div
+                    className={pulses ? "spine-node-live" : undefined}
+                    style={{
+                      width: 12, height: 12, borderRadius: 999,
+                      background: lit ? nodeColor : T.surface,
+                      border: `2px solid ${lit ? nodeColor : T.border}`,
+                      boxShadow: (current || special) ? `0 0 0 4px ${nodeColor}22` : "none",
+                      transition: "box-shadow .2s, background .2s, border-color .2s",
+                      ...(pulses ? { animation: "spine-pulse 1.7s ease-out infinite", "--spine-glow": `${nodeColor}66` } : {}),
+                    } as React.CSSProperties}
+                  />
+                  <div style={{
+                    color: lit ? nodeColor : T.muted,
+                    fontFamily: T.mono, fontSize: 9, fontWeight: 800,
+                    letterSpacing: 0.8, textTransform: "uppercase",
+                  }}>
+                    {st.label}
+                  </div>
+                </div>
+              );
+              if (i === 0) return [node];
+              const traversed = i <= reached;
+              const isActiveConn = i === reached + 1 && !isClosed;
+              const conn = isActiveConn ? (
+                // Active connector: a bright energy beam sweeps rightward (white-hot
+                // core + role-colour glow) along a dim wire toward the next milestone.
+                <div key={"conn" + i} style={{
+                  flex: 1, height: 2, borderRadius: 2, marginTop: 6,
+                  position: "relative", overflow: "hidden",
+                  background: `${spineAccent}40`,
+                }}>
+                  <div className="spine-beam" style={{
+                    position: "absolute", top: 0, bottom: 0, left: 0, width: "45%",
+                    background: `linear-gradient(90deg, transparent, ${spineAccent}, #ffffff, ${spineAccent}, transparent)`,
+                    filter: `drop-shadow(0 0 3px ${spineAccent})`,
+                    animation: "spine-beam 1.5s linear infinite",
+                    willChange: "transform",
+                  }} />
+                </div>
+              ) : (
+                <div key={"conn" + i} style={{
+                  flex: 1, height: 2, borderRadius: 2, marginTop: 6,
+                  background: special ?? (traversed ? spineAccent : T.border),
+                  opacity: (traversed || special) ? 0.75 : 1,
+                }} />
+              );
+              return [conn, node];
+            })}
+          </div>
+        );
+      })()}
 
       <div className="trade-detail-layout">
         <div className="trade-detail-listing-pane">
@@ -1552,7 +1660,16 @@ export function TradeDetail({
             marginBottom: 7,
           }}>
             <div style={{
-              color: nextStep.color,
+              // Identity accent — the kicker wears the viewer's role colour
+              // ("your view wears your colour") for waiting/active (purple/teal)
+              // tones only. Money (accent → bitcoin-orange), settled (green) and
+              // error (red) tones stay semantic — those signals are sacred.
+              color: (myRole
+                && nextStep.tone !== "green"
+                && nextStep.tone !== "red"
+                && nextStep.tone !== "accent")
+                ? ROLE_COLOR[myRole as keyof typeof ROLE_COLOR]
+                : nextStep.color,
               fontFamily: T.mono,
               fontSize: 11,
               fontWeight: 900,
@@ -1573,6 +1690,17 @@ export function TradeDetail({
           }}>
             {nextStep.title}
           </div>
+          {nextStep.body && (
+            <div style={{
+              color: T.muted,
+              fontFamily: T.sans,
+              fontSize: 13,
+              lineHeight: 1.5,
+              marginTop: 8,
+            }}>
+              {nextStep.body}
+            </div>
+          )}
         </div>
 
         {/* Ratings (kind:38123): one-tap rate the counterparty the moment the
@@ -1698,6 +1826,37 @@ export function TradeDetail({
           </div>
         )}
 
+        {/* Zone 3 — elastic deal slot: collapses to "who ⇄ who · item", expands
+            to the trinity ring + shield. Auto-open at fund (CREATED) & dispute. */}
+        <div style={{
+          background: T.surface, border: `1px solid ${T.border}`,
+          borderRadius: T.r, overflow: "hidden", marginBottom: 16,
+        }}>
+          <div onClick={() => setDealSlotOpen(!dealOpen)} style={{
+            cursor: "pointer", padding: "11px 14px",
+            display: "flex", alignItems: "center", gap: 10,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
+              {TRINITY_RING_ORDER.map(role => (
+                <span key={role} style={{
+                  width: 8, height: 8, borderRadius: "50%",
+                  background: participants[role] ? ROLE_COLOR[role as keyof typeof ROLE_COLOR] : "transparent",
+                  border: `1.5px solid ${ROLE_COLOR[role as keyof typeof ROLE_COLOR]}${participants[role] ? "" : "66"}`,
+                }} />
+              ))}
+            </div>
+            <div style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700 }}>
+                <span style={{ color: ROLE_COLOR.buyer }}>{dealBuyerName ?? "Buyer"}</span>
+                <span style={{ color: T.muted }}> ⇄ </span>
+                <span style={{ color: ROLE_COLOR.seller }}>{dealSellerName ?? "Seller"}</span>
+              </span>
+              <span style={{ fontFamily: T.sans, fontSize: 11, color: T.muted }}> · {state.description || tradeRoomTitle}</span>
+            </div>
+            <span style={{ color: T.muted, fontSize: 11, fontFamily: T.mono, flexShrink: 0 }}>{dealOpen ? "▾" : "▸"}</span>
+          </div>
+          {dealOpen && (
+          <div style={{ padding: "4px 14px 14px" }}>
         <div style={{
           display: "flex",
           alignItems: "center",
@@ -1787,9 +1946,27 @@ export function TradeDetail({
             </div>
           </div>
         </details>
+          </div>
+          )}
+        </div>
 
         {(state.status === EscrowStatus.LOCKED || state.status === EscrowStatus.APPROVED ||
           state.status === EscrowStatus.CLAIMED || state.status === EscrowStatus.COMPLETED) && (
+          <div style={{
+            background: T.surface, border: `1px solid ${T.border}`,
+            borderRadius: T.r, overflow: "hidden", marginBottom: 18,
+          }}>
+            <div onClick={() => setVotesRowOpen(!votesOpen)} style={{
+              cursor: "pointer", padding: "11px 14px",
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 1 }}>SETTLEMENT</span>
+              <span style={{ fontFamily: T.mono, fontSize: 10, color: decisionTone }}>
+                {state.resolvedOutcome ? String(state.resolvedOutcome).toLowerCase() : "awaiting"} · {releaseVoteCount}R / {refundVoteCount}F
+              </span>
+              <span style={{ marginLeft: "auto", color: T.muted, fontSize: 11, fontFamily: T.mono }}>{votesOpen ? "▾" : "▸"}</span>
+            </div>
+            {votesOpen && (
           <div className="trade-vote-decisions" style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr 1fr",
@@ -1828,6 +2005,8 @@ export function TradeDetail({
                 ? <>{refundChip}{centerChip}{releaseChip}</>
                 : <>{releaseChip}{centerChip}{refundChip}</>;
             })()}
+          </div>
+            )}
           </div>
         )}
 
@@ -1954,8 +2133,8 @@ export function TradeDetail({
                 try { await onJoin(Role.BUYER); } finally { setJoining(false); }
               }} style={{
                 flex: 1, padding: "14px", borderRadius: T.rs,
-                background: T.accentDim, border: `1px solid ${T.accent}44`,
-                color: T.accent, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+                background: `${ROLE_COLOR.buyer}22`, border: `1px solid ${ROLE_COLOR.buyer}44`,
+                color: ROLE_COLOR.buyer, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
                 cursor: joining ? "default" : "pointer", transition: "all 0.2s",
               }}>
                 {joining ? "Joining..." : "Join as Buyer"}
@@ -1971,8 +2150,8 @@ export function TradeDetail({
                 try { await onJoin(Role.ARBITER); } finally { setJoining(false); }
               }} style={{
                 flex: 1, padding: "14px", borderRadius: T.rs,
-                background: T.purpleDim, border: `1px solid ${T.purple}44`,
-                color: T.purple, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+                background: `${ROLE_COLOR.arbiter}22`, border: `1px solid ${ROLE_COLOR.arbiter}44`,
+                color: ROLE_COLOR.arbiter, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
                 cursor: joining ? "default" : "pointer", transition: "all 0.2s",
               }}>
                 {joining ? "Joining..." : "Join as Arbiter"}
@@ -1985,8 +2164,8 @@ export function TradeDetail({
               try { await onJoin(Role.SELLER); } finally { setJoining(false); }
             }} style={{
               width: "100%", marginTop: 10, padding: "14px", borderRadius: T.rs,
-              background: T.tealDim, border: `1px solid ${T.teal}44`,
-              color: T.teal, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+              background: `${ROLE_COLOR.seller}22`, border: `1px solid ${ROLE_COLOR.seller}44`,
+              color: ROLE_COLOR.seller, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
               cursor: joining ? "default" : "pointer", transition: "all 0.2s",
             }}>
               {joining ? "Joining..." : "Join as Seller"}
@@ -2664,9 +2843,28 @@ export function TradeDetail({
         </div>
       )}
 
-      {/* Trade chat */}
+      {/* Trade chat — disclosure row, prominent (open) during LOCKED. */}
       {myRole && (
-        <ChatPanel state={state} myRole={myRole} onSend={onSendChat} embedded />
+        <div style={{
+          background: T.surface, border: `1px solid ${T.border}`,
+          borderRadius: T.r, overflow: "hidden", marginBottom: 16,
+        }}>
+          <div onClick={() => setChatRowOpen(!chatOpen)} style={{
+            cursor: "pointer", padding: "11px 14px",
+            display: "flex", alignItems: "center", gap: 8,
+          }}>
+            <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 1 }}>CHAT</span>
+            <span style={{ fontFamily: T.mono, fontSize: 10, color: T.muted }}>
+              {state.chatMessages.length} message{state.chatMessages.length !== 1 ? "s" : ""} · private
+            </span>
+            <span style={{ marginLeft: "auto", color: T.muted, fontSize: 11, fontFamily: T.mono }}>{chatOpen ? "▾" : "▸"}</span>
+          </div>
+          {chatOpen && (
+            <div style={{ padding: "0 14px 10px" }}>
+              <ChatPanel state={state} myRole={myRole} onSend={onSendChat} embedded hideHeader />
+            </div>
+          )}
+        </div>
       )}
       </div>
       </div>

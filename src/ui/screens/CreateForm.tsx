@@ -515,16 +515,16 @@ function menuCurrencyHint(vertical: Vertical, currency: string): string {
 
 function singleModeLabel(vertical: Vertical): string {
   if (vertical === "bill-pay") return "Single bill";
-  if (vertical === "marketplace") return "Single item";
-  if (vertical === "lending") return "Single loan";
-  return "Single sale";
+  if (vertical === "marketplace") return "Single";
+  if (vertical === "lending") return "One loan";
+  return "One swap";
 }
 
 function menuModeLabel(vertical: Vertical): string {
-  if (vertical === "p2p-trade") return "Amount menu";
-  if (vertical === "bill-pay") return "Bill bundle";
-  if (vertical === "lending") return "Loan book";
-  return "Store";
+  if (vertical === "p2p-trade") return "Curated swaps";
+  if (vertical === "bill-pay") return "Monthly bills";
+  if (vertical === "lending") return "Loanbook";
+  return "Storefront";
 }
 
 function singleModeDescription(vertical: Vertical): string {
@@ -873,6 +873,22 @@ export function CreateForm({
   const [arbiterDismissed, setArbiterDismissed] = useState(false);
   const [drafts, setDrafts] = useState<SavedDraft[]>(() => readAllDrafts());
   const [showAllDrafts, setShowAllDrafts] = useState(false);
+  // v3.1 stage 5: listing-mode setter lifted to the parent so the "every seller is
+  // a Store" segmented toggle can live in Step 1 (under the category pick). Same
+  // behaviour as before — a menu/store seeds a draft item + turns subscription off.
+  const setListingMode = (listingMode: ListingMode) => {
+    setForm(prev => {
+      const nextItems = listingMode === "menu" && prev.menuItems.length === 0
+        ? [newMenuDraftItem()]
+        : prev.menuItems;
+      return {
+        ...prev,
+        listingMode,
+        isSubscription: listingMode === "menu" ? false : prev.isSubscription,
+        menuItems: nextItems,
+      };
+    });
+  };
 
   useEffect(() => {
     setForm(prev => prev.cur === communityCurrency ? prev : { ...prev, cur: communityCurrency });
@@ -1020,6 +1036,8 @@ export function CreateForm({
         <Step1
           vertical={vertical}
           setVertical={setVertical}
+          listingMode={form.listingMode}
+          setListingMode={setListingMode}
           homeCommunity={homeCommunity}
           isHomeCommunity={isHomeCommunity}
           onSetHome={setAsHome}
@@ -1253,6 +1271,7 @@ function equalButtonStyle(): React.CSSProperties {
 
 function Step1({
   vertical, setVertical,
+  listingMode, setListingMode,
   homeCommunity,
   isHomeCommunity,
   onSetHome,
@@ -1262,6 +1281,8 @@ function Step1({
 }: {
   vertical: Vertical;
   setVertical: (v: Vertical) => void;
+  listingMode: ListingMode;
+  setListingMode: (m: ListingMode) => void;
   homeCommunity: ReturnType<typeof getCommunityBySlug>;
   /** v2.2.0: whether the listing community matches the PERSISTED home
    *  (the sign-in boot-routing anchor). When false, the caption becomes
@@ -1277,6 +1298,11 @@ function Step1({
 }) {
   const visibleDrafts = showAllDrafts ? drafts : drafts.slice(0, 3);
   const hiddenDraftCount = Math.max(0, drafts.length - 3);
+  // CBP's "Monthly bills" multi-mode is parked (coming soon) — never leave the
+  // form in menu mode for bill-pay (e.g. after switching verticals from a Store).
+  useEffect(() => {
+    if (vertical === "bill-pay" && listingMode === "menu") setListingMode("single");
+  }, [vertical, listingMode]);
 
   return (
     <>
@@ -1386,6 +1412,64 @@ function Step1({
             </button>
           );
         })}
+      </div>
+
+      {/* Stage 5 — "every seller is a Store": one light sub-step under the type
+          pick. A sliding segmented control between a single listing and the
+          vertical's multi/store mode, driving the same listingMode state. */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 8 }}>
+          LISTING STYLE
+        </div>
+        <div style={{
+          position: "relative", display: "grid", gridTemplateColumns: "1fr 1fr",
+          background: T.surface, border: `1px solid ${T.border}`,
+          borderRadius: 999, padding: 4,
+        }}>
+          <div aria-hidden="true" style={{
+            position: "absolute", top: 4, bottom: 4, left: 4,
+            width: "calc(50% - 4px)", borderRadius: 999,
+            background: T.accentDim, border: `1px solid ${T.accent}66`,
+            transform: (listingMode === "menu" && vertical !== "bill-pay") ? "translateX(100%)" : "translateX(0)",
+            transition: "transform .22s cubic-bezier(.4,0,.2,1)",
+          }} />
+          {([["single", singleModeLabel(vertical)], ["menu", menuModeLabel(vertical)]] as [ListingMode, string][]).map(([mode, label]) => {
+            const disabled = mode === "menu" && vertical === "bill-pay";
+            const active = listingMode === mode && !disabled;
+            return (
+              <button
+                key={mode}
+                type="button"
+                disabled={disabled}
+                onClick={() => { if (!disabled) setListingMode(mode); }}
+                style={{
+                  position: "relative", zIndex: 1,
+                  background: "transparent", border: "none",
+                  padding: "9px 10px", borderRadius: 999,
+                  cursor: disabled ? "not-allowed" : "pointer",
+                  fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+                  color: disabled ? T.muted : active ? T.accent : T.muted,
+                  transition: "color .2s",
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                }}
+              >
+                {label}
+                {disabled && (
+                  <span style={{
+                    fontSize: 8, fontWeight: 800, letterSpacing: 0.5,
+                    color: T.amber, background: `${T.amber}22`,
+                    padding: "1px 5px", borderRadius: 999,
+                  }}>SOON</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.sans, lineHeight: 1.4, marginTop: 7 }}>
+          {listingMode === "menu" && vertical !== "bill-pay"
+            ? menuModeDescription(vertical)
+            : singleModeDescription(vertical)}
+        </div>
       </div>
 
       {/* Community context. v2.2.0: the line reflects the header
@@ -1604,19 +1688,8 @@ function Step2({
       };
     });
   };
-  const setListingMode = (listingMode: ListingMode) => {
-    setForm(prev => {
-      const nextItems = listingMode === "menu" && prev.menuItems.length === 0
-        ? [newMenuDraftItem()]
-        : prev.menuItems;
-      return {
-        ...prev,
-        listingMode,
-        isSubscription: listingMode === "menu" ? false : prev.isSubscription,
-        menuItems: nextItems,
-      };
-    });
-  };
+  // setListingMode lifted to the parent CreateForm (v3.1 stage 5 — the listing-style
+  // toggle moved to Step 1, under the category pick).
   const menuTitle = menuTitleForVertical(vertical);
   const menuHint = menuHintForVertical(vertical);
   const fiatPrimary = amountDisplayMode === "fiat" && vertical !== "lending";
@@ -1687,40 +1760,7 @@ function Step2({
           ⚠ {imageError} <span style={{ color: T.muted }}>(tap to dismiss)</span>
         </div>
       )}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-          LISTING STYLE
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          {(["single", "menu"] as ListingMode[]).map(mode => {
-            const active = form.listingMode === mode;
-            const label = mode === "single" ? singleModeLabel(vertical) : menuModeLabel(vertical);
-            const copy = mode === "single" ? singleModeDescription(vertical) : menuModeDescription(vertical);
-            return (
-              <button
-                key={mode}
-                onClick={() => setListingMode(mode)}
-                style={{
-                  padding: "12px",
-                  borderRadius: T.rs,
-                  border: `1px solid ${active ? T.accent + "66" : T.border}`,
-                  background: active ? T.accentDim : T.surface,
-                  color: active ? T.accent : T.text,
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-              >
-                <div style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 900, marginBottom: 5 }}>
-                  {label}
-                </div>
-                <div style={{ fontFamily: T.sans, fontSize: 11, lineHeight: 1.35, color: active ? T.text : T.muted }}>
-                  {copy}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      {/* LISTING STYLE toggle relocated to Step 1 (v3.1 "every seller is a Store"). */}
 
       {categoryAllowsFulfillmentChoice(vertical) && (
         <div style={{ marginBottom: 16 }}>
