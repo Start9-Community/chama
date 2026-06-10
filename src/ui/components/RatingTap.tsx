@@ -23,16 +23,23 @@ export function RatingTap({
 }) {
   const [tapped, setTapped] = useState<RatingThumb | undefined>(undefined);
   const [pending, setPending] = useState<RatingThumb | null>(null);
+  const [failed, setFailed] = useState(false);
   const shown = tapped ?? ratedThumb;
 
   const tap = async (thumb: RatingThumb) => {
     if (shown || pending) return;
     setPending(thumb);
+    setFailed(false);
     try {
       await onRate(tradeId, ratee, thumb);
       setTapped(thumb);
-    } catch {
-      // Leave it un-rated so the user can retry; a failed publish is silent.
+    } catch (e) {
+      // v3.1.1: this catch used to be silent — a failed sign/publish gave the
+      // user zero feedback. Now we log it (so a device repro yields a real
+      // stack for the kind:38123 publish bug) and flag a retry inline. The
+      // thumb stays live because `tapped` isn't set, so tapping again retries.
+      console.error("[chama] rating publish failed:", e);
+      setFailed(true);
     } finally {
       setPending(null);
     }
@@ -73,8 +80,8 @@ export function RatingTap({
 
   return (
     <div style={wrap}>
-      <span style={{ fontSize: 11, fontFamily: T.mono, color: T.muted }}>
-        How was your counterparty?
+      <span style={{ fontSize: 11, fontFamily: T.mono, color: failed ? T.red : T.muted }}>
+        {failed ? "Couldn't publish — tap to retry" : "How was your counterparty?"}
       </span>
       <button aria-label="thumbs up" disabled={!!pending} onClick={() => tap("up")} style={pill("up", T.green)}>
         👍

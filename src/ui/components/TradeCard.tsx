@@ -71,8 +71,9 @@ export function TradeCard({
     ?? (state.initiator.role === Role.SELLER ? state.initiator.pubkey : null);
   const sellerName = profileNameFor(profileNames, sellerPubkey, kind0Enabled);
   // A "Store" tile = a marketplace listing with a seller (same condition as the
-  // Store badge below). These get a faint Satoshi Market storefront watermark.
-  const isMarketStore = state.category === "marketplace" && !!sellerPubkey;
+  // Store badge below). Own-route stores keep the storefront treatment; external
+  // amber/off-route stores stay text-first and compact.
+  const isMarketStore = state.category === "marketplace" && !!sellerPubkey && !isAmber;
   const communityChipLabel = listingCommunity
     ? (listingCommunity.disambiguator ?? listingCommunity.displayName)
     : null;
@@ -107,7 +108,7 @@ export function TradeCard({
     ? exchangeBracketRange(menuItems)
     : null;
   const satsLabel = exchangeRange ? satsRangeLabel(exchangeRange) : fmtSats(state.amountMsats);
-  const marketplaceImages = state.category === "marketplace"
+  const marketplaceImages = isMarketStore
     ? menuItems.map(item => item.imageDataUrl).filter((src): src is string => !!src)
     : [];
   const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null) : null;

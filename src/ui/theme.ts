@@ -140,6 +140,12 @@ export const STATUS = {
 //   Seller  = Bitcoin Orange #F7931A
 //   Arbiter = Signal Teal    #5AC8FA
 export const ROLE_COLOR = { buyer: "#BF5AF2", seller: "#F7931A", arbiter: "#5AC8FA" };
+// v3.2: TEXT-legible role colours. The sacred ROLE_COLOR hexes are tuned for
+// fills/borders/dots on the dark palette; as TEXT on light-mode tinted cards
+// the seller orange and arbiter sky-blue fall below readable contrast. Use
+// THIS map for role-coloured text (kickers, links, button labels); keep raw
+// ROLE_COLOR for fills, borders, and dots. Rebuilt by refreshThemeDerived().
+export const ROLE_COLOR_TEXT = { ...ROLE_COLOR };
 export const ROLE_ICON  = { buyer: "B", seller: "S", arbiter: "A" };
 
 // v0.3.0 Phase 6 (item 8): Trinity Ring participant render order.
@@ -197,6 +203,9 @@ export const inputStyle: CSSProperties = {
 // STATUS and inputStyle capture T values at module load; rebuild them in
 // place on every palette swap so importers' references stay live.
 function refreshThemeDerived(): void {
+  Object.assign(ROLE_COLOR_TEXT, resolvedTheme === "light"
+    ? { buyer: "#9b3fd1", seller: "#c47308", arbiter: "#0e7aa8" }
+    : ROLE_COLOR);
   Object.assign(STATUS.CREATED,      { c: T.teal,   bg: T.tealDim });
   Object.assign(STATUS.LOCKED,       { c: T.purple, bg: T.purpleDim });
   Object.assign(STATUS.APPROVED,     { c: T.accent, bg: T.accentDim });

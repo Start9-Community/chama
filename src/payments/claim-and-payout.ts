@@ -78,13 +78,16 @@
 //                    covering balance means a previous attempt already
 //                    credited this wallet.
 // `payout-failed`    TERMINAL — claim succeeded, balance landed, but
-//                    payInvoice threw. ORPHAN balance — the recovery
-//                    banner catches it.
+//                    payInvoice threw. The trade is deliberately left
+//                    un-COMPLETEd so the Claim button stays the retry
+//                    path, including for sub-material payouts that the
+//                    main recovery banner keeps quiet.
 //
 // The four-way split lets the modal surface UX that matches reality:
 // `claim-bridge-threw` shows the actual error + retry; `claim-pending`
 // shows "still arriving" reassurance; `claim-failed` shows terminal
-// no-recovery framing; `payout-failed` points at the recovery banner.
+// no-recovery framing; `payout-failed` points at retrying Claim while
+// the recovered balance remains safely local.
 
 import { markSatsTracesDrained, recordSatsTrace } from "./sats-trace.js";
 import { maxLightningPayoutSats } from "./lightning-fees.js";
@@ -107,11 +110,10 @@ export type ClaimAndPayoutTerminal =
   | { kind: "claim-failed"; error: string }
   | { kind: "claim-bridge-threw"; error: string }
   | { kind: "claim-pending"; error: string }
-  /** `claimCompleted`: false when settlement was proven by the absolute-
-   *  balance cover check (COMPLETE deliberately not yet published) — the
-   *  trade's Claim button is still alive, so "tap Claim again" is the
-   *  honest retry path. True/undefined when the growth path already
-   *  published COMPLETE before the payout attempt. */
+  /** `claimCompleted`: false when COMPLETE was deliberately not yet
+   *  published because the outbound payout failed. The trade's Claim
+   *  button is still alive, so "tap Claim again" is the honest retry
+   *  path. Kept optional for older callers/terminals. */
   | { kind: "payout-failed"; error: string; claimCompleted?: boolean };
 
 /** Error codes the bridge tags on typed retry-able failures. Defined
@@ -406,8 +408,8 @@ export interface RunClaimAndPayoutOpts extends RunClaimAndPayoutDeps {
  *   - claim-failed: claim threw HARD; balance unchanged; no orphan
  *   - claim-pending: claim returned but balance never landed in 60s;
  *     keep pending-redemption stash so boot can retry the redeem
- *   - payout-failed: claim landed (balance grew), but Lightning send
- *     failed; CONFIRMED orphan — recovery banner is the next stop */
+ *   - payout-failed: claim landed (balance grew or covered), but the
+ *     outbound send failed; sats remain local and Claim stays retryable */
 export async function runClaimAndPayout(
   opts: RunClaimAndPayoutOpts,
 ): Promise<ClaimAndPayoutTerminal> {
@@ -610,53 +612,11 @@ export async function runClaimAndPayout(
     }
   }
 
-  // COMPLETE is a statement that the escrow sats are under the winner's
-  // control. GROWTH proof publishes it here, before payout (the redeem
-  // demonstrably landed; payout is a wallet-level concern the trade
-  // chain shouldn't wait on). COVER proof defers COMPLETE until the
-  // payout actually succeeds (below): the evidence is circumstantial,
-  // and deferring keeps the trade's Claim button alive if the payout
-  // leg fails — which matters enormously for sub-material amounts that
-  // no recovery surface will ever show. If the relay publish fails, the
-  // money path still continues; the trade can be healed/retried later
-  // without blocking payout.
-  if (settledBy === "growth" && opts.completeClaim) {
-    try {
-      moneyLog("CLAIM-COMPLETE-IN", {
-        escrowId: opts.escrowId,
-      });
-      claimTrace("orchestrator-complete-in", {
-        escrowId: opts.escrowId,
-      });
-      await opts.completeClaim(opts.escrowId);
-      moneyLog("CLAIM-COMPLETE-OUT", {
-        escrowId: opts.escrowId,
-        result: "success",
-      });
-      claimTrace("orchestrator-complete-out", {
-        escrowId: opts.escrowId,
-        result: "success",
-      });
-    } catch (e: any) {
-      moneyLog("CLAIM-COMPLETE-OUT", {
-        escrowId: opts.escrowId,
-        result: "error",
-        errMsg: (e?.message || String(e)).slice(0, 120),
-      });
-      claimTrace("orchestrator-complete-out", {
-        escrowId: opts.escrowId,
-        result: "error",
-        errMsg: (e?.message || String(e)).slice(0, 120),
-      });
-      // Advisory protocol event only; money movement already confirmed.
-    }
-  }
-
   // Phase 3: outbound payout. Pay the user's destination.
-  // If this throws on the growth path, the balance is orphaned in the
-  // user's Chama — recovery banner is the next stop. On the cover path
-  // the trade is NOT yet completed, so re-tapping Claim retries cleanly
-  // (picker → fresh invoice → cover check → payout).
+  // If this throws, COMPLETE has not been published yet, so re-tapping
+  // Claim retries cleanly (picker → fresh invoice → cover check →
+  // payout). This matters for tiny claims too: the balance can be real
+  // but below the main recovery banner's material line.
   emit({ kind: payoutKind === "onchain" ? "paying-onchain" : "paying-invoice" });
   try {
     moneyLog("CLAIM-PAY-IN", {
@@ -694,7 +654,7 @@ export async function runClaimAndPayout(
       result: "error",
       errMsg: error.slice(0, 120),
     });
-    const claimCompleted = settledBy === "growth";
+    const claimCompleted = false;
     emit({ kind: "payout-failed", error, claimCompleted });
     return { kind: "payout-failed", error, claimCompleted };
   }
@@ -707,42 +667,43 @@ export async function runClaimAndPayout(
     result: "success",
   });
 
-  // Cover-path COMPLETE: deferred until the user is demonstrably made
-  // whole (payout sent). At this point the attestation is materially
-  // true regardless of which attempt's redeem funded it. Best-effort,
-  // same as the growth-path publish.
-  if (settledBy === "cover" && opts.completeClaim) {
+  // COMPLETE is deferred until the user is demonstrably made whole
+  // (payout sent). At this point the attestation is materially true
+  // whether settlement was proven by fresh growth or by a covering
+  // balance from an earlier/late redeem. Best-effort: the money path
+  // succeeded, so a relay publish failure must not undo the payout.
+  if (opts.completeClaim) {
     try {
       moneyLog("CLAIM-COMPLETE-IN", {
         escrowId: opts.escrowId,
-        via: "cover",
+        via: settledBy,
       });
       claimTrace("orchestrator-complete-in", {
         escrowId: opts.escrowId,
-        via: "cover",
+        via: settledBy,
       });
       await opts.completeClaim(opts.escrowId);
       moneyLog("CLAIM-COMPLETE-OUT", {
         escrowId: opts.escrowId,
         result: "success",
-        via: "cover",
+        via: settledBy,
       });
       claimTrace("orchestrator-complete-out", {
         escrowId: opts.escrowId,
         result: "success",
-        via: "cover",
+        via: settledBy,
       });
     } catch (e: any) {
       moneyLog("CLAIM-COMPLETE-OUT", {
         escrowId: opts.escrowId,
         result: "error",
-        via: "cover",
+        via: settledBy,
         errMsg: (e?.message || String(e)).slice(0, 120),
       });
       claimTrace("orchestrator-complete-out", {
         escrowId: opts.escrowId,
         result: "error",
-        via: "cover",
+        via: settledBy,
         errMsg: (e?.message || String(e)).slice(0, 120),
       });
       // Advisory protocol event only; the user already has their sats.

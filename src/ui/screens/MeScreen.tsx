@@ -34,7 +34,12 @@ import {
 import { getWinner } from "../../escrow-engine/state-machine.js";
 import { arbiterVotePriority, substitutionEligibleAt } from "../../escrow-engine/arbiter-substitution.js";
 import { BLF_OFFICIAL_ARBITERS } from "../../arbiters/pool.js";
-import { getPickerCommunities, getCommunityBySlug } from "../../communities/registry.js";
+import {
+  DEFAULT_COMMUNITY_SLUG,
+  addCustomCommunity,
+  getCommunityBySlug,
+} from "../../communities/registry.js";
+import { getAllPickerCountries, type PickerCountry } from "../../communities/countries.js";
 import {
   MAIN_SURFACE_RECOVERY_MIN_SATS,
   formatStepInCountdown,
@@ -94,7 +99,6 @@ export function MeScreen({
   onSignOut,
   communitySlug,
   onSelectCommunity,
-  onApplyAsArbiter,
   onRateCounterparty,
   myGivenRatings,
 }: {
@@ -132,9 +136,6 @@ export function MeScreen({
   /** Bound to handleSelectCommunity — switches Chama (with the same funds-at-
    *  risk destroy-confirm guard the Browse pill used to trigger). */
   onSelectCommunity?: (slug: string) => void;
-  /** V3 #74: publish a signed arbiter application (kind:38121) for the
-   *  user's current community. Absent ⇒ the CTA card doesn't render. */
-  onApplyAsArbiter?: (community: string, statement: string) => Promise<void>;
 }) {
   const npubShort = pubkey.slice(0, 8) + "…" + pubkey.slice(-4);
   const [localKind0On, setLocalKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
@@ -368,6 +369,14 @@ export function MeScreen({
                 positive
               </span>
             </div>
+            {/* v3.1.1 (#2): 👍/👎 breakdown, consistent with the tap-a-
+                counterparty reputation readout. This aggregate includes arbiter
+                ratings (any verified rating where you are the ratee). */}
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 10, fontFamily: T.mono, fontSize: 13 }}>
+              <span style={{ color: T.green, fontWeight: 700 }}>👍 {ratings.positive}</span>
+              <span style={{ color: T.amber, fontWeight: 700 }}>👎 {ratings.negative}</span>
+              <span style={{ color: T.muted, fontSize: 11 }}>from {ratings.count} settled trade{ratings.count !== 1 ? "s" : ""}</span>
+            </div>
           </div>
         ) : (
           <div style={{ fontSize: 12, color: T.muted, fontFamily: T.sans, lineHeight: 1.55 }}>
@@ -484,13 +493,6 @@ export function MeScreen({
         <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
         <SettingsRow label="Sign out" hint={null} onClick={onSignOut} danger />
       </div>
-
-      {communitySlug && onApplyAsArbiter && (
-        <ArbiterCtaCard
-          communitySlug={communitySlug}
-          onApply={onApplyAsArbiter}
-        />
-      )}
 
       <MeTradeHistory
         trades={visibleTrades}
@@ -1584,10 +1586,23 @@ function YourChamaCard({
   onSelectCommunity: (slug: string) => void;
 }) {
   const [changing, setChanging] = useState(false);
+  const [query, setQuery] = useState("");
   const current = communitySlug ? getCommunityBySlug(communitySlug) : null;
-  const communities = [...getPickerCommunities()].sort((a, b) =>
-    a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" }),
-  );
+  const countries = getAllPickerCountries();
+  const currentCountry = current?.country
+    ? countries.find((country) => country.code === current.country) ?? null
+    : null;
+  const currentCountryCode = currentCountry?.code ?? current?.country ?? null;
+  const currentCountryLabel = currentCountry?.name ?? current?.country ?? "Global";
+  const currentCountryFlag = currentCountry?.flag ?? (current?.country ? current.flagEmoji : null);
+  const currentCountrySubline = currentCountry
+    ? countrySubline(currentCountry)
+    : current?.currency ?? "USD";
+  const search = query.trim().toLowerCase();
+  const filteredCountries = search
+    ? countries.filter((country) => countryMatchesSearch(country, search))
+    : countries;
+  const otherCountries = filteredCountries.filter((country) => country.code !== currentCountryCode);
 
   return (
     <div style={{
@@ -1605,7 +1620,10 @@ function YourChamaCard({
         </div>
         {!hasActiveCommitment && (
           <button
-            onClick={() => setChanging((v) => !v)}
+            onClick={() => {
+              setChanging((v) => !v);
+              setQuery("");
+            }}
             style={{
               background: changing ? T.surface : T.accentDim,
               border: `1px solid ${changing ? T.border : T.accent + "66"}`,
@@ -1614,20 +1632,38 @@ function YourChamaCard({
               padding: "5px 10px", borderRadius: T.rs, cursor: "pointer",
             }}
           >
-            {changing ? "Cancel" : "Change →"}
+            {changing ? "Cancel" : "Switch"}
           </button>
         )}
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <span style={{ fontSize: 24, lineHeight: 1 }}>{current?.flagEmoji ?? "🌐"}</span>
-        <div style={{ minWidth: 0 }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 12,
+        padding: "11px 12px", borderRadius: T.rs,
+        background: T.surface, border: `1px solid ${T.border}`,
+      }}>
+        {currentCountryFlag ? (
+          <span style={{ fontSize: 24, lineHeight: 1 }}>{currentCountryFlag}</span>
+        ) : (
+          <span style={{
+            width: 34, height: 34, borderRadius: "50%",
+            background: T.accentDim, color: T.accent,
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            fontFamily: T.mono, fontSize: 13, fontWeight: 900,
+          }}>
+            C
+          </span>
+        )}
+        <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, fontWeight: 600 }}>
-            {current?.disambiguator ?? current?.displayName ?? "Global"}
+            {currentCountryLabel}
           </div>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
-            {current?.currency ?? "USD"}
+            {currentCountrySubline}
           </div>
+        </div>
+        <div style={{ color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 900 }}>
+          current
         </div>
       </div>
 
@@ -1645,35 +1681,132 @@ function YourChamaCard({
 
       {changing && !hasActiveCommitment && (
         <div style={{
-          marginTop: 12, display: "flex", flexWrap: "wrap" as const, gap: 6,
+          marginTop: 12,
         }}>
-          {communities.map((c) => {
-            const active = c.slug === communitySlug;
-            return (
+          <label style={{
+            display: "flex", alignItems: "center", gap: 8,
+            padding: "10px 12px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, marginBottom: 12,
+          }}>
+            <span style={{ fontSize: 15, lineHeight: 1 }}>⌕</span>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search countries..."
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              style={{
+                flex: 1, minWidth: 0, background: "transparent", border: "none",
+                outline: "none", color: T.text, fontFamily: T.sans,
+                fontSize: 14, letterSpacing: 0,
+              }}
+            />
+          </label>
+
+          <div style={{
+            fontSize: 10, fontWeight: 800, color: T.muted,
+            fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
+          }}>
+            {search ? `${otherCountries.length} MATCH${otherCountries.length === 1 ? "" : "ES"}` : "OTHER COUNTRIES"}
+          </div>
+          <div style={{ display: "grid", gap: 8, maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
+            {otherCountries.length === 0 ? (
+              <div style={{
+                padding: "14px 12px", borderRadius: T.rs,
+                background: T.surface, border: `1px dashed ${T.border}`,
+                color: T.muted, fontFamily: T.mono, fontSize: 11,
+                textAlign: "center" as const,
+              }}>
+                No countries match that search.
+              </div>
+            ) : otherCountries.map((country) => (
               <button
-                key={c.slug}
+                key={country.code}
                 onClick={() => {
                   setChanging(false);
-                  if (!active) onSelectCommunity(c.slug);
+                  setQuery("");
+                  onSelectCommunity(resolveCountryCommunitySlug(country));
                 }}
                 style={{
-                  padding: "7px 12px", borderRadius: 18,
-                  background: active ? T.tealDim : T.surface,
-                  border: `1px solid ${active ? T.teal + "66" : T.border}`,
-                  color: active ? T.teal : T.muted,
-                  fontFamily: T.mono, fontSize: 11, fontWeight: 600,
-                  cursor: active ? "default" : "pointer",
-                  whiteSpace: "nowrap" as const,
+                  width: "100%",
+                  display: "flex", alignItems: "center", gap: 11,
+                  padding: "11px 12px", borderRadius: T.rs,
+                  background: T.surface, border: `1px solid ${T.border}`,
+                  color: T.text, fontFamily: T.sans,
+                  cursor: "pointer", textAlign: "left",
                 }}
               >
-                {c.flagEmoji} {c.disambiguator ?? c.displayName} · {c.currency}
+                <span style={{ fontSize: 22, lineHeight: 1 }}>{country.flag}</span>
+                <span style={{ minWidth: 0, flex: 1 }}>
+                  <span style={{
+                    display: "block", overflow: "hidden",
+                    textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    fontSize: 13, fontWeight: 800, color: T.text,
+                  }}>
+                    {country.name}
+                  </span>
+                  <span style={{
+                    display: "block", marginTop: 2,
+                    overflow: "hidden", textOverflow: "ellipsis",
+                    whiteSpace: "nowrap", fontFamily: T.mono,
+                    fontSize: 10, color: T.muted,
+                  }}>
+                    {countrySubline(country)}
+                  </span>
+                </span>
+                <span style={{ color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 900 }}>
+                  switch
+                </span>
               </button>
-            );
-          })}
+            ))}
+          </div>
         </div>
       )}
     </div>
   );
+}
+
+function countryMatchesSearch(country: PickerCountry, search: string): boolean {
+  return [
+    country.code,
+    country.name,
+    country.currency,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .includes(search);
+}
+
+function countrySubline(country: PickerCountry): string {
+  return `${country.currency} · ${country.code}`;
+}
+
+function resolveCountryCommunitySlug(country: PickerCountry): string {
+  const realLocal = country.realChamas[0];
+  if (realLocal) return realLocal.slug;
+
+  const dc = country.defaultCommunity;
+  try {
+    if (country.isGeneratedShell && !getCommunityBySlug(dc.slug) && dc.federationInvite) {
+      addCustomCommunity({
+        slug: dc.slug,
+        displayName: dc.displayName,
+        currency: dc.currency,
+        country: dc.country,
+        flagEmoji: dc.flagEmoji,
+        federationInvite: dc.federationInvite,
+        browserReliable: dc.browserReliable,
+        languages: dc.languages,
+        disambiguator: dc.disambiguator,
+      });
+    }
+    return dc.slug;
+  } catch {
+    return DEFAULT_COMMUNITY_SLUG;
+  }
 }
 
 function buildMeDashboard(
@@ -1995,155 +2128,5 @@ function SettingsRow({ label, hint, onClick, danger }: {
       </div>
       <span style={{ color: T.muted, fontSize: 16 }}>›</span>
     </button>
-  );
-}
-
-// ── V3 #74: the arbiter on-ramp — CTA + FAQ + signed application ────────────
-// Field-read I: "a small CTA widget... the human on-ramp to consensus
-// admission. It makes the recruitment path visible instead of tribal
-// knowledge." Publishing signs a kind:38121 event the community's roster
-// steward reviews; the FAQ is honest that community-wide admission VOTING
-// comes later (kind:38122 reserved).
-function ArbiterCtaCard({
-  communitySlug,
-  onApply,
-}: {
-  communitySlug: string;
-  onApply: (community: string, statement: string) => Promise<void>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [statement, setStatement] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [fedInvite, setFedInvite] = useState("");
-  const community = getCommunityBySlug(communitySlug);
-  const displayName = community?.displayName ?? communitySlug;
-
-  const submit = async () => {
-    if (!statement.trim()) {
-      setError("Tell the community why — the statement IS the application.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    setStatus(null);
-    try {
-      // v3.1 A3: fed operators are the strongest anchors — carry the invite +
-      // steward key inside the statement text (no kind:38121 schema change).
-      const fullStatement = fedInvite.trim()
-        ? `${statement.trim()}\n\nFederation operator — invite + steward key: ${fedInvite.trim()}`
-        : statement;
-      await onApply(communitySlug, fullStatement);
-      setStatus("Application signed and published. The community steward reviews it from their roster surface.");
-      setStatement("");
-      setFedInvite("");
-    } catch (e: any) {
-      setError(e?.message || "Couldn't publish the application. Check relays and retry.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div style={{
-      background: T.card, border: `1px solid ${T.border}`,
-      borderRadius: T.r, marginBottom: 16, overflow: "hidden",
-    }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          width: "100%", padding: "14px 16px",
-          background: "none", border: "none", cursor: "pointer", textAlign: "left",
-        }}
-      >
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
-            ⚖ Become a community arbiter
-          </div>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-            Keep {displayName} trades fair — duty pays
-          </div>
-        </div>
-        <span style={{ color: T.muted, fontSize: 16 }}>{open ? "▾" : "›"}</span>
-      </button>
-      {open && (
-        <div style={{ padding: "0 16px 16px" }}>
-          <div style={{
-            fontSize: 11, color: T.muted, fontFamily: T.sans, lineHeight: 1.6,
-            padding: "10px 12px", borderRadius: T.rs, marginBottom: 10,
-            background: T.surface, border: `1px solid ${T.border}`,
-          }}>
-            Arbiters are the community's neutral third key. You vote only when
-            buyer and seller disagree, inside a response window — and the
-            dispute fee (1.5%, split-paid by both parties) is yours for the
-            work. Show up and rule fairly: presence will be bonded and
-            fairness is your public rating. Today the community steward
-            reviews applications and signs the roster; community-wide
-            admission voting comes in a later release.
-          </div>
-          <textarea
-            value={statement}
-            onChange={e => setStatement(e.target.value)}
-            placeholder={`Why you? Languages, availability, how ${displayName} knows you…`}
-            rows={3}
-            maxLength={800}
-            style={{
-              width: "100%", boxSizing: "border-box", resize: "vertical",
-              padding: "10px 12px", borderRadius: T.rs, marginBottom: 8,
-              background: T.surface, border: `1px solid ${T.border}`,
-              color: T.text, fontFamily: T.sans, fontSize: 12, lineHeight: 1.5,
-            }}
-          />
-          {/* v3.1 A3: federation-owner credential — the premier "proof of work"
-              anchor path. Form + copy only; the invite rides in the statement. */}
-          <div style={{
-            marginBottom: 8, padding: "10px 12px", borderRadius: T.rs,
-            background: `${ROLE_COLOR.arbiter}0f`, border: `1px solid ${ROLE_COLOR.arbiter}33`,
-          }}>
-            <div style={{ fontSize: 11, fontWeight: 800, color: ROLE_COLOR.arbiter, fontFamily: T.mono, marginBottom: 4, letterSpacing: 0.5 }}>
-              🏰 RUN YOUR OWN FEDERATION?
-            </div>
-            <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.sans, lineHeight: 1.45, marginBottom: 8 }}>
-              Federation operators are the strongest anchors — the premier proof-of-work path. Paste your invite + steward key and the steward can fast-track you.
-            </div>
-            <input
-              value={fedInvite}
-              onChange={e => setFedInvite(e.target.value)}
-              placeholder="fed1… invite + steward npub / key (optional)"
-              style={{
-                width: "100%", boxSizing: "border-box",
-                padding: "9px 11px", borderRadius: T.rs,
-                background: T.surface, border: `1px solid ${T.border}`,
-                color: T.text, fontFamily: T.mono, fontSize: 12,
-              }}
-            />
-          </div>
-          <button
-            onClick={submit}
-            disabled={busy}
-            style={{
-              padding: "10px 14px", borderRadius: T.rs,
-              border: `1px solid ${ROLE_COLOR.arbiter}66`, background: `${ROLE_COLOR.arbiter}22`,
-              color: ROLE_COLOR.arbiter, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
-              cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1,
-            }}
-          >
-            {busy ? "Publishing…" : "Sign + send application"}
-          </button>
-          {status && (
-            <div style={{ marginTop: 8, fontSize: 11, color: T.green, fontFamily: T.mono }}>
-              ✓ {status}
-            </div>
-          )}
-          {error && (
-            <div style={{ marginTop: 8, fontSize: 11, color: T.red, fontFamily: T.mono }}>
-              ⚠ {error}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
   );
 }

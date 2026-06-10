@@ -125,6 +125,7 @@ import {
   shouldReconcileFederation,
   federationNameForInvite,
   deriveCreateFedTags,
+  effectiveCreateFederationId,
   generateFediEcash,
   hasFediInternalEcash,
   hasFediInternalGenerateEcash,
@@ -561,7 +562,7 @@ export interface UseEscrowActions {
   fetchRatingSummary: (ratee: string) => Promise<AggregateRatings>;
   /** The (trade, ratee) the signed-in user has already rated, newest thumb per
    *  slot — drives "already rated" vs an active one-tap on the capture surfaces. */
-  fetchMyGivenRatings: () => Promise<Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>>;
+  fetchMyGivenRatings: () => Promise<Array<{ tradeId: string; ratee: string; thumb: RatingThumb; ratedAt?: number }>>;
   /**
    * Wipe the local Fedimint wallet's IndexedDB and reset in-memory state.
    * Use this to recover from a "No modification allowed" seed-mismatch error
@@ -1182,8 +1183,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     // money-move defense — it gates on the same fed-ID.
     const state = client.getState(escrowId);
     const createEvent = state?.eventChain?.[0];
-    const expectedFed: string | undefined =
-      (createEvent?.payload as any)?.fed;
+    const expectedFed = effectiveCreateFederationId(createEvent?.payload as any);
 
     if (expectedFed && fedimintRef.current) {
       const walletFed = fedimintRef.current.getFederationId();
@@ -2861,11 +2861,23 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         { kinds: [RATING_KIND], "#p": [ratee.toLowerCase()], limit: 500 } as any,
         5_000,
       );
+      const missingTradeIds = [...new Set(
+        (events as any[])
+          .map((event) => parseRatingEvent(event as any)?.tradeId ?? null)
+          .filter((id): id is string => !!id && !client.getState(id)),
+      )].slice(0, 25);
+      await Promise.all(missingTradeIds.map(async (id) => {
+        try {
+          await client.loadEscrow(id);
+        } catch (e) {
+          console.debug(`[chama] rating summary: couldn't load verifying trade ${id}`, e);
+        }
+      }));
       // Each rating is verified against the trade THIS client knows: a rating on
       // a trade we can't see, or one that never settled, never counts.
       return aggregateVerifiedRatings(events as any, ratee, (id) => client.getState(id));
     },
-    fetchMyGivenRatings: async (): Promise<Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>> => {
+    fetchMyGivenRatings: async (): Promise<Array<{ tradeId: string; ratee: string; thumb: RatingThumb; ratedAt?: number }>> => {
       const client = clientRef.current;
       const signer = signerRef.current;
       if (!client || !signer) return [];
@@ -2886,7 +2898,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           latest.set(key, { tradeId: r.tradeId, ratee: r.ratee, thumb: r.thumb, at: r.createdAt });
         }
       }
-      return [...latest.values()].map(({ tradeId, ratee, thumb }) => ({ tradeId, ratee, thumb }));
+      return [...latest.values()].map(({ tradeId, ratee, thumb, at }) => ({ tradeId, ratee, thumb, ratedAt: at }));
     },
     spendNotes: async (amountMsats: number, meta?: ChamaOperationMeta) => {
       const bridge = requireBridge();

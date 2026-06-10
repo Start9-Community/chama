@@ -1013,11 +1013,10 @@ function TerminalPanel({
   let toneDim: string;
   let icon: string;
   let showRetry = false;
-  // v2.1.1: a payout failure on the COVER settlement path leaves the
-  // trade un-COMPLETEd on purpose — the Claim button is still alive and
-  // retries with a fresh invoice. That's a strictly better retry path
-  // than the recovery surface (which also ignores sub-material amounts),
-  // so only point at recovery when it will actually engage.
+  // A payout failure leaves the trade un-COMPLETEd on purpose — the
+  // Claim button is still alive and retries with a fresh invoice. That's
+  // a better retry path than the recovery surface, especially for
+  // sub-material amounts that the banner keeps quiet.
   const claimStillOpen =
     terminal.kind === "payout-failed" && terminal.claimCompleted === false;
   const showRecoveryCta =

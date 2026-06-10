@@ -1,8 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { type EscrowState } from "../../escrow-engine/types.js";
 import { getCommunityBySlug, type Community } from "../../communities/registry.js";
 import { T, ROLE_COLOR, BROWSE_CATS, inputStyle } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
+import { BOTTOM_NAV_HEIGHT } from "../components/BottomNav.js";
+import { ArbiterApplyForm } from "../components/ArbiterApplyForm.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
 import { type NostrProfileNameMap } from "../nostr-profiles.js";
 import { type AmountDisplayMode } from "../amount-display.js";
@@ -30,7 +32,7 @@ export function BrowseView({
   kind0Enabled = false, profileNames,
   isFirstTime, onPasteCustomInvite,
   onOpenEscrow, onLoadById,
-  onCreate, onRecruitArbiter,
+  onCreate, onApplyAsArbiter,
 }: {
   browseCategory: string;
   setBrowseCategory: (s: string) => void;
@@ -49,14 +51,32 @@ export function BrowseView({
   onPasteCustomInvite: (invite: string) => void | Promise<void>;
   onOpenEscrow: (id: string) => void;
   onLoadById: (id: string) => void | Promise<void>;
-  /** v3.1 A2: Browse on-ramps — pencil opens Create, "?" recruits arbiters. */
+  /** v3.1.1: floating-menu on-ramps — pencil opens Create; the ⚖️ FAB opens the
+   *  arbiter application form inline (no bounce to Me). */
   onCreate: () => void;
-  onRecruitArbiter: () => void;
+  onApplyAsArbiter: (community: string, statement: string) => Promise<void>;
 }) {
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showRecruit, setShowRecruit] = useState(false);
   const [customInviteInput, setCustomInviteInput] = useState("");
+
+  // v3.1.1: fade the floating action menu down while the list is scrolling so it
+  // never sits opaque over a card the user is reading; back to full ~300ms after
+  // they stop. `capture: true` makes window receive the scroll event no matter
+  // which element actually scrolls (scroll doesn't bubble but DOES capture), so
+  // the fade is robust whether the window or some inner container is the scroller.
+  const [menuScrolling, setMenuScrolling] = useState(false);
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      setMenuScrolling(true);
+      if (t) clearTimeout(t);
+      t = setTimeout(() => setMenuScrolling(false), 300);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true, capture: true });
+    return () => { window.removeEventListener("scroll", onScroll, true); if (t) clearTimeout(t); };
+  }, []);
 
   const totalListings = matchingListings.length + nonMatchingListings.length;
   const homeCommunity = getCommunityBySlug(browseCommunity);
@@ -85,6 +105,89 @@ export function BrowseView({
 
   return (
     <div style={{ padding: 16 }}>
+      {/* v3.1.1: blur the listings behind the menu while the arbiter application
+          form is open, to focus attention on it. The FAB stack (zIndex 80) and
+          the toast sit ABOVE this backdrop (79) and stay crisp; tapping the
+          backdrop dismisses the form. */}
+      {showRecruit && (
+        <div
+          onClick={() => setShowRecruit(false)}
+          aria-hidden="true"
+          style={{
+            position: "fixed", inset: 0, zIndex: 79,
+            background: "rgba(0,0,0,0.35)",
+            backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)",
+            animation: "fadeIn 0.2s ease",
+          }}
+        />
+      )}
+      {/* v3.1.1 floating action menu — a vertical FAB stack pinned to the
+          listings column's bottom-right, floating OVER the cards (never in the
+          header) and clear of the 64px bottom tab bar. `right` is column-edge
+          aware (hugs the 520px column on wide viewports, 16px on mobile).
+          Fades to half opacity while scrolling so it never hides a listing. */}
+      <div style={{
+        position: "fixed", zIndex: 80,
+        right: "calc((100vw - min(100vw, 520px)) / 2 + 16px)",
+        bottom: `calc(${BOTTOM_NAV_HEIGHT}px + env(safe-area-inset-bottom, 0px) + 16px)`,
+        display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 14,
+        // fade while scrolling — but never while the application form is open.
+        opacity: (menuScrolling && !showRecruit) ? 0.35 : 1,
+        transition: "opacity 0.2s ease",
+      }}>
+        {showRecruit && (
+          <div style={{
+            width: 300, maxWidth: "calc(100vw - 32px)", marginBottom: 2,
+            padding: "14px 16px", maxHeight: "min(72vh, 480px)", overflowY: "auto",
+            background: T.card, border: `1px solid ${ROLE_COLOR.arbiter}55`,
+            borderRadius: T.r, boxShadow: "0 12px 34px rgba(0,0,0,0.6)",
+            textAlign: "left",
+          }}>
+            {/* v3.1.1: the arbiter application form lives inline here — apply
+                without leaving Browse (it no longer exists in Me). */}
+            <ArbiterApplyForm
+              communitySlug={browseCommunity}
+              onApply={onApplyAsArbiter}
+              onClose={() => setShowRecruit(false)}
+            />
+          </div>
+        )}
+        {/* arbiter recruitment (secondary) */}
+        <button
+          type="button" onClick={() => setShowRecruit(s => !s)}
+          title="Become a community arbiter" aria-label="Arbiter recruitment"
+          style={{
+            width: 50, height: 50, borderRadius: "50%", flexShrink: 0,
+            background: ROLE_COLOR.arbiter, border: "none", color: "#fff",
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: showRecruit
+              ? `0 0 0 4px ${ROLE_COLOR.arbiter}44, 0 8px 20px rgba(0,0,0,0.5)`
+              : "0 8px 20px rgba(0,0,0,0.5)",
+            transition: "box-shadow 0.2s ease",
+          }}
+        >
+          <svg width="29" height="29" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2.1} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M7 20l10 0" /><path d="M6 6l6 -1l6 1" /><path d="M12 3l0 17" />
+            <path d="M9 12l-3 -6l-3 6a3 3 0 0 0 6 0" /><path d="M21 12l-3 -6l-3 6a3 3 0 0 0 6 0" />
+          </svg>
+        </button>
+        {/* create a trade (primary) */}
+        <button
+          type="button" onClick={onCreate}
+          title="Create a trade" aria-label="Create a trade"
+          style={{
+            width: 58, height: 58, borderRadius: "50%", flexShrink: 0,
+            background: T.accent, border: "none", color: "#fff",
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: `0 8px 22px ${T.accent}66, 0 8px 20px rgba(0,0,0,0.5)`,
+          }}
+        >
+          <svg width="31" height="31" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2.1} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+            <path d="M13.5 6.5l4 4" />
+          </svg>
+        </button>
+      </div>
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "flex-start",
         marginBottom: 16,
@@ -106,29 +209,8 @@ export function BrowseView({
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          {/* v3.1 A2: Browse on-ramps — pencil = create a trade, "?" = arbiter recruitment. */}
-          <button
-            type="button" onClick={onCreate}
-            title="Create a trade" aria-label="Create a trade"
-            style={{
-              width: 36, height: 36, borderRadius: 999, flexShrink: 0,
-              background: T.surface, border: `1px solid ${T.border}`,
-              color: T.text, fontSize: 16, cursor: "pointer", lineHeight: 1,
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}
-          >✏️</button>
-          <button
-            type="button" onClick={() => setShowRecruit(s => !s)}
-            title="Become a community arbiter" aria-label="Arbiter recruitment"
-            style={{
-              width: 36, height: 36, borderRadius: 999, flexShrink: 0,
-              background: showRecruit ? `${ROLE_COLOR.arbiter}22` : T.surface,
-              border: `1px solid ${showRecruit ? ROLE_COLOR.arbiter : T.border}`,
-              color: showRecruit ? ROLE_COLOR.arbiter : T.muted,
-              fontFamily: T.mono, fontSize: 16, fontWeight: 800, cursor: "pointer", lineHeight: 1,
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}
-          >?</button>
+          {/* v3.1.1: the create + arbiter on-ramps moved out of the header into
+              the floating action menu (FAB stack) rendered at the screen root. */}
           {homeCommunity && (
           // v2.3.1: view-only identity chip. The community SWITCHER moved to
           // Me › Your Chama so switching is a deliberate, between-trades act
@@ -160,37 +242,7 @@ export function BrowseView({
         </div>
       </div>
 
-      {showRecruit && (
-        <div style={{
-          marginBottom: 12, padding: "12px 14px",
-          background: T.surface, border: `1px solid ${ROLE_COLOR.arbiter}55`,
-          borderRadius: T.r,
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-            <span style={{ fontSize: 15, lineHeight: 1 }}>⚖️</span>
-            <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 800, color: ROLE_COLOR.arbiter, letterSpacing: 0.5 }}>
-              BECOME A COMMUNITY ARBITER
-            </span>
-          </div>
-          <div style={{ fontFamily: T.sans, fontSize: 12, color: T.muted, lineHeight: 1.5, marginBottom: 10 }}>
-            Arbiters are neutral tiebreakers — you only vote when the two sides disagree. Strong arbiters anchor a community's trust, and federation operators make the best anchors of all.
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={onRecruitArbiter} style={{
-              flex: 1, padding: "9px 12px", borderRadius: T.rs,
-              background: `${ROLE_COLOR.arbiter}22`, border: `1px solid ${ROLE_COLOR.arbiter}66`,
-              color: ROLE_COLOR.arbiter, fontFamily: T.mono, fontSize: 12, fontWeight: 800,
-              cursor: "pointer",
-            }}>Apply in Me → Arbiter →</button>
-            <button type="button" onClick={() => setShowRecruit(false)} style={{
-              padding: "9px 12px", borderRadius: T.rs,
-              background: "transparent", border: `1px solid ${T.border}`,
-              color: T.muted, fontFamily: T.mono, fontSize: 12, fontWeight: 700,
-              cursor: "pointer",
-            }}>Later</button>
-          </div>
-        </div>
-      )}
+      {/* (arbiter-recruitment card now lives in the floating menu at the root) */}
 
       <div style={{
         display: "flex", gap: 8, alignItems: "center",

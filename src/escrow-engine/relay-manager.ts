@@ -109,6 +109,7 @@ const MAX_RETRY_MS = 60_000;
 const PUBLISH_TIMEOUT_MS = 8_000;
 const PUBLISH_CONNECT_WAIT_MS = 8_000;
 const PUBLISH_CONNECT_POLL_MS = 250;
+const FETCH_CONNECT_WAIT_MS = 5_000;
 
 // ══════════════════════════════════════════════════════════════════════════
 // RELAY MANAGER
@@ -614,7 +615,11 @@ export class RelayManager {
    * Fetch all events for an escrow and return them once all relays
    * have sent EOSE (end of stored events).
    */
-  fetchEscrowEvents(escrowId: string, timeoutMs = 15_000): Promise<NostrEvent[]> {
+  async fetchEscrowEvents(escrowId: string, timeoutMs = 15_000): Promise<NostrEvent[]> {
+    if ([...this.relays.values()].every(r => r.status !== RelayStatus.CONNECTED)) {
+      await this.waitForConnectedRelays(FETCH_CONNECT_WAIT_MS);
+    }
+
     return new Promise((resolve) => {
       const events: NostrEvent[] = [];
       const seenIds = new Set<string>();
@@ -683,7 +688,11 @@ export class RelayManager {
    * Fetch events matching an arbitrary filter. Resolves when every
    * connected relay has sent EOSE, or after the timeout.
    */
-  fetchOnce(filter: NostrFilter, timeoutMs = 5_000): Promise<NostrEvent[]> {
+  async fetchOnce(filter: NostrFilter, timeoutMs = 5_000): Promise<NostrEvent[]> {
+    if ([...this.relays.values()].every(r => r.status !== RelayStatus.CONNECTED)) {
+      await this.waitForConnectedRelays(FETCH_CONNECT_WAIT_MS);
+    }
+
     return new Promise((resolve) => {
       const events: NostrEvent[] = [];
       const seenIds = new Set<string>();

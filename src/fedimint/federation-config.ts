@@ -176,6 +176,42 @@ export function expectedFederationIdForInvite(invite: string | null | undefined)
   return null;
 }
 
+/**
+ * Resolve the effective federation ID for a CREATE payload, including a narrow
+ * compatibility path for listings published during the route-drift era.
+ *
+ * Modern listings carry a `fed` tag and it normally wins: it is the fast,
+ * canonical route fact. Some pre-fix CREATEs, however, were stamped with a
+ * stale `fed` while `mintUrl` and `community` both pointed at the intended
+ * route. Open listings have no minted sats yet, so when those two independent
+ * route fields agree on a known federation, treat the mismatched `fed` tag as
+ * stale and use the corroborated route instead.
+ *
+ * Older listings may have no `fed` tag at all. In that shape, a resolvable
+ * community is allowed to rescue a stale `mintUrl` because it is the only
+ * user-visible route stamp carried by the card.
+ */
+export function effectiveCreateFederationId(inputs: {
+  fed?: string | null;
+  mintUrl?: string | null;
+  community?: string | null;
+} | null | undefined): string | undefined {
+  const stampedFed = normalizeFederationId(inputs?.fed);
+  const mintFed = normalizeFederationId(expectedFederationIdForInvite(inputs?.mintUrl));
+  const communityInvite = getCommunityBySlug(inputs?.community)?.federationInvite ?? null;
+  const communityFed = normalizeFederationId(expectedFederationIdForInvite(communityInvite));
+
+  if (stampedFed) {
+    if (mintFed && communityFed && mintFed === communityFed && stampedFed !== mintFed) {
+      return mintFed;
+    }
+    return stampedFed;
+  }
+
+  if (communityFed) return communityFed;
+  return mintFed ?? undefined;
+}
+
 // ── Cold-start drift detection (pure) ───────────────────────────────────
 //
 // Pure helper for initFedimint's reconcile gate. Returns true when the

@@ -12,9 +12,12 @@ export function BottomNav({ active, onSelect }: {
   onSelect: (t: Tab) => void;
 }) {
   const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(getSignInEnvironment());
+  // v3.2: the old Create tab mirrors the Browse pencil for now. Both surfaces
+  // open the same overlay, keeping one create path until the tab's permanent
+  // future is decided.
   const items: { id: Tab; label: string; icon: string }[] = [
     { id: "browse", label: "Browse", icon: "🔍" },
-    { id: "create", label: "Create", icon: "+" },
+    { id: "create", label: "Create", icon: "✎" },
     { id: "me",     label: "Me",     icon: "👤" },
   ];
   return (
@@ -38,6 +41,7 @@ export function BottomNav({ active, onSelect }: {
                 flex: 1, padding: "10px 4px",
                 background: "none", border: "none",
                 color: isActive ? T.accent : T.muted,
+                opacity: 1,
                 fontFamily: T.mono, fontSize: 10, fontWeight: 700,
                 cursor: "pointer", letterSpacing: 0.5,
                 display: "flex", flexDirection: "column", alignItems: "center", gap: 4,

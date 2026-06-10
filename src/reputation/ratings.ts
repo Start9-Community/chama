@@ -95,7 +95,14 @@ export function buildRatingEvent(params: {
     created_at: createdAt,
     tags: [
       ["d", ratingReplaceableKey(tradeId, ratee)],
-      ["e", tradeId], // the rated trade
+      // v3.1.1 (#1 fix): the trade is identified by the `d` tag
+      // (`${tradeId}:${ratee}`) and the content payload — NOT by an `e` tag.
+      // `tradeId` is an internal escrow id (`sm_…`), not a 32-byte Nostr event
+      // id, so tagging it as `e` made every relay reject the whole event
+      // ("unexpected size for fixed-size tag: e") and no rating ever published.
+      // Nothing queries `#e` (fetchRatingSummary filters on `#p`), so dropping
+      // it is lossless. If query-by-trade is ever wanted, use a non-fixed-size
+      // tag (e.g. `["i", tradeId]`), never `e`.
       ["p", ratee],   // the rated pubkey (lets clients query ratings ABOUT someone)
       ["t", RATING_TYPE],
     ],

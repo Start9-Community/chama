@@ -155,6 +155,13 @@ function mergeRawEventsById(primary: NostrEvent[], secondary: NostrEvent[]): Nos
   return [...byId.values()];
 }
 
+// v3.1.1: mirror of relay-manager's per-event content cap (the size relays
+// enforce on receive). Defined locally rather than imported to avoid a
+// cross-module re-export that tripped a Vite dev ESM resolution race (the dev
+// server served a stale relay-manager without the new export → the whole module
+// graph failed to load). Keep in sync with relay-manager.ts's value.
+const MAX_CHAT_EVENT_CONTENT_BYTES = 128 * 1024;
+
 // ══════════════════════════════════════════════════════════════════════════
 // ESCROW CLIENT CONFIG
 // ══════════════════════════════════════════════════════════════════════════
@@ -1049,6 +1056,19 @@ export class EscrowClient {
 
     const content = JSON.stringify(payload);
 
+    // v3.1.1 (chat-safety, FIX 3): fail LOUDLY before publish if the event
+    // content exceeds the relay cap. Relays silently DROP oversized events on
+    // receive (MAX_EVENT_CONTENT_BYTES) and publish has no guard, so without
+    // this an oversized image "sends" (local echo only), never reaches the peer,
+    // and vanishes on reload. `content` already includes the per-recipient
+    // envelope fan-out, so it is the true on-wire size. Thrown before
+    // publish/local-apply → App's onSendChat .catch toasts it → no phantom copy.
+    if (content.length > MAX_CHAT_EVENT_CONTENT_BYTES) {
+      throw new Error(
+        `That image is too large to send (${Math.round(content.length / 1024)} KB; the limit is ${Math.round(MAX_CHAT_EVENT_CONTENT_BYTES / 1024)} KB). Try a smaller image.`,
+      );
+    }
+
     const unsigned: UnsignedEvent = {
       kind: EscrowEventKind.CHAT,
       created_at: now,
@@ -1075,6 +1095,14 @@ export class EscrowClient {
         const chatResult = applyEvent(currentChatState, chatParsed.event);
         if (chatResult.ok) {
           this.states.set(escrowId, chatResult.state);
+          // v3.1.1 (chat-safety, FIX 1): durably cache the sent chat raw. CHAT
+          // is intentionally NOT in eventChain, and the relay echo dedups +
+          // returns early (alreadyHave below), so this is the ONLY cache write
+          // for our own messages — without it loadEscrow rebuilds chat from an
+          // incomplete relay fetch and loses everything we sent.
+          const cached = this.rawEvents.get(escrowId) || [];
+          cached.push(signed);
+          this.rawEvents.set(escrowId, cached);
           this.callbacks.onStateUpdate?.(escrowId, chatResult.state);
         }
       }
@@ -1370,6 +1398,22 @@ export class EscrowClient {
       return current!;
     }
 
+    // v3.1.1 (chat-safety, FIX 2): CHAT is not in the eventChain, so a chat-poor
+    // relay fetch can rebuild a SHORTER chatMessages than we already hold in
+    // memory. Keep the fresh replayed state but re-seed any in-memory chat
+    // messages the replay didn't include (dedup by raw.id, kept chronological) —
+    // a reload must never SHRINK the visible chat. FIX 1 fills the cache so this
+    // is usually a no-op; it guards the window before the cache fills and any
+    // cross-session gap.
+    if (current && current.chatMessages.length > 0) {
+      const haveIds = new Set(result.state.chatMessages.map(m => m.raw.id));
+      const missing = current.chatMessages.filter(m => !haveIds.has(m.raw.id));
+      if (missing.length > 0) {
+        result.state.chatMessages = [...result.state.chatMessages, ...missing]
+          .sort((a, b) => a.raw.created_at - b.raw.created_at);
+      }
+    }
+
     this.states.set(escrowId, result.state);
     this.rawEvents.set(escrowId, rawEvents);
 
@@ -1485,6 +1529,11 @@ export class EscrowClient {
         const result = applyEvent(state, parsed);
         if (result.ok) {
           this.states.set(escrowId, result.state);
+          // v3.1.1 (chat-safety, FIX 1): durably cache the received chat raw so
+          // loadEscrow's cache carries it forward (CHAT is not in eventChain).
+          const cached = this.rawEvents.get(escrowId) || [];
+          cached.push(event);
+          this.rawEvents.set(escrowId, cached);
           this.callbacks.onChatMessage?.(escrowId, parsed as ParsedEscrowEvent<ChatPayload>);
         }
       }

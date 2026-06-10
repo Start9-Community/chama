@@ -16,14 +16,19 @@ import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
 import { remainingStock, isSoldOut, overcommittedChildren } from "../escrow-engine/storefront.js";
 import {
+  CURATED_PRESETS,
   getActiveInvite,
   getConfiguredNativeBridgeCommunitySlug,
+  getNativeBridgeUrl,
   hasFediInternalEcash,
   isNativeBridgeModeOn,
   isTestnetMode,
+  expectedFederationIdForInvite,
+  setActiveInvite,
 } from "../fedimint/index.js";
 import {
   getCommunityBySlug,
+  communityForInvite,
   DEFAULT_COMMUNITY_SLUG,
   claimGeneratedShellCreator,
 } from "../communities/registry.js";
@@ -155,6 +160,124 @@ const TAB_FOR_VIEW: Record<View, Tab> = {
   advanced: "me",
 };
 
+type GivenRatingSlot = {
+  tradeId: string;
+  ratee: string;
+  thumb: RatingThumb;
+  ratedAt?: number;
+};
+
+const GIVEN_RATINGS_STORAGE_PREFIX = "chama_given_ratings_v1";
+const SWITCH_FEEDBACK_MIN_MS = 550;
+
+function givenRatingsStorageKey(pubkey: string): string {
+  return `${GIVEN_RATINGS_STORAGE_PREFIX}:${pubkey.toLowerCase()}`;
+}
+
+function normalizeGivenRatingSlot(value: unknown): GivenRatingSlot | null {
+  if (!value || typeof value !== "object") return null;
+  const slot = value as Record<string, unknown>;
+  const tradeId = typeof slot.tradeId === "string" ? slot.tradeId.trim() : "";
+  const ratee = typeof slot.ratee === "string" ? slot.ratee.trim().toLowerCase() : "";
+  const thumb = slot.thumb === "up" || slot.thumb === "down" ? slot.thumb : null;
+  const ratedAt = typeof slot.ratedAt === "number" && Number.isFinite(slot.ratedAt)
+    ? slot.ratedAt
+    : undefined;
+  if (!tradeId || !ratee || !thumb) return null;
+  return { tradeId, ratee, thumb, ratedAt };
+}
+
+function readCachedGivenRatings(pubkey: string): GivenRatingSlot[] {
+  try {
+    if (typeof localStorage === "undefined") return [];
+    const raw = localStorage.getItem(givenRatingsStorageKey(pubkey));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(normalizeGivenRatingSlot)
+      .filter((slot): slot is GivenRatingSlot => !!slot);
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedGivenRatings(pubkey: string, slots: GivenRatingSlot[]): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(givenRatingsStorageKey(pubkey), JSON.stringify(slots));
+  } catch {
+    // Cache only; relay state is still canonical.
+  }
+}
+
+function mergeGivenRatingSlots(...groups: GivenRatingSlot[][]): GivenRatingSlot[] {
+  const latest = new Map<string, GivenRatingSlot>();
+  for (const group of groups) {
+    for (const raw of group) {
+      const slot = normalizeGivenRatingSlot(raw);
+      if (!slot) continue;
+      const key = `${slot.tradeId}:${slot.ratee}`;
+      const existing = latest.get(key);
+      if (!existing || (slot.ratedAt ?? 0) >= (existing.ratedAt ?? 0)) {
+        latest.set(key, slot);
+      }
+    }
+  }
+  return [...latest.values()].sort((a, b) => (b.ratedAt ?? 0) - (a.ratedAt ?? 0));
+}
+
+function waitForSwitchFeedback(startedAt: number): Promise<void> {
+  const remaining = SWITCH_FEEDBACK_MIN_MS - (Date.now() - startedAt);
+  return remaining > 0
+    ? new Promise((resolve) => setTimeout(resolve, remaining))
+    : Promise.resolve();
+}
+
+function normalizeRouteFedId(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && /^[0-9a-f]{64}$/.test(normalized) ? normalized : null;
+}
+
+function resolveLiveActiveInvite(inputs: {
+  joined: boolean;
+  federationId: string | null | undefined;
+  storedInvite: string | null;
+}): string | null {
+  if (!inputs.joined) return null;
+  const liveFedId = normalizeRouteFedId(inputs.federationId);
+  if (!liveFedId) return inputs.storedInvite;
+
+  const expectedStoredFedId = normalizeRouteFedId(expectedFederationIdForInvite(inputs.storedInvite));
+  if (expectedStoredFedId === liveFedId) {
+    return inputs.storedInvite;
+  }
+
+  const livePresetInvite = CURATED_PRESETS.find(
+    (preset) => normalizeRouteFedId(preset.federationId) === liveFedId,
+  )?.inviteCode ?? null;
+
+  if (livePresetInvite) return livePresetInvite;
+  return expectedStoredFedId ? null : inputs.storedInvite;
+}
+
+function routeCommunitySlugForInvite(communitySlug: string, activeInvite: string | null): string {
+  if (!activeInvite) return communitySlug;
+  const community = getCommunityBySlug(communitySlug);
+  if (community?.federationInvite === activeInvite) return communitySlug;
+  return communityForInvite(activeInvite)?.slug ?? communitySlug;
+}
+
+function nativeBridgePortLabel(): string | null {
+  if (!isNativeBridgeModeOn()) return null;
+  try {
+    const url = new URL(getNativeBridgeUrl());
+    return url.port ? `:${url.port}` : url.host;
+  } catch {
+    return "native";
+  }
+}
+
 export default function App() {
   // Toast state needs to be declared before the hook since we pass
   // onClaimProgress which dispatches toasts. useRef holds the callback
@@ -206,6 +329,9 @@ export default function App() {
   });
 
   const [view, setView] = useState<View>("browse");
+  // v3.2: the create flow opens as one shared overlay. The Browse pencil and
+  // the old bottom-nav Create slot both hit this same path for now.
+  const [createOverlayOpen, setCreateOverlayOpen] = useState(false);
   // When the Advanced screen is opened from the trade-page NWC "Change" link,
   // land focused on the NWC wallets section instead of the top of the page.
   const [advancedFocusNwc, setAdvancedFocusNwc] = useState(false);
@@ -244,9 +370,19 @@ export default function App() {
   // one-tap capture's "rated" state). Both null/empty until connected — exactly
   // today's behavior, so the graduation gate degrades closed on any fetch miss.
   const [myRatings, setMyRatings] = useState<AggregateRatings | null>(null);
-  const [myGivenRatings, setMyGivenRatings] = useState<Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>>([]);
+  const [myGivenRatings, setMyGivenRatings] = useState<GivenRatingSlot[]>([]);
+  const ratingHydrationKey = useMemo(() => {
+    return [...escrows.values()]
+      .filter((trade) => trade.status === EscrowStatus.COMPLETED || trade.resolvedOutcome !== null)
+      .map((trade) => `${trade.id}:${trade.resolvedOutcome ?? "open"}:${trade.eventChain?.length ?? 0}`)
+      .sort()
+      .join("|");
+  }, [escrows]);
   useEffect(() => {
     if (!pubkey) { setMyRatings(null); setMyGivenRatings([]); return; }
+    const cached = readCachedGivenRatings(pubkey);
+    setMyGivenRatings(cached);
+    if (!connected || connectedRelays <= 0) return;
     let cancelled = false;
     (async () => {
       try {
@@ -254,18 +390,33 @@ export default function App() {
           actions.fetchRatingSummary(pubkey),
           actions.fetchMyGivenRatings(),
         ]);
-        if (!cancelled) { setMyRatings(summary); setMyGivenRatings(given); }
+        if (!cancelled) {
+          setMyRatings(summary);
+          const merged = mergeGivenRatingSlots(cached, given);
+          setMyGivenRatings(merged);
+          writeCachedGivenRatings(pubkey, merged);
+        }
       } catch { /* leave null — graduation stays closed, same as before */ }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pubkey]);
+  }, [connected, pubkey, connectedRelays, ratingHydrationKey]);
   const handleRateCounterparty = async (tradeId: string, ratee: string, thumb: RatingThumb) => {
     await actions.rateCounterparty(tradeId, ratee, thumb);
     const lc = ratee.toLowerCase();
+    const slot: GivenRatingSlot = {
+      tradeId,
+      ratee: lc,
+      thumb,
+      ratedAt: Math.floor(Date.now() / 1000),
+    };
     // Optimistic: flip the one-tap to "rated" immediately (the slot is
     // replaceable, so a later re-fetch converges on the same value).
-    setMyGivenRatings(prev => [...prev.filter(r => !(r.tradeId === tradeId && r.ratee === lc)), { tradeId, ratee: lc, thumb }]);
+    setMyGivenRatings(prev => {
+      const merged = mergeGivenRatingSlots(prev, [slot]);
+      if (pubkey) writeCachedGivenRatings(pubkey, merged);
+      return merged;
+    });
   };
   // v0.2.0 item 1: brief inline overlay during silent re-init triggered
   // by listing-tap. Sub-second on a healthy fed; modal-free.
@@ -345,6 +496,30 @@ export default function App() {
     setThemeModeState(mode);
     setThemeEpoch(e => e + 1);
   };
+  const storedActiveInvite = getActiveInvite();
+  const liveActiveInvite = resolveLiveActiveInvite({
+    joined: fedimint.joined,
+    federationId: fedimint.federationId,
+    storedInvite: storedActiveInvite,
+  });
+  const routeCommunitySlug = routeCommunitySlugForInvite(browseCommunity, liveActiveInvite);
+  const nativeBridgeLabel = nativeBridgePortLabel();
+  const localWalletSats = Math.floor(Math.max(0, fedimint.balanceMsats ?? 0) / 1000);
+  const sessionBadge = nativeBridgeLabel
+    ? `${nativeBridgeLabel}${localWalletSats > 0 ? ` · ${localWalletSats} sats` : ""}`
+    : "";
+
+  useEffect(() => {
+    if (!fedimint.joined || !liveActiveInvite) return;
+    if (storedActiveInvite === liveActiveInvite) return;
+    setActiveInvite(liveActiveInvite);
+  }, [fedimint.joined, liveActiveInvite, storedActiveInvite]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.title = nativeBridgeLabel ? `Chama ${nativeBridgeLabel}` : "Chama";
+  }, [nativeBridgeLabel]);
+
   useEffect(() => {
     if (themeMode !== "system" || typeof globalThis.matchMedia !== "function") return;
     const mq = globalThis.matchMedia("(prefers-color-scheme: light)");
@@ -721,7 +896,7 @@ export default function App() {
   // falling back to mintUrl for legacy listings. The fed id is the
   // load-bearing money-route fact; mintUrl can be stale if a power user
   // switched routes without changing their home community.
-  const myActiveInvite = fedimint.joined ? getActiveInvite() : null;
+  const myActiveInvite = liveActiveInvite;
   // #7 Stage 3: index child purchases by parent so a multi-unit listing can
   // show a derived "N left" and drop off Browse when sold out. Children seen via
   // the public CREATE feed are enough to subtract visible reservations; a
@@ -797,10 +972,6 @@ export default function App() {
     // without forcing deep equality on the array.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleListings.length, visibleListings.map(l => l.id).join(",")]);
-  // browseCommunity drives pill highlighting; it no longer filters
-  // (the pill is identity-only post-v0.1.87). matchesBrowseCommunity
-  // helper retired with the filter.
-  void browseCommunity;
   const selected = selectedId ? escrows.get(selectedId) : null;
   const selectedPoisonedClaimReason = selected
     ? listPendingRedemptions().find(entry =>
@@ -866,8 +1037,10 @@ export default function App() {
     // "Recover & switch" path because that path can only send whole sats.
     setPendingDestroyConfirm(null);
     (async () => {
+      const switchStartedAt = Date.now();
       try {
         setSwitchingToCommunity({ displayName: request.label });
+        setToast({ message: `Switching to ${request.label}...`, type: "info" });
         const persistCustom = !("restoreCommunitySlug" in request);
         if (fedimint.federationId) {
           await actions.switchFederation(request.invite, { persistCustom });
@@ -902,6 +1075,7 @@ export default function App() {
           type: "error",
         });
       } finally {
+        await waitForSwitchFeedback(switchStartedAt);
         setSwitchingToCommunity(null);
       }
     })();
@@ -940,8 +1114,12 @@ export default function App() {
     }
 
     const effect = decideListingTapEffect({
-      listing: { mintUrl: local.mintUrl, community: local.community },
-      currentInvite: getActiveInvite(),
+      listing: {
+        mintUrl: local.mintUrl,
+        community: local.community,
+        fedId: (local.eventChain[0]?.payload as { fed?: string } | undefined)?.fed ?? null,
+      },
+      currentInvite: liveActiveInvite,
       balanceMsats: fedimint.balanceMsats ?? 0,
       activeCommitmentCount,
     });
@@ -977,7 +1155,9 @@ export default function App() {
 
     if (effect.kind === "switch-silent") {
       setSwitchingToCommunity({ displayName: effect.displayName });
+      setToast({ message: `Switching to ${effect.displayName} for this trade...`, type: "info" });
       (async () => {
+        const switchStartedAt = Date.now();
         try {
           if (fedimint.federationId) {
             await actions.switchFederation(effect.targetInvite);
@@ -992,6 +1172,7 @@ export default function App() {
           setDetailBackView(safeBackView);
           setSelectedId(id);
           setView("detail");
+          setToast({ message: `On ${effect.displayName} for this trade.`, type: "success" });
         } catch (e: any) {
           if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE"
             || e?.code === "SWITCH_REFUSED_NONZERO_BALANCE") {
@@ -1002,7 +1183,7 @@ export default function App() {
               invite: effect.targetInvite,
               label: effect.displayName,
               balanceMsats: e.balanceMsats || 0,
-              activeInvite: e.previousActiveInvite || getActiveInvite() || "",
+              activeInvite: e.previousActiveInvite || liveActiveInvite || "",
               navigateToEscrowAfter: id,
             });
           } else {
@@ -1012,6 +1193,7 @@ export default function App() {
             });
           }
         } finally {
+          await waitForSwitchFeedback(switchStartedAt);
           setSwitchingToCommunity(null);
         }
       })();
@@ -1091,13 +1273,25 @@ export default function App() {
     const homeSlug = getUserCommunitySlugRaw();
     const home = homeSlug ? getCommunityBySlug(homeSlug) : null;
     const homeInvite = home?.federationInvite;
-    if (!home || !homeInvite || getActiveInvite() === homeInvite) return;
+    if (!home || !homeInvite) return;
+    const homeFedId = normalizeRouteFedId(expectedFederationIdForInvite(homeInvite));
+    const activeFedId = normalizeRouteFedId(fedimint.federationId);
+    const alreadyHome = homeFedId && activeFedId
+      ? homeFedId === activeFedId
+      : liveActiveInvite === homeInvite;
+    if (alreadyHome) return;
     void (async () => {
+      const switchStartedAt = Date.now();
       try {
+        setSwitchingToCommunity({ displayName: home.displayName });
+        setToast({ message: `Returning to ${home.displayName}...`, type: "info" });
         await actions.switchFederation(homeInvite);
         setToast({ message: `Back home on ${home.displayName}.`, type: "info" });
       } catch (e: any) {
         console.warn("[chama] snap-back to home failed:", e?.message || e);
+      } finally {
+        await waitForSwitchFeedback(switchStartedAt);
+        setSwitchingToCommunity(null);
       }
     })();
   };
@@ -1113,7 +1307,7 @@ export default function App() {
 
   const switchTab = (t: Tab) => {
     if (t === "browse") setView("browse");
-    else if (t === "create") setView("create");
+    else if (t === "create") setCreateOverlayOpen(true);
     else if (t === "me") setView("me");
     // V3 #75: leaving a visited trade via the bottom nav counts as backing
     // out — same snap-back as the detail back button.
@@ -1278,7 +1472,7 @@ export default function App() {
                 {/* Local/test builds carry an amber "dev <build time>" stamp so a
                     Tauri/ASDK refresh visibly confirms it picked up the new
                     bundle. ship.sh exports CHAMA_RELEASE=1 → clean version. */}
-                v{__APP_VERSION__}{__BUILD_STAMP__ ? ` · dev ${__BUILD_STAMP__}` : ""}
+                v{__APP_VERSION__}{__BUILD_STAMP__ ? ` · dev ${__BUILD_STAMP__}` : ""}{sessionBadge ? ` · ${sessionBadge}` : ""}
               </div>
             </div>
           </div>
@@ -1315,7 +1509,7 @@ export default function App() {
           the failure-mode escape hatch is reachable from anywhere. */}
           <ChamaBar
             fedimint={fedimint}
-            communitySlug={browseCommunity}
+            communitySlug={routeCommunitySlug}
             chamaLabel={decideChamaBarLabel({
               balanceMsats: fedimint.balanceMsats ?? 0,
               hasActiveBuyerSellerCommitment: hasActiveCommitment,
@@ -1333,7 +1527,7 @@ export default function App() {
               title: "Recover sats",
               traceContext: recoveryTraceContext,
             })}
-            showReconnect={getUserCommunitySlugRaw() !== null || getActiveInvite() !== null}
+            showReconnect={getUserCommunitySlugRaw() !== null || !!(storedActiveInvite || liveActiveInvite)}
             onInit={() => actions.initFedimint().catch(
               (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
             )}
@@ -1437,7 +1631,7 @@ export default function App() {
         <EcashExportModal
           balanceMsats={fedimint.balanceMsats ?? 0}
           federationLabel={
-            getCommunityBySlug(browseCommunity)?.displayName
+            getCommunityBySlug(routeCommunitySlug)?.displayName
             ?? fedimint.federationName
             ?? "your federation"
           }
@@ -1500,12 +1694,11 @@ export default function App() {
                 type: "info",
               });
             } else if (terminal.kind === "payout-failed") {
-              // v2.1.1: route by what can actually help. When the claim
-              // settled via the cover check, COMPLETE wasn't published —
-              // the trade's Claim button is alive and retries with a
-              // fresh invoice. And below the material line, Me's Recover
-              // surface is deliberately quiet, so pointing there would
-              // strand sub-material payouts (the ₿17 Samuel case).
+              // Route by what can actually help. New claim payouts defer
+              // COMPLETE until the outbound leg succeeds, so the trade's
+              // Claim button is alive and retries with a fresh invoice.
+              // Older terminals may still arrive completed; below the
+              // material line, Me's Lightning recovery surface stays quiet.
               const payoutSatsForCopy = Math.floor(pendingClaim.payoutMsats / 1000);
               if (terminal.claimCompleted === false) {
                 setToast({
@@ -1663,6 +1856,7 @@ export default function App() {
             profileNames={nostrProfiles}
             onRateCounterparty={handleRateCounterparty}
             myGivenRatings={myGivenRatings}
+            fetchRatingSummary={actions.fetchRatingSummary}
             // v0.3.1 Phase 3 (Q4 scope): same boot-probe flag the
             // ChamaBar's "unreachable" pill reads from. Fund + Claim
             // buttons disable with the "Federation unreachable —
@@ -2054,7 +2248,7 @@ export default function App() {
               onGoToArbiterTrade={(escrowId) => openEscrow(escrowId)}
               canOfferSubscription={userCanSubscribe}
               userPubkey={pubkey ?? null}
-              activeInvite={getActiveInvite()}
+              activeInvite={liveActiveInvite}
               amountDisplayMode={amountDisplayMode}
               communitySlug={browseCommunity}
             />
@@ -2076,9 +2270,6 @@ export default function App() {
             onKind0EnabledChange={setKind0Enabled}
             themeMode={themeMode}
             onThemeModeChange={setThemeMode}
-            onApplyAsArbiter={async (community, statement) => {
-              await actions.applyAsArbiter(community, statement);
-            }}
             myTrades={myTrades}
             allTrades={visibleTrades}
             ratings={myRatings}
@@ -2227,7 +2418,7 @@ export default function App() {
             <BrowseView
               browseCategory={browseCategory}
               setBrowseCategory={setBrowseCategory}
-              browseCommunity={browseCommunity}
+              browseCommunity={routeCommunitySlug}
               amountDisplayMode={amountDisplayMode}
               matchingListings={matchingListings}
               nonMatchingListings={nonMatchingListings}
@@ -2239,8 +2430,10 @@ export default function App() {
               pubkey={pubkey!}
               kind0Enabled={kind0Enabled}
               profileNames={nostrProfiles}
-              onCreate={() => switchTab("create")}
-              onRecruitArbiter={() => switchTab("me")}
+              onCreate={() => setCreateOverlayOpen(true)}
+              onApplyAsArbiter={async (community, statement) => {
+                await actions.applyAsArbiter(community, statement);
+              }}
               onOpenEscrow={openEscrow}
               onLoadById={async (id) => {
                 try {
@@ -2263,7 +2456,56 @@ export default function App() {
         </>
       )}
 
-      {!detailMode && <BottomNav active={activeTab} onSelect={switchTab} />}
+      {!detailMode && <BottomNav active={createOverlayOpen ? "create" : activeTab} onSelect={switchTab} />}
+
+      {/* v3.2: the create flow opens from either the Browse floating-menu pencil
+          or the old bottom-nav Create slot. CreateForm is self-contained (its own header /
+          close × / step progress), so the sheet just frames it over a blurred
+          Browse. Drafts persist to localStorage, so dismissing is non-destructive. */}
+      {createOverlayOpen && (
+        <>
+          <div
+            onClick={() => setCreateOverlayOpen(false)}
+            aria-hidden="true"
+            style={{
+              position: "fixed", inset: 0, zIndex: 9994,
+              background: "rgba(0,0,0,0.45)",
+              backdropFilter: "blur(7px)", WebkitBackdropFilter: "blur(7px)",
+              animation: "fadeIn 0.2s ease",
+            }}
+          />
+          <div style={{
+            // Auto-height card sized to its content (like the arbiter toast),
+            // NOT a full sheet — so the blurred Browse shows above AND below it
+            // instead of an unblurrable black void. Only the drafts list grows
+            // the content, so cap at the viewport (minus top+bottom blur margin)
+            // and let extra drafts scroll inside.
+            position: "fixed", left: 0, right: 0, top: 40,
+            zIndex: 9995, maxWidth: 520, margin: "0 auto",
+            maxHeight: "calc(100dvh - 80px)",
+            background: T.bg, borderRadius: 18,
+            border: `1px solid ${T.border}`,
+            boxShadow: "0 12px 44px rgba(0,0,0,0.6)",
+            overflowY: "auto", animation: "fadeIn 0.25s ease",
+          }}>
+            <CreateForm
+              onCreate={async (params: any) => {
+                await handleCreate(params);
+                setCreateOverlayOpen(false);
+                setDetailBackView("browse");
+              }}
+              onClose={() => setCreateOverlayOpen(false)}
+              arbiterWarning={arbiterWarning}
+              onGoToArbiterTrade={(escrowId) => { setCreateOverlayOpen(false); openEscrow(escrowId); }}
+              canOfferSubscription={userCanSubscribe}
+              userPubkey={pubkey ?? null}
+              activeInvite={liveActiveInvite}
+              amountDisplayMode={amountDisplayMode}
+              communitySlug={browseCommunity}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2319,8 +2561,8 @@ const globalCss = () => `
     .trade-detail-layout{display:grid;grid-template-columns:minmax(0,.92fr) minmax(420px,1.08fr);gap:18px;align-items:start}
     .trade-room-card{position:sticky;top:20px}
     .trade-detail-title{font-size:26px!important}
-    .trade-detail-amount .bitcoin-amount-number{font-size:56px!important}
-    .trade-detail-amount .bitcoin-amount-glyph{font-size:50px!important}
+    .trade-detail-amount .bitcoin-amount-number{font-size:40px!important}
+    .trade-detail-amount .bitcoin-amount-glyph{font-size:36px!important}
     .trade-lock-ring{width:148px!important;height:148px!important}
   }
   @media (min-width: 1280px){

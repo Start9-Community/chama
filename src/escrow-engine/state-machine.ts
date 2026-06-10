@@ -1527,6 +1527,13 @@ export function replayEventChain(events: ParsedEscrowEvent[]): TransitionResult 
             .includes(event.kind)) {
         continue;
       }
+      // CHAT is auxiliary state, not the escrow's money/state chain. A legacy
+      // or malicious nonparticipant chat must not make the CREATE/JOIN/LOCK
+      // history unloadable from relays; keep rejecting it on live send/apply,
+      // but skip it during full-chain replay.
+      if (event.kind === EscrowEventKind.CHAT && result.error.code === "NOT_PARTICIPANT") {
+        continue;
+      }
       // Real error — fail the replay
       return result;
     }

@@ -125,6 +125,7 @@ const DRAFT_KEY_PREFIX = "chama_create_draft_";
 const FIRST_PUBLISH_KEY_PREFIX = "chama_first_publish_done_";
 const MAX_MENU_ITEMS = 20;
 const MAX_MENU_IMAGE_DATA_URL_CHARS = 500_000;
+const MENU_IMAGE_MAX_EDGE_PX = 1280;
 const MENU_IMAGE_ACCEPT = [
   "image/*",
   ".avif",
@@ -209,6 +210,57 @@ function normalizeImageDataUrl(file: File, dataUrl: string): string | null {
   const commaIndex = dataUrl.indexOf(",");
   if (commaIndex < 0) return null;
   return `data:${mimeType};base64,${dataUrl.slice(commaIndex + 1)}`;
+}
+
+function readImageFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Couldn't read image"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageDataUrl(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Couldn't preview image"));
+    img.src = dataUrl;
+  });
+}
+
+async function prepareMenuImageDataUrl(file: File): Promise<string> {
+  const original = normalizeImageDataUrl(file, await readImageFileAsDataUrl(file));
+  if (!original) {
+    throw new Error("That file doesn't look like a supported photo.");
+  }
+  if (original.length <= MAX_MENU_IMAGE_DATA_URL_CHARS) return original;
+
+  const img = await loadImageDataUrl(original);
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+
+  for (const maxEdge of [MENU_IMAGE_MAX_EDGE_PX, 1024, 820, 640, 500]) {
+    const scale = Math.min(1, maxEdge / Math.max(width, height));
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Image preview is not available in this browser.");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, targetWidth, targetHeight);
+    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+    for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42]) {
+      const dataUrl = canvas.toDataURL("image/jpeg", quality);
+      if (dataUrl.length <= MAX_MENU_IMAGE_DATA_URL_CHARS) return dataUrl;
+    }
+  }
+
+  throw new Error("That screenshot is too large for this release. Try a tighter crop.");
 }
 
 function normalizeFormState(raw: any, currency = "USD"): FormState {
@@ -1734,18 +1786,20 @@ function Step2({
       updateMenuItem(id, { imageDataUrl: "" });
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      const imageDataUrl = normalizeImageDataUrl(file, result);
-      if (!imageDataUrl || imageDataUrl.length > MAX_MENU_IMAGE_DATA_URL_CHARS) {
-        setImageError("That file doesn't look like a supported photo, or it's too large for this release. Try JPG, PNG, WebP, GIF, AVIF, HEIC, HEIF, or BMP.");
-        return;
+    void (async () => {
+      try {
+        const imageDataUrl = await prepareMenuImageDataUrl(file);
+        setImageError(null);
+        updateMenuItem(id, { imageDataUrl });
+      } catch (e: any) {
+        setImageError(e?.message || "That file doesn't look like a supported photo, or it's too large for this release. Try JPG, PNG, or WebP.");
       }
-      setImageError(null);
-      updateMenuItem(id, { imageDataUrl });
-    };
-    reader.readAsDataURL(file);
+    })();
+  };
+
+  const clearMenuImage = (id: string) => {
+    setImageError(null);
+    updateMenuItem(id, { imageDataUrl: "" });
   };
 
   return (
@@ -2276,7 +2330,10 @@ function Step2({
                       <input
                         type="file"
                         accept={MENU_IMAGE_ACCEPT}
-                        onChange={e => updateMenuImage(item.id, e.target.files?.[0] ?? null)}
+                        onChange={e => {
+                          updateMenuImage(item.id, e.target.files?.[0] ?? null);
+                          e.currentTarget.value = "";
+                        }}
                         style={{ display: "none" }}
                       />
                     </label>
@@ -2294,7 +2351,7 @@ function Step2({
                           }}
                         />
                         <button
-                          onClick={() => updateMenuItem(item.id, { imageDataUrl: "" })}
+                          onClick={() => clearMenuImage(item.id)}
                           style={{
                             border: "none",
                             background: "none",

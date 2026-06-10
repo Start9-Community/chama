@@ -36,6 +36,7 @@ import { getSavedHandle } from "../payments/saved-handles.js";
 import { pickArbiterFromPool } from "../arbiters/pool.js";
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
 import { receiveFediEcash } from "./fedi-internal.js";
+import { effectiveCreateFederationId } from "./federation-config.js";
 
 function claimTraceEnabled(): boolean {
   try {
@@ -114,8 +115,7 @@ export class EscrowFedimintBridge {
     const createEvent = state.eventChain.find(
       (e: any) => e.kind === 38100 || e.payload?.type === "escrow:create"
     );
-    const expectedFed: string | undefined =
-      (createEvent?.payload as any)?.fed;
+    const expectedFed = effectiveCreateFederationId(createEvent?.payload as any);
 
     if (expectedFed) {
       let probe: { fed: string | null };
@@ -475,8 +475,7 @@ export class EscrowFedimintBridge {
     const claimCreateEvent = state.eventChain.find(
       (e: any) => e.kind === 38100 || e.payload?.type === "escrow:create"
     );
-    const expectedFed: string | undefined =
-      (claimCreateEvent?.payload as any)?.fed;
+    const expectedFed = effectiveCreateFederationId(claimCreateEvent?.payload as any);
 
     let redeemProbe: { fed: string | null };
     try {

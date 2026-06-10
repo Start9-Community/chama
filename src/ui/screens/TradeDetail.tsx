@@ -24,7 +24,7 @@ import {
 } from "../../payments/saved-handles.js";
 import { getRailByKey, matchRails, toRailKey, categoryUsesPaymentRails } from "../../payments/rail-registry.js";
 import {
-  T, STATUS, ROLE_COLOR, CAT_LABEL, TRINITY_RING_ORDER,
+  T, STATUS, ROLE_COLOR, ROLE_COLOR_TEXT, CAT_LABEL, TRINITY_RING_ORDER,
   fmtSats, refundRecipientFor, inputStyle,
 } from "../theme.js";
 import { listingPremiumLine } from "../listing-metrics.js";
@@ -33,7 +33,7 @@ import { useFiatRates } from "../hooks/useFiatRates.js";
 import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
 import { pickArbiterFromPool, getTrustedArbiterPool, classifyArbiterProvenance } from "../../arbiters/pool.js";
 import { isPerformanceContest } from "../../escrow-engine/arbiter-substitution.js";
-import { counterpartyToRate, type RatingThumb } from "../../reputation/ratings.js";
+import { counterpartyToRate, type RatingThumb, type AggregateRatings } from "../../reputation/ratings.js";
 import { RatingTap } from "../components/RatingTap.js";
 import {
   hasStateBExplained,
@@ -41,6 +41,7 @@ import {
 } from "./state-b-explainer.js";
 import { Badge } from "../components/Badge.js";
 import { Dot } from "../components/Dot.js";
+import { ReputationReadout } from "../components/ReputationReadout.js";
 import { CountdownTimer } from "../components/CountdownTimer.js";
 import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
@@ -99,7 +100,7 @@ export function TradeDetail({
   disableNwc = false, onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
   onPrewarmFunding, onRebroadcast, onForget, onLeave, onPurchase, stockLeft, isOversoldOrder = false,
-  onRateCounterparty, myGivenRatings,
+  onRateCounterparty, myGivenRatings, fetchRatingSummary,
 }: {
   state: EscrowState; pubkey: string;
   /** User's home community slug — drives State A vs State B subtitle
@@ -145,6 +146,9 @@ export function TradeDetail({
   /** Reputation (kind:38123): one-tap rate the counterparty on a settled trade. */
   onRateCounterparty?: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
   myGivenRatings?: Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>;
+  /** v3.1.1 (#2): fetch a participant's verified rating aggregate on demand —
+   *  drives the tap-a-participant reputation readout in the trinity ring. */
+  fetchRatingSummary?: (ratee: string) => Promise<AggregateRatings>;
   onJoin: (
     role: Role,
     opts?: { selectedItems?: SelectedMenuItem[]; amountMsats?: number; orderFinalized?: boolean },
@@ -232,11 +236,18 @@ export function TradeDetail({
   const [cancelArmed, setCancelArmed] = useState(false);
   // v3.1 B2: two-tap confirm for the buyer's PRE-lock "leave this trade" link.
   const [leaveArmed, setLeaveArmed] = useState(false);
+  // v3.2: Mark-delivered debounce (chat echo flips the durable done-state) +
+  // the chat-row anchor the arbiter's "Open chat & evidence" link scrolls to.
+  const [markingDelivered, setMarkingDelivered] = useState(false);
+  const chatRowRef = useRef<HTMLDivElement | null>(null);
   const [joining, setJoining] = useState(false);
   const [locking, setLocking] = useState(false);
   // Advanced "re-broadcast / heal" — idle → broadcasting → a result line.
   const [rebroadcasting, setRebroadcasting] = useState(false);
   const [rebroadcastResult, setRebroadcastResult] = useState<string | null>(null);
+  // v3.1.1 (#2): which participant's reputation is currently revealed — tap a
+  // trinity-ring avatar to toggle. null = none shown.
+  const [repFor, setRepFor] = useState<string | null>(null);
   const [rebroadcastDone, setRebroadcastDone] = useState(false);
   const [idCopied, setIdCopied] = useState(false);
   // Inline two-tap forget confirm (no native confirm() — it's a no-op in the
@@ -621,6 +632,8 @@ export function TradeDetail({
     menuOrderNotFinal,
     participantsBuyer: participants.buyer ?? undefined,
     votePromptKind: votePrompt.kind,
+    votePromptOutcomes: votePrompt.kind === "buttons" ? votePrompt.outcomes : undefined,
+    votePromptRole: votePrompt.kind === "buttons" ? votePrompt.role : null,
     iAmWinner,
     claimRetryBlocked,
     canJoinTrade,
@@ -664,17 +677,20 @@ export function TradeDetail({
   const premiumCheckoutLine = detailPremiumCheckoutLine(state, heroFiat);
   const showHeroFiat = amountDisplayMode === "fiat" && !!heroFiatLabel;
   const shortTradeId = state.id.length > 18 ? `${state.id.slice(0, 10)}…${state.id.slice(-6)}` : state.id;
+  const releaseVoteCount = Object.values(state.votes).filter(v => v === Outcome.RELEASE).length;
+  const refundVoteCount = Object.values(state.votes).filter(v => v === Outcome.REFUND).length;
+  // v3.2: dispute is a first-class header state — "A call is needed" the
+  // moment both outcomes are on record unresolved, for every seat.
+  const titleDisputed = releaseVoteCount > 0 && refundVoteCount > 0 && !state.resolvedOutcome;
   const tradeRoomTitle = state.status === EscrowStatus.CREATED
-    ? hasMenu ? "Build the order" : "Ready to start"
+    ? hasMenu ? "Build the order" : "New order"
     : state.status === EscrowStatus.LOCKED
-      ? "Trade is live"
+      ? titleDisputed ? "A call is needed" : "Trade is live"
       : state.status === EscrowStatus.COMPLETED
         ? "Trade complete"
         : state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED
           ? "Ready to settle"
           : "Trade room";
-  const releaseVoteCount = Object.values(state.votes).filter(v => v === Outcome.RELEASE).length;
-  const refundVoteCount = Object.values(state.votes).filter(v => v === Outcome.REFUND).length;
   const decisionTone = state.resolvedOutcome === Outcome.RELEASE
     ? T.green
     : state.resolvedOutcome === Outcome.REFUND
@@ -691,10 +707,19 @@ export function TradeDetail({
   // v3.1 stage 2 — disclosure rows: votes open once any vote is in / it's
   // resolved; chat open while LOCKED (the work surface). null = follow the rule.
   const votesOpen = votesRowOpen ?? (releaseVoteCount + refundVoteCount > 0 || !!state.resolvedOutcome);
-  const chatOpen = chatRowOpen ?? (state.status === EscrowStatus.LOCKED);
-  const heroImages = [
+  // v3.2: chat auto-opens at LOCKED for buyer/seller (the work surface). The
+  // arbiter keeps the chat VISIBLE (they guard both sides throughout) but it
+  // stays collapsed until a dispute actually summons them.
+  const chatOpen = chatRowOpen ?? (state.status === EscrowStatus.LOCKED
+    && (myRole !== Role.ARBITER || titleDisputed));
+  const showStorefrontImages =
+    state.category !== "marketplace" ||
+    !homeCommunity ||
+    !state.community ||
+    state.community === homeCommunity;
+  const heroImages = showStorefrontImages ? [
     ...(renderedMenuRows.length > 0 ? renderedMenuRows : menuItems),
-  ].filter(item => !!item.imageDataUrl).slice(0, 2);
+  ].filter(item => !!item.imageDataUrl).slice(0, 2) : [];
   // Trade detail follows the sketch: route education stays as a tiny
   // context note in the hero instead of a full pre-room card.
   const showVerboseRouteEducation = false;
@@ -886,8 +911,8 @@ export function TradeDetail({
       <div className="trade-detail-layout">
         <div className="trade-detail-listing-pane">
           <div className="trade-detail-hero" style={{
-            padding: "6px 0 18px",
-            marginBottom: 6,
+            padding: "0 0 10px",
+            marginBottom: 4,
             textAlign: "center" as const,
           }}>
             {heroImages.length > 0 && (
@@ -895,7 +920,7 @@ export function TradeDetail({
                 display: "grid",
                 gridTemplateColumns: heroImages.length > 1 ? "1fr 1fr" : "1fr",
                 gap: 8,
-                marginBottom: 18,
+                marginBottom: 10,
                 borderRadius: T.r,
                 overflow: "hidden",
                 border: `1px solid ${T.border}`,
@@ -907,7 +932,7 @@ export function TradeDetail({
                     alt=""
                     style={{
                       width: "100%",
-                      height: 150,
+                      height: 96,
                       objectFit: "cover",
                       display: "block",
                     }}
@@ -922,7 +947,7 @@ export function TradeDetail({
                 brand/status accent without the vertical cost. */}
             <div aria-hidden="true" style={{
               width: 40, height: 3, borderRadius: 2,
-              margin: "2px auto 16px",
+              margin: "2px auto 10px",
               background: s.c,
               boxShadow: `0 0 12px ${s.c}66`,
             }} />
@@ -933,7 +958,7 @@ export function TradeDetail({
                 <div className="trade-detail-amount" style={{
                   color: T.accent,
                   fontFamily: T.mono,
-                  fontSize: 44,
+                  fontSize: 32,
                   fontWeight: 900,
                   lineHeight: 1,
                   letterSpacing: 0,
@@ -941,15 +966,15 @@ export function TradeDetail({
                   {heroFiatLabel}
                 </div>
               ) : (
-                <BitcoinAmount className="trade-detail-amount" msats={heroAmountMsats} size={46} gap={8} glyphScale={1.12} />
+                <BitcoinAmount className="trade-detail-amount" msats={heroAmountMsats} size={34} gap={7} glyphScale={1.12} />
               )}
             </div>
             <div style={{
-              marginTop: 10,
+              marginTop: 7,
               color: T.muted,
               fontFamily: T.mono,
-              fontSize: 11,
-              lineHeight: 1.5,
+              fontSize: 10,
+              lineHeight: 1.45,
             }}>
               {state.description}
               {showHeroFiat
@@ -1097,7 +1122,7 @@ export function TradeDetail({
                   border: `1px solid ${T.border}`,
                   borderRadius: T.rs,
                 }}>
-                  {item.imageDataUrl && (
+                  {showStorefrontImages && item.imageDataUrl && (
                     <img
                       src={item.imageDataUrl}
                       alt=""
@@ -1642,13 +1667,21 @@ export function TradeDetail({
         <div style={{
           padding: 14,
           borderRadius: T.rs,
-          background: nextStep.tone === "green" ? T.greenDim
+          // v3.2 prototype: the card wears the VIEWER's role colour — buyer
+          // purple, seller orange, arbiter blue — "the screen knows who you
+          // are". Red (error) stays semantic: that signal is sacred. Visitors
+          // (no seat) keep the semantic tone palette.
+          background: myRole && nextStep.tone !== "red"
+            ? `${ROLE_COLOR[myRole as keyof typeof ROLE_COLOR]}14`
+            : nextStep.tone === "green" ? T.greenDim
             : nextStep.tone === "red" ? T.redDim
             : nextStep.tone === "purple" ? T.purpleDim
             : nextStep.tone === "teal" ? T.tealDim
             : T.surface,
           border: `1px solid ${
-            nextStep.tone === "green" ? T.green + "44"
+            myRole && nextStep.tone !== "red"
+            ? ROLE_COLOR[myRole as keyof typeof ROLE_COLOR] + "44"
+            : nextStep.tone === "green" ? T.green + "44"
             : nextStep.tone === "red" ? T.red + "44"
             : nextStep.tone === "purple" ? T.purple + "44"
             : nextStep.tone === "teal" ? T.teal + "44"
@@ -1664,15 +1697,12 @@ export function TradeDetail({
             marginBottom: 7,
           }}>
             <div style={{
-              // Identity accent — the kicker wears the viewer's role colour
-              // ("your view wears your colour") for waiting/active (purple/teal)
-              // tones only. Money (accent → bitcoin-orange), settled (green) and
-              // error (red) tones stay semantic — those signals are sacred.
-              color: (myRole
-                && nextStep.tone !== "green"
-                && nextStep.tone !== "red"
-                && nextStep.tone !== "accent")
-                ? ROLE_COLOR[myRole as keyof typeof ROLE_COLOR]
+              // Identity accent — v3.2: the kicker wears the viewer's role
+              // colour in every state except error (red stays sacred). Money
+              // colour now lives on the buttons inside the card, not the chrome.
+              // ROLE_COLOR_TEXT = light-mode-legible variant of the role hexes.
+              color: (myRole && nextStep.tone !== "red")
+                ? ROLE_COLOR_TEXT[myRole as keyof typeof ROLE_COLOR_TEXT]
                 : nextStep.color,
               fontFamily: T.mono,
               fontSize: 11,
@@ -1705,7 +1735,808 @@ export function TradeDetail({
               {nextStep.body}
             </div>
           )}
+
+          {/* v3.2: seller's delivery nudge (marketplace, LOCKED). "Delivered" has
+              no wire event by design — it rides the existing chat (kind:38108)
+              as a structured message the buyer + arbiter both see. Renders ABOVE
+              the vote buttons (notify first, then the "Item delivered" vote
+              settles), flips done off the chat echo OR an already-cast seller
+              RELEASE vote, debounces the publish round-trip, and hides during a
+              dispute (the ruling owns that moment). */}
+          {state.status === EscrowStatus.LOCKED && myRole === Role.SELLER
+            && state.category === "marketplace" && !titleDisputed && (() => {
+            const deliveredMarked = state.votes[Role.SELLER] === Outcome.RELEASE
+              || state.chatMessages.some(m =>
+                m.payload.senderRole === Role.SELLER
+                && (m.payload.message ?? "").startsWith("📦 Marked as delivered"));
+            const busyOrDone = deliveredMarked || markingDelivered;
+            return (
+              <>
+                <button
+                  type="button"
+                  disabled={busyOrDone}
+                  onClick={() => {
+                    setMarkingDelivered(true);
+                    onSendChat("📦 Marked as delivered — on its way.");
+                  }}
+                  style={{
+                    width: "100%", marginTop: 12, padding: "12px 14px",
+                    borderRadius: T.rs,
+                    background: busyOrDone ? T.surface : `${ROLE_COLOR.seller}22`,
+                    border: `1px solid ${busyOrDone ? T.border : ROLE_COLOR.seller + "66"}`,
+                    color: busyOrDone ? T.muted : ROLE_COLOR_TEXT.seller,
+                    fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+                    cursor: busyOrDone ? "default" : "pointer",
+                  }}
+                >
+                  {deliveredMarked
+                    ? "✓ Delivery marked — waiting on release"
+                    : markingDelivered ? "Sending…" : "📦 Mark delivered"}
+                </button>
+                <div style={{ marginTop: 6, fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.4 }}>
+                  Sends a chat note — your "Item delivered" confirm below is what settles the trade.
+                </div>
+              </>
+            );
+          })()}
+
+          {/* v3.2 prototype: the card owns the actions — fund / vote / claim /
+              join render INSIDE the role-coloured action card, so one card is
+              always "situation + what you do about it". Blocks moved intact
+              from their old column positions; all gating logic unchanged. */}
+          {/* CREATED — atomic lock surface for the locker. The locker can
+              spend only after any cross-role menu order is finalized. */}
+          {state.status === EscrowStatus.CREATED && myRole && canILock && (() => {
+            const fiatCategory = state.category === "p2p-trade"
+              || state.category === "bill-pay"
+              || state.category === "lending";
+            const allHandles = fiatCategory ? listSavedHandles() : [];
+            const menuSelectionMissing = hasMenu && lockMenuItems.length === 0;
+            return (
+            <div style={{
+              paddingTop: 16,
+              marginTop: 16,
+              marginBottom: 16,
+              borderTop: `1px solid ${T.accent}33`,
+            }}>
+              <div style={{
+                fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+                letterSpacing: 1, marginBottom: 12,
+              }}>
+                ATOMIC LOCK
+              </div>
+              <div style={{
+                textAlign: "center", fontFamily: T.mono, fontSize: 12,
+                color: T.accent, marginBottom: 14,
+              }}>
+                {hasMenu && menuSelectionMissing
+                  ? `Waiting for ${roleDisplayName(menuSelectorRole).toLowerCase()} to choose what they want…`
+                  : menuOrderNotFinal
+                  ? `${roleDisplayName(menuSelectorRole)} is still editing. Lock opens after they press Ready.`
+                  : participants.buyer
+                  ? "Funds the trade and locks it into 2-of-3 escrow in one step."
+                  : "Waiting for buyer to acknowledge the trade…"}
+              </div>
+
+              {/* Handle reveal picker for fiat categories */}
+              {fiatCategory && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 600, color: T.muted,
+                    fontFamily: T.mono, letterSpacing: 0.5, marginBottom: 6,
+                  }}>
+                    REVEAL HANDLE TO PARTICIPANTS
+                  </div>
+                  {allHandles.length === 0 ? (
+                    <div style={{
+                      padding: "10px 12px", borderRadius: T.rs,
+                      background: T.surface, border: `1px dashed ${T.border}`,
+                      color: T.muted, fontFamily: T.mono, fontSize: 11,
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                    }}>
+                      <span>No saved handles. Lock will proceed without one.</span>
+                      {onOpenSettings && (
+                        <button onClick={onOpenSettings} style={{
+                          background: "none", border: "none",
+                          color: T.accent, fontFamily: T.mono, fontSize: 11,
+                          fontWeight: 700, cursor: "pointer", padding: 0,
+                        }}>+ Add</button>
+                      )}
+                    </div>
+                  ) : (
+                    <select
+                      value={selectedHandleId}
+                      onChange={e => setSelectedHandleId(e.target.value)}
+                      style={{ ...inputStyle, color: T.text, background: T.surface }}
+                    >
+                      <option value="">— don't reveal a handle —</option>
+                      {allHandles.map(h => {
+                        const rail = getRailByKey(h.rail);
+                        return (
+                          <option key={h.id} value={h.id}>
+                            {(rail?.displayName || h.rail) + " · " + maskHandle(h.handle)}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {/* v1.2.4: NWC status banner + direct-NWC Fund path. If the
+                  user has a saved NWC wallet, the Fund button bypasses the
+                  AtomicFundingModal chooser and dispatches straight via
+                  actions.fundAndLock. The banner above lets the user
+                  switch / add wallets without leaving the trade page. */}
+              {!disableNwc && (
+                <NwcStatusBanner
+                  activeConnection={activeNwc}
+                  onSaved={refreshSavedNwcs}
+                  onManage={onOpenNwcSettings}
+                />
+              )}
+
+              <button
+                disabled={locking || directNwcFundPhase !== null || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal}
+                title={fundingInProgress
+                  ? "Another funding operation is in progress. Complete it first."
+                  : receiveUnavailable
+                    ? "Lightning receive is unavailable on this browser route. Use Fedi, native bridge, or sim demo."
+                  : lockBlockedByNoArbiter
+                    ? "No eligible arbiter is available for this trade."
+                  : menuOrderNotFinal
+                    ? `${roleDisplayName(menuSelectorRole)} must press Ready before this order can be locked.`
+                  : menuSelectionMissing
+                    ? menuSelectionTitle(state.category)
+                    : undefined}
+                onClick={async () => {
+                  // v1.2.4: when the user has a saved NWC and the parent
+                  // wired the direct path, skip the modal entirely. The
+                  // direct path threads phase labels back via onPhase so
+                  // the button itself becomes the progress indicator.
+                  if (activeNwc && onLockDirectNwc) {
+                    setDirectNwcFundPhase("Starting…");
+                    try {
+                      const result = await onLockDirectNwc({
+                        nwcConnectionString: activeNwc.connectionString,
+                        savedHandleId: selectedHandleId || undefined,
+                        selectedItems: hasMenu ? lockMenuItems : undefined,
+                        amountMsats: lockAmountMsats,
+                        onPhase: (label) => setDirectNwcFundPhase(label),
+                      });
+                      if (!result.ok) {
+                        // Failure path: parent has already surfaced the
+                        // humanized toast. The "Try other method" link
+                        // below offers the modal as a fallback.
+                      }
+                    } finally {
+                      setDirectNwcFundPhase(null);
+                    }
+                    return;
+                  }
+                  setLocking(true);
+                  try {
+                    await onLock({
+                      savedHandleId: selectedHandleId || undefined,
+                      selectedItems: hasMenu ? lockMenuItems : undefined,
+                      amountMsats: lockAmountMsats,
+                    });
+                  } finally {
+                    setLocking(false);
+                  }
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                  width: "100%", padding: "16px", borderRadius: T.rs,
+                  background: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal
+                    ? T.surface
+                    : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
+                  border: "none",
+                  color: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal ? T.muted : T.bg,
+                  fontFamily: T.mono, fontSize: 14, fontWeight: 800,
+                  cursor: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal ? "default" : "pointer",
+                  letterSpacing: 0.5, transition: "all 0.2s",
+                }}
+              >
+                {directNwcFundPhase
+                  ? `${directNwcFundPhase}`
+                  : locking
+                  ? "Funding…"
+                  : fundingInProgress || receiveUnavailable || lockBlockedByNoArbiter
+                    ? lockLabel + " unavailable"
+                  : menuOrderNotFinal
+                    ? `Waiting for ${roleDisplayName(menuSelectorRole)} Ready`
+                  : menuSelectionMissing
+                    ? menuSelectionButtonLabel(state.category)
+                    : activeNwc && onLockDirectNwc
+                      ? (
+                          <>
+                            ⚡ {lockLabel} via {activeNwc.label} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                          </>
+                        )
+                      : (
+                          <>
+                            ⚡ {lockLabel} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                          </>
+                        )}
+              </button>
+              {/* v1.2.4: indeterminate progress strip under the Fund
+                  button while the direct-NWC path is mid-action.
+                  Cosmetic — the button label already shows the phase
+                  text; this gives a continuous visual that something is
+                  moving during NWC round-trips. */}
+              {directNwcFundPhase && (
+                <div style={{
+                  marginTop: 8,
+                  height: 3,
+                  borderRadius: 999,
+                  background: `${T.accent}1f`,
+                  overflow: "hidden",
+                  position: "relative",
+                }}>
+                  <div style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "30%",
+                    height: "100%",
+                    borderRadius: 999,
+                    background: `linear-gradient(90deg, ${T.accent}00, ${T.accent}, ${T.amber}, ${T.amber}00)`,
+                    animation: "nwcProgressSweep 1.4s ease-in-out infinite",
+                  }} />
+                </div>
+              )}
+              {/* v1.2.4: "Try other method" fallback when the direct-NWC
+                  path is the default and the user wants the chooser
+                  modal instead (different wallet, Onchain, external swap,
+                  etc.). Hidden when no NWC is set up — the regular button
+                  already routes through the modal in that case. */}
+              {activeNwc && onLockDirectNwc && !directNwcFundPhase && !locking && (
+                <button
+                  onClick={async () => {
+                    setLocking(true);
+                    try {
+                      await onLock({
+                        savedHandleId: selectedHandleId || undefined,
+                        selectedItems: hasMenu ? lockMenuItems : undefined,
+                        amountMsats: lockAmountMsats,
+                      });
+                    } finally {
+                      setLocking(false);
+                    }
+                  }}
+                  style={{
+                    background: "none", border: "none",
+                    color: T.muted, fontFamily: T.mono, fontSize: 10,
+                    cursor: "pointer", padding: "8px 0",
+                    width: "100%", textAlign: "center",
+                    textDecoration: "underline",
+                  }}
+                >
+                  Use a different funding method
+                </button>
+              )}
+              {fundingInProgress && (
+                <div style={{
+                  textAlign: "center", marginTop: 8,
+                  fontSize: 10, color: T.amber, fontFamily: T.mono,
+                }}>
+                  Another funding operation is in progress. Complete it first.
+                </div>
+              )}
+              {lockBlockedByNoArbiter && !fundingInProgress && (
+                <div style={{
+                  textAlign: "center", marginTop: 8,
+                  fontSize: 10, color: T.amber, fontFamily: T.mono,
+                }}>
+                  No eligible arbiter for this trade
+                </div>
+              )}
+              {bootProbeFailed && !fundingInProgress && !lockBlockedByNoArbiter && (
+                <div style={{
+                  textAlign: "center", marginTop: 8,
+                  fontSize: 10, color: T.amber, fontFamily: T.mono,
+                }}>
+                  Federation unreachable — reconnect first
+                </div>
+              )}
+              {receiveUnavailable && !bootProbeFailed && !fundingInProgress && !lockBlockedByNoArbiter && (
+                <div style={{
+                  textAlign: "center", marginTop: 8,
+                  fontSize: 10, color: T.amber, fontFamily: T.mono,
+                }}>
+                  Lightning receive unavailable — use Fedi/native bridge or sim demo
+                </div>
+              )}
+              <div style={{
+                textAlign: "center", marginTop: 8,
+                fontSize: 9, color: T.muted, fontFamily: T.mono,
+              }}>
+                Held safely in 2-of-3 escrow — it takes 2 of 3 to release
+              </div>
+            </div>
+            );
+          })()}
+          {/* Vote buttons — vertical-aware copy from the label dictionary.
+              v0.2.0 item 9: when the user is the arbiter, the vote
+              buttons mirror role colors per Pillar 5.2 — purple for
+              "side with buyer," orange for "side with seller." Buyer
+              and seller voting on their own experience keep the
+              green/amber semantics (happy path / refund).
+
+              Color derivation: RELEASE flows sats to the role that
+              didn't lock. For marketplace, buyer locks → RELEASE goes
+              to seller. For other verticals, seller locks → RELEASE
+              goes to buyer. The arbiter's button color reflects who
+              actually receives the sats on each vote, removing the
+              ambiguity that otherwise sits in the highest-stakes UI
+              interaction in the product. */}
+          {/* v3.2: skip the waiting line for the seated arbiter on a quiet
+              trade — their matrix cell already says "only step in if they
+              disagree"; repeating it inside one card reads as a stutter. The
+              backup-arbiter countdown (no seat) keeps its timer line. */}
+          {votePrompt.kind === "waiting" && !(myRole === Role.ARBITER && !titleDisputed) && (
+            <div style={{
+              padding: "14px 0 0",
+              marginTop: 16,
+              borderTop: `1px solid ${T.border}`,
+              color: T.muted, fontFamily: T.mono, fontSize: 11,
+              lineHeight: 1.5, textAlign: "center", marginBottom: 16,
+            }}>
+              {votePrompt.message}
+            </div>
+          )}
+
+          {votePrompt.kind === "buttons" && (() => {
+            const voteRole = votePrompt.role;
+            const isArbiter = voteRole === Role.ARBITER;
+            const isMarketplace = state.category === "marketplace";
+            // Oversold order: this unit was already taken by an earlier buyer, so the
+            // ONLY correct action for BOTH sides is to refund — releasing just loses
+            // someone their sats. Hide Release for buyer and seller alike (the arbiter,
+            // in the rare case it reaches them, still sees both to decide). Refunding
+            // the right order is what protects everyone.
+            const isOversoldVoterView = isOversoldOrder && voteRole !== Role.ARBITER;
+            const showRelease = votePrompt.outcomes.includes(Outcome.RELEASE) && !isOversoldVoterView;
+            const showRefund = votePrompt.outcomes.includes(Outcome.REFUND);
+            // Who wins on RELEASE / REFUND
+            const releaseWinner = isMarketplace ? "seller" : "buyer";
+            const refundWinner = isMarketplace ? "buyer" : "seller";
+
+            const arbiterReleaseColor = ROLE_COLOR[releaseWinner];
+            const arbiterRefundColor = ROLE_COLOR[refundWinner];
+
+            const releaseBg = isArbiter ? `${arbiterReleaseColor}22` : T.greenDim;
+            const releaseBorder = isArbiter ? `${arbiterReleaseColor}66` : `${T.green}44`;
+            const releaseText = isArbiter ? arbiterReleaseColor : T.green;
+
+            const refundBg = isArbiter
+              ? `${arbiterRefundColor}22`
+              : state.subscription ? T.redDim : T.amberDim;
+            const refundBorder = isArbiter
+              ? `${arbiterRefundColor}66`
+              : `${state.subscription ? T.red : T.amber}44`;
+            const refundText = isArbiter
+              ? arbiterRefundColor
+              : state.subscription ? T.red : T.amber;
+            // Vote #1 (the off-chain deed-doer, zero votes cast): no real duality
+            // exists yet — the voter has ONE task plus a back-out hatch, so the
+            // primary button drops the protocol prefix and the refund demotes to a
+            // quiet cancel link below (rendered in the firstVote branch).
+            const isFirstVoteMoment = votePrompt.firstVote === true && !isArbiter && !isOversoldVoterView;
+            // v3.2 prototype: the ruling names where the sats GO — "Release →
+            // Mariam" beats "Side with seller". Recipient colours unchanged.
+            const releaseLabel = isArbiter
+              ? "Release → " + ((releaseWinner === "seller" ? dealSellerName : dealBuyerName)
+                  ?? (releaseWinner === "seller" ? "Seller" : "Buyer"))
+              : isFirstVoteMoment
+                ? getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE)
+                : voteOutcomeLabel("Release", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE));
+            const refundLabel = state.subscription
+              ? "Cancel & refund remaining"
+              : isArbiter
+                ? "Refund → " + ((refundWinner === "seller" ? dealSellerName : dealBuyerName)
+                    ?? (refundWinner === "seller" ? "Seller" : "Buyer"))
+                : isOversoldVoterView
+                  // The single, unmistakable action on an oversold unit, phrased for
+                  // whoever is tapping it: the seller refunds the duplicate; the buyer
+                  // simply gets their own sats back.
+                  ? (voteRole === Role.SELLER ? "Refund duplicate order" : "Refund — get my sats back")
+                  : isMarketplace && voteRole === Role.SELLER
+                    // Market seller votes first; "Refund" stays neutral rather than
+                    // presuming "Buyer never received" before any dispute exists.
+                    ? "Refund"
+                    : voteOutcomeLabel("Refund", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND));
+
+            const releaseButton = showRelease ? (
+              <button
+                key="release"
+                disabled={voting}
+                onClick={() => handleVote(Outcome.RELEASE)}
+                aria-label={`Vote release: ${releaseLabel}`}
+                style={voteActionButtonStyle({
+                  disabled: voting,
+                  background: releaseBg,
+                  border: releaseBorder,
+                  color: releaseText,
+                })}
+              >
+                <span aria-hidden="true" style={voteActionIconStyle(releaseText)}>✓</span>
+                <span style={voteActionLabelStyle()}>{releaseLabel}</span>
+              </button>
+            ) : null;
+            const refundButton = showRefund ? (
+              <button
+                key="refund"
+                disabled={voting}
+                onClick={() => handleVote(Outcome.REFUND)}
+                aria-label={`Vote refund: ${refundLabel}`}
+                style={voteActionButtonStyle({
+                  disabled: voting,
+                  background: refundBg,
+                  border: refundBorder,
+                  color: refundText,
+                })}
+              >
+                <span aria-hidden="true" style={voteActionIconStyle(refundText)}>↩</span>
+                <span style={voteActionLabelStyle()}>{refundLabel}</span>
+              </button>
+            ) : null;
+            // Vote #1: ONE primary task button, refund demoted to a quiet two-tap
+            // "cancel this trade" hatch whose routing copy derives from the engine
+            // (payoutRecipientFor) so it can never lie about where the sats go.
+            if (isFirstVoteMoment && showRelease && showRefund) {
+              const refundRecipient = payoutRecipientFor(state, Outcome.REFUND);
+              const cancelRouting = refundRecipient && refundRecipient.pubkey === pubkey
+                ? "refund me"
+                : refundRecipient
+                  ? `sats return to the ${refundRecipient.role}`
+                  : "the locked sats are returned";
+              return (
+                <div className="trade-vote-actions" style={{
+                  display: "grid", gridTemplateColumns: "1fr", marginBottom: 16,
+                }}>
+                  {releaseButton}
+                  <button
+                    disabled={voting}
+                    aria-label={`Vote refund: cancel this trade — ${cancelRouting}`}
+                    onClick={() => {
+                      if (!cancelArmed) { setCancelArmed(true); return; }
+                      setCancelArmed(false);
+                      handleVote(Outcome.REFUND);
+                    }}
+                    style={{
+                      width: "100%", marginTop: 10, padding: "9px 10px",
+                      background: cancelArmed ? T.amberDim : "none",
+                      border: cancelArmed ? `1px solid ${T.amber}66` : `1px dashed ${T.border}`,
+                      borderRadius: T.rs,
+                      color: cancelArmed ? T.amber : T.muted,
+                      fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+                      cursor: voting ? "default" : "pointer",
+                    }}
+                  >
+                    {cancelArmed
+                      ? `Sure? This ends the trade — ${cancelRouting}. Tap again to confirm.`
+                      : `${getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND)} · ${cancelRouting}`}
+                  </button>
+                </div>
+              );
+            }
+            // Buyer-favoring vote on the LEFT (purple), seller-favoring on the RIGHT
+            // (orange), mirroring the B · A · S participant ring + the tally. RELEASE
+            // wins for the buyer in p2p/bill-pay/lending but for the SELLER in
+            // Market — so Market swaps the two so the buyer's outcome stays left.
+            return (
+              <div className="trade-vote-actions" style={{
+                display: "grid",
+                gridTemplateColumns: showRelease && showRefund ? "minmax(0, 1fr) minmax(0, 1fr)" : "1fr",
+                gap: 10,
+                marginBottom: 16,
+              }}>
+                {isMarketplace ? <>{refundButton}{releaseButton}</> : <>{releaseButton}{refundButton}</>}
+              </div>
+            );
+          })()}
+          {/* Claim button.
+              v0.3.1 Phase 3 expanded scope (Q4): boot probe also gates
+              the Claim button. When bootProbeFailed === true, the button
+              disables with "Federation unreachable — reconnect first"
+              subtitle. The Reconnect CTA lives in ChamaBar (single
+              source of truth). */}
+          {(state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED) && iAmWinner && !state.subscription && (
+            <div style={{
+              marginTop: 18,
+              paddingTop: 16,
+              marginBottom: 18,
+              borderTop: `1px solid ${T.border}`,
+            }}>
+              {/* v1.2.4: NWC status banner + direct-NWC Claim path.
+                  Mirror of the Fund button treatment — saved NWC wallet
+                  → one-tap claim straight to that wallet, banner above
+                  for context + paste-to-add. */}
+              {!disableNwc && (
+                <NwcStatusBanner
+                  activeConnection={activeNwc}
+                  onSaved={refreshSavedNwcs}
+                  onManage={onOpenNwcSettings}
+                />
+              )}
+
+              <button
+                disabled={claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked}
+                onClick={async () => {
+                  // v1.2.4: direct-NWC claim path. Saved NWC wallet skips
+                  // the ClaimPayoutModal chooser → resolveNwcConnectionToInvoice
+                  // → claimAndPayout in one shot, all from the button.
+                  if (activeNwc && onClaimDirectNwc) {
+                    setDirectNwcClaimPhase("Starting…");
+                    try {
+                      await onClaimDirectNwc({
+                        nwcConnectionString: activeNwc.connectionString,
+                        onPhase: (label) => setDirectNwcClaimPhase(label),
+                      });
+                    } finally {
+                      setDirectNwcClaimPhase(null);
+                    }
+                    return;
+                  }
+                  setClaiming(true);
+                  try {
+                    await onClaim();
+                  } finally {
+                    setClaiming(false);
+                  }
+                }}
+                style={{
+                  width: "100%", padding: "18px", borderRadius: T.rs,
+                  background: claimRetryBlocked
+                    ? T.redDim
+                    : claiming || directNwcClaimPhase !== null || bootProbeFailed
+                    ? T.surface
+                    : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
+                  border: claimRetryBlocked ? `1px solid ${T.red}55` : "none",
+                  color: claimRetryBlocked ? T.red : claiming || directNwcClaimPhase !== null || bootProbeFailed ? T.muted : T.bg,
+                  fontFamily: T.mono, fontSize: 15, fontWeight: 800,
+                  cursor: claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked ? "default" : "pointer", letterSpacing: 1,
+                  animation: (claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked) ? "none" : "pulse 2s ease-in-out infinite",
+                }}>
+                {directNwcClaimPhase
+                  ? directNwcClaimPhase
+                  : claimRetryBlocked
+                  ? "✕ CLAIM DID NOT SETTLE"
+                  : claiming
+                  ? state.status === EscrowStatus.CLAIMED ? "Retrying claim…" : "Claiming…"
+                  : activeNwc && onClaimDirectNwc
+                    ? (state.status === EscrowStatus.CLAIMED
+                        ? `⚡ RETRY CLAIM via ${activeNwc.label}`
+                        : `⚡ CLAIM YOUR SATS via ${activeNwc.label}`)
+                    : state.status === EscrowStatus.CLAIMED ? "⚡ RETRY CLAIM" : "⚡ CLAIM YOUR SATS"}
+              </button>
+              {/* v1.2.4: same indeterminate progress strip under the
+                  Claim button while the direct-NWC claim is mid-action.
+                  Mirror of the Fund strip — purely cosmetic, since the
+                  button label is already showing the phase text. */}
+              {directNwcClaimPhase && (
+                <div style={{
+                  marginTop: 8,
+                  height: 3,
+                  borderRadius: 999,
+                  background: `${T.accent}1f`,
+                  overflow: "hidden",
+                  position: "relative",
+                }}>
+                  <div style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "30%",
+                    height: "100%",
+                    borderRadius: 999,
+                    background: `linear-gradient(90deg, ${T.accent}00, ${T.accent}, ${T.amber}, ${T.amber}00)`,
+                    animation: "nwcProgressSweep 1.4s ease-in-out infinite",
+                  }} />
+                </div>
+              )}
+              {/* "Try other method" fallback link — same pattern as the
+                  Fund button. Opens ClaimPayoutModal with the full
+                  chooser when the user wants a different destination. */}
+              {activeNwc && onClaimDirectNwc && !directNwcClaimPhase && !claiming && (
+                <button
+                  onClick={async () => {
+                    setClaiming(true);
+                    try {
+                      await onClaim();
+                    } finally {
+                      setClaiming(false);
+                    }
+                  }}
+                  style={{
+                    background: "none", border: "none",
+                    color: T.muted, fontFamily: T.mono, fontSize: 10,
+                    cursor: "pointer", padding: "8px 0",
+                    width: "100%", textAlign: "center",
+                    textDecoration: "underline",
+                  }}
+                >
+                  Use a different payout method
+                </button>
+              )}
+              {bootProbeFailed && (
+                <div style={{
+                  textAlign: "center", marginTop: 8,
+                  fontSize: 10, color: T.amber, fontFamily: T.mono,
+                }}>
+                  Federation unreachable — reconnect first
+                </div>
+              )}
+              {claimRetryBlocked && (
+                <div style={{
+                  textAlign: "center", marginTop: 8,
+                  fontSize: 10, color: T.red, fontFamily: T.mono,
+                }}>
+                  Ecash redeem failed after federation consumed the notes — retry is disabled
+                </div>
+              )}
+              {!bootProbeFailed && !claimRetryBlocked && state.status === EscrowStatus.CLAIMED && (
+                <div style={{
+                  textAlign: "center", marginTop: 8,
+                  fontSize: 10, color: T.amber, fontFamily: T.mono,
+                }}>
+                  Claim already sent — retrying only completes the payout once your wallet confirms
+                </div>
+              )}
+            </div>
+          )}
+          {/* JOIN buttons — show when user is not a participant and slots are open */}
+          {!myRole && !hasDuplicateParticipant && !currentKeyAlreadyPresent && state.status === EscrowStatus.CREATED && canJoinTrade && (
+            <div style={{
+              paddingTop: 16,
+              marginTop: 16,
+              marginBottom: 16,
+              borderTop: `1px solid ${T.border}`,
+            }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
+                {isMultiUnitParent ? "BUY FROM THIS LISTING" : "JOIN THIS TRADE"}
+              </div>
+              {isMultiUnitParent && onPurchase && (
+                soldOut ? (
+                  <div style={{ padding: "12px 14px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 12, fontWeight: 700, textAlign: "center", letterSpacing: 0.5 }}>
+                    SOLD OUT · all units claimed
+                  </div>
+                ) : (
+                <div style={{ marginBottom: 4 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                    <button type="button" disabled={purchasing || buyQtyClamped <= 1}
+                      onClick={() => setBuyQty(q => Math.max(1, Math.min(q, buyMax) - 1))}
+                      style={{ width: 40, height: 40, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 18, fontWeight: 800, cursor: (purchasing || buyQtyClamped <= 1) ? "default" : "pointer" }}>−</button>
+                    <div style={{ minWidth: 44, textAlign: "center", fontFamily: T.mono, fontSize: 18, fontWeight: 800, color: T.text }}>{buyQtyClamped}</div>
+                    <button type="button" disabled={purchasing || buyQtyClamped >= buyMax}
+                      onClick={() => setBuyQty(q => Math.min(buyMax, q + 1))}
+                      style={{ width: 40, height: 40, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 18, fontWeight: 800, cursor: (purchasing || buyQtyClamped >= buyMax) ? "default" : "pointer" }}>+</button>
+                    <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 11, marginLeft: 4 }}>
+                      {typeof stockLeft === "number" ? `${stockLeft} left` : `${state.stock} in stock`}
+                    </div>
+                  </div>
+                  <button type="button" disabled={purchasing}
+                    onClick={async () => {
+                      setPurchasing(true);
+                      try { await onPurchase(state.id, buyQtyClamped); } finally { setPurchasing(false); }
+                    }}
+                    style={{
+                      width: "100%", padding: "14px", borderRadius: T.rs,
+                      background: T.accentDim, border: `1px solid ${T.accent}44`,
+                      color: T.accent, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+                      cursor: purchasing ? "default" : "pointer",
+                    }}>
+                    {purchasing ? "Starting your order…" : `Buy ${buyQtyClamped} unit${buyQtyClamped > 1 ? "s" : ""}`}
+                  </button>
+                  <p style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, margin: "8px 2px 0" }}>
+                    Each purchase is its own 2-of-3 escrow — you'll fund and lock it on the next screen.
+                  </p>
+                </div>
+                )
+              )}
+              {!isMultiUnitParent && (<>
+              <div style={{ display: "flex", gap: 10 }}>
+                {canJoinAsBuyer && (
+                  <button disabled={joining} onClick={async () => {
+                    setJoining(true);
+                    try { await onJoin(Role.BUYER); } finally { setJoining(false); }
+                  }} style={{
+                    flex: 1, padding: "14px", borderRadius: T.rs,
+                    background: `${ROLE_COLOR.buyer}22`, border: `1px solid ${ROLE_COLOR.buyer}44`,
+                    color: ROLE_COLOR.buyer, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+                    cursor: joining ? "default" : "pointer", transition: "all 0.2s",
+                  }}>
+                    {joining ? "Joining..." : "Join as Buyer"}
+                  </button>
+                )}
+                {/* v0.6.5: hide the Join-as-Arbiter affordance when the
+                    community pool will auto-assign one. v0.8.0 tightens
+                    the empty-pool case too: no pool means no trusted arbiter
+                    slot, not "anyone may volunteer." */}
+                {canJoinAsArbiter && (
+                  <button disabled={joining} onClick={async () => {
+                    setJoining(true);
+                    try { await onJoin(Role.ARBITER); } finally { setJoining(false); }
+                  }} style={{
+                    flex: 1, padding: "14px", borderRadius: T.rs,
+                    background: `${ROLE_COLOR.arbiter}22`, border: `1px solid ${ROLE_COLOR.arbiter}44`,
+                    color: ROLE_COLOR.arbiter, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+                    cursor: joining ? "default" : "pointer", transition: "all 0.2s",
+                  }}>
+                    {joining ? "Joining..." : "Join as Arbiter"}
+                  </button>
+                )}
+              </div>
+              {canJoinAsSeller && (
+                <button disabled={joining} onClick={async () => {
+                  setJoining(true);
+                  try { await onJoin(Role.SELLER); } finally { setJoining(false); }
+                }} style={{
+                  width: "100%", marginTop: 10, padding: "14px", borderRadius: T.rs,
+                  background: `${ROLE_COLOR.seller}22`, border: `1px solid ${ROLE_COLOR.seller}44`,
+                  color: ROLE_COLOR.seller, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
+                  cursor: joining ? "default" : "pointer", transition: "all 0.2s",
+                }}>
+                  {joining ? "Joining..." : "Join as Seller"}
+                </button>
+              )}
+              </>)}
+            </div>
+          )}
+
+          {/* v3.2: arbiter's evidence shortcut while ruling — opens the chat row
+              below (the evidence lives there: messages + receipt images) and
+              scrolls it into view, so the tap always lands on the evidence. */}
+          {titleDisputed && myRole === Role.ARBITER && (
+            <button
+              type="button"
+              onClick={() => {
+                setChatRowOpen(true);
+                setTimeout(() => chatRowRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+              }}
+              style={{
+                background: "none", border: "none", padding: "10px 0 0",
+                color: ROLE_COLOR_TEXT.arbiter, fontFamily: T.mono, fontSize: 12,
+                fontWeight: 700, cursor: "pointer", textAlign: "left",
+              }}
+            >
+              Open chat &amp; evidence →
+            </button>
+          )}
         </div>
+
+        {/* v3.2: the draft placeholder — the other side is still building the
+            order, make the "forming" state visible instead of empty space. */}
+        {state.status === EscrowStatus.CREATED && hasMenu && myRole
+          && myRole !== menuSelectorRole && !savedOrderFinalized && (
+          <div style={{
+            marginBottom: 16, padding: 13, textAlign: "center",
+            background: T.surface, border: `1px dashed ${T.border}`,
+            borderRadius: T.rs,
+          }}>
+            <div style={{ fontFamily: T.mono, fontSize: 11, color: T.muted }}>
+              draft order forming…
+            </div>
+            <div style={{
+              marginTop: 7, display: "flex", alignItems: "center",
+              justifyContent: "center", gap: 7,
+              fontFamily: T.mono, fontSize: 11,
+            }}>
+              <span style={{
+                width: 7, height: 7, borderRadius: 999,
+                background: ROLE_COLOR[menuSelectorRole as keyof typeof ROLE_COLOR] ?? T.muted,
+              }} />
+              <span style={{ color: ROLE_COLOR[menuSelectorRole as keyof typeof ROLE_COLOR] ?? T.muted }}>
+                waiting on {roleDisplayName(menuSelectorRole).toLowerCase()}
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* v3.1 B2: pre-lock exit for a joined buyer waiting on the locker. No sats
             are escrowed until LOCK, so this just releases the reservation locally +
@@ -1916,20 +2747,26 @@ export function TradeDetail({
           {TRINITY_RING_ORDER.map(role => {
             const realPk = participants[role];
             const isAutoArbiter = role === Role.ARBITER && !realPk && !!previewArbiterPk;
+            const dotPk = realPk ?? (isAutoArbiter ? previewArbiterPk : null);
             return (
               <Dot key={role} role={role}
-                pk={realPk ?? (isAutoArbiter ? previewArbiterPk : null)}
+                pk={dotPk}
                 isYou={myRole === role}
                 voted={!!state.votes[role]} outcome={state.votes[role]}
                 autoAssigned={isAutoArbiter}
-                displayName={profileNameFor(
-                  profileNames,
-                  realPk ?? (isAutoArbiter ? previewArbiterPk : null),
-                  kind0Enabled,
-                )} />
+                onClick={fetchRatingSummary && dotPk ? () => setRepFor(prev => prev === dotPk ? null : dotPk) : undefined}
+                displayName={profileNameFor(profileNames, dotPk, kind0Enabled)} />
             );
           })}
         </div>
+        {/* v3.1.1 (#2): tap a filled avatar above → its verified reputation. */}
+        {repFor && fetchRatingSummary && (
+          <ReputationReadout
+            pubkey={repFor}
+            name={profileNameFor(profileNames, repFor, kind0Enabled)}
+            fetchSummary={fetchRatingSummary}
+          />
+        )}
 
         {/* v2.7: the trust story + B/A/S legend. Plain-language "why this is
             safe" at the moment it matters, decoding the three coloured dots
@@ -1993,7 +2830,9 @@ export function TradeDetail({
               cursor: "pointer", padding: "11px 14px",
               display: "flex", alignItems: "center", gap: 8,
             }}>
-              <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 1 }}>SETTLEMENT</span>
+              <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: titleDisputed ? T.amber : T.muted, letterSpacing: 1 }}>
+                {titleDisputed ? "VOTES ON RECORD" : "SETTLEMENT"}
+              </span>
               <span style={{ fontFamily: T.mono, fontSize: 10, color: decisionTone }}>
                 {state.resolvedOutcome ? String(state.resolvedOutcome).toLowerCase() : "awaiting"} · {releaseVoteCount}R / {refundVoteCount}F
               </span>
@@ -2109,381 +2948,7 @@ export function TradeDetail({
         </div>
       )}
 
-      {/* JOIN buttons — show when user is not a participant and slots are open */}
-      {!myRole && !hasDuplicateParticipant && !currentKeyAlreadyPresent && state.status === EscrowStatus.CREATED && canJoinTrade && (
-        <div style={{
-          paddingTop: 16,
-          marginTop: 16,
-          marginBottom: 16,
-          borderTop: `1px solid ${T.border}`,
-        }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-            {isMultiUnitParent ? "BUY FROM THIS LISTING" : "JOIN THIS TRADE"}
-          </div>
-          {isMultiUnitParent && onPurchase && (
-            soldOut ? (
-              <div style={{ padding: "12px 14px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 12, fontWeight: 700, textAlign: "center", letterSpacing: 0.5 }}>
-                SOLD OUT · all units claimed
-              </div>
-            ) : (
-            <div style={{ marginBottom: 4 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                <button type="button" disabled={purchasing || buyQtyClamped <= 1}
-                  onClick={() => setBuyQty(q => Math.max(1, Math.min(q, buyMax) - 1))}
-                  style={{ width: 40, height: 40, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 18, fontWeight: 800, cursor: (purchasing || buyQtyClamped <= 1) ? "default" : "pointer" }}>−</button>
-                <div style={{ minWidth: 44, textAlign: "center", fontFamily: T.mono, fontSize: 18, fontWeight: 800, color: T.text }}>{buyQtyClamped}</div>
-                <button type="button" disabled={purchasing || buyQtyClamped >= buyMax}
-                  onClick={() => setBuyQty(q => Math.min(buyMax, q + 1))}
-                  style={{ width: 40, height: 40, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 18, fontWeight: 800, cursor: (purchasing || buyQtyClamped >= buyMax) ? "default" : "pointer" }}>+</button>
-                <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 11, marginLeft: 4 }}>
-                  {typeof stockLeft === "number" ? `${stockLeft} left` : `${state.stock} in stock`}
-                </div>
-              </div>
-              <button type="button" disabled={purchasing}
-                onClick={async () => {
-                  setPurchasing(true);
-                  try { await onPurchase(state.id, buyQtyClamped); } finally { setPurchasing(false); }
-                }}
-                style={{
-                  width: "100%", padding: "14px", borderRadius: T.rs,
-                  background: T.accentDim, border: `1px solid ${T.accent}44`,
-                  color: T.accent, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-                  cursor: purchasing ? "default" : "pointer",
-                }}>
-                {purchasing ? "Starting your order…" : `Buy ${buyQtyClamped} unit${buyQtyClamped > 1 ? "s" : ""}`}
-              </button>
-              <p style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, margin: "8px 2px 0" }}>
-                Each purchase is its own 2-of-3 escrow — you'll fund and lock it on the next screen.
-              </p>
-            </div>
-            )
-          )}
-          {!isMultiUnitParent && (<>
-          <div style={{ display: "flex", gap: 10 }}>
-            {canJoinAsBuyer && (
-              <button disabled={joining} onClick={async () => {
-                setJoining(true);
-                try { await onJoin(Role.BUYER); } finally { setJoining(false); }
-              }} style={{
-                flex: 1, padding: "14px", borderRadius: T.rs,
-                background: `${ROLE_COLOR.buyer}22`, border: `1px solid ${ROLE_COLOR.buyer}44`,
-                color: ROLE_COLOR.buyer, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-                cursor: joining ? "default" : "pointer", transition: "all 0.2s",
-              }}>
-                {joining ? "Joining..." : "Join as Buyer"}
-              </button>
-            )}
-            {/* v0.6.5: hide the Join-as-Arbiter affordance when the
-                community pool will auto-assign one. v0.8.0 tightens
-                the empty-pool case too: no pool means no trusted arbiter
-                slot, not "anyone may volunteer." */}
-            {canJoinAsArbiter && (
-              <button disabled={joining} onClick={async () => {
-                setJoining(true);
-                try { await onJoin(Role.ARBITER); } finally { setJoining(false); }
-              }} style={{
-                flex: 1, padding: "14px", borderRadius: T.rs,
-                background: `${ROLE_COLOR.arbiter}22`, border: `1px solid ${ROLE_COLOR.arbiter}44`,
-                color: ROLE_COLOR.arbiter, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-                cursor: joining ? "default" : "pointer", transition: "all 0.2s",
-              }}>
-                {joining ? "Joining..." : "Join as Arbiter"}
-              </button>
-            )}
-          </div>
-          {canJoinAsSeller && (
-            <button disabled={joining} onClick={async () => {
-              setJoining(true);
-              try { await onJoin(Role.SELLER); } finally { setJoining(false); }
-            }} style={{
-              width: "100%", marginTop: 10, padding: "14px", borderRadius: T.rs,
-              background: `${ROLE_COLOR.seller}22`, border: `1px solid ${ROLE_COLOR.seller}44`,
-              color: ROLE_COLOR.seller, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
-              cursor: joining ? "default" : "pointer", transition: "all 0.2s",
-            }}>
-              {joining ? "Joining..." : "Join as Seller"}
-            </button>
-          )}
-          </>)}
-        </div>
-      )}
 
-      {/* CREATED — atomic lock surface for the locker. The locker can
-          spend only after any cross-role menu order is finalized. */}
-      {state.status === EscrowStatus.CREATED && myRole && canILock && (() => {
-        const fiatCategory = state.category === "p2p-trade"
-          || state.category === "bill-pay"
-          || state.category === "lending";
-        const allHandles = fiatCategory ? listSavedHandles() : [];
-        const menuSelectionMissing = hasMenu && lockMenuItems.length === 0;
-        return (
-        <div style={{
-          paddingTop: 16,
-          marginTop: 16,
-          marginBottom: 16,
-          borderTop: `1px solid ${T.accent}33`,
-        }}>
-          <div style={{
-            fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
-            letterSpacing: 1, marginBottom: 12,
-          }}>
-            ATOMIC LOCK
-          </div>
-          <div style={{
-            textAlign: "center", fontFamily: T.mono, fontSize: 12,
-            color: T.accent, marginBottom: 14,
-          }}>
-            {hasMenu && menuSelectionMissing
-              ? `Waiting for ${roleDisplayName(menuSelectorRole).toLowerCase()} to choose what they want…`
-              : menuOrderNotFinal
-              ? `${roleDisplayName(menuSelectorRole)} is still editing. Lock opens after they press Ready.`
-              : participants.buyer
-              ? "Funds the trade and locks it into 2-of-3 escrow in one step."
-              : "Waiting for buyer to acknowledge the trade…"}
-          </div>
-
-          {/* Handle reveal picker for fiat categories */}
-          {fiatCategory && (
-            <div style={{ marginBottom: 14 }}>
-              <div style={{
-                fontSize: 10, fontWeight: 600, color: T.muted,
-                fontFamily: T.mono, letterSpacing: 0.5, marginBottom: 6,
-              }}>
-                REVEAL HANDLE TO PARTICIPANTS
-              </div>
-              {allHandles.length === 0 ? (
-                <div style={{
-                  padding: "10px 12px", borderRadius: T.rs,
-                  background: T.surface, border: `1px dashed ${T.border}`,
-                  color: T.muted, fontFamily: T.mono, fontSize: 11,
-                  display: "flex", justifyContent: "space-between", alignItems: "center",
-                }}>
-                  <span>No saved handles. Lock will proceed without one.</span>
-                  {onOpenSettings && (
-                    <button onClick={onOpenSettings} style={{
-                      background: "none", border: "none",
-                      color: T.accent, fontFamily: T.mono, fontSize: 11,
-                      fontWeight: 700, cursor: "pointer", padding: 0,
-                    }}>+ Add</button>
-                  )}
-                </div>
-              ) : (
-                <select
-                  value={selectedHandleId}
-                  onChange={e => setSelectedHandleId(e.target.value)}
-                  style={{ ...inputStyle, color: T.text, background: T.surface }}
-                >
-                  <option value="">— don't reveal a handle —</option>
-                  {allHandles.map(h => {
-                    const rail = getRailByKey(h.rail);
-                    return (
-                      <option key={h.id} value={h.id}>
-                        {(rail?.displayName || h.rail) + " · " + maskHandle(h.handle)}
-                      </option>
-                    );
-                  })}
-                </select>
-              )}
-            </div>
-          )}
-
-          {/* v1.2.4: NWC status banner + direct-NWC Fund path. If the
-              user has a saved NWC wallet, the Fund button bypasses the
-              AtomicFundingModal chooser and dispatches straight via
-              actions.fundAndLock. The banner above lets the user
-              switch / add wallets without leaving the trade page. */}
-          {!disableNwc && (
-            <NwcStatusBanner
-              activeConnection={activeNwc}
-              onSaved={refreshSavedNwcs}
-              onManage={onOpenNwcSettings}
-            />
-          )}
-
-          <button
-            disabled={locking || directNwcFundPhase !== null || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal}
-            title={fundingInProgress
-              ? "Another funding operation is in progress. Complete it first."
-              : receiveUnavailable
-                ? "Lightning receive is unavailable on this browser route. Use Fedi, native bridge, or sim demo."
-              : lockBlockedByNoArbiter
-                ? "No eligible arbiter is available for this trade."
-              : menuOrderNotFinal
-                ? `${roleDisplayName(menuSelectorRole)} must press Ready before this order can be locked.`
-              : menuSelectionMissing
-                ? menuSelectionTitle(state.category)
-                : undefined}
-            onClick={async () => {
-              // v1.2.4: when the user has a saved NWC and the parent
-              // wired the direct path, skip the modal entirely. The
-              // direct path threads phase labels back via onPhase so
-              // the button itself becomes the progress indicator.
-              if (activeNwc && onLockDirectNwc) {
-                setDirectNwcFundPhase("Starting…");
-                try {
-                  const result = await onLockDirectNwc({
-                    nwcConnectionString: activeNwc.connectionString,
-                    savedHandleId: selectedHandleId || undefined,
-                    selectedItems: hasMenu ? lockMenuItems : undefined,
-                    amountMsats: lockAmountMsats,
-                    onPhase: (label) => setDirectNwcFundPhase(label),
-                  });
-                  if (!result.ok) {
-                    // Failure path: parent has already surfaced the
-                    // humanized toast. The "Try other method" link
-                    // below offers the modal as a fallback.
-                  }
-                } finally {
-                  setDirectNwcFundPhase(null);
-                }
-                return;
-              }
-              setLocking(true);
-              try {
-                await onLock({
-                  savedHandleId: selectedHandleId || undefined,
-                  selectedItems: hasMenu ? lockMenuItems : undefined,
-                  amountMsats: lockAmountMsats,
-                });
-              } finally {
-                setLocking(false);
-              }
-            }}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-              width: "100%", padding: "16px", borderRadius: T.rs,
-              background: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal
-                ? T.surface
-                : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
-              border: "none",
-              color: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal ? T.muted : T.bg,
-              fontFamily: T.mono, fontSize: 14, fontWeight: 800,
-              cursor: locking || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal ? "default" : "pointer",
-              letterSpacing: 0.5, transition: "all 0.2s",
-            }}
-          >
-            {directNwcFundPhase
-              ? `${directNwcFundPhase}`
-              : locking
-              ? "Funding…"
-              : fundingInProgress || receiveUnavailable || lockBlockedByNoArbiter
-                ? lockLabel + " unavailable"
-              : menuOrderNotFinal
-                ? `Waiting for ${roleDisplayName(menuSelectorRole)} Ready`
-              : menuSelectionMissing
-                ? menuSelectionButtonLabel(state.category)
-                : activeNwc && onLockDirectNwc
-                  ? (
-                      <>
-                        ⚡ {lockLabel} via {activeNwc.label} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
-                      </>
-                    )
-                  : (
-                      <>
-                        ⚡ {lockLabel} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
-                      </>
-                    )}
-          </button>
-          {/* v1.2.4: indeterminate progress strip under the Fund
-              button while the direct-NWC path is mid-action.
-              Cosmetic — the button label already shows the phase
-              text; this gives a continuous visual that something is
-              moving during NWC round-trips. */}
-          {directNwcFundPhase && (
-            <div style={{
-              marginTop: 8,
-              height: 3,
-              borderRadius: 999,
-              background: `${T.accent}1f`,
-              overflow: "hidden",
-              position: "relative",
-            }}>
-              <div style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "30%",
-                height: "100%",
-                borderRadius: 999,
-                background: `linear-gradient(90deg, ${T.accent}00, ${T.accent}, ${T.amber}, ${T.amber}00)`,
-                animation: "nwcProgressSweep 1.4s ease-in-out infinite",
-              }} />
-            </div>
-          )}
-          {/* v1.2.4: "Try other method" fallback when the direct-NWC
-              path is the default and the user wants the chooser
-              modal instead (different wallet, Onchain, external swap,
-              etc.). Hidden when no NWC is set up — the regular button
-              already routes through the modal in that case. */}
-          {activeNwc && onLockDirectNwc && !directNwcFundPhase && !locking && (
-            <button
-              onClick={async () => {
-                setLocking(true);
-                try {
-                  await onLock({
-                    savedHandleId: selectedHandleId || undefined,
-                    selectedItems: hasMenu ? lockMenuItems : undefined,
-                    amountMsats: lockAmountMsats,
-                  });
-                } finally {
-                  setLocking(false);
-                }
-              }}
-              style={{
-                background: "none", border: "none",
-                color: T.muted, fontFamily: T.mono, fontSize: 10,
-                cursor: "pointer", padding: "8px 0",
-                width: "100%", textAlign: "center",
-                textDecoration: "underline",
-              }}
-            >
-              Use a different funding method
-            </button>
-          )}
-          {fundingInProgress && (
-            <div style={{
-              textAlign: "center", marginTop: 8,
-              fontSize: 10, color: T.amber, fontFamily: T.mono,
-            }}>
-              Another funding operation is in progress. Complete it first.
-            </div>
-          )}
-          {lockBlockedByNoArbiter && !fundingInProgress && (
-            <div style={{
-              textAlign: "center", marginTop: 8,
-              fontSize: 10, color: T.amber, fontFamily: T.mono,
-            }}>
-              No eligible arbiter for this trade
-            </div>
-          )}
-          {bootProbeFailed && !fundingInProgress && !lockBlockedByNoArbiter && (
-            <div style={{
-              textAlign: "center", marginTop: 8,
-              fontSize: 10, color: T.amber, fontFamily: T.mono,
-            }}>
-              Federation unreachable — reconnect first
-            </div>
-          )}
-          {receiveUnavailable && !bootProbeFailed && !fundingInProgress && !lockBlockedByNoArbiter && (
-            <div style={{
-              textAlign: "center", marginTop: 8,
-              fontSize: 10, color: T.amber, fontFamily: T.mono,
-            }}>
-              Lightning receive unavailable — use Fedi/native bridge or sim demo
-            </div>
-          )}
-          <div style={{
-            textAlign: "center", marginTop: 8,
-            fontSize: 9, color: T.muted, fontFamily: T.mono,
-          }}>
-            Held safely in 2-of-3 escrow — it takes 2 of 3 to release
-          </div>
-        </div>
-        );
-      })()}
 
       {/* Revealed payment handle for the trade's three participants. */}
       {state.status === EscrowStatus.LOCKED && state.lock.handle && (
@@ -2552,333 +3017,11 @@ export function TradeDetail({
         </div>
       )}
 
-      {/* Vote buttons — vertical-aware copy from the label dictionary.
-          v0.2.0 item 9: when the user is the arbiter, the vote
-          buttons mirror role colors per Pillar 5.2 — purple for
-          "side with buyer," orange for "side with seller." Buyer
-          and seller voting on their own experience keep the
-          green/amber semantics (happy path / refund).
 
-          Color derivation: RELEASE flows sats to the role that
-          didn't lock. For marketplace, buyer locks → RELEASE goes
-          to seller. For other verticals, seller locks → RELEASE
-          goes to buyer. The arbiter's button color reflects who
-          actually receives the sats on each vote, removing the
-          ambiguity that otherwise sits in the highest-stakes UI
-          interaction in the product. */}
-      {votePrompt.kind === "waiting" && (
-        <div style={{
-          padding: "14px 0 0",
-          marginTop: 16,
-          borderTop: `1px solid ${T.border}`,
-          color: T.muted, fontFamily: T.mono, fontSize: 11,
-          lineHeight: 1.5, textAlign: "center", marginBottom: 16,
-        }}>
-          {votePrompt.message}
-        </div>
-      )}
-
-      {votePrompt.kind === "buttons" && (() => {
-        const voteRole = votePrompt.role;
-        const isArbiter = voteRole === Role.ARBITER;
-        const isMarketplace = state.category === "marketplace";
-        // Oversold order: this unit was already taken by an earlier buyer, so the
-        // ONLY correct action for BOTH sides is to refund — releasing just loses
-        // someone their sats. Hide Release for buyer and seller alike (the arbiter,
-        // in the rare case it reaches them, still sees both to decide). Refunding
-        // the right order is what protects everyone.
-        const isOversoldVoterView = isOversoldOrder && voteRole !== Role.ARBITER;
-        const showRelease = votePrompt.outcomes.includes(Outcome.RELEASE) && !isOversoldVoterView;
-        const showRefund = votePrompt.outcomes.includes(Outcome.REFUND);
-        // Who wins on RELEASE / REFUND
-        const releaseWinner = isMarketplace ? "seller" : "buyer";
-        const refundWinner = isMarketplace ? "buyer" : "seller";
-
-        const arbiterReleaseColor = ROLE_COLOR[releaseWinner];
-        const arbiterRefundColor = ROLE_COLOR[refundWinner];
-
-        const releaseBg = isArbiter ? `${arbiterReleaseColor}22` : T.greenDim;
-        const releaseBorder = isArbiter ? `${arbiterReleaseColor}66` : `${T.green}44`;
-        const releaseText = isArbiter ? arbiterReleaseColor : T.green;
-
-        const refundBg = isArbiter
-          ? `${arbiterRefundColor}22`
-          : state.subscription ? T.redDim : T.amberDim;
-        const refundBorder = isArbiter
-          ? `${arbiterRefundColor}66`
-          : `${state.subscription ? T.red : T.amber}44`;
-        const refundText = isArbiter
-          ? arbiterRefundColor
-          : state.subscription ? T.red : T.amber;
-        // Vote #1 (the off-chain deed-doer, zero votes cast): no real duality
-        // exists yet — the voter has ONE task plus a back-out hatch, so the
-        // primary button drops the protocol prefix and the refund demotes to a
-        // quiet cancel link below (rendered in the firstVote branch).
-        const isFirstVoteMoment = votePrompt.firstVote === true && !isArbiter && !isOversoldVoterView;
-        const releaseLabel = isArbiter
-          ? "Side with " + releaseWinner
-          : isFirstVoteMoment
-            ? getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE)
-            : voteOutcomeLabel("Release", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE));
-        const refundLabel = state.subscription
-          ? "Cancel & refund remaining"
-          : isArbiter
-            ? "Side with " + refundWinner
-            : isOversoldVoterView
-              // The single, unmistakable action on an oversold unit, phrased for
-              // whoever is tapping it: the seller refunds the duplicate; the buyer
-              // simply gets their own sats back.
-              ? (voteRole === Role.SELLER ? "Refund duplicate order" : "Refund — get my sats back")
-              : isMarketplace && voteRole === Role.SELLER
-                // Market seller votes first; "Refund" stays neutral rather than
-                // presuming "Buyer never received" before any dispute exists.
-                ? "Refund"
-                : voteOutcomeLabel("Refund", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND));
-
-        const releaseButton = showRelease ? (
-          <button
-            key="release"
-            disabled={voting}
-            onClick={() => handleVote(Outcome.RELEASE)}
-            aria-label={`Vote release: ${releaseLabel}`}
-            style={voteActionButtonStyle({
-              disabled: voting,
-              background: releaseBg,
-              border: releaseBorder,
-              color: releaseText,
-            })}
-          >
-            <span aria-hidden="true" style={voteActionIconStyle(releaseText)}>✓</span>
-            <span style={voteActionLabelStyle()}>{releaseLabel}</span>
-          </button>
-        ) : null;
-        const refundButton = showRefund ? (
-          <button
-            key="refund"
-            disabled={voting}
-            onClick={() => handleVote(Outcome.REFUND)}
-            aria-label={`Vote refund: ${refundLabel}`}
-            style={voteActionButtonStyle({
-              disabled: voting,
-              background: refundBg,
-              border: refundBorder,
-              color: refundText,
-            })}
-          >
-            <span aria-hidden="true" style={voteActionIconStyle(refundText)}>↩</span>
-            <span style={voteActionLabelStyle()}>{refundLabel}</span>
-          </button>
-        ) : null;
-        // Vote #1: ONE primary task button, refund demoted to a quiet two-tap
-        // "cancel this trade" hatch whose routing copy derives from the engine
-        // (payoutRecipientFor) so it can never lie about where the sats go.
-        if (isFirstVoteMoment && showRelease && showRefund) {
-          const refundRecipient = payoutRecipientFor(state, Outcome.REFUND);
-          const cancelRouting = refundRecipient && refundRecipient.pubkey === pubkey
-            ? "refund me"
-            : refundRecipient
-              ? `sats return to the ${refundRecipient.role}`
-              : "the locked sats are returned";
-          return (
-            <div className="trade-vote-actions" style={{
-              display: "grid", gridTemplateColumns: "1fr", marginBottom: 16,
-            }}>
-              {releaseButton}
-              <button
-                disabled={voting}
-                aria-label={`Vote refund: cancel this trade — ${cancelRouting}`}
-                onClick={() => {
-                  if (!cancelArmed) { setCancelArmed(true); return; }
-                  setCancelArmed(false);
-                  handleVote(Outcome.REFUND);
-                }}
-                style={{
-                  width: "100%", marginTop: 10, padding: "9px 10px",
-                  background: cancelArmed ? T.amberDim : "none",
-                  border: cancelArmed ? `1px solid ${T.amber}66` : `1px dashed ${T.border}`,
-                  borderRadius: T.rs,
-                  color: cancelArmed ? T.amber : T.muted,
-                  fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-                  cursor: voting ? "default" : "pointer",
-                }}
-              >
-                {cancelArmed
-                  ? `Sure? This ends the trade — ${cancelRouting}. Tap again to confirm.`
-                  : `${getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND)} · ${cancelRouting}`}
-              </button>
-            </div>
-          );
-        }
-        // Buyer-favoring vote on the LEFT (purple), seller-favoring on the RIGHT
-        // (orange), mirroring the B · A · S participant ring + the tally. RELEASE
-        // wins for the buyer in p2p/bill-pay/lending but for the SELLER in
-        // Market — so Market swaps the two so the buyer's outcome stays left.
-        return (
-          <div className="trade-vote-actions" style={{
-            display: "grid",
-            gridTemplateColumns: showRelease && showRefund ? "minmax(0, 1fr) minmax(0, 1fr)" : "1fr",
-            gap: 10,
-            marginBottom: 16,
-          }}>
-            {isMarketplace ? <>{refundButton}{releaseButton}</> : <>{releaseButton}{refundButton}</>}
-          </div>
-        );
-      })()}
-
-      {/* Claim button.
-          v0.3.1 Phase 3 expanded scope (Q4): boot probe also gates
-          the Claim button. When bootProbeFailed === true, the button
-          disables with "Federation unreachable — reconnect first"
-          subtitle. The Reconnect CTA lives in ChamaBar (single
-          source of truth). */}
-      {(state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED) && iAmWinner && !state.subscription && (
-        <div style={{
-          marginTop: 18,
-          paddingTop: 16,
-          marginBottom: 18,
-          borderTop: `1px solid ${T.border}`,
-        }}>
-          {/* v1.2.4: NWC status banner + direct-NWC Claim path.
-              Mirror of the Fund button treatment — saved NWC wallet
-              → one-tap claim straight to that wallet, banner above
-              for context + paste-to-add. */}
-          {!disableNwc && (
-            <NwcStatusBanner
-              activeConnection={activeNwc}
-              onSaved={refreshSavedNwcs}
-              onManage={onOpenNwcSettings}
-            />
-          )}
-
-          <button
-            disabled={claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked}
-            onClick={async () => {
-              // v1.2.4: direct-NWC claim path. Saved NWC wallet skips
-              // the ClaimPayoutModal chooser → resolveNwcConnectionToInvoice
-              // → claimAndPayout in one shot, all from the button.
-              if (activeNwc && onClaimDirectNwc) {
-                setDirectNwcClaimPhase("Starting…");
-                try {
-                  await onClaimDirectNwc({
-                    nwcConnectionString: activeNwc.connectionString,
-                    onPhase: (label) => setDirectNwcClaimPhase(label),
-                  });
-                } finally {
-                  setDirectNwcClaimPhase(null);
-                }
-                return;
-              }
-              setClaiming(true);
-              try {
-                await onClaim();
-              } finally {
-                setClaiming(false);
-              }
-            }}
-            style={{
-              width: "100%", padding: "18px", borderRadius: T.rs,
-              background: claimRetryBlocked
-                ? T.redDim
-                : claiming || directNwcClaimPhase !== null || bootProbeFailed
-                ? T.surface
-                : `linear-gradient(135deg, ${T.accent}, ${T.amber})`,
-              border: claimRetryBlocked ? `1px solid ${T.red}55` : "none",
-              color: claimRetryBlocked ? T.red : claiming || directNwcClaimPhase !== null || bootProbeFailed ? T.muted : T.bg,
-              fontFamily: T.mono, fontSize: 15, fontWeight: 800,
-              cursor: claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked ? "default" : "pointer", letterSpacing: 1,
-              animation: (claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked) ? "none" : "pulse 2s ease-in-out infinite",
-            }}>
-            {directNwcClaimPhase
-              ? directNwcClaimPhase
-              : claimRetryBlocked
-              ? "✕ CLAIM DID NOT SETTLE"
-              : claiming
-              ? state.status === EscrowStatus.CLAIMED ? "Retrying claim…" : "Claiming…"
-              : activeNwc && onClaimDirectNwc
-                ? (state.status === EscrowStatus.CLAIMED
-                    ? `⚡ RETRY CLAIM via ${activeNwc.label}`
-                    : `⚡ CLAIM YOUR SATS via ${activeNwc.label}`)
-                : state.status === EscrowStatus.CLAIMED ? "⚡ RETRY CLAIM" : "⚡ CLAIM YOUR SATS"}
-          </button>
-          {/* v1.2.4: same indeterminate progress strip under the
-              Claim button while the direct-NWC claim is mid-action.
-              Mirror of the Fund strip — purely cosmetic, since the
-              button label is already showing the phase text. */}
-          {directNwcClaimPhase && (
-            <div style={{
-              marginTop: 8,
-              height: 3,
-              borderRadius: 999,
-              background: `${T.accent}1f`,
-              overflow: "hidden",
-              position: "relative",
-            }}>
-              <div style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "30%",
-                height: "100%",
-                borderRadius: 999,
-                background: `linear-gradient(90deg, ${T.accent}00, ${T.accent}, ${T.amber}, ${T.amber}00)`,
-                animation: "nwcProgressSweep 1.4s ease-in-out infinite",
-              }} />
-            </div>
-          )}
-          {/* "Try other method" fallback link — same pattern as the
-              Fund button. Opens ClaimPayoutModal with the full
-              chooser when the user wants a different destination. */}
-          {activeNwc && onClaimDirectNwc && !directNwcClaimPhase && !claiming && (
-            <button
-              onClick={async () => {
-                setClaiming(true);
-                try {
-                  await onClaim();
-                } finally {
-                  setClaiming(false);
-                }
-              }}
-              style={{
-                background: "none", border: "none",
-                color: T.muted, fontFamily: T.mono, fontSize: 10,
-                cursor: "pointer", padding: "8px 0",
-                width: "100%", textAlign: "center",
-                textDecoration: "underline",
-              }}
-            >
-              Use a different payout method
-            </button>
-          )}
-          {bootProbeFailed && (
-            <div style={{
-              textAlign: "center", marginTop: 8,
-              fontSize: 10, color: T.amber, fontFamily: T.mono,
-            }}>
-              Federation unreachable — reconnect first
-            </div>
-          )}
-          {claimRetryBlocked && (
-            <div style={{
-              textAlign: "center", marginTop: 8,
-              fontSize: 10, color: T.red, fontFamily: T.mono,
-            }}>
-              Ecash redeem failed after federation consumed the notes — retry is disabled
-            </div>
-          )}
-          {!bootProbeFailed && !claimRetryBlocked && state.status === EscrowStatus.CLAIMED && (
-            <div style={{
-              textAlign: "center", marginTop: 8,
-              fontSize: 10, color: T.amber, fontFamily: T.mono,
-            }}>
-              Claim already sent — retrying only completes the payout once your wallet confirms
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Trade chat — disclosure row, prominent (open) during LOCKED. */}
       {myRole && (
-        <div style={{
+        <div ref={chatRowRef} style={{
           background: T.surface, border: `1px solid ${T.border}`,
           borderRadius: T.r, overflow: "hidden", marginBottom: 16,
         }}>
@@ -3157,6 +3300,8 @@ function detailNextStep({
   menuOrderNotFinal,
   participantsBuyer,
   votePromptKind,
+  votePromptOutcomes,
+  votePromptRole,
   iAmWinner,
   claimRetryBlocked,
   canJoinTrade,
@@ -3173,6 +3318,14 @@ function detailNextStep({
   menuOrderNotFinal: boolean;
   participantsBuyer?: string;
   votePromptKind: "waiting" | "buttons" | "none";
+  /** v3.2: the offered outcomes when buttons are live — REFUND-only means the
+   *  heal path (expired-unresolved), and the matrix must say so instead of
+   *  promising a Release that isn't on offer. */
+  votePromptOutcomes?: Outcome[];
+  /** v3.2: who the buttons belong to. A pool-backup arbiter ruling a dispute
+   *  has votePromptRole === ARBITER while myRole is null — the matrix must
+   *  treat them as the arbiter, not a visitor. */
+  votePromptRole?: Role | null;
   iAmWinner: boolean;
   claimRetryBlocked: boolean;
   canJoinTrade: boolean;
@@ -3184,6 +3337,23 @@ function detailNextStep({
   color: string;
   amountMsats: number | null;
 } {
+  // v3.2 prototype matrix: role × state cells. Everything below derives from
+  // state + myRole — dispute = both outcomes on record, unresolved.
+  const voteValues = Object.values(state.votes);
+  const matrixReleaseVotes = voteValues.filter(v => v === Outcome.RELEASE).length;
+  const matrixRefundVotes = voteValues.filter(v => v === Outcome.REFUND).length;
+  const isDisputed = matrixReleaseVotes > 0 && matrixRefundVotes > 0 && !state.resolvedOutcome;
+  const myVote = myRole ? state.votes[myRole] : undefined;
+  const arbiterRuled = !!state.votes[Role.ARBITER];
+  const isMarketplaceCell = state.category === "marketplace";
+  // RELEASE pays the non-locker; REFUND returns to the locker. Marketplace:
+  // buyer locks → release pays seller. Other verticals: seller locks → buyer.
+  const releaseWinnerRole: Role = isMarketplaceCell ? Role.SELLER : Role.BUYER;
+  const refundWinnerRole: Role = isMarketplaceCell ? Role.BUYER : Role.SELLER;
+  const settledWinnerRole = state.resolvedOutcome === Outcome.RELEASE
+    ? releaseWinnerRole
+    : state.resolvedOutcome === Outcome.REFUND ? refundWinnerRole : null;
+
   if (state.status === EscrowStatus.CREATED) {
     if (!myRole) {
       if (!canJoinTrade) {
@@ -3215,11 +3385,54 @@ function detailNextStep({
         amountMsats: hasMenu ? null : state.amountMsats,
       };
     }
+    if (myRole === Role.ARBITER) {
+      // v3.2: the arbiter is the watchful guardian from minute one — present
+      // for both sides the whole way, but acts ONLY if they disagree.
+      return {
+        kicker: "STANDING BY",
+        title: "You're this trade's arbiter.",
+        body: "You watch over both sides the whole way — but you only act if they disagree. Nothing is needed from you yet.",
+        tone: "teal",
+        color: ROLE_COLOR.arbiter,
+        amountMsats: state.amountMsats,
+      };
+    }
+    // v3.2 prototype reserved@seller: the storefront owner watching an order
+    // form. Without these the seller fell to "waiting for the locking side to
+    // fund" while the buyer was still picking items — premature and confusing.
+    if (isMarketplaceCell && myRole === Role.SELLER) {
+      if (!participantsBuyer) {
+        return {
+          kicker: "STOREFRONT LIVE",
+          title: "Waiting for a buyer to start an order.",
+          body: "Your listing is visible on Browse. When a buyer joins and funds, deliver the order — you're paid on release.",
+          tone: "teal",
+          color: T.teal,
+          amountMsats: hasMenu ? null : state.amountMsats,
+        };
+      }
+      if (hasMenu && !savedOrderFinalized) {
+        return {
+          kicker: "ORDER FORMING",
+          title: "The buyer is choosing what they want.",
+          body: "Nothing to do yet. Once they fund, deliver the order — you're paid on release.",
+          tone: "teal",
+          color: T.teal,
+          amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
+        };
+      }
+    }
     if (hasMenu && myRole === menuSelectorRole && !savedOrderFinalized) {
       return {
         kicker: "YOUR ORDER",
-        title: savedOrderAmountMsats > 0 ? "Review your cart, then mark it ready." : "Build your cart before this trade can lock.",
-        body: "Save as many edits as you need. Press Ready when the selection is final so the counterparty can fund exactly that snapshot.",
+        title: savedOrderAmountMsats > 0
+          ? "Review your cart, then mark it ready."
+          // v3.2 review fix: only a selector who ALSO locks is told to lock —
+          // in p2p/bill-pay the selector builds the order and the OTHER side funds.
+          : canILock ? "Build your cart, then lock it." : "Build your order, then press Ready.",
+        body: canILock
+          ? "Pick your items and save — press Ready when it's final. When you fund, the sats drop straight into 2-of-3 escrow."
+          : "Pick your items and save — press Ready when it's final. The funding side locks that exact snapshot into 2-of-3 escrow.",
         tone: "accent",
         color: T.accent,
         amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
@@ -3248,15 +3461,15 @@ function detailNextStep({
       }
       return {
         kicker: "READY TO FUND",
-        title: "Fund this exact order when you are ready.",
-        body: "Chama locks your sats into 2-of-3 escrow in one step — held safely until the trade settles.",
+        title: "Fund it — your sats drop straight into 2-of-3 escrow.",
+        body: "Locked sats move only when 2 of the 3 agree. Chama never holds your money.",
         tone: "accent",
         color: T.accent,
         amountMsats: lockAmountMsats,
       };
     }
     return {
-      kicker: "WAITING",
+      kicker: "RESERVED",
       title: "Waiting for the locking side to fund.",
       body: "Stay nearby. Once sats enter escrow, the vote and claim path opens from this same trade room.",
       tone: "purple",
@@ -3266,11 +3479,113 @@ function detailNextStep({
   }
 
   if (state.status === EscrowStatus.LOCKED) {
+    // v3.2 review fix (heal-awareness): decideVotePrompt offers REFUND-only
+    // buttons to ANY seat — arbiter included, no dispute needed — when the
+    // trade is past its deadline (a quiet dead trade still reads LOCKED until
+    // an event lands). The matrix must describe that heal instead of denying
+    // it ("nothing for you") or promising a Release that isn't on offer.
+    const healOnly = votePromptKind === "buttons"
+      && !!votePromptOutcomes
+      && votePromptOutcomes.includes(Outcome.REFUND)
+      && !votePromptOutcomes.includes(Outcome.RELEASE);
+    // v3.2 review fix: a pool-backup arbiter ruling a dispute has
+    // votePromptRole === ARBITER while myRole is null — treat them as the
+    // arbiter, never as a visitor.
+    const actsAsArbiter = myRole === Role.ARBITER || votePromptRole === Role.ARBITER;
+    // v3.2 dispute cells — both outcomes on record, unresolved. The header
+    // says "A call is needed"; each seat gets its own framing.
+    if (isDisputed && !healOnly) {
+      if (actsAsArbiter) {
+        if (arbiterRuled) {
+          return {
+            kicker: "RULING SENT",
+            title: "Your ruling is in — settling now.",
+            body: "The resolve lands as soon as a participant's Chama syncs it. Nothing more is needed from you.",
+            tone: "teal",
+            color: ROLE_COLOR.arbiter,
+            amountMsats: state.amountMsats,
+          };
+        }
+        return {
+          kicker: "YOUR RULING",
+          title: "Both sides voted — and they disagree.",
+          body: myRole === Role.ARBITER
+            ? "Weigh the chat and evidence, then send the sats one way. Your ruling settles it on the spot."
+            : "The assigned arbiter is absent — you hold the third key now. Weigh the evidence, then send the sats one way.",
+          tone: "teal",
+          color: ROLE_COLOR.arbiter,
+          amountMsats: state.amountMsats,
+        };
+      }
+      if (myRole === Role.BUYER || myRole === Role.SELLER) {
+        return {
+          kicker: "IN DISPUTE",
+          title: myVote === Outcome.REFUND
+            ? "You asked for a refund. The arbiter decides."
+            : myVote === Outcome.RELEASE
+              ? "You asked for release. The arbiter decides."
+              : "The two sides disagree. The arbiter decides.",
+          body: "Add anything that helps your case in chat — it moves the moment they rule.",
+          tone: "purple",
+          color: T.amber,
+          amountMsats: state.amountMsats,
+        };
+      }
+    }
+    if (healOnly) {
+      return {
+        kicker: "PAST DEADLINE",
+        title: "This trade expired unresolved — a refund vote heals it.",
+        body: "The deadline passed without settlement, so the one path left is the refund below: the locked sats route straight back to the locker.",
+        tone: "accent",
+        color: T.amber,
+        amountMsats: state.amountMsats,
+      };
+    }
+    if (myRole === Role.ARBITER && votePromptKind !== "buttons") {
+      return {
+        kicker: "LIVE TRADE",
+        title: "Locked and quiet. Nothing for you yet.",
+        body: "You're the watchful third key — you protect both sides throughout, but you only step in if they disagree.",
+        tone: "teal",
+        color: ROLE_COLOR.arbiter,
+        amountMsats: state.amountMsats,
+      };
+    }
+    // v3.2 review fix: the marketplace cells render in BOTH phases (your turn
+    // to act vs waiting on the other side) — the buyer's "on its way" moment
+    // is mostly the waiting phase, which the old gate skipped entirely.
+    if (isMarketplaceCell && myRole === Role.SELLER) {
+      return {
+        kicker: "LIVE TRADE",
+        title: "Deliver the order — you're paid on release.",
+        body: votePromptKind === "buttons"
+          ? "The buyer's sats are locked in escrow. Use chat for proof and timing."
+          : "You've confirmed your side — waiting on the buyer to release.",
+        tone: "purple",
+        color: T.purple,
+        amountMsats: state.amountMsats,
+      };
+    }
+    if (isMarketplaceCell && myRole === Role.BUYER) {
+      return {
+        kicker: "LIVE TRADE",
+        title: "Sats locked. Your order's on the way.",
+        body: votePromptKind === "buttons"
+          ? "Release when it arrives. An arbiter only steps in if you two disagree."
+          : "The seller is getting it to you — you'll confirm here when it arrives.",
+        tone: "purple",
+        color: T.purple,
+        amountMsats: state.amountMsats,
+      };
+    }
     if (votePromptKind === "buttons") {
       return {
         kicker: "YOUR NEXT STEP",
         title: "Confirm the outcome when the off-chain side is complete.",
-        body: "Release pays the winner for this vertical. Refund sends sats back to the original locker.",
+        // v3.2 review fix: no protocol jargon at the highest-stakes tap — the
+        // buttons below carry the exact per-category direction labels.
+        body: "The buttons below say exactly where the sats go — confirm your side when it's done.",
         tone: "purple",
         color: T.purple,
         amountMsats: state.amountMsats,
@@ -3286,24 +3601,97 @@ function detailNextStep({
     };
   }
 
-  if ((state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED) && iAmWinner) {
-    return {
-      kicker: claimRetryBlocked ? "CLAIM BLOCKED" : "READY TO CLAIM",
-      title: claimRetryBlocked ? "This claim needs recovery, not another retry." : "Claim your sats from escrow.",
-      body: claimRetryBlocked
-        ? "The federation consumed the notes before local settlement finished. Use the recovery surface if a balance appears."
-        : "Chama releases your sats and sends them out the best available way.",
-      tone: claimRetryBlocked ? "red" : "accent",
-      color: claimRetryBlocked ? T.red : T.accent,
-      amountMsats: state.amountMsats,
-    };
+  if (state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED) {
+    if (iAmWinner) {
+      return {
+        kicker: claimRetryBlocked ? "CLAIM BLOCKED" : "READY TO CLAIM",
+        // v3.2 review fix: outcome-honest — a refund winner is getting their
+        // OWN sats back, not a payout.
+        title: claimRetryBlocked
+          ? "This claim needs recovery, not another retry."
+          : state.resolvedOutcome === Outcome.REFUND
+            ? "Refunded — your sats are back."
+            : "Released — the sats are yours.",
+        body: claimRetryBlocked
+          ? "The federation consumed the notes before local settlement finished. Use the recovery surface if a balance appears."
+          : "Chama pulls them out of escrow and sends them the best way available.",
+        tone: claimRetryBlocked ? "red" : "accent",
+        color: claimRetryBlocked ? T.red : T.accent,
+        amountMsats: state.amountMsats,
+      };
+    }
+    // v3.2 settling cells for the non-claiming seats: name where the sats
+    // went, and make "nothing left for you" explicit. Subscription trades skip
+    // these (periods settle on their own schedule — the cells' claim-promise
+    // and full-amount pill would both mislead) and keep the generic fallback.
+    if (myRole === Role.ARBITER) {
+      return {
+        kicker: "SETTLED",
+        title: arbiterRuled ? "Your ruling is in — settling now." : "Both sides agreed — settling now.",
+        body: "The outcome is on record and the winner is claiming. Nothing more is needed from you.",
+        tone: "teal",
+        color: ROLE_COLOR.arbiter,
+        amountMsats: state.amountMsats,
+      };
+    }
+    if (!state.subscription && (myRole === Role.BUYER || myRole === Role.SELLER)) {
+      const winnerLabel = settledWinnerRole === Role.SELLER ? "seller" : "buyer";
+      return {
+        kicker: "SETTLING",
+        title: state.resolvedOutcome === Outcome.REFUND
+          ? `Refunded back to the ${winnerLabel}.`
+          : `Released to the ${winnerLabel}.`,
+        body: "Nothing left to do here — the trade closes out when they claim.",
+        tone: "purple",
+        color: T.purple,
+        amountMsats: state.amountMsats,
+      };
+    }
   }
 
   if (state.status === EscrowStatus.COMPLETED) {
+    if (myRole === Role.SELLER) {
+      return {
+        kicker: "COMPLETE",
+        // v3.2 review fix: "you were paid" only on a RELEASE outcome — a
+        // refunded seller merely got their own locked sats back.
+        title: !state.subscription && state.resolvedOutcome === Outcome.RELEASE && settledWinnerRole === Role.SELLER
+          ? "Trade complete — you were paid."
+          : state.resolvedOutcome === Outcome.REFUND && settledWinnerRole === Role.SELLER
+            ? "Trade complete — your sats came back."
+            : "Trade complete.",
+        body: "Saved to your history below. Rate the buyer anytime — reputation is the backbone here.",
+        tone: "green",
+        color: T.green,
+        amountMsats: state.amountMsats,
+      };
+    }
+    if (myRole === Role.BUYER) {
+      return {
+        kicker: "COMPLETE",
+        title: "Trade complete.",
+        body: "Saved to your history below — and your rating of the seller lives right here.",
+        tone: "green",
+        color: T.green,
+        amountMsats: state.amountMsats,
+      };
+    }
+    if (myRole === Role.ARBITER) {
+      return {
+        kicker: "COMPLETE",
+        title: "Trade complete.",
+        body: arbiterRuled
+          ? "Your ruling helped settle it. Saved to history."
+          : "Settled by mutual agreement — no ruling was ever needed. Saved to history.",
+        tone: "green",
+        color: T.green,
+        amountMsats: state.amountMsats,
+      };
+    }
     return {
       kicker: "COMPLETE",
       title: "This trade is settled.",
-      body: "Your full trade history is saved below. Ratings will plug into this moment next.",
+      body: "Your full trade history is saved below. Ratings plug into this moment.",
       tone: "green",
       color: T.green,
       amountMsats: state.amountMsats,

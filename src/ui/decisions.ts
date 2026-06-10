@@ -15,7 +15,12 @@ import {
   getPickerCommunities,
   DEFAULT_COMMUNITY_SLUG,
 } from "../communities/registry.js";
-import { BP_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
+import {
+  BP_FEDERATION_INVITE,
+  CURATED_PRESETS,
+  effectiveCreateFederationId,
+  expectedFederationIdForInvite,
+} from "../fedimint/federation-config.js";
 import { balanceBlocksFederationSwitch, MATERIAL_RECOVERY_MIN_SATS } from "../payments/lightning-fees.js";
 import {
   type EscrowState,
@@ -889,7 +894,7 @@ export interface ListingTapInputs {
    *  item 9 fix, every listing carries both mintUrl and community.
    *  Pre-v0.1.87 listings may have stale/missing mintUrl; community
    *  is the more reliable source there. */
-  listing: { mintUrl: string; community: string | null };
+  listing: { mintUrl: string; community: string | null; fedId?: string | null };
   /** chama_active_invite — null if the user has no fed loaded. */
   currentInvite: string | null;
   /** Live OPFS balance. */
@@ -900,7 +905,26 @@ export interface ListingTapInputs {
   activeCommitmentCount?: number;
 }
 
-function resolveListingInvite(listing: { mintUrl: string; community: string | null }): string {
+function inviteForFederationId(fedId: string | null | undefined): string | null {
+  const normalized = normalizeFedId(fedId);
+  if (!normalized) return null;
+  return CURATED_PRESETS.find(
+    (preset) => normalizeFedId(preset.federationId) === normalized,
+  )?.inviteCode ?? null;
+}
+
+function resolveListingInvite(listing: {
+  mintUrl: string;
+  community: string | null;
+  fedId?: string | null;
+}): string {
+  const effectiveFedId = effectiveCreateFederationId({
+    fed: listing.fedId,
+    mintUrl: listing.mintUrl,
+    community: listing.community,
+  });
+  const fedInvite = inviteForFederationId(effectiveFedId);
+  if (fedInvite) return fedInvite;
   if (listing.mintUrl && listing.mintUrl.startsWith("fed1")) {
     return listing.mintUrl;
   }
@@ -925,8 +949,13 @@ function normalizeFedId(value: string | null | undefined): string | null {
 }
 
 export function listingMatchesActiveRoute(inputs: ListingRouteMatchInputs): boolean {
-  const listingFedId = normalizeFedId(inputs.listingFedId);
-  const activeFedId = normalizeFedId(inputs.activeFedId);
+  const listingFedId = effectiveCreateFederationId({
+    fed: inputs.listingFedId,
+    mintUrl: inputs.listingMintUrl,
+    community: inputs.listingCommunity,
+  });
+  const activeFedId = normalizeFedId(inputs.activeFedId)
+    ?? normalizeFedId(expectedFederationIdForInvite(inputs.activeInvite));
 
   if (listingFedId) {
     return !!activeFedId && listingFedId === activeFedId;

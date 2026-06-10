@@ -670,7 +670,11 @@ export function sortEventChain(events: ParsedEscrowEvent[]): ParsedEscrowEvent[]
     const pa = GLOBAL_KIND_ORDER[a.kind] ?? 99;
     const pb = GLOBAL_KIND_ORDER[b.kind] ?? 99;
     if (pa !== pb) return pa - pb;
-    return 0; // stable: preserve BFS order within same kind
+    // Relay arrival order is not stable across relays. Orphaned same-kind
+    // branches (notably repeated JOIN holds that reference chat/old branch tips)
+    // must still replay chronologically so expired holds can be replaced by the
+    // newest valid JOIN.
+    return a.timestamp - b.timestamp;
   });
 
   // Interleave chat events by timestamp

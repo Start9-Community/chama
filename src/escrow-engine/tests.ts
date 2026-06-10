@@ -151,6 +151,7 @@ import {
   setCustomFederationInvite,
   shouldReconcileFederation,
   expectedFederationIdForInvite,
+  effectiveCreateFederationId,
   PUBLIC_FEDI_APPROVED_FEDERATIONS,
   BP_FEDERATION_ID,
   AFRIBIT_KIBERA_FEDERATION_ID,
@@ -2629,6 +2630,46 @@ console.log("\n── CHAT ──");
   assert(chatClient.getState(state.id)?.chatMessages[0]?.payload.attachments?.[0]?.id === "img_receipt_2",
     "Local sendChat apply shows encrypted receipt image immediately");
 
+  // v3.1.1 (chat-safety, FIX 1 regression): the sent chat raw MUST be persisted
+  // to the durable rawEvents cache. CHAT is intentionally NOT in eventChain, so
+  // without this a reload (which seeds replay from rawEvents) rebuilds chat from
+  // an incomplete relay fetch and silently drops it — the chat-absorption root
+  // cause Jetty hit on a live two-device trade.
+  const cachedChatRaws = (chatClient as any).rawEvents.get(state.id) as NostrEvent[] | undefined;
+  assert(!!cachedChatRaws?.some(e => e.id === capturedChat.id),
+    "FIX 1: the sent chat raw is persisted to the durable rawEvents cache");
+
+  // v3.1.1 (chat-safety, FIX 3 regression): an oversized image must FAIL LOUDLY
+  // before publish (relays silently DROP events over 128 KiB on receive), not
+  // "send" as a phantom local copy that vanishes on reload. Needs a signer whose
+  // ciphertext scales with the plaintext — the shared mock above returns a fixed
+  // short cipher, which can't exercise the real on-wire size cap.
+  const bigChatClient = new EscrowClient({
+    async getPublicKey() { return BUYER_PK; },
+    async signEvent(event: UnsignedEvent) {
+      return { ...event, id: "chat_big_1", pubkey: BUYER_PK, sig: "sig" } as NostrEvent;
+    },
+    async nip44Encrypt(plaintext: string) { return "C".repeat(plaintext.length); },
+    async nip44Decrypt(ciphertext: string) { return ciphertext; },
+  }, { relays: [] });
+  (bigChatClient as any).states.set(state.id, state);
+  (bigChatClient as any).relayManager.publish = async () => ({ accepted: 1, rejected: 0, errors: [] });
+  let oversizedChatThrew = false;
+  try {
+    await bigChatClient.sendChat(state.id, {
+      message: "",
+      attachments: [{
+        id: "img_huge", kind: "image", mimeType: "image/jpeg",
+        dataUrl: "data:image/jpeg;base64," + "A".repeat(200 * 1024),
+        name: "huge.jpg", width: 4000, height: 4000, sizeBytes: 200 * 1024,
+      }],
+    });
+  } catch (e: any) {
+    oversizedChatThrew = /too large/i.test(e?.message || "");
+  }
+  assert(oversizedChatThrew,
+    "FIX 3: an oversized chat image throws a clear 'too large' error before publish");
+
   // Non-participant can't chat
   const badChat = makeParsedEvent<ChatPayload>(EscrowEventKind.CHAT, "ff".repeat(32), {
     type: "escrow:chat",
@@ -2637,6 +2678,41 @@ console.log("\n── CHAT ──");
     sentAt: NOW,
   });
   assertErr(applyEvent(state, badChat), "NOT_PARTICIPANT", "Non-participant can't chat");
+
+  const replayWithBadHistoricalChat = replayEventChain(sortEventChain([
+    create,
+    badChat,
+    j1,
+  ]));
+  if (assertOk(replayWithBadHistoricalChat,
+    "Historical non-participant CHAT is skipped during full-chain replay")) {
+    assert(
+      replayWithBadHistoricalChat.state.status === EscrowStatus.CREATED,
+      "Bad historical CHAT does not hide an otherwise valid CREATED listing",
+    );
+    assert(
+      replayWithBadHistoricalChat.state.chatMessages.length === 0,
+      "Skipped historical CHAT is not shown in chat history",
+    );
+  }
+
+  const oldBuyer = "11".repeat(32);
+  const latestBuyer = "22".repeat(32);
+  const oldOrphanJoin = retimeEvent(joinEvent(Role.BUYER, oldBuyer, "missing_old_branch"), NOW + 100);
+  const latestOrphanJoin = retimeEvent(joinEvent(Role.BUYER, latestBuyer, "missing_new_branch"), NOW + 1_200);
+  const replayWithOrphanJoins = replayEventChain(sortEventChain([
+    create,
+    badChat,
+    latestOrphanJoin,
+    oldOrphanJoin,
+  ]));
+  if (assertOk(replayWithOrphanJoins,
+    "Orphaned JOIN branches replay chronologically despite relay arrival order")) {
+    assert(
+      replayWithOrphanJoins.state.participants[Role.BUYER] === latestBuyer,
+      "Newest valid JOIN replaces an expired older hold on replay",
+    );
+  }
 }
 
 // ── 8a. HOLDER-ONLY SHARES — payoutRecipientFor pure over candidate outcome ─
@@ -3739,6 +3815,18 @@ console.log("\n── BP / BLF RESOLVER ──");
     resolveFederationForCommunity(route.slug) === route.invite &&
     expectedFederationIdForInvite(route.invite) === route.federationId
   ), "Every baked public Fedi route resolves to its approved invite and federation ID");
+  assert(effectiveCreateFederationId({
+    fed: BP_FEDERATION_ID,
+    mintUrl: BLF_FEDERATION_INVITE,
+    community: "us-blf",
+  }) === BLF_FEDERATION_ID,
+    "Legacy CREATE with stale fed is rescued when mintUrl and community agree");
+  assert(effectiveCreateFederationId({
+    fed: BP_FEDERATION_ID,
+    mintUrl: BLF_FEDERATION_INVITE,
+    community: null,
+  }) === BP_FEDERATION_ID,
+    "CREATE fed still wins over a lone stale mintUrl");
 
   const globalUsdInvite = getCommunityBySlug("global-usd")!.federationInvite!;
   assert(resolveFederationForCommunity("global-usd") === globalUsdInvite,
@@ -7854,7 +7942,7 @@ console.log("\n── decideListingTapEffect ──");
 {
   // Matching fed → State A render, no client work.
   const matching = decideListingTapEffect({
-    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "sn-cfa" },
+    listing: { mintUrl: BLF_FEDERATION_INVITE, community: "us-blf" },
     currentInvite: BLF_FEDERATION_INVITE,
     balanceMsats: 0,
   });
@@ -7934,8 +8022,36 @@ console.log("\n── decideListingTapEffect ──");
       "Community-derived fallback resolves to us-blf's pinned invite");
   }
 
-  const bpFedId = "11".repeat(32);
-  const blfFedId = "22".repeat(32);
+  const legacyStaleFedMatching = decideListingTapEffect({
+    listing: {
+      mintUrl: BLF_FEDERATION_INVITE,
+      community: "us-blf",
+      fedId: BP_FEDERATION_ID,
+    },
+    currentInvite: BLF_FEDERATION_INVITE,
+    balanceMsats: 0,
+  });
+  assert(legacyStaleFedMatching.kind === "matching",
+    "Listing tap treats stale fed as matching when mintUrl and community agree");
+
+  const fedWinsOverLoneMint = decideListingTapEffect({
+    listing: {
+      mintUrl: BLF_FEDERATION_INVITE,
+      community: null,
+      fedId: BP_FEDERATION_ID,
+    },
+    currentInvite: BLF_FEDERATION_INVITE,
+    balanceMsats: 0,
+  });
+  assert(fedWinsOverLoneMint.kind === "switch-silent",
+    "Listing tap keeps CREATE fed authoritative over a lone stale mintUrl");
+  if (fedWinsOverLoneMint.kind === "switch-silent") {
+    assert(fedWinsOverLoneMint.targetInvite === BP_FEDERATION_INVITE,
+      "Fed-authoritative listing targets the invite mapped from CREATE fed");
+  }
+
+  const bpFedId = BP_FEDERATION_ID;
+  const blfFedId = BLF_FEDERATION_ID;
   assert(
     listingMatchesActiveRoute({
       listingMintUrl: BLF_FEDERATION_INVITE,
@@ -7962,6 +8078,16 @@ console.log("\n── decideListingTapEffect ──");
       activeFedId: blfFedId,
     }) === true,
     "Legacy listing without fed id falls back to mintUrl matching",
+  );
+  assert(
+    listingMatchesActiveRoute({
+      listingMintUrl: BLF_FEDERATION_INVITE,
+      listingFedId: bpFedId,
+      listingCommunity: "us-blf",
+      activeInvite: BLF_FEDERATION_INVITE,
+      activeFedId: blfFedId,
+    }) === true,
+    "Legacy listing with stale fed id is matched when mintUrl and community agree",
   );
   assert(
     listingMatchesActiveRoute({
@@ -10657,8 +10783,8 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
 	  }
 
 	  // ── Payout-failed: claim confirmed, balance grew, but payInvoice threw
-	  // This is the orphan-balance case — recovery banner catches it
-	  // (Phase 4 wiring).
+	  // COMPLETE is not published until the outbound payout succeeds, so
+	  // the trade's Claim button stays alive as the retry path.
   {
     const wallet = makeMockWallet({
       balances: [0, 100_000, 100_000],
@@ -10693,12 +10819,16 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "claim was attempted (succeeded)");
     assert(wallet.calls.payInvoice === 1,
       "payInvoice was attempted (failed)");
-    assert(wallet.calls.completeClaim === 1,
-      "COMPLETE still publishes when balance landed but outbound payout failed");
+    assert(wallet.calls.completeClaim === 0,
+      "COMPLETE NOT published when balance landed but outbound payout failed");
+    if (terminal.kind === "payout-failed") {
+      assert(terminal.claimCompleted === false,
+        "payout-failed marks claimCompleted=false so Claim stays the retry path");
+    }
     assert(wallet.calls.clearPendingRedemption === 1,
       "Pending redemption stash clears once balance landed even if outbound payout fails");
     assert(wallet.calls.saveHandle === 0,
-      "Handle NOT saved when payout failed (orphan = recovery banner's job)");
+      "Handle NOT saved when payout failed (retry needs a fresh successful payout)");
   }
 
   // WASM errors can cross the JS boundary as plain strings. Preserve the
@@ -10994,7 +11124,7 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       "cover + payout failure → COMPLETE NOT published (trade stays claimable)");
   }
 
-  // ── Growth path payout failure → claimCompleted=true (existing order)
+  // ── Growth path payout failure → claimCompleted=false (retry stays open)
   {
     const wallet = makeMockWallet({
       balances: [0, 100_000, 100_000],
@@ -11018,8 +11148,10 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
       confirmTimeoutMs: 30_000,
       pollIntervalMs: 1_000,
     });
-    assert(terminal.kind === "payout-failed" && terminal.claimCompleted === true,
-      "growth + payout failure → claimCompleted=true (COMPLETE already published pre-payout)");
+    assert(terminal.kind === "payout-failed" && terminal.claimCompleted === false,
+      "growth + payout failure → claimCompleted=false (COMPLETE waits for payout success)");
+    assert(wallet.calls.completeClaim === 0,
+      "growth + payout failure → COMPLETE NOT published before payout success");
   }
 
   // ── Consumed notes + NON-covering balance → honest claim-failed ─────
@@ -13896,6 +14028,36 @@ console.log("\n── RELAY MANAGER — one-shot fetch isolation ──");
     fetched.length === 1 && fetched[0].id === "seed-event",
     "fetchOnce ignores unrelated live-subscription events while seed recovery is running"
   );
+
+  FakeWebSocket.instances = [];
+  const coldRelayManager = new RelayManager(
+    ["wss://cold-relay.test"],
+    {},
+    FakeWebSocket as unknown as typeof WebSocket
+  );
+  coldRelayManager.connect();
+  const coldSocket = FakeWebSocket.instances[0]!;
+  const coldFetch = coldRelayManager.fetchEscrowEvents("sm_cold_start_trade", 1_000);
+
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert(
+    coldSocket.sent.length === 0,
+    "Cold fetch waits for a relay socket instead of immediately returning empty"
+  );
+
+  coldSocket.onopen?.({} as Event);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const coldFetchReq = coldSocket.sent
+    .map(raw => JSON.parse(raw))
+    .find(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_"));
+  assert(!!coldFetchReq, "Cold fetch sends the escrow REQ after relay connect");
+  assert(
+    coldFetchReq[2]?.["#d"]?.[0] === "sm_cold_start_trade",
+    "Cold fetch keeps the requested escrow id filter intact"
+  );
+  coldSocket.emit(["EOSE", coldFetchReq[1]]);
+  const coldFetched = await coldFetch;
+  assert(coldFetched.length === 0, "Cold fetch resolves after the connected relay EOSEs");
 }
 
 // ── FIRST-ACK PUBLISH (field fix: slow Create→Publish) ─────────────────
@@ -14212,6 +14374,12 @@ console.log("\n── Ratings primitive (kind:38123) ──");
   assert(upUnsigned.kind === RATING_KIND, "rating: builder stamps kind:38123");
   assert(upUnsigned.tags.find(t => t[0] === "d")?.[1] === ratingReplaceableKey(TRADE, rateePk),
     "rating: d-tag is the (trade, ratee) replaceable key");
+  // v3.1.1 (#1 regression): the internal escrow id (`sm_…`) is NOT a 32-byte
+  // Nostr event id, so it must never be emitted as a fixed-size `e` tag — relays
+  // reject the whole event ("unexpected size for fixed-size tag: e") and no
+  // rating ever publishes. The trade is identified by the d-tag + content.
+  assert(!upUnsigned.tags.some(t => t[0] === "e"),
+    "rating: no e-tag — escrow id is not a Nostr event id, relays reject it");
   const upSigned = finalizeEvent(upUnsigned, raterSk) as unknown as NostrEvent;
   const up = parseRatingEvent(upSigned);
   assert(!!up && up.rater === raterPk && up.ratee === rateePk && up.tradeId === TRADE && up.thumb === "up",
