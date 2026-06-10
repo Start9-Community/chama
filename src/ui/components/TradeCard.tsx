@@ -80,8 +80,8 @@ export function TradeCard({
   // v2.3.1 — history/audit presentation. On your OWN trade (the Me list) you
   // already know your role — you have the seller dashboard, and arbiters get
   // their own view — so the card shows just the COUNTERPARTY (the other side),
-  // never "· You", plus the unique trade ID for audit. Identical-looking orders
-  // (same npub, same title) are still told apart by the id. On Browse (non-
+  // never "· You". Identical-looking orders (same npub, same title) are still
+  // told apart by the public trade ID, which is shown on every card. On Browse (non-
   // participant) we keep the single "Seller · X" context line. This also fixes
   // the v2.3 double-"Seller" line: a buyer-viewer rendered the counterparty line
   // ("Seller · X") AND the seller-context line ("Seller · X").
@@ -356,7 +356,7 @@ export function TradeCard({
             </div>
           )}
 
-          {isParticipant && <TradeIdLine id={state.id} />}
+          <TradeIdLine id={state.id} />
 
           {sellerContextLine && (
             <div style={{
