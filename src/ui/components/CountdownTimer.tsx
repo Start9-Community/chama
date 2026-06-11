@@ -27,6 +27,9 @@ export function CountdownTimer({
         background: T.redDim, border: `1px solid ${T.red}44`,
         textAlign: "center", fontFamily: T.mono, fontSize: 12,
         color: T.red, fontWeight: 700,
+        width: "fit-content",
+        maxWidth: "100%",
+        margin: "0 auto",
       }}>
         DEADLINE PASSED
       </div>
@@ -42,20 +45,19 @@ export function CountdownTimer({
     ? `${mins}m ${secs.toString().padStart(2, "0")}s`
     : `${secs}s`;
 
-  const urgent = remaining < 300;
   const warning = remaining < 600;
   const caution = remaining < 3600;
 
   const color = warning ? T.red : caution ? T.amber : T.green;
-  const bg = warning ? T.redDim : caution ? T.amberDim : T.greenDim;
 
   return (
     <div style={{
-      display: "flex", alignItems: "center", justifyContent: "center",
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
       gap: 8, padding: "8px 16px", borderRadius: T.rs,
-      background: bg, border: `1px solid ${color}44`,
+      background: T.surface, border: `1px solid ${color}44`,
       fontFamily: T.mono, fontSize: 11,
-      animation: urgent ? "pulse 1s ease-in-out infinite" : "none",
+      width: "fit-content",
+      maxWidth: "100%",
     }}>
       <span style={{ color: T.muted, fontSize: 9, letterSpacing: 1 }}>{label}</span>
       <span style={{ color, fontWeight: 700, fontSize: 13 }}>{timeStr}</span>

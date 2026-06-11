@@ -32,7 +32,7 @@
 //     honesty info card (one-time-per-account, dismissed on first
 //     publish). Save-draft button + Publish button.
 
-import { useState, useEffect, type WheelEvent } from "react";
+import { useState, useEffect } from "react";
 import { type MenuItem } from "../../escrow-engine/types.js";
 import { randomId } from "../../storage/random-id.js";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
@@ -315,6 +315,12 @@ function parsePremiumBps(value: string): number | undefined {
   return Math.round(clamped * 100);
 }
 
+function satsWithPremium(baseSats: number, premiumBps: number | undefined): number {
+  if (!Number.isFinite(baseSats) || baseSats <= 0) return 0;
+  const multiplierBps = Math.max(1, 10_000 + (premiumBps ?? 0));
+  return Math.max(1, Math.ceil((baseSats * multiplierBps) / 10_000));
+}
+
 function parseOptionalPositiveInt(value: string): number | undefined {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
@@ -366,11 +372,17 @@ function menuKindForVertical(vertical: Vertical): NonNullable<MenuItem["kind"]> 
   return "market-item";
 }
 
+function menuImagesAllowedForVertical(vertical: Vertical): boolean {
+  return vertical === "marketplace" || vertical === "p2p-trade";
+}
+
 function normalizeMenuItems(form: FormState, vertical: Vertical): MenuItem[] {
   if (form.listingMode !== "menu") return [];
+  const premiumBps = vertical === "bill-pay" ? parsePremiumBps(form.premium) : undefined;
   return form.menuItems.flatMap((item, index) => {
     const label = item.label.trim();
     const minSats = parseWholeSats(item.sats);
+    const itemSats = vertical === "bill-pay" ? satsWithPremium(minSats, premiumBps) : minSats;
     const maxSats = vertical === "p2p-trade"
       ? (parseWholeSats(item.maxSats) || minSats)
       : minSats;
@@ -386,14 +398,14 @@ function normalizeMenuItems(form: FormState, vertical: Vertical): MenuItem[] {
       id: item.id || `item_${index + 1}`,
       label,
       kind,
-      amountMsats: minSats * 1000,
+      amountMsats: itemSats * 1000,
       minAmountMsats: vertical === "p2p-trade" ? minSats * 1000 : undefined,
       maxAmountMsats: vertical === "p2p-trade" ? maxSats * 1000 : undefined,
       description: item.description.trim() || undefined,
       fiatAmount: Number.isFinite(fiatAmount) ? fiatAmount : undefined,
       fiatCurrency: Number.isFinite(fiatAmount) ? form.cur : undefined,
       fulfillment: vertical === "marketplace" ? item.fulfillment : undefined,
-      imageDataUrl: vertical === "marketplace" && item.imageDataUrl ? item.imageDataUrl : undefined,
+      imageDataUrl: menuImagesAllowedForVertical(vertical) && item.imageDataUrl ? item.imageDataUrl : undefined,
       dueAt: vertical === "bill-pay" ? parseDueDate(item.dueDate) : undefined,
       termDays: vertical === "lending" ? parseOptionalPositiveInt(item.termDays) : undefined,
       aprBps: vertical === "lending"
@@ -448,7 +460,9 @@ function minimumMenuSats(items: MenuItem[]): number {
 function effectiveListingSats(form: FormState, vertical: Vertical): number {
   const menuItems = normalizeMenuItems(form, vertical);
   if (menuItems.length > 0) return minimumMenuSats(menuItems);
-  const baseSats = parseWholeSats(form.sats);
+  const baseSats = vertical === "bill-pay"
+    ? satsWithPremium(parseWholeSats(form.sats), parsePremiumBps(form.premium))
+    : parseWholeSats(form.sats);
   return form.isSubscription
     ? baseSats * parseWholeSats(form.periods)
     : baseSats;
@@ -524,10 +538,6 @@ function markFirstPublished(pubkey: string | null): void {
       localStorage.setItem(FIRST_PUBLISH_KEY_PREFIX + pubkey, "1");
     }
   } catch { /* no-op */ }
-}
-
-function blurNumberInputOnWheel(e: WheelEvent<HTMLInputElement>) {
-  e.currentTarget.blur();
 }
 
 function menuTitleForVertical(vertical: Vertical): string {
@@ -753,7 +763,7 @@ function premiumLabelForVertical(vertical: Vertical): string {
 
 function premiumHintForVertical(vertical: Vertical, currency: string): string {
   if (vertical === "lending") return "Shown as APR on the loan request.";
-  if (vertical === "bill-pay") return `Shown with the ${currency} bill price.`;
+  if (vertical === "bill-pay") return `${currency} bill price stays fixed; premium increases locked sats.`;
   return `Shown with the ${currency} exchange price.`;
 }
 
@@ -842,6 +852,16 @@ function premiumCheckoutLine(form: FormState, vertical: Vertical): string | null
   if (vertical === "lending" || !supportsPremium(vertical)) return null;
   const premiumBps = parsePremiumBps(form.premium);
   const baseFiat = parseFiatAmount(form.fiat);
+  if (vertical === "bill-pay") {
+    const baseSats = parseWholeSats(form.sats);
+    if (premiumBps === undefined || baseSats <= 0) return null;
+    const lockSats = satsWithPremium(baseSats, premiumBps);
+    const signed = premiumBps > 0 ? `+${formatPremiumPercent(premiumBps)}%` : `${formatPremiumPercent(premiumBps)}%`;
+    const due = baseFiat !== null && baseFiat > 0
+      ? formatFiatAmount(baseFiat, form.cur)
+      : `${form.cur} bill`;
+    return `${due} due stays fixed; ${signed} locks ₿ ${fmtSats(lockSats * 1000)}`;
+  }
   if (premiumBps === undefined || baseFiat === null || baseFiat <= 0) return null;
   const checkoutFiat = baseFiat * (1 + premiumBps / 10_000);
   if (!Number.isFinite(checkoutFiat) || checkoutFiat < 0) return null;
@@ -980,7 +1000,15 @@ export function CreateForm({
     ) return;
     setSubmitting(true);
     try {
-      const amountMsats = baseSats * 1000;
+      const singleLockSats = !hasMenu && vertical === "bill-pay"
+        ? satsWithPremium(baseSats, parsePremiumBps(form.premium))
+        : baseSats;
+      const periodAmountMsats = singleLockSats * 1000;
+      const amountMsats = hasMenu
+        ? baseSats * 1000
+        : form.isSubscription
+          ? parseWholeSats(form.periods) * periodAmountMsats
+          : periodAmountMsats;
       // #103: stamp the community LABEL honest with the fed this listing is
       // actually minted on. browseCommunity (the header pill) can drift from
       // the wallet's loaded fed during a foreign-listing visit; if it has,
@@ -998,11 +1026,7 @@ export function CreateForm({
       });
       const params: any = {
         description,
-        amountMsats: hasMenu
-          ? amountMsats
-          : form.isSubscription
-            ? parseWholeSats(form.periods) * amountMsats
-            : amountMsats,
+        amountMsats,
         fiatAmount: !hasMenu && form.fiat ? parseFloat(form.fiat) : undefined,
         fiatCurrency: !hasMenu && form.fiat ? form.cur : undefined,
         // v1.2.2 premium-display fix: when the seller leaves the
@@ -1043,7 +1067,7 @@ export function CreateForm({
       if (!hasMenu && form.isSubscription) {
         params.subscription = {
           totalPeriods: parseWholeSats(form.periods),
-          periodAmountMsats: amountMsats,
+          periodAmountMsats,
           periodDurationSeconds: parseWholeSats(form.intervalDays) * 86400,
         };
       }
@@ -1873,7 +1897,6 @@ function Step2({
               type="number"
               value={form.sats}
               onChange={e => syncSingleSats(e.target.value)}
-              onWheel={blurNumberInputOnWheel}
               placeholder="100000"
               style={inputStyle}
             />
@@ -1913,7 +1936,6 @@ function Step2({
               type="number"
               value={form.sats}
               onChange={e => syncSingleSats(e.target.value)}
-              onWheel={blurNumberInputOnWheel}
               placeholder="100000"
               style={inputStyle}
             />
@@ -2013,7 +2035,6 @@ function Step2({
               type="number"
               value={form.premium}
               onChange={e => set("premium", e.target.value)}
-              onWheel={blurNumberInputOnWheel}
               placeholder={vertical === "lending" ? "12" : "2.5"}
               style={inputStyle}
             />
@@ -2203,7 +2224,6 @@ function Step2({
                     type="number"
                     value={item.sats}
                     onChange={e => updateMenuSats(item.id, e.target.value)}
-                    onWheel={blurNumberInputOnWheel}
                     placeholder={vertical === "p2p-trade" ? "min sats" : vertical === "lending" ? "principal" : "sats"}
                     style={{ ...inputStyle, width: 92 }}
                   />
@@ -2212,7 +2232,6 @@ function Step2({
                       type="number"
                       value={item.maxSats}
                       onChange={e => updateMenuItem(item.id, { maxSats: e.target.value })}
-                      onWheel={blurNumberInputOnWheel}
                       placeholder="max"
                       style={{ ...inputStyle, width: 92 }}
                     />
@@ -2230,7 +2249,6 @@ function Step2({
                       type="number"
                       value={item.fiat}
                       onChange={e => updateMenuFiat(item.id, e.target.value)}
-                      onWheel={blurNumberInputOnWheel}
                       placeholder={form.cur}
                       style={{ ...inputStyle, width: 84, fontSize: 12 }}
                     />
@@ -2249,7 +2267,6 @@ function Step2({
                         type="number"
                         value={item.termDays}
                         onChange={e => updateMenuItem(item.id, { termDays: e.target.value })}
-                        onWheel={blurNumberInputOnWheel}
                         placeholder="days"
                         style={{ ...inputStyle, width: 72, fontSize: 12 }}
                       />
@@ -2257,7 +2274,6 @@ function Step2({
                         type="number"
                         value={item.apr}
                         onChange={e => updateMenuItem(item.id, { apr: e.target.value })}
-                        onWheel={blurNumberInputOnWheel}
                         placeholder="APR"
                         style={{ ...inputStyle, width: 72, fontSize: 12 }}
                       />
@@ -2305,7 +2321,7 @@ function Step2({
                     ×
                   </button>
                 </div>
-                {vertical === "marketplace" && (
+                {menuImagesAllowedForVertical(vertical) && (
                   <div style={{
                     display: "flex",
                     alignItems: "center",
@@ -2366,38 +2382,40 @@ function Step2({
                         </button>
                       </>
                     )}
-                    <label
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 6,
-                        marginLeft: "auto",
-                        fontFamily: T.mono,
-                        fontSize: 10,
-                        fontWeight: 800,
-                        color: item.maxQty.trim() ? T.accent : T.muted,
-                      }}
-                      title="Max units of this item one order can take. Blank = unlimited."
-                    >
-                      Max / order
-                      <input
-                        type="number"
-                        min={1}
-                        inputMode="numeric"
-                        placeholder="∞"
-                        value={item.maxQty}
-                        onChange={e => updateMenuItem(item.id, { maxQty: e.target.value })}
+                    {vertical === "marketplace" && (
+                      <label
                         style={{
-                          ...inputStyle,
-                          width: 56,
-                          padding: "8px 8px",
-                          fontSize: 11,
-                          textAlign: "center",
-                          color: T.text,
-                          background: T.card,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          marginLeft: "auto",
+                          fontFamily: T.mono,
+                          fontSize: 10,
+                          fontWeight: 800,
+                          color: item.maxQty.trim() ? T.accent : T.muted,
                         }}
-                      />
-                    </label>
+                        title="Max units of this item one order can take. Blank = unlimited."
+                      >
+                        Max / order
+                        <input
+                          type="number"
+                          min={1}
+                          inputMode="numeric"
+                          placeholder="∞"
+                          value={item.maxQty}
+                          onChange={e => updateMenuItem(item.id, { maxQty: e.target.value })}
+                          style={{
+                            ...inputStyle,
+                            width: 56,
+                            padding: "8px 8px",
+                            fontSize: 11,
+                            textAlign: "center",
+                            color: T.text,
+                            background: T.card,
+                          }}
+                        />
+                      </label>
+                    )}
                   </div>
                 )}
               </div>
@@ -2555,8 +2573,9 @@ function Step3({
     setForm(prev => ({ ...prev, [key]: value }));
   const fiatFloor = menuFiatFloor(menuItems);
   const singleFiatAmount = parseFiatAmount(form.fiat);
+  const singleFiatEstimateSats = vertical === "bill-pay" ? parseWholeSats(form.sats) : totalSats;
   const estimatedSingleFiatAmount = singleFiatAmount ?? estimateFiatForMsats({
-    amountMsats: totalSats * 1000,
+    amountMsats: singleFiatEstimateSats * 1000,
     currency: form.cur,
     usdPerBtc: btcPrice.usd,
     usdFiatRates: fiatRates.rates,
@@ -2570,6 +2589,7 @@ function Step3({
   const previewPremium = premiumReviewLine(form, vertical);
   const previewPremiumCheckout = premiumCheckoutLine(form, vertical);
   const showFiatPrimary = amountDisplayMode === "fiat";
+  const previewSingleSats = totalSats;
 
   return (
     <>
@@ -2776,17 +2796,13 @@ function Step3({
                 <>
                   <span>{formatFiatAmount(estimatedSingleFiatAmount, form.cur)}</span>
                   <span style={{ color: T.muted, fontWeight: 400 }}>
-                    ₿ {fmtSats((form.isSubscription
-                      ? parseWholeSats(form.periods) * parseWholeSats(form.sats)
-                      : parseWholeSats(form.sats)) * 1000)}
+                    ₿ {fmtSats(previewSingleSats * 1000)}
                   </span>
                 </>
               ) : (
                 <>
                   <BitcoinAmount
-                    sats={form.isSubscription
-                      ? parseWholeSats(form.periods) * parseWholeSats(form.sats)
-                      : parseWholeSats(form.sats)}
+                    sats={previewSingleSats}
                     size={14}
                     gap={4}
                     glyphScale={1.18}

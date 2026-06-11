@@ -70,10 +70,6 @@ export function TradeCard({
   const sellerPubkey = state.participants[Role.SELLER]
     ?? (state.initiator.role === Role.SELLER ? state.initiator.pubkey : null);
   const sellerName = profileNameFor(profileNames, sellerPubkey, kind0Enabled);
-  // A "Store" tile = a marketplace listing with a seller (same condition as the
-  // Store badge below). Own-route stores keep the storefront treatment; external
-  // amber/off-route stores stay text-first and compact.
-  const isMarketStore = state.category === "marketplace" && !!sellerPubkey && !isAmber;
   const communityChipLabel = listingCommunity
     ? (listingCommunity.disambiguator ?? listingCommunity.displayName)
     : null;
@@ -103,12 +99,15 @@ export function TradeCard({
     : null;
   const menuItems = state.items ?? [];
   const hasMenu = menuItems.length > 0;
+  const isStorefrontTile = !!sellerPubkey
+    && !isAmber
+    && (state.category === "marketplace" || (state.category === "p2p-trade" && hasMenu));
   const fiatFloor = menuFiatFloor(menuItems);
   const exchangeRange = state.category === "p2p-trade"
     ? exchangeBracketRange(menuItems)
     : null;
   const satsLabel = exchangeRange ? satsRangeLabel(exchangeRange) : fmtSats(state.amountMsats);
-  const marketplaceImages = isMarketStore
+  const storefrontImages = isStorefrontTile
     ? menuItems.map(item => item.imageDataUrl).filter((src): src is string => !!src)
     : [];
   const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null) : null;
@@ -165,12 +164,9 @@ export function TradeCard({
       overflow: "hidden",
       position: "relative", isolation: "isolate",
     }}>
-      {/* v3.1.1: the storefront watermark renders on every Store tile. The dark
-          navy field that used to expose a square over the amber off-route tint
-          is now keyed to TRUE ALPHA in the asset (transparent PNG), so it never
-          paints — clean over any backdrop (dark OR amber), no `isAmber` gate
-          needed. The approved screen-blend glow on dark tiles is unchanged. */}
-      {isMarketStore && (
+      {/* Storefront media stays on own-route Store/Exchange-menu tiles. External
+          amber cards remain compact so route context stays the strongest signal. */}
+      {isStorefrontTile && (
         <div aria-hidden="true" style={{
           position: "absolute", inset: 0, zIndex: -1,
           backgroundImage: `url(${STORE_WATERMARK})`,
@@ -183,25 +179,21 @@ export function TradeCard({
           backgroundPosition: "right 20px center",
           backgroundSize: "auto 128px",
           filter: "contrast(1.4)",
-          // Dark tiles keep the neon screen-glow (approved look). Off-route amber
-          // tiles drop to normal blend so the storefront can't screen-lift the
-          // warm wash into a halo, and render quieter — they're a de-emphasised
-          // route, so the storefront reads as a faint ghost, not a beacon.
-          mixBlendMode: isAmber ? "normal" : "screen",
-          opacity: isAmber ? 0.28 : 0.65,
+          mixBlendMode: "screen",
+          opacity: 0.65,
           pointerEvents: "none",
         }} />
       )}
-      {marketplaceImages.length > 0 && (
+      {storefrontImages.length > 0 && (
         <div style={{
           display: "grid",
-          gridTemplateColumns: marketplaceImages.length > 1 ? "1fr 1fr" : "1fr",
+          gridTemplateColumns: storefrontImages.length > 1 ? "1fr 1fr" : "1fr",
           gap: 2,
           margin: "-14px -14px 12px",
           height: 156,
           background: T.surface,
         }}>
-          {marketplaceImages.slice(0, 2).map((src, index) => (
+          {storefrontImages.slice(0, 2).map((src, index) => (
             <img
               key={`${src.slice(0, 32)}_${index}`}
               src={src}

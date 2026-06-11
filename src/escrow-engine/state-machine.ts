@@ -1323,8 +1323,10 @@ function handlePeriodRelease(state: EscrowState, event: ParsedEscrowEvent<Period
 // Chat messages don't change state but are part of the escrow record.
 
 function handleChat(state: EscrowState, event: ParsedEscrowEvent<ChatPayload>): TransitionResult {
-  // Only participants can chat
-  if (getRole(state, event.pubkey) === null) {
+  // Only effective participants can chat. In CREATED, buyer/seller JOIN slots
+  // expire if they do not lock in time, so a stale raw participant pubkey must
+  // not keep reading or sending on a relisted trade.
+  if (getActiveRole(state, event.pubkey, event.timestamp) === null) {
     return err("NOT_PARTICIPANT", "Only participants can send chat messages", event.raw.id);
   }
 

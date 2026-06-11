@@ -26,6 +26,7 @@ import {
   Outcome,
   TAGS,
   getEffectiveParticipantAt,
+  getEffectiveParticipantsAt,
   joinHoldExpiresAt,
   type NostrEvent,
   type EscrowState,
@@ -1035,10 +1036,11 @@ export class EscrowClient {
       message,
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
     };
+    const activeParticipants = getEffectiveParticipantsAt(state, now);
     const recipients = [
-      state.participants.buyer,
-      state.participants.seller,
-      state.participants.arbiter,
+      activeParticipants.buyer,
+      activeParticipants.seller,
+      activeParticipants.arbiter,
     ].filter((pk): pk is string => typeof pk === "string" && pk.length > 0);
     const bodyEnvelope = await createEnvelope(
       JSON.stringify(chatBody),

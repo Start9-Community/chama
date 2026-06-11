@@ -619,6 +619,7 @@ export function TradeDetail({
     && buyerAttemptRows.length > 0
     && !!sellerPubkey
     && samePubkey(sellerPubkey, pubkey);
+  const lockMenuSelectionMissing = hasMenu && lockMenuItems.length === 0;
   const nextStep = detailNextStep({
     state,
     myRole,
@@ -628,7 +629,7 @@ export function TradeDetail({
     savedOrderFinalized,
     savedOrderAmountMsats,
     lockAmountMsats,
-    menuSelectionMissing: hasMenu && lockMenuItems.length === 0,
+    menuSelectionMissing: lockMenuSelectionMissing,
     menuOrderNotFinal,
     participantsBuyer: participants.buyer ?? undefined,
     votePromptKind: votePrompt.kind,
@@ -1341,10 +1342,10 @@ export function TradeDetail({
         </div>
       )}
 
-      {categoryUsesPaymentRails(state.category) && acceptedPaymentMethods.length > 0 && (
+      {(categoryUsesPaymentRails(state.category) && acceptedPaymentMethods.length > 0 || premiumLine) && (
         <div style={{
           background: T.card,
-          border: `1px solid ${T.border}`,
+          border: `1px solid ${premiumLine ? T.amber + "33" : T.border}`,
           borderRadius: T.r,
           padding: 12,
           marginBottom: 12,
@@ -1355,79 +1356,68 @@ export function TradeDetail({
             color: T.muted,
             fontFamily: T.mono,
             letterSpacing: 1,
-            marginBottom: 10,
+            marginBottom: 9,
           }}>
-            ACCEPTED PAYMENT
+            TRADE TERMS
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-            {acceptedPaymentMethods.map(method => {
-              // For a prospective buyer, flag the rails they can already pay on.
-              const isShared = myRole !== Role.SELLER && sharedRailSet.has(toRailKey(method));
-              return (
-                <span
-                  key={method}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 4,
-                    padding: "5px 9px",
-                    borderRadius: 999,
-                    background: isShared ? `${T.green}22` : T.surface,
-                    border: `1px solid ${isShared ? T.green : T.border}`,
-                    color: isShared ? T.green : T.text,
-                    fontFamily: T.mono,
-                    fontSize: 11,
-                    fontWeight: 800,
-                  }}
-                >
-                  {isShared ? "✓ " : ""}{method}
-                </span>
-              );
-            })}
-          </div>
-          {myRole !== Role.SELLER && suggestedRail && railMatch.shared.length > 0 && (
-            <div style={{ marginTop: 10, color: T.muted, fontSize: 11, lineHeight: 1.5 }}>
-              You both use <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong> — the easiest payment method to settle on before you lock.
-            </div>
+          {acceptedPaymentMethods.length > 0 && (
+            <>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                {acceptedPaymentMethods.map(method => {
+                  // For a prospective buyer, flag the rails they can already pay on.
+                  const isShared = myRole !== Role.SELLER && sharedRailSet.has(toRailKey(method));
+                  return (
+                    <span
+                      key={method}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                        padding: "5px 9px",
+                        borderRadius: 999,
+                        background: isShared ? `${T.green}22` : T.surface,
+                        border: `1px solid ${isShared ? T.green : T.border}`,
+                        color: isShared ? T.green : T.text,
+                        fontFamily: T.mono,
+                        fontSize: 11,
+                        fontWeight: 800,
+                      }}
+                    >
+                      {isShared ? "✓ " : ""}{method}
+                    </span>
+                  );
+                })}
+              </div>
+              {myRole !== Role.SELLER && suggestedRail && railMatch.shared.length > 0 && (
+                <div style={{ marginTop: 8, color: T.muted, fontSize: 11, lineHeight: 1.5 }}>
+                  You both use <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong>.
+                </div>
+              )}
+            </>
           )}
-        </div>
-      )}
-
-      {premiumLine && (
-        <div style={{
-          background: T.card,
-          border: `1px solid ${T.amber}44`,
-          borderRadius: T.r,
-          padding: 12,
-          marginBottom: 12,
-        }}>
-          <div style={{
-            fontSize: 11,
-            fontWeight: 700,
-            color: T.muted,
-            fontFamily: T.mono,
-            letterSpacing: 1,
-            marginBottom: 8,
-          }}>
-            PREMIUM
-          </div>
-          <div style={{
-            color: T.amber,
-            fontFamily: T.mono,
-            fontSize: 14,
-            fontWeight: 900,
-          }}>
-            {premiumLine}
-          </div>
-          {premiumCheckoutLine && (
+          {premiumLine && (
             <div style={{
-              marginTop: 6,
-              color: T.muted,
+              marginTop: acceptedPaymentMethods.length > 0 ? 10 : 0,
+              paddingTop: acceptedPaymentMethods.length > 0 ? 10 : 0,
+              borderTop: acceptedPaymentMethods.length > 0 ? `1px solid ${T.border}` : "none",
+              display: "flex",
+              alignItems: "baseline",
+              justifyContent: "space-between",
+              gap: 10,
+              color: T.amber,
               fontFamily: T.mono,
               fontSize: 11,
               lineHeight: 1.4,
             }}>
-              {premiumCheckoutLine}
+              <span style={{ color: T.muted, fontWeight: 800, letterSpacing: 0.7 }}>PREMIUM</span>
+              <span style={{ fontSize: 13, fontWeight: 900, textAlign: "right" as const }}>
+                {premiumLine}
+                {premiumCheckoutLine && (
+                  <span style={{ display: "block", marginTop: 2, color: T.muted, fontSize: 10, fontWeight: 500 }}>
+                    {premiumCheckoutLine}
+                  </span>
+                )}
+              </span>
             </div>
           )}
         </div>
@@ -1786,12 +1776,17 @@ export function TradeDetail({
               from their old column positions; all gating logic unchanged. */}
           {/* CREATED — atomic lock surface for the locker. The locker can
               spend only after any cross-role menu order is finalized. */}
-          {state.status === EscrowStatus.CREATED && myRole && canILock && (() => {
+          {state.status === EscrowStatus.CREATED
+            && myRole
+            && canILock
+            && participants.buyer
+            && !lockMenuSelectionMissing
+            && !menuOrderNotFinal && (() => {
             const fiatCategory = state.category === "p2p-trade"
               || state.category === "bill-pay"
               || state.category === "lending";
             const allHandles = fiatCategory ? listSavedHandles() : [];
-            const menuSelectionMissing = hasMenu && lockMenuItems.length === 0;
+            const menuSelectionMissing = lockMenuSelectionMissing;
             return (
             <div style={{
               paddingTop: 16,
@@ -1799,25 +1794,6 @@ export function TradeDetail({
               marginBottom: 16,
               borderTop: `1px solid ${T.accent}33`,
             }}>
-              <div style={{
-                fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
-                letterSpacing: 1, marginBottom: 12,
-              }}>
-                ATOMIC LOCK
-              </div>
-              <div style={{
-                textAlign: "center", fontFamily: T.mono, fontSize: 12,
-                color: T.accent, marginBottom: 14,
-              }}>
-                {hasMenu && menuSelectionMissing
-                  ? `Waiting for ${roleDisplayName(menuSelectorRole).toLowerCase()} to choose what they want…`
-                  : menuOrderNotFinal
-                  ? `${roleDisplayName(menuSelectorRole)} is still editing. Lock opens after they press Ready.`
-                  : participants.buyer
-                  ? "Funds the trade and locks it into 2-of-3 escrow in one step."
-                  : "Waiting for buyer to acknowledge the trade…"}
-              </div>
-
               {/* Handle reveal picker for fiat categories */}
               {fiatCategory && (
                 <div style={{ marginBottom: 14 }}>
@@ -2051,12 +2027,6 @@ export function TradeDetail({
                   Lightning receive unavailable — use Fedi/native bridge or sim demo
                 </div>
               )}
-              <div style={{
-                textAlign: "center", marginTop: 8,
-                fontSize: 9, color: T.muted, fontFamily: T.mono,
-              }}>
-                Held safely in 2-of-3 escrow — it takes 2 of 3 to release
-              </div>
             </div>
             );
           })()}
@@ -3997,6 +3967,9 @@ function detailPremiumCheckoutLine(
 ): string | null {
   if (state.category !== "p2p-trade" && state.category !== "bill-pay") return null;
   if (state.premiumBps === undefined || !heroFiat || heroFiat.amount <= 0) return null;
+  if (state.category === "bill-pay") {
+    return `Fiat due stays ${formatFiatAmount(heroFiat.amount, heroFiat.currency)}; premium is locked in sats`;
+  }
   const checkoutFiat = heroFiat.amount * (1 + state.premiumBps / 10_000);
   if (!Number.isFinite(checkoutFiat) || checkoutFiat < 0) return null;
   return `${formatFiatAmount(heroFiat.amount, heroFiat.currency)} -> ${formatFiatAmount(checkoutFiat, heroFiat.currency)} at checkout`;

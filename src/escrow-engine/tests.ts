@@ -2630,6 +2630,50 @@ console.log("\n── CHAT ──");
   assert(chatClient.getState(state.id)?.chatMessages[0]?.payload.attachments?.[0]?.id === "img_receipt_2",
     "Local sendChat apply shows encrypted receipt image immediately");
 
+  const expiredBuyer = "33".repeat(32);
+  const expiredBuyerState = {
+    ...state,
+    participants: { ...state.participants, [Role.BUYER]: expiredBuyer },
+    joinHolds: {
+      ...state.joinHolds,
+      [Role.BUYER]: {
+        role: Role.BUYER,
+        pubkey: expiredBuyer,
+        joinedAt: NOW - JOIN_HOLD_SECONDS - 120,
+        expiresAt: NOW - 120,
+        eventId: "expired_buyer_join",
+      },
+    },
+  } as EscrowState;
+  let expiredSlotPublishedChat: NostrEvent | null = null;
+  const expiredSlotChatClient = new EscrowClient({
+    async getPublicKey() { return SELLER_PK; },
+    async signEvent(event: UnsignedEvent) {
+      return { ...event, id: "chat_expired_slot_1", pubkey: SELLER_PK, sig: "sig" } as NostrEvent;
+    },
+    async nip44Encrypt(_plaintext: string, recipientPubkey: string) {
+      return `cipher-for:${recipientPubkey}`;
+    },
+    async nip44Decrypt(ciphertext: string) {
+      return ciphertext;
+    },
+  }, { relays: [] });
+  (expiredSlotChatClient as any).states.set(expiredBuyerState.id, expiredBuyerState);
+  (expiredSlotChatClient as any).relayManager.publish = async (event: NostrEvent) => {
+    expiredSlotPublishedChat = event;
+    return { accepted: 1, rejected: 0, errors: [] };
+  };
+  await expiredSlotChatClient.sendChat(expiredBuyerState.id, "old buyer should not receive this");
+  const expiredSlotCaptured = expiredSlotPublishedChat as unknown as NostrEvent | null;
+  if (!expiredSlotCaptured) {
+    throw new Error("sendChat did not publish the expired-slot regression event");
+  }
+  const expiredSlotPayload = JSON.parse(expiredSlotCaptured.content) as ChatPayload;
+  assert(!!expiredSlotPayload.bodyEnvelope?.encryptedFor[SELLER_PK],
+    "Seller chat still encrypts to the active seller");
+  assert(!expiredSlotPayload.bodyEnvelope?.encryptedFor[expiredBuyer],
+    "Expired buyer JOIN slot is not included in new chat recipients");
+
   // v3.1.1 (chat-safety, FIX 1 regression): the sent chat raw MUST be persisted
   // to the durable rawEvents cache. CHAT is intentionally NOT in eventChain, so
   // without this a reload (which seeds replay from rawEvents) rebuilds chat from
@@ -2678,6 +2722,20 @@ console.log("\n── CHAT ──");
     sentAt: NOW,
   });
   assertErr(applyEvent(state, badChat), "NOT_PARTICIPANT", "Non-participant can't chat");
+
+  const createForExpiredChat = createEvent();
+  let expiredChatState = (applyEvent(null, createForExpiredChat) as any).state;
+  const joinedAt = NOW + 10_000;
+  const expiredJoin = retimeEvent(joinEvent(Role.BUYER, BUYER_PK, createForExpiredChat.raw.id), joinedAt);
+  expiredChatState = (applyEvent(expiredChatState, expiredJoin) as any).state;
+  const expiredBuyerChat = retimeEvent(makeParsedEvent<ChatPayload>(EscrowEventKind.CHAT, BUYER_PK, {
+    type: "escrow:chat",
+    message: "my hold already expired",
+    senderRole: Role.BUYER,
+    sentAt: joinedAt + JOIN_HOLD_SECONDS + 1,
+  }), joinedAt + JOIN_HOLD_SECONDS + 1);
+  assertErr(applyEvent(expiredChatState, expiredBuyerChat), "NOT_PARTICIPANT",
+    "Expired joined buyer can't chat before lock");
 
   const replayWithBadHistoricalChat = replayEventChain(sortEventChain([
     create,
