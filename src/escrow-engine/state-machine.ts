@@ -63,6 +63,22 @@ function err(code: string, message: string, eventId?: string, details?: Record<s
   return { ok: false, error: { code, message, eventId, details } };
 }
 
+// INVARIANT(arbiter-fee-bounds) — v3.3 (C2): the arbiter fee is locker-chosen
+// and the parser only rejects NaN/Infinity, so it can still arrive negative,
+// fractional, or above the trade amount. Sanitize — never reject — at every
+// write into state.fees.arbiterMsats: an integer clamped to [0, amount].
+// Rejecting at LOCK would strand the locker (the ecash is spent before the
+// reducer runs); rejecting at parse would make an odd-but-accepted historical
+// chain unloadable. Coercion keeps the payout balanced (seller = amount − fee
+// stays in range), applies identically on every client (replay-deterministic),
+// and is a no-op for honest floor()'d bps fees. A canonical fee assertion
+// belongs to the economic layer (C8) once a payout path actually fans out.
+function sanitizeArbiterFeeMsats(value: unknown, amountMsats: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  const cap = Number.isFinite(amountMsats) && amountMsats > 0 ? Math.floor(amountMsats) : 0;
+  return Math.max(0, Math.min(cap, Math.floor(value)));
+}
+
 // ── Helper: clone state immutably ─────────────────────────────────────────
 
 function cloneState(state: EscrowState): EscrowState {
@@ -331,7 +347,11 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
       platformBps: p.platformFeeBps,
       platformPubkey: p.platformFeePubkey,
       platformMsats: Math.floor((p.amountMsats * p.platformFeeBps) / 10_000),
-      arbiterMsats: p.arbiterFeeMsats ?? 0,
+      // INVARIANT(arbiter-fee-bounds) — v3.3 (C2): sanitize the locker-chosen
+      // fee at the canonical source (CREATE) into [0, amount] (integer). This
+      // is where the LOCK builder later reads the fee from, so coercing here
+      // keeps every downstream LOCK in range without a fund-stranding reject.
+      arbiterMsats: sanitizeArbiterFeeMsats(p.arbiterFeeMsats, p.amountMsats),
     },
     lock: {
       notesHash: null,
@@ -542,9 +562,11 @@ function handleJoin(state: EscrowState, event: ParsedEscrowEvent<JoinPayload>): 
     delete next.joinHolds[p.role];
   }
 
-  // If arbiter is joining with fee terms, record them
+  // If arbiter is joining with fee terms, record them — sanitized into
+  // [0, amount] (C2), same as CREATE/LOCK, so a crafted arbiter JOIN can't
+  // seed a junk fee before the LOCK overwrites it.
   if (p.role === Role.ARBITER && p.arbiterFeeMsats !== undefined) {
-    next.fees.arbiterMsats = p.arbiterFeeMsats;
+    next.fees.arbiterMsats = sanitizeArbiterFeeMsats(p.arbiterFeeMsats, state.amountMsats);
   }
 
   next.eventChain.push(event);
@@ -640,6 +662,14 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
       event.raw.id
     );
   }
+
+  // NOTE: C1 (deterministic-assignment gate on LOCK) is intentionally NOT
+  // enforced here in v3.3 — see INVARIANTS.md. A naive recompute would reject
+  // genuine pre-v0.7.2 (no-exclusion builder) chains as ARBITER_NOT_ASSIGNED
+  // on replay (not a benign code → whole chain unloadable, funds stranded).
+  // It moves to the pool-integrity cluster (C1+C6+C7) with a backward-
+  // compatible accept-either-basis fix. The JOIN-side gate (handleJoin ~506)
+  // and the matches-prior-JOIN check (ARBITER_PUBKEY_MISMATCH above) stand.
 
   // The buyer and arbiter must be distinct from the seller (and each other).
   const sellerPk = state.participants[Role.SELLER];
@@ -789,6 +819,12 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   // multi-party payout path exists.
   // We accept old LOCKs (pre-.71) that may still carry platformFeeMsats
   // in their payload by checking for either sum shape.
+  // INVARIANT(arbiter-fee-bounds) — v3.3 (C2): the fee is bounded by SANITIZING
+  // at the writes into state.fees.arbiterMsats (see sanitizeArbiterFeeMsats),
+  // never by rejecting the LOCK. The reducer runs AFTER the ecash is spent and
+  // the LOCK is published, so a reject here would strand the locker; coercion
+  // keeps the payout balanced without that hazard. The sum check below is
+  // unchanged.
   const seller = p.sellerReceivesMsats;
   const arbiter = p.arbiterFeeMsats;
   const legacyPlatform = (p as unknown as { platformFeeMsats?: number }).platformFeeMsats;
@@ -863,10 +899,11 @@ function handleLock(state: EscrowState, event: ParsedEscrowEvent<LockPayload>): 
   // as platform fees move to LN collection). Old LOCKs (pre-.71) still
   // do — read it via the legacy escape hatch so replays of historical
   // chains preserve audit info. Defaults to 0 for new LOCKs.
-  const legacyPlatformWriteback =
-    (p as unknown as { platformFeeMsats?: number }).platformFeeMsats ?? 0;
-  next.fees.platformMsats = legacyPlatformWriteback;
-  next.fees.arbiterMsats = p.arbiterFeeMsats;
+  next.fees.platformMsats = legacyPlatform ?? 0;
+  // INVARIANT(arbiter-fee-bounds) — v3.3 (C2): sanitize the locker-chosen fee
+  // into [0, amount] (integer) on the way into state rather than rejecting the
+  // LOCK. expectedLockAmountMsats is the just-validated lock amount.
+  next.fees.arbiterMsats = sanitizeArbiterFeeMsats(p.arbiterFeeMsats, expectedLockAmountMsats);
 
   next.eventChain.push(event);
   return { ok: true, state: next };

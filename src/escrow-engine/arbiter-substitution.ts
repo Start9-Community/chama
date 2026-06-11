@@ -48,6 +48,36 @@ export function clampSubstitutionGraceSeconds(value: number | null | undefined):
   return Math.max(0, Math.min(SUBSTITUTION_GRACE_MAX_SECONDS, Math.floor(value)));
 }
 
+/** INVARIANT(dispute-clock-bounded) — v3.3 (C11). How far past expiry a
+ *  dispute-clock anchor may sit before the clamp pins it. Reuses the 4h grace
+ *  ceiling so the whole substitution clock thinks in one unit. */
+export const DISPUTE_CLOCK_SLACK_SECONDS = SUBSTITUTION_GRACE_MAX_SECONDS;
+
+/** INVARIANT(dispute-clock-bounded) — v3.3 (C11): clamp a dispute-clock anchor
+ *  to its CEILING only — `≤ expiresAt + slack(4h)`. The anchors below come from
+ *  self-asserted vote `created_at`s; without the ceiling a FUTURE-dated vote
+ *  pushes eligibility absurdly far out (frozen escalation). The clamp is a
+ *  bound, not the boundary: the deterministic PRIORITY RULE is the real
+ *  correctness boundary — the assigned arbiter's later vote beats any backup's
+ *  pre-settlement, whatever the timestamps claim (see the header note and the
+ *  slot derivation in handleVote).
+ *
+ *  NOTE — no lower (lockedAt) floor. `lockedAt` is the locker's clock; votes
+ *  carry each voter's clock; and there is NO floor gate on buyer/seller votes,
+ *  so an HONEST RELEASE vote can legitimately sit slightly before `lockedAt` on
+ *  ordinary skew. Flooring it forward would push `eligibleAt` later and reject
+ *  a previously-valid arbiter/backup vote (ARBITER_TOO_EARLY /
+ *  SUBSTITUTE_TOO_EARLY) — same chain, divergent outcome. The ceiling has no
+ *  such hazard: an honest vote is never that late. Pure over committed state;
+ *  the ceiling comes from the chain itself, so every client clamps identically. */
+function clampDisputeAnchor(state: EscrowState, at: number): number {
+  if (typeof state.expiresAt === "number" && state.expiresAt > 0) {
+    const ceiling = state.expiresAt + DISPUTE_CLOCK_SLACK_SECONDS;
+    if (at > ceiling) return ceiling;
+  }
+  return at;
+}
+
 /** Low-level deterministic priority order. The LOCK builder calls this with
  *  the pubkeys it is about to commit (the arbiter isn't seated in state yet at
  *  build time); everyone else should prefer arbiterPriorityOrder(state). */
@@ -118,7 +148,8 @@ export function disputeStartAt(state: EscrowState): number | null {
     else if (p.role === Role.SELLER && !seller) seller = { outcome: p.outcome, at };
   }
   if (buyer && seller && buyer.outcome !== seller.outcome) {
-    return Math.max(buyer.at, seller.at);
+    // C11: clamp the self-asserted anchor to its ceiling (≤ expiresAt + slack).
+    return clampDisputeAnchor(state, Math.max(buyer.at, seller.at));
   }
   return oneSidedEscalationAt(state);
 }
@@ -175,7 +206,8 @@ export function oneSidedReleaseAnchor(
     const p = ve.payload as VotePayload | undefined;
     if (p?.outcome !== Outcome.RELEASE) continue;
     const at = (ve as { raw?: { created_at?: number } }).raw?.created_at ?? 0;
-    return { nonLockerRole: nonLocker.role, releaseVoteAt: at };
+    // C11: same ceiling clamp as the two-sided arm — one clock, one bound.
+    return { nonLockerRole: nonLocker.role, releaseVoteAt: clampDisputeAnchor(state, at) };
   }
   return null;
 }

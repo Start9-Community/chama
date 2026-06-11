@@ -314,8 +314,14 @@ function validateLockPayload(data: unknown): data is LockPayload {
     d.type === "escrow:lock" &&
     typeof d.notesHash === "string" &&
     Array.isArray(d.shares) && d.shares.length === 3 &&
-    typeof d.sellerReceivesMsats === "number" &&
-    typeof d.arbiterFeeMsats === "number" &&
+    // INVARIANT(arbiter-fee-bounds) — v3.3 (C2): keep the type check and reject
+    // only NaN/Infinity (which never appear in an honest payload and would
+    // corrupt the sum math). Negatives / fractionals still PARSE — they are
+    // sanitized into [0, amount] at the reducer (sanitizeArbiterFeeMsats), so
+    // an odd-but-historically-accepted chain stays loadable rather than being
+    // rejected at ingest.
+    typeof d.sellerReceivesMsats === "number" && Number.isFinite(d.sellerReceivesMsats) &&
+    typeof d.arbiterFeeMsats === "number" && Number.isFinite(d.arbiterFeeMsats) &&
     typeof d.buyerPubkey === "string" && d.buyerPubkey.length > 0 &&
     typeof d.arbiterPubkey === "string" && d.arbiterPubkey.length > 0 &&
     typeof d.lockedAt === "number"

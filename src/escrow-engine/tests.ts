@@ -100,6 +100,7 @@ import {
   disputeStartAt,
   substitutionEligibleAt,
   SUBSTITUTION_GRACE_MAX_SECONDS,
+  DISPUTE_CLOCK_SLACK_SECONDS,
   clampSubstitutionGraceSeconds,
   oneSidedEscalationAt,
   oneSidedReleaseAnchor,
@@ -535,6 +536,7 @@ function createEvent(opts: {
   stock?: number;
   parent?: string;
   claimedQuantity?: number;
+  arbiterFeeMsats?: number;
 } = {}): ParsedEscrowEvent<CreatePayload> {
   return makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
     type: "escrow:create",
@@ -548,7 +550,7 @@ function createEvent(opts: {
     mintUrl: "fed11q...",
     platformFeeBps: 50,
     platformFeePubkey: PLATFORM_PK,
-    arbiterFeeMsats: 1_000_000,
+    arbiterFeeMsats: opts.arbiterFeeMsats ?? 1_000_000,
     paymentMethods: ["Zelle", "CashApp"],
     expirySeconds: 86400,
     communityArbiters: opts.communityArbiters,
@@ -2427,6 +2429,167 @@ console.log("\n── v2.9 expiry-exploit: performance contest ──");
     "v2.9: marketplace — the SELLER's standing RELEASE is the contest (inversion handled by construction)");
   assert(isPerformanceContest(mkt({ [Role.BUYER]: Outcome.RELEASE })) === false,
     "v2.9: marketplace — the BUYER (locker) voting RELEASE is NOT a contest");
+}
+
+// ── 5b-v3.3. Consensus invariants — C2 + C11 (INVARIANTS.md) ──────────────
+// Coordinated release v3.3. C1 (the LOCK deterministic-assignment gate) was
+// PULLED: a naive recompute rejects genuine pre-v0.7.2 (no-exclusion builder)
+// chains as ARBITER_NOT_ASSIGNED on replay — and that code isn't benign, so the
+// whole chain becomes unloadable and funds strand. It moves to the pool-
+// integrity cluster (C1+C6+C7) with a backward-compatible accept-either fix.
+// What ships here: C2 SANITIZES the locker-chosen arbiter fee into [0, amount]
+// at every write (never rejects — a reject would strand the locker, whose ecash
+// is spent before the reducer runs), and C11 clamps the dispute-clock CEILING
+// only (the lockedAt floor rejected valid arbiter votes on honest clock skew).
+// Both leave honest chains byte-identical; only junk/forged values diverge.
+// Test names follow the INVARIANTS.md convention so "is X still enforced?" is a grep.
+console.log("\n── v3.3 consensus invariants (C2 fee sanitize · C11 dispute-clock ceiling) ──");
+{
+  const POOL33 = [ARBITER_PK, ARBITER2_PK, "ff".repeat(32)];
+
+  // C2 — SANITIZE at CREATE (the canonical fee source the LOCK builder reads):
+  // bad values are coerced into [0, amount] (integer), never rejected.
+  {
+    const neg = (applyEvent(null, createEvent({ arbiterFeeMsats: -1 })) as any).state;
+    assert(neg.fees.arbiterMsats === 0,
+      "invariant_arbiter-fee-bounds__negative_clamped_to_zero");
+    const over = (applyEvent(null, createEvent({ arbiterFeeMsats: 200_000_000 })) as any).state;
+    assert(over.fees.arbiterMsats === 100_000_000,
+      "invariant_arbiter-fee-bounds__over_amount_clamped");
+    const frac = (applyEvent(null, createEvent({ arbiterFeeMsats: 3.5 })) as any).state;
+    assert(frac.fees.arbiterMsats === 3,
+      "invariant_arbiter-fee-bounds__fractional_floored");
+    const nan = (applyEvent(null, createEvent({ arbiterFeeMsats: NaN })) as any).state;
+    assert(nan.fees.arbiterMsats === 0,
+      "v3.3 C2: a non-finite fee coerces to 0 at CREATE (never corrupts the sum)");
+    const ok = (applyEvent(null, createEvent({ arbiterFeeMsats: 1_000_000 })) as any).state;
+    assert(ok.fees.arbiterMsats === 1_000_000,
+      "invariant_arbiter-fee-bounds__valid_fee_replays_identically");
+  }
+
+  // C2 — the LOCK writeback sanitizes too, and CRUCIALLY does NOT reject: a
+  // crafted fee whose raw legs still SUM to the amount applies (no strand) and
+  // lands clamped. The first brief's reject fired here AFTER the ecash spend.
+  {
+    const create = createEvent(); // no pool — isolates the fee path
+    const st = (applyEvent(null, create) as any).state;
+    // Negative arbiter leg balanced by an inflated seller leg → applies, clamps to 0.
+    const rNeg = applyEvent(st, lockEvent(create.raw.id, { arbiterFeeMsats: -1_000_000, sellerReceivesMsats: 101_000_000 }));
+    if (assertOk(rNeg, "v3.3 C2: a negative-fee LOCK that still sums to amount APPLIES (no fund-stranding reject)")) {
+      assert(rNeg.state.fees.arbiterMsats === 0,
+        "v3.3 C2: the LOCK writeback clamps a negative fee to 0");
+    }
+    // Over-amount arbiter leg balanced by a negative seller leg → applies, clamps to amount.
+    const rOver = applyEvent(st, lockEvent(create.raw.id, { arbiterFeeMsats: 150_000_000, sellerReceivesMsats: -50_000_000 }));
+    if (assertOk(rOver, "v3.3 C2: an over-amount-fee LOCK that still sums to amount APPLIES")) {
+      assert(rOver.state.fees.arbiterMsats === 100_000_000,
+        "v3.3 C2: the LOCK writeback clamps an over-amount fee to the amount");
+    }
+    // Fractional legs that sum exactly → applies, floors.
+    const rFrac = applyEvent(st, lockEvent(create.raw.id, { arbiterFeeMsats: 0.5, sellerReceivesMsats: 99_999_999.5 }));
+    if (assertOk(rFrac, "v3.3 C2: a fractional-leg LOCK that sums to amount APPLIES")) {
+      assert(rFrac.state.fees.arbiterMsats === 0,
+        "v3.3 C2: the LOCK writeback floors a fractional fee");
+    }
+    // A genuinely unbalanced split still fails AMOUNT_MISMATCH — the sum invariant is untouched.
+    assertErr(applyEvent(st, lockEvent(create.raw.id, { arbiterFeeMsats: 5_000_000, sellerReceivesMsats: 99_000_000 })),
+      "AMOUNT_MISMATCH",
+      "v3.3 C2: an unbalanced fee split still fails AMOUNT_MISMATCH (sum check intact)");
+    // Honest LOCK passes through unchanged.
+    const rOk = applyEvent(st, lockEvent(create.raw.id));
+    if (assertOk(rOk, "v3.3 C2: an honest LOCK still locks (regression guard)")) {
+      assert(rOk.state.fees.arbiterMsats === 1_000_000,
+        "v3.3 C2: an honest fee is written through unchanged");
+    }
+  }
+
+  // C2 — parser: keep the type check, reject only NON-NUMERIC (and non-finite)
+  // legs. Negatives and fractionals still PARSE (sanitized at the reducer), so
+  // an odd-but-historically-accepted chain stays loadable instead of being
+  // rejected on ingest.
+  {
+    const lockRaw: NostrEvent = {
+      id: "v33_parser_lock", pubkey: SELLER_PK, created_at: NOW,
+      kind: EscrowEventKind.LOCK, tags: [["d", "test-123"]], content: "enc", sig: "s",
+    };
+    const lockJson = (fee: unknown, sellerReceives: unknown = 99_000_000) => JSON.stringify({
+      type: "escrow:lock", notesHash: "h",
+      shares: [
+        { shareIndex: 0, encryptedFor: { a: "x" } },
+        { shareIndex: 1, encryptedFor: { a: "x" } },
+        { shareIndex: 2, encryptedFor: { a: "x" } },
+      ],
+      sellerReceivesMsats: sellerReceives, arbiterFeeMsats: fee,
+      buyerPubkey: BUYER_PK, arbiterPubkey: ARBITER_PK, lockedAt: NOW,
+    });
+    assert(parseEscrowEvent(lockRaw, lockJson(1_000_000), true).ok === true,
+      "v3.3 C2: parser accepts an integer fee (regression guard)");
+    assert(parseEscrowEvent(lockRaw, lockJson(-1), true).ok === true,
+      "invariant_arbiter-fee-bounds__parser_accepts_negative_for_reducer_to_sanitize");
+    assert(parseEscrowEvent(lockRaw, lockJson(0.5), true).ok === true,
+      "v3.3 C2: parser accepts a fractional fee (sanitized downstream, not rejected)");
+    // JSON can't carry NaN/Infinity (they serialize to null) — so a non-finite
+    // fee arrives as a non-number and the typeof gate rejects it.
+    assert(parseEscrowEvent(lockRaw, lockJson(NaN), true).ok === false,
+      "invariant_arbiter-fee-bounds__parser_rejects_non_finite_fee");
+    assert(parseEscrowEvent(lockRaw, lockJson("5"), true).ok === false,
+      "v3.3 C2: parser rejects a non-numeric fee leg");
+    assert(parseEscrowEvent(lockRaw, lockJson(1_000_000, "x"), true).ok === false,
+      "v3.3 C2: parser rejects a non-numeric seller leg too");
+  }
+
+  // C11 — CEILING clamp: a far-future anchor pins at expiresAt + slack, so a
+  // forged timestamp can't freeze escalation past the trade's window.
+  {
+    const create = createEvent({ communityArbiters: POOL33 });
+    let s = (applyEvent(null, create) as any).state;
+    const lk = lockEvent(create.raw.id);
+    lk.payload.arbiterPoolShare = true;
+    s = (applyEvent(s, lk) as any).state;
+    const bv = voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, lk.raw.id);
+    s = (applyEvent(s, bv) as any).state;
+    const sv = voteEvent(Role.SELLER, SELLER_PK, Outcome.REFUND, bv.raw.id);
+    s = (applyEvent(s, sv) as any).state;
+    retimeEvent(sv, s.expiresAt + 10 * 86_400); // forge AFTER application — chain holds the same raw by reference
+    assert(disputeStartAt(s) === s.expiresAt + DISPUTE_CLOCK_SLACK_SECONDS,
+      "invariant_dispute-clock__ceiling_rejects_far_future");
+    assert(substitutionEligibleAt(s) === s.expiresAt + DISPUTE_CLOCK_SLACK_SECONDS,
+      "v3.3 C11: a far-future anchor can't push eligibility past expiry + slack");
+  }
+
+  // C11 — NO floor: an HONEST vote whose created_at sits slightly before
+  // lockedAt (ordinary clock skew) is NOT pushed forward, so eligibility is
+  // byte-identical to the pre-clamp (v2.9) computation. This is exactly the
+  // honest chain the dropped floor would have diverged → unloadable.
+  {
+    const create = createEvent({ communityArbiters: POOL33 });
+    let s = (applyEvent(null, create) as any).state;
+    const lk = lockEvent(create.raw.id);
+    lk.payload.arbiterPoolShare = true;
+    s = (applyEvent(s, lk) as any).state;
+    const lockedAt = s.lock.lockedAt as number;
+    // Two-sided dispute, both votes legitimately a little before lockedAt.
+    const bv = retimeEvent(voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, lk.raw.id), lockedAt - 30);
+    s = (applyEvent(s, bv) as any).state;
+    const sv = retimeEvent(voteEvent(Role.SELLER, SELLER_PK, Outcome.REFUND, bv.raw.id), lockedAt - 10);
+    s = (applyEvent(s, sv) as any).state;
+    const rawAnchor = Math.max(bv.raw.created_at, sv.raw.created_at); // = lockedAt - 10
+    assert(rawAnchor < lockedAt && disputeStartAt(s) === rawAnchor,
+      "invariant_dispute-clock__honest_skew_vote_unaffected");
+    assert(
+      substitutionEligibleAt(s) === rawAnchor + Math.min(SUBSTITUTION_GRACE_MAX_SECONDS, Math.floor((s.expiresAt - rawAnchor) / 2)),
+      "v3.3 C11: eligibility tracks the raw anchor (no lockedAt floor)");
+    // One-sided arm: the lone RELEASE anchor is likewise NOT floored to lockedAt.
+    const c2 = createEvent({ communityArbiters: POOL33 });
+    let s2 = (applyEvent(null, c2) as any).state;
+    const lk2 = lockEvent(c2.raw.id); lk2.payload.arbiterPoolShare = true;
+    s2 = (applyEvent(s2, lk2) as any).state;
+    const lockedAt2 = s2.lock.lockedAt as number;
+    const bRel = retimeEvent(voteEvent(Role.BUYER, BUYER_PK, Outcome.RELEASE, lk2.raw.id), lockedAt2 - 30);
+    s2 = (applyEvent(s2, bRel) as any).state;
+    assert(oneSidedReleaseAnchor(s2)!.releaseVoteAt === lockedAt2 - 30,
+      "v3.3 C11: the one-sided RELEASE anchor is not floored to lockedAt either");
+  }
 }
 
 // ── 5c. Locker released at RESOLVE — won-by-other trades stop counting ────
