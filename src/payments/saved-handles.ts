@@ -752,6 +752,35 @@ export function getPhoneNumberDisplayParts(value: string): PhoneNumberDisplayPar
   };
 }
 
+export interface PhoneCountryHint {
+  countryCode: string;
+  countryName: string | null;
+  flagEmoji: string | null;
+  expectedLength: string;
+  nationalPlaceholder: string;
+}
+
+export function getPhoneCountryHint(value: string): PhoneCountryHint | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("+")) return null;
+  const digits = trimmed.replace(/\D/g, "");
+  if (!digits) return null;
+
+  const ccLen = detectCountryCodeLength(digits);
+  if (ccLen === 0) return null;
+
+  const countryCode = digits.slice(0, ccLen);
+  const rule = PHONE_LENGTH_RULES[countryCode];
+  const exampleParts = rule ? getPhoneNumberDisplayParts(rule.example) : null;
+  return {
+    countryCode,
+    countryName: PHONE_CC_TO_COUNTRY[countryCode] ?? null,
+    flagEmoji: phoneFlagForCountryCode(countryCode),
+    expectedLength: rule ? expectedLengthText(rule) : "4-12 digits",
+    nationalPlaceholder: exampleParts?.nationalFormatted || "phone number",
+  };
+}
+
 export function formatPhoneNumberForDisplay(value: string): string {
   return getPhoneNumberDisplayParts(value).display;
 }

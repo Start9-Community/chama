@@ -40,12 +40,13 @@ export interface Rail {
   placeholder?: string;
 }
 
-/** v1 seed list. Bias toward Africa-first + honest: enumerate the rails
- *  users already reach for across Chama's early communities, then keep
- *  the global-south tail close enough that cross-border sellers do not
- *  need a new release to tag a local rail. Sensitive rails
- *  (phone-number-based mobile money, bank transfers) are private-only;
- *  public-by-design tags get the opt-in path. */
+/** v1 seed list. Bias toward mobile-first + honest: enumerate the rails
+ *  users already reach for across Chama's early communities, then keep a
+ *  compact global tail of mobile money, instant mobile-bank rails, and app
+ *  wallets close enough that cross-border sellers do not need a new release
+ *  to tag a local rail. Sensitive rails (phone-number-based mobile money,
+ *  bank transfers) are private-only; public-by-design tags get the opt-in
+ *  path. */
 export const RAIL_REGISTRY: Rail[] = [
   // ── universal default ──────────────────────────────────────────────
   // Mobile money, bank-transfer coordination, and cash-in/cash-out
@@ -218,10 +219,30 @@ export const RAIL_REGISTRY: Rail[] = [
   },
 
   // ── South & Southeast Asia mobile money ───────────────────────────
+  // UPI — India's mobile-first instant payment layer. VPAs are shareable but
+  // often phone/PII-adjacent, so Chama keeps them private by default.
+  {
+    key: "upi",
+    displayName: "UPI (India)",
+    allowPublicHandle: false,
+    placeholder: "name@bank or +91 98765 43210",
+  },
   // bKash — Bangladesh's dominant mobile financial service.
   {
     key: "bkash",
     displayName: "bKash",
+    allowPublicHandle: false,
+    placeholder: "+880 1700 123456",
+  },
+  {
+    key: "nagad",
+    displayName: "Nagad",
+    allowPublicHandle: false,
+    placeholder: "+880 1700 123456",
+  },
+  {
+    key: "rocket",
+    displayName: "Rocket",
     allowPublicHandle: false,
     placeholder: "+880 1700 123456",
   },
@@ -253,6 +274,48 @@ export const RAIL_REGISTRY: Rail[] = [
     allowPublicHandle: false,
     placeholder: "+92 300 1234567",
   },
+  {
+    key: "truemoney",
+    displayName: "TrueMoney",
+    allowPublicHandle: false,
+    placeholder: "+66 81 234 5678",
+  },
+  {
+    key: "dana",
+    displayName: "DANA",
+    allowPublicHandle: false,
+    placeholder: "+62 812 3456 7890",
+  },
+  {
+    key: "gopay",
+    displayName: "GoPay",
+    allowPublicHandle: false,
+    placeholder: "+62 812 3456 7890",
+  },
+  {
+    key: "ovo",
+    displayName: "OVO",
+    allowPublicHandle: false,
+    placeholder: "+62 812 3456 7890",
+  },
+  {
+    key: "momo-vietnam",
+    displayName: "MoMo (Vietnam)",
+    allowPublicHandle: false,
+    placeholder: "+84 91 234 5678",
+  },
+  {
+    key: "touch-n-go",
+    displayName: "Touch 'n Go eWallet",
+    allowPublicHandle: false,
+    placeholder: "+60 12 345 6789",
+  },
+  {
+    key: "grabpay",
+    displayName: "GrabPay",
+    allowPublicHandle: false,
+    placeholder: "+65 8123 4567",
+  },
 
   // ── Latin America popular rails ──────────────────────────────────
   // PIX — Brazil's instant-payment system. Keys are CPF, email,
@@ -278,6 +341,36 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Nequi",
     allowPublicHandle: false,
     placeholder: "+57 300 123 4567",
+  },
+  {
+    key: "yape",
+    displayName: "Yape",
+    allowPublicHandle: false,
+    placeholder: "+51 987 654 321",
+  },
+  {
+    key: "plin",
+    displayName: "Plin",
+    allowPublicHandle: false,
+    placeholder: "+51 987 654 321",
+  },
+  {
+    key: "codi",
+    displayName: "CoDi (Mexico)",
+    allowPublicHandle: false,
+    placeholder: "+52 55 1234 5678",
+  },
+  {
+    key: "spei",
+    displayName: "SPEI (Mexico)",
+    allowPublicHandle: false,
+    placeholder: "CLABE / phone / bank alias",
+  },
+  {
+    key: "sinpe-movil",
+    displayName: "SINPE Movil",
+    allowPublicHandle: false,
+    placeholder: "+506 8888 8888",
   },
 
   // ── sv-usd (El Salvador · USD) ─────────────────────────────────────
@@ -377,14 +470,29 @@ const AFRICA_FIRST_RAIL_KEYS = [
 ];
 
 const GLOBAL_SOUTH_TAIL_RAIL_KEYS = [
+  "upi",
   "bkash",
+  "nagad",
+  "rocket",
   "gcash",
   "maya",
   "easypaisa",
   "jazzcash",
+  "truemoney",
+  "dana",
+  "gopay",
+  "ovo",
+  "momo-vietnam",
+  "touch-n-go",
+  "grabpay",
   "pix",
   "mercado-pago",
   "nequi",
+  "yape",
+  "plin",
+  "codi",
+  "spei",
+  "sinpe-movil",
   "strike",
   "revtag",
   "cashtag",

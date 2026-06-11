@@ -387,64 +387,6 @@ export function MeScreen({
         )}
       </div>
 
-      {/* Nostr Profile sub-section */}
-      <div style={{
-        background: T.card, border: `1px solid ${T.border}`,
-        borderRadius: T.r, padding: 20, marginBottom: 16,
-      }}>
-        <div style={{
-          fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
-          letterSpacing: 1, marginBottom: 12,
-        }}>
-          NOSTR PROFILE
-        </div>
-
-        {/* Toggle: fetch counterparty kind:0 */}
-        <div
-          onClick={() => setKind0On(!kind0On)}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            cursor: "pointer", marginBottom: 14,
-          }}
-        >
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
-              Show counterparty names
-            </div>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 4, lineHeight: 1.5 }}>
-              Off (default): trades show truncated npubs only. On: Chama
-              fetches self-published Nostr profile names for trade
-              participants. Privacy default is npub-only.
-            </div>
-          </div>
-          <div style={{
-            width: 40, height: 22, borderRadius: 11,
-            background: kind0On ? T.accent : T.border,
-            padding: 2, transition: "background 0.2s",
-            flexShrink: 0, marginLeft: 12,
-          }}>
-            <div style={{
-              width: 18, height: 18, borderRadius: "50%",
-              background: T.bg, transition: "transform 0.2s",
-              transform: kind0On ? "translateX(18px)" : "translateX(0)",
-            }} />
-          </div>
-        </div>
-
-        {/* Educational copy — Chama doesn't manage profiles */}
-        <div style={{
-          fontSize: 11, color: T.muted, fontFamily: T.sans, lineHeight: 1.55,
-          padding: "10px 12px",
-          background: T.surface, border: `1px solid ${T.border}`,
-          borderRadius: T.rs,
-        }}>
-          Chama doesn't manage your Nostr profile. Use a Nostr client
-          (Damus, Primal, Amethyst) to set your name and picture. When
-          the toggle is on, names appear under participant dots and
-          store/seller badges after relays return your kind:0 profile.
-        </div>
-      </div>
-
       {/* Settings sub-page entries */}
       <div style={{
         background: T.card, border: `1px solid ${T.border}`,
@@ -488,8 +430,9 @@ export function MeScreen({
           </div>
         )}
         <NotificationsRow />
-        <SettingsRow label="Payment handles" hint="Saved handles for fast trade-time fill" onClick={onOpenSavedHandles} />
-        <SettingsRow label="Payout destinations" hint="Lightning addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
+        <NostrNamesRow on={kind0On} onToggle={() => setKind0On(!kind0On)} />
+        <SettingsRow label="Payment methods" hint="Phone, mobile money, bank, and app IDs" onClick={onOpenSavedHandles} />
+        <SettingsRow label="Lightning Addresses" hint="Saved addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
         <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
         <SettingsRow label="Sign out" hint={null} onClick={onSignOut} danger />
       </div>
@@ -2097,6 +2040,44 @@ function NotificationsRow() {
           position: "absolute", top: 2, left: on ? 22 : 2,
           width: 20, height: 20, borderRadius: "50%",
           background: on ? T.green : T.muted, transition: "left 0.15s",
+        }} />
+      </button>
+    </div>
+  );
+}
+
+function NostrNamesRow({ on, onToggle }: {
+  on: boolean; onToggle: () => void;
+}) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      gap: 10, padding: "14px 16px", borderBottom: `1px solid ${T.border}`,
+    }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+          Nostr names
+        </div>
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+          Show profile names instead of npub IDs
+        </div>
+      </div>
+      <button
+        onClick={onToggle}
+        role="switch"
+        aria-checked={on}
+        style={{
+          width: 46, height: 26, borderRadius: 999, position: "relative",
+          border: `1px solid ${on ? T.accent + "66" : T.border}`,
+          background: on ? T.accentDim : T.surface,
+          cursor: "pointer", transition: "background 0.15s, border-color 0.15s",
+          flexShrink: 0,
+        }}
+      >
+        <span style={{
+          position: "absolute", top: 2, left: on ? 22 : 2,
+          width: 20, height: 20, borderRadius: "50%",
+          background: on ? T.accent : T.muted, transition: "left 0.15s",
         }} />
       </button>
     </div>
