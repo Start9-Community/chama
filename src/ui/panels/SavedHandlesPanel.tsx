@@ -19,6 +19,7 @@ import {
   type Rail,
   getRailByKey,
   railsForCommunity,
+  searchableRailsForCommunity,
   railAllowsPublicHandle,
   phoneNetworksForCommunity,
 } from "../../payments/rail-registry.js";
@@ -174,17 +175,25 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
     setHandles(listSavedHandles());
   };
 
-  const availableRails = railsForCommunity(communitySlug)
+  const localAvailableRails = railsForCommunity(communitySlug)
     .filter(r => r.key !== PHONE_NUMBER_RAIL);
+  const searchableAvailableRails = searchableRailsForCommunity(communitySlug)
+    .filter(r => r.key !== PHONE_NUMBER_RAIL);
+  const availableRails = railQuery.trim() ? searchableAvailableRails : localAvailableRails;
   const methodResults = filterRails(availableRails, railQuery).slice(0, MAX_METHOD_RESULTS);
   const selectedRail = getRailByKey(addRail);
-  const phoneNetworkOptions = phoneNetworksForCommunity(communitySlug);
+  const localPhoneNetworkOptions = phoneNetworksForCommunity(communitySlug);
+  const searchablePhoneNetworkOptions = phoneNetworksForCommunity(communitySlug, { includeSearchable: true });
+  const phoneNetworkOptions = phoneNetworkQuery.trim()
+    ? searchablePhoneNetworkOptions
+    : localPhoneNetworkOptions;
   const phoneNetworkResults = filterRails(phoneNetworkOptions, phoneNetworkQuery)
     .slice(0, MAX_NETWORK_RESULTS);
   const phoneRail = getRailByKey(PHONE_NUMBER_RAIL);
-  const phonePlaceholder = phoneNetworkOptions.find(r =>
+  const phonePlaceholder = localPhoneNetworkOptions.find(r =>
     r.region?.includes(communitySlug) && r.placeholder?.startsWith("+")
   )?.placeholder
+    || localPhoneNetworkOptions.find(r => r.placeholder?.startsWith("+"))?.placeholder
     || phoneRail?.placeholder
     || "+254 712-345-678";
   const phoneParts = getPhoneNumberDisplayParts(phoneValue);

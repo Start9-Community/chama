@@ -344,7 +344,9 @@ export function BrowseView({
             </>
           ) : (
             <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6 }}>
-              Pick your Chama above to see what's trading.
+              {homeCommunity
+                ? `Reconnect to ${homeCommunity.disambiguator ?? homeCommunity.displayName} to see what's trading.`
+                : "Pick your Chama above to see what's trading."}
             </div>
           )}
         </div>

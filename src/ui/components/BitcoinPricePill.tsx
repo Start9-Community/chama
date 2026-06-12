@@ -1,34 +1,63 @@
 import { formatUsdBtcPrice, formatUsdBtcPriceFull } from "../../markets/bitcoin-price.js";
 import { T } from "../theme.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
-import { nextAmountDisplayMode, type AmountDisplayMode } from "../amount-display.js";
+import { useFiatRates } from "../hooks/useFiatRates.js";
+import {
+  estimateFiatForMsats,
+  formatFiatAmount,
+  nextAmountDisplayMode,
+  normalizeFiatCurrency,
+  type AmountDisplayMode,
+} from "../amount-display.js";
 
 export function BitcoinPricePill({
   compact = false,
   hero = false,
   amountMode,
   onAmountModeChange,
+  quoteCurrency,
 }: {
   compact?: boolean;
   hero?: boolean;
   amountMode?: AmountDisplayMode;
   onAmountModeChange?: (mode: AmountDisplayMode) => void;
+  quoteCurrency?: string | null;
 }) {
   const price = useBitcoinPrice();
-  const label = price.usd ? `${formatUsdBtcPrice(price.usd)} BTC` : "BTC price…";
-  const fullLabel = price.usd ? formatUsdBtcPriceFull(price.usd) : "BTC price…";
+  const fiatRates = useFiatRates();
+  const normalizedQuoteCurrency = normalizeFiatCurrency(quoteCurrency) ?? "USD";
+  const localBtcPrice = normalizedQuoteCurrency === "USD"
+    ? price.usd ?? null
+    : estimateFiatForMsats({
+        amountMsats: 100_000_000_000,
+        currency: normalizedQuoteCurrency,
+        usdPerBtc: price.usd,
+        usdFiatRates: fiatRates.rates,
+      });
+  const displayCurrency = localBtcPrice ? normalizedQuoteCurrency : "USD";
+  const displayAmount = localBtcPrice ?? price.usd ?? null;
+  const displayIsUsd = displayCurrency === "USD";
+  const label = displayAmount
+    ? `${displayIsUsd ? formatUsdBtcPrice(displayAmount) : formatFiatAmount(displayAmount, displayCurrency)} BTC`
+    : "BTC price…";
+  const fullLabel = displayAmount
+    ? (displayIsUsd ? formatUsdBtcPriceFull(displayAmount) : formatFiatAmount(displayAmount, displayCurrency))
+    : "BTC price…";
   const stale = price.source !== "live";
   const title = price.updatedAt
-    ? `BTC/USD ${new Date(price.updatedAt).toLocaleTimeString()}`
-    : "Loading BTC/USD";
+    ? `BTC/${displayCurrency} ${new Date(price.updatedAt).toLocaleTimeString()}`
+    : `Loading BTC/${displayCurrency}`;
   const providerCount = price.source === "live" ? price.providers?.length ?? 0 : 0;
-  const sourceLabel = price.source === "live"
+  const btcSourceLabel = price.source === "live"
     ? providerCount > 1
       ? `median of ${providerCount} sources`
       : "live source"
     : price.source === "cache"
       ? "cached quote"
       : "waiting for sources";
+  const sourceLabel = displayCurrency !== "USD" && displayAmount
+    ? `${btcSourceLabel} · FX ${fiatRates.source === "live" ? "live" : fiatRates.source === "cache" ? "cached" : "waiting"}`
+    : btcSourceLabel;
   const content = (
     <>
       <span
@@ -127,7 +156,7 @@ export function BitcoinPricePill({
                   boxShadow: stale ? "none" : `0 0 10px ${T.green}88`,
                 }}
               />
-              BTC/USD
+              BTC/{displayCurrency}
             </span>
             <span style={{
               color: price.usd ? T.text : T.muted,
@@ -220,7 +249,7 @@ export function BitcoinPricePill({
             textTransform: "uppercase",
             marginBottom: 5,
           }}>
-            BTC/USD
+            BTC/{displayCurrency}
           </div>
           <div style={{
             color: price.usd ? T.text : T.muted,

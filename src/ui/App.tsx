@@ -1485,6 +1485,7 @@ export default function App() {
               hero
               amountMode={amountDisplayMode}
               onAmountModeChange={setAmountDisplayMode}
+              quoteCurrency={getCommunityBySlug(routeCommunitySlug)?.currency ?? null}
             />
           </div>
 

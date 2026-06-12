@@ -1101,11 +1101,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 	    mountedRef.current = true;
 	    return () => {
 	      mountedRef.current = false;
+	      clientRef.current?.disconnect();
+	      clientRef.current = null;
 	      if ((import.meta as any).env?.DEV && (import.meta as any).hot) {
-	        console.debug("[chama] preserving live Fedimint session across Vite hot reload cleanup");
+	        console.debug("[chama] preserving live Fedimint session across Vite hot reload cleanup; relay sockets closed");
 	        return;
 	      }
-	      clientRef.current?.disconnect();
 	      const fedimint = fedimintRef.current;
 	      fedimint?.cleanup().catch(() => {});
 	      if (fedimintRef.current === fedimint) fedimintRef.current = null;

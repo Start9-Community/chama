@@ -50,7 +50,14 @@ import {
   MIN_REAL_ATOMIC_FUNDING_SATS,
   minimumAtomicFundingMessage,
 } from "../../payments/funding-limits.js";
-import { railsForCommunity, categoryUsesPaymentRails } from "../../payments/rail-registry.js";
+import {
+  type Rail,
+  getRailByKey,
+  railsForCommunity,
+  searchableRailsForCommunity,
+  categoryUsesPaymentRails,
+  toRailKey,
+} from "../../payments/rail-registry.js";
 import { isTestnetMode } from "../../fedimint/index.js";
 import { isSimModeOn } from "../../sim/simMode.js";
 import {
@@ -869,6 +876,32 @@ function premiumCheckoutLine(form: FormState, vertical: Vertical): string | null
   return `${formatFiatAmount(baseFiat, form.cur)} ${signed} = ${formatFiatAmount(checkoutFiat, form.cur)} at checkout`;
 }
 
+function railCreateSearchText(rail: Rail): string {
+  return [
+    rail.displayName,
+    rail.key.replace(/-/g, " "),
+    rail.placeholder ?? "",
+    ...(rail.countries ?? []),
+  ].join(" ").toLowerCase();
+}
+
+function filterCreateRails(rails: Rail[], query: string): Rail[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return rails;
+  return rails.filter(rail => railCreateSearchText(rail).includes(q));
+}
+
+function uniqueRailsByKey(rails: Rail[]): Rail[] {
+  const seen = new Set<string>();
+  const unique: Rail[] = [];
+  for (const rail of rails) {
+    if (seen.has(rail.key)) continue;
+    seen.add(rail.key);
+    unique.push(rail);
+  }
+  return unique;
+}
+
 export function emptyCreateFormState(currency = "USD"): FormState {
   return {
     listingMode: "single",
@@ -1632,6 +1665,7 @@ function Step2({
 }) {
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
+  const [paymentRailQuery, setPaymentRailQuery] = useState("");
   // v2.5: inline photo-upload error. window.alert is a silent no-op in the
   // Tauri/Capacitor webview, so a rejected image used to fail invisibly.
   const [imageError, setImageError] = useState<string | null>(null);
@@ -1755,14 +1789,25 @@ function Step2({
       return changed ? { ...prev, menuItems } : prev;
     });
   }, [vertical, form.menuItems, btcPrice.usd, fiatRates.rates, setForm]);
-  const paymentMethodOptions = railsForCommunity(homeCommunity?.slug);
+  const selectedPaymentRails = form.paymentMethods
+    .map(method => getRailByKey(toRailKey(method)))
+    .filter((rail): rail is Rail => !!rail);
+  const paymentMethodOptions = uniqueRailsByKey([
+    ...railsForCommunity(homeCommunity?.slug),
+    ...selectedPaymentRails,
+  ]);
+  const paymentSearchResults = paymentRailQuery.trim()
+    ? filterCreateRails(searchableRailsForCommunity(homeCommunity?.slug), paymentRailQuery)
+      .slice(0, 8)
+    : [];
   const togglePaymentMethod = (method: string) => {
     setForm(prev => {
-      const exists = prev.paymentMethods.some(value => value.toLowerCase() === method.toLowerCase());
+      const methodKey = toRailKey(method);
+      const exists = prev.paymentMethods.some(value => toRailKey(value) === methodKey);
       return {
         ...prev,
         paymentMethods: exists
-          ? prev.paymentMethods.filter(value => value.toLowerCase() !== method.toLowerCase())
+          ? prev.paymentMethods.filter(value => toRailKey(value) !== methodKey)
           : [...prev.paymentMethods, method],
       };
     });
@@ -2059,8 +2104,19 @@ function Step2({
 
       {categoryUsesPaymentRails(vertical) && paymentMethodOptions.length > 0 && (
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-            ACCEPTED PAYMENT
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            marginBottom: 6,
+          }}>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
+              ACCEPTED PAYMENT
+            </div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>
+              {homeCommunity?.country ?? homeCommunity?.currency ?? "LOCAL"}
+            </div>
           </div>
           <div className="payment-rail-scroll" style={{
             display: "flex",
@@ -2081,7 +2137,7 @@ function Step2({
             }}>
               {paymentMethodOptions.map(rail => {
                 const selected = form.paymentMethods.some(method =>
-                  method.toLowerCase() === rail.displayName.toLowerCase()
+                  toRailKey(method) === rail.key
                 );
                 return (
                   <button
@@ -2108,6 +2164,80 @@ function Step2({
               })}
             </div>
           </div>
+          <input
+            value={paymentRailQuery}
+            onChange={e => setPaymentRailQuery(e.target.value)}
+            placeholder="Search more payment methods"
+            style={{
+              ...inputStyle,
+              marginTop: 8,
+              marginBottom: paymentRailQuery.trim() ? 8 : 0,
+              padding: "9px 11px",
+              fontSize: 11,
+            }}
+          />
+          {paymentRailQuery.trim() && (
+            <div style={{
+              display: "grid",
+              gap: 6,
+              padding: 8,
+              borderRadius: T.rs,
+              background: T.surface,
+              border: `1px solid ${T.border}`,
+              animation: "fadeIn 0.18s ease",
+            }}>
+              {paymentSearchResults.length === 0 ? (
+                <div style={{
+                  color: T.muted,
+                  fontFamily: T.mono,
+                  fontSize: 10,
+                  padding: "4px 2px",
+                }}>
+                  No matching payment method.
+                </div>
+              ) : paymentSearchResults.map((rail, i) => {
+                const selected = form.paymentMethods.some(method =>
+                  toRailKey(method) === rail.key
+                );
+                return (
+                  <button
+                    key={rail.key}
+                    type="button"
+                    onClick={() => togglePaymentMethod(rail.displayName)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 10,
+                      width: "100%",
+                      padding: "8px 9px",
+                      borderRadius: T.rs,
+                      border: `1px solid ${selected ? T.accent + "77" : T.border}`,
+                      background: selected ? T.accentDim : T.card,
+                      color: selected ? T.accent : T.text,
+                      fontFamily: T.mono,
+                      fontSize: 10,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                      textAlign: "left" as const,
+                      animation: `fadeIn 0.18s ease ${i * 0.025}s both`,
+                    }}
+                  >
+                    <span style={{
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}>
+                      {rail.displayName}
+                    </span>
+                    <span style={{ color: selected ? T.accent : T.muted, flexShrink: 0 }}>
+                      {selected ? "Added" : "Add"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
       {amountTooSmall && (

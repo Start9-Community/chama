@@ -810,6 +810,7 @@ export function TradeDetail({
             compact
             amountMode={amountDisplayMode}
             onAmountModeChange={onAmountDisplayModeChange}
+            quoteCurrency={homeQuoteCurrency}
           />
           <Badge status={statusKey} />
         </div>

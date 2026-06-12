@@ -121,6 +121,7 @@ export class RelayManager {
   private seenEventIds: Set<string> = new Set();
   private subscriptionCounter = 0;
   private WebSocketImpl: typeof WebSocket;
+  private stopped = false;
 
   constructor(
     relayUrls: string[],
@@ -146,12 +147,14 @@ export class RelayManager {
   // ── Connect to all relays ───────────────────────────────────────────────
 
   connect(): void {
+    this.stopped = false;
     for (const [url] of this.relays) {
       this.connectRelay(url);
     }
   }
 
   private connectRelay(url: string): void {
+    if (this.stopped) return;
     const relay = this.relays.get(url);
     if (!relay) return;
     if (relay.status === RelayStatus.CONNECTING || relay.status === RelayStatus.CONNECTED) return;
@@ -193,6 +196,7 @@ export class RelayManager {
         relay.status = RelayStatus.DISCONNECTED;
         relay.ws = null;
         this.callbacks.onStatusChange?.(url, RelayStatus.DISCONNECTED);
+        if (this.stopped) return;
         this.scheduleReconnect(url);
       };
     } catch (e) {
@@ -205,6 +209,7 @@ export class RelayManager {
   // ── Reconnection with exponential backoff ───────────────────────────────
 
   private scheduleReconnect(url: string): void {
+    if (this.stopped) return;
     const relay = this.relays.get(url);
     if (!relay || relay.retryCount >= MAX_RETRY_COUNT) return;
 
@@ -753,6 +758,7 @@ export class RelayManager {
   // ── Shutdown ────────────────────────────────────────────────────────────
 
   disconnect(): void {
+    this.stopped = true;
     for (const [, relay] of this.relays) {
       if (relay.retryTimer) {
         clearTimeout(relay.retryTimer);

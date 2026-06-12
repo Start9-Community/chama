@@ -62,10 +62,12 @@ export function ChamaBar({
   communitySlug?: string | null;
 }) {
   let displayName: string;
+  const community = communitySlug ? getCommunityBySlug(communitySlug) : null;
   if (!fedimint.joined) {
-    displayName = fedimint.busy ? "Connecting..." : "Choose your Chama";
+    displayName = community
+      ? communityChamaBarLabel(community)
+      : fedimint.busy ? "Connecting..." : "Choose your Chama";
   } else {
-    const community = communitySlug ? getCommunityBySlug(communitySlug) : null;
     const matched = fedimint.federationId
       ? CURATED_PRESETS.find((p) => p.federationId === fedimint.federationId)
       : null;

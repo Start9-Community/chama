@@ -194,6 +194,7 @@ import {
   RAIL_REGISTRY,
   getRailByKey,
   railsForCommunity,
+  searchableRailsForCommunity,
   phoneNetworksForCommunity,
   railAllowsPublicHandle,
   matchRails,
@@ -4577,32 +4578,41 @@ console.log("\n── RAIL REGISTRY ──");
   assert(railAllowsPublicHandle(null) === false,
     "Null rail conservatively refuses public");
 
-  // railsForCommunity: local-first ordering, but the picker now exposes
-  // the full Africa/global-south catalog so sellers can tag real rails
-  // even when a country Chama is still routed through a broader fed.
+  // railsForCommunity: country-first defaults. The picker/search can still
+  // reach the full catalog, but the default surface should feel local.
   const senegal = railsForCommunity("sn-cfa");
   assert(senegal.some(r => r.key === "wave"),
     "sn-cfa community shows Wave");
   assert(senegal.some(r => r.key === "orange-money"),
     "sn-cfa community shows Orange Money");
-  assert(senegal.some(r => r.key === "revtag"),
-    "sn-cfa community ALSO shows global rails (Revtag)");
+  assert(!senegal.some(r => r.key === "revtag"),
+    "sn-cfa default rail picker does not show unrelated global rails");
   assert(senegal.some(r => r.key === "phone-number"),
     "sn-cfa community shows universal Phone number rail");
-  assert(senegal.some(r => r.key === "m-pesa"),
-    "sn-cfa community also surfaces M-Pesa in the Africa rail catalog");
+  assert(!senegal.some(r => r.key === "m-pesa"),
+    "sn-cfa default rail picker does not show Kenya/Tanzania M-Pesa");
+  assert(searchableRailsForCommunity("sn-cfa").some(r => r.key === "m-pesa"),
+    "sn-cfa search catalog can still find M-Pesa");
+  assert(searchableRailsForCommunity("sn-cfa").some(r => r.key === "revtag"),
+    "sn-cfa search catalog can still find global app rails");
 
   const kenya = railsForCommunity("ke-kes");
   assert(kenya.some(r => r.key === "m-pesa"),
     "ke-kes community shows M-Pesa");
+  assert(kenya.some(r => r.key === "airtel-money"),
+    "ke-kes community shows Airtel Money");
   assert(kenya.some(r => r.key === "phone-number"),
     "ke-kes community shows universal Phone number rail");
-  assert(kenya.some(r => r.key === "wave"),
-    "ke-kes community also shows Wave for cross-Africa sellers");
-  assert(kenya.some(r => r.key === "orange-money"),
-    "ke-kes community also shows Orange Money for cross-Africa sellers");
-  assert(kenya.findIndex(r => r.key === "m-pesa") < kenya.findIndex(r => r.key === "wave"),
-    "ke-kes keeps local rails ahead of the cross-Africa tail");
+  assert(kenya.some(r => r.key === "bank-transfer"),
+    "ke-kes community keeps mobile bank transfer as a universal local fallback");
+  assert(!kenya.some(r => r.key === "wave"),
+    "ke-kes default rail picker does not show Senegal Wave");
+  assert(!kenya.some(r => r.key === "orange-money"),
+    "ke-kes default rail picker does not show Orange Money");
+  assert(searchableRailsForCommunity("ke-kes").some(r => r.key === "wave"),
+    "ke-kes search catalog can still find Wave for edge cases");
+  assert(kenya.findIndex(r => r.key === "m-pesa") < kenya.findIndex(r => r.key === "bank-transfer"),
+    "ke-kes keeps local mobile money ahead of generic bank transfer");
   // Field-test ask #1: US-leaning Chamas lead with US rails.
   assert(railsForCommunity("us-gbf").slice(0, 4).map(r => r.key).join(",") === "strike,cashtag,zelle,bank-transfer",
     "GBF Chama leads with US rails: Strike, Cash App, Zelle, bank transfer");
@@ -4647,15 +4657,17 @@ console.log("\n── RAIL REGISTRY ──");
   assert(getRailByKey("nequi")?.displayName === "Nequi",
     "Nequi registered");
 
-  // Region-first ordering: a Kenyan user sees M-Pesa + Airtel Money
-  // up top, then the cross-region rails (MTN MoMo, bKash, etc.).
+  // Region-first defaults: a Kenyan user sees M-Pesa + Airtel Money, not
+  // unrelated country rails unless they search.
   const keNetworks = phoneNetworksForCommunity("ke-kes");
   assert(keNetworks[0]?.key === "m-pesa",
     "ke-kes sees M-Pesa first");
-  assert(keNetworks.some(r => r.key === "mtn-momo"),
-    "ke-kes also gets MTN MoMo in the cross-region tail");
-  assert(keNetworks.some(r => r.key === "bkash"),
-    "ke-kes also gets bKash in the cross-region tail");
+  assert(keNetworks.some(r => r.key === "airtel-money"),
+    "ke-kes includes Airtel Money in local phone networks");
+  assert(!keNetworks.some(r => r.key === "bkash"),
+    "ke-kes local phone networks do not show bKash by default");
+  assert(phoneNetworksForCommunity("ke-kes", { includeSearchable: true }).some(r => r.key === "bkash"),
+    "ke-kes searchable phone networks can still find bKash");
 
   const tzNetworks = phoneNetworksForCommunity("tz-tzs");
   assert(tzNetworks[0]?.key === "m-pesa",
@@ -4663,23 +4675,25 @@ console.log("\n── RAIL REGISTRY ──");
   assert(tzNetworks.some(r => r.key === "tigo-pesa"),
     "tz-tzs includes Tigo Pesa in regional phone networks");
 
-  // Senegal sees Wave / Orange / Wizall / Free Money first, then
-  // cross-region.
+  // Senegal sees Wave / Orange / Wizall / Free Money locally.
   const snNetworks = phoneNetworksForCommunity("sn-cfa");
   const snFirstKeys = snNetworks.slice(0, 4).map(r => r.key);
   assert(snFirstKeys.includes("wave") && snFirstKeys.includes("orange-money"),
     "sn-cfa sees its regional rails first");
-  assert(snNetworks.some(r => r.key === "mtn-momo"),
-    "sn-cfa also gets cross-region rails like MTN MoMo");
+  assert(!snNetworks.some(r => r.key === "mtn-momo"),
+    "sn-cfa local phone networks do not show MTN MoMo by default");
+  assert(phoneNetworksForCommunity("sn-cfa", { includeSearchable: true }).some(r => r.key === "mtn-momo"),
+    "sn-cfa searchable phone networks can still find MTN MoMo");
 
-  // No matching community (e.g. an unconfigured slug) → show
-  // everything phone-shaped, so a user from Bangladesh on Global ·
-  // USD can still tag their bKash number.
+  // No matching community (e.g. an unconfigured slug) → keep the default local
+  // surface empty/quiet for phone networks, with search as the escape hatch.
   const fallback = phoneNetworksForCommunity("xx-future");
-  assert(fallback.some(r => r.key === "bkash"),
-    "Unmatched community still surfaces bKash");
-  assert(fallback.some(r => r.key === "wave"),
-    "Unmatched community still surfaces Wave");
+  assert(fallback.length === 0,
+    "Unmatched community does not guess phone networks by default");
+  assert(phoneNetworksForCommunity("xx-future", { includeSearchable: true }).some(r => r.key === "bkash"),
+    "Unmatched community searchable networks still surface bKash");
+  assert(phoneNetworksForCommunity("xx-future", { includeSearchable: true }).some(r => r.key === "wave"),
+    "Unmatched community searchable networks still surface Wave");
   assert(!fallback.some(r => r.key === "phone-number"),
     "Phone-number meta rail itself is excluded from the network picker");
 
@@ -14279,6 +14293,19 @@ console.log("\n── RELAY MANAGER — one-shot fetch isolation ──");
   coldSocket.emit(["EOSE", coldFetchReq[1]]);
   const coldFetched = await coldFetch;
   assert(coldFetched.length === 0, "Cold fetch resolves after the connected relay EOSEs");
+
+  FakeWebSocket.instances = [];
+  const closingRelayManager = new RelayManager(
+    ["wss://close-relay.test"],
+    {},
+    FakeWebSocket as unknown as typeof WebSocket
+  );
+  closingRelayManager.connect();
+  const closingSocket = FakeWebSocket.instances[0]!;
+  closingRelayManager.disconnect();
+  closingSocket.onclose?.({} as CloseEvent);
+  const retryTimer = (closingRelayManager as any).relays.get("wss://close-relay.test")?.retryTimer;
+  assert(!retryTimer, "Disconnect suppresses the socket-close reconnect timer");
 }
 
 // ── FIRST-ACK PUBLISH (field fix: slow Create→Publish) ─────────────────

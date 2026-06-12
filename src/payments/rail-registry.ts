@@ -32,9 +32,12 @@ export interface Rail {
    *  default to masked but allow opt-in publishing. */
   allowPublicHandle: boolean;
   /** Optional list of community slugs this rail is geo-relevant to.
-   *  Empty/missing means available to every community (Revtag, $cashtag,
-   *  Wise — they cross borders). */
+   *  Kept for Chama-specific overrides, especially where one country has
+   *  multiple Chamas or legacy slugs. */
   region?: string[];
+  /** ISO country codes where this rail should appear in the default local
+   *  picker. Search still exposes the wider catalog. */
+  countries?: string[];
   /** Placeholder hint for the input field — "+221 77 123 4567",
    *  "@username", "your.bank@email.com", etc. */
   placeholder?: string;
@@ -67,6 +70,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Wave",
     allowPublicHandle: false,
     region: ["sn-cfa"],
+    countries: ["SN", "CI"],
     placeholder: "+221 77 123 4567",
   },
   {
@@ -74,6 +78,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Orange Money",
     allowPublicHandle: false,
     region: ["sn-cfa"],
+    countries: ["SN", "CI", "CM", "GN", "ML", "BF", "BJ", "MG"],
     placeholder: "+221 77 123 4567",
   },
   {
@@ -81,6 +86,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Wizall",
     allowPublicHandle: false,
     region: ["sn-cfa"],
+    countries: ["SN"],
     placeholder: "+221 77 123 4567",
   },
   {
@@ -88,24 +94,28 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Free Money",
     allowPublicHandle: false,
     region: ["sn-cfa"],
+    countries: ["SN"],
     placeholder: "+221 77 123 4567",
   },
   {
     key: "moov-money",
     displayName: "Moov Money",
     allowPublicHandle: false,
+    countries: ["BJ", "CI", "BF", "TG", "NE"],
     placeholder: "+229 91 234 567",
   },
   {
     key: "vodafone-cash",
     displayName: "Vodafone Cash",
     allowPublicHandle: false,
+    countries: ["GH"],
     placeholder: "+233 20 123 4567",
   },
   {
     key: "airtel-tigo-money",
     displayName: "AirtelTigo Money",
     allowPublicHandle: false,
+    countries: ["GH"],
     placeholder: "+233 27 123 4567",
   },
 
@@ -123,6 +133,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "M-Pesa",
     allowPublicHandle: false,
     region: ["ke-kes", "tz-tzs"],
+    countries: ["KE", "TZ", "MZ", "CD", "LS", "GH", "EG", "ZA", "ET"],
     placeholder: "+255 71 234 5678",
   },
   {
@@ -130,6 +141,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Airtel Money",
     allowPublicHandle: false,
     region: ["ke-kes", "tz-tzs"],
+    countries: ["KE", "TZ", "UG", "RW", "ZM", "MW", "NE", "TD", "CD", "MG", "GA", "CG", "SC"],
     placeholder: "+255 68 123 4567",
   },
   // MTN Mobile Money (MoMo) — the dominant network across West and
@@ -142,6 +154,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "mtn-momo",
     displayName: "MTN Mobile Money",
     allowPublicHandle: false,
+    countries: ["GH", "CI", "CM", "UG", "RW", "ZM", "BJ", "LR", "CG", "GN", "SS", "ZA"],
     placeholder: "+233 24 123 4567",
   },
   // Tigo Pesa — Tanzania (rebranded to "Mixx by Yas" 2023 but Tigo
@@ -151,6 +164,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Tigo Pesa",
     allowPublicHandle: false,
     region: ["tz-tzs"],
+    countries: ["TZ"],
     placeholder: "+255 71 234 5678",
   },
   {
@@ -158,6 +172,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "HaloPesa",
     allowPublicHandle: false,
     region: ["tz-tzs"],
+    countries: ["TZ"],
     placeholder: "+255 62 123 4567",
   },
   {
@@ -165,6 +180,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "AzamPesa",
     allowPublicHandle: false,
     region: ["tz-tzs"],
+    countries: ["TZ"],
     placeholder: "+255 68 123 4567",
   },
   // Telebirr — Ethio Telecom's wallet, Ethiopia's dominant mobile
@@ -173,48 +189,56 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "telebirr",
     displayName: "Telebirr",
     allowPublicHandle: false,
+    countries: ["ET"],
     placeholder: "+251 91 234 5678",
   },
   {
     key: "ecocash",
     displayName: "EcoCash",
     allowPublicHandle: false,
+    countries: ["ZW"],
     placeholder: "+263 77 123 4567",
   },
   {
     key: "opay",
     displayName: "OPay",
     allowPublicHandle: false,
+    countries: ["NG"],
     placeholder: "+234 801 234 5678",
   },
   {
     key: "paga",
     displayName: "Paga",
     allowPublicHandle: false,
+    countries: ["NG"],
     placeholder: "+234 801 234 5678",
   },
   {
     key: "palmpay",
     displayName: "PalmPay",
     allowPublicHandle: false,
+    countries: ["NG", "GH"],
     placeholder: "+234 801 234 5678",
   },
   {
     key: "chipper-cash",
     displayName: "Chipper Cash",
     allowPublicHandle: false,
+    countries: ["GH", "NG", "UG", "RW", "TZ", "ZA", "KE"],
     placeholder: "+256 70 123 4567",
   },
   {
     key: "mukuru",
     displayName: "Mukuru",
     allowPublicHandle: false,
+    countries: ["ZA", "ZW", "ZM", "MW", "BW", "LS", "SZ", "MZ"],
     placeholder: "+27 71 123 4567",
   },
   {
     key: "fawry",
     displayName: "Fawry",
     allowPublicHandle: false,
+    countries: ["EG"],
     placeholder: "+20 100 123 4567",
   },
 
@@ -225,6 +249,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "upi",
     displayName: "UPI (India)",
     allowPublicHandle: false,
+    countries: ["IN"],
     placeholder: "name@bank or +91 98765 43210",
   },
   // bKash — Bangladesh's dominant mobile financial service.
@@ -232,18 +257,21 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "bkash",
     displayName: "bKash",
     allowPublicHandle: false,
+    countries: ["BD"],
     placeholder: "+880 1700 123456",
   },
   {
     key: "nagad",
     displayName: "Nagad",
     allowPublicHandle: false,
+    countries: ["BD"],
     placeholder: "+880 1700 123456",
   },
   {
     key: "rocket",
     displayName: "Rocket",
     allowPublicHandle: false,
+    countries: ["BD"],
     placeholder: "+880 1700 123456",
   },
   // GCash — Philippines, ~70M users. Globe Telecom's wallet.
@@ -251,6 +279,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "gcash",
     displayName: "GCash",
     allowPublicHandle: false,
+    countries: ["PH"],
     placeholder: "+63 917 123 4567",
   },
   // Maya (formerly PayMaya) — Philippines, GCash's main competitor.
@@ -258,6 +287,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "maya",
     displayName: "Maya (PayMaya)",
     allowPublicHandle: false,
+    countries: ["PH"],
     placeholder: "+63 917 123 4567",
   },
   // Easypaisa — Pakistan, Telenor Bank wallet.
@@ -265,6 +295,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "easypaisa",
     displayName: "Easypaisa",
     allowPublicHandle: false,
+    countries: ["PK"],
     placeholder: "+92 300 1234567",
   },
   // JazzCash — Pakistan, Jazz Mobile Bank wallet.
@@ -272,48 +303,56 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "jazzcash",
     displayName: "JazzCash",
     allowPublicHandle: false,
+    countries: ["PK"],
     placeholder: "+92 300 1234567",
   },
   {
     key: "truemoney",
     displayName: "TrueMoney",
     allowPublicHandle: false,
+    countries: ["TH", "KH", "MM", "ID", "PH", "VN"],
     placeholder: "+66 81 234 5678",
   },
   {
     key: "dana",
     displayName: "DANA",
     allowPublicHandle: false,
+    countries: ["ID"],
     placeholder: "+62 812 3456 7890",
   },
   {
     key: "gopay",
     displayName: "GoPay",
     allowPublicHandle: false,
+    countries: ["ID"],
     placeholder: "+62 812 3456 7890",
   },
   {
     key: "ovo",
     displayName: "OVO",
     allowPublicHandle: false,
+    countries: ["ID"],
     placeholder: "+62 812 3456 7890",
   },
   {
     key: "momo-vietnam",
     displayName: "MoMo (Vietnam)",
     allowPublicHandle: false,
+    countries: ["VN"],
     placeholder: "+84 91 234 5678",
   },
   {
     key: "touch-n-go",
     displayName: "Touch 'n Go eWallet",
     allowPublicHandle: false,
+    countries: ["MY"],
     placeholder: "+60 12 345 6789",
   },
   {
     key: "grabpay",
     displayName: "GrabPay",
     allowPublicHandle: false,
+    countries: ["SG", "MY", "PH", "TH", "ID", "VN"],
     placeholder: "+65 8123 4567",
   },
 
@@ -325,6 +364,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "pix",
     displayName: "PIX (Brazil)",
     allowPublicHandle: true,
+    countries: ["BR"],
     placeholder: "+55 11 91234 5678 or CPF / email",
   },
   // Mercado Pago — Argentina, Brazil, Mexico, Chile, Colombia, Peru,
@@ -333,6 +373,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "mercado-pago",
     displayName: "Mercado Pago",
     allowPublicHandle: false,
+    countries: ["AR", "BR", "MX", "CL", "CO", "PE", "UY"],
     placeholder: "+54 9 11 1234 5678",
   },
   // Nequi — Colombia, Bancolombia's digital wallet. Phone-keyed.
@@ -340,36 +381,42 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "nequi",
     displayName: "Nequi",
     allowPublicHandle: false,
+    countries: ["CO"],
     placeholder: "+57 300 123 4567",
   },
   {
     key: "yape",
     displayName: "Yape",
     allowPublicHandle: false,
+    countries: ["PE"],
     placeholder: "+51 987 654 321",
   },
   {
     key: "plin",
     displayName: "Plin",
     allowPublicHandle: false,
+    countries: ["PE"],
     placeholder: "+51 987 654 321",
   },
   {
     key: "codi",
     displayName: "CoDi (Mexico)",
     allowPublicHandle: false,
+    countries: ["MX"],
     placeholder: "+52 55 1234 5678",
   },
   {
     key: "spei",
     displayName: "SPEI (Mexico)",
     allowPublicHandle: false,
+    countries: ["MX"],
     placeholder: "CLABE / phone / bank alias",
   },
   {
     key: "sinpe-movil",
     displayName: "SINPE Movil",
     allowPublicHandle: false,
+    countries: ["CR"],
     placeholder: "+506 8888 8888",
   },
 
@@ -379,7 +426,8 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "strike",
     displayName: "Strike",
     allowPublicHandle: true,
-    region: ["sv-usd"],
+    region: ["sv-usd", "us-gbf", "us-blf", "global-usd"],
+    countries: ["US", "SV", "AR"],
     placeholder: "username",
   },
 
@@ -391,18 +439,21 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "revtag",
     displayName: "Revtag (Revolut)",
     allowPublicHandle: true,
+    countries: ["GB", "IE", "FR", "ES", "PT", "DE", "NL", "BE", "IT", "PL", "RO", "LT", "LV", "EE", "CZ", "HU", "SE", "DK", "NO", "IS", "AU", "NZ"],
     placeholder: "@username",
   },
   {
     key: "cashtag",
     displayName: "$cashtag (Cash App)",
     allowPublicHandle: true,
+    countries: ["US", "GB"],
     placeholder: "$username",
   },
   {
     key: "zbd",
     displayName: "ZBD username",
     allowPublicHandle: true,
+    countries: ["US"],
     placeholder: "username@zbd.gg",
   },
   {
@@ -417,6 +468,7 @@ export const RAIL_REGISTRY: Rail[] = [
     key: "paypal",
     displayName: "PayPal",
     allowPublicHandle: false,
+    countries: ["US", "GB", "CA", "AU", "NZ", "FR", "DE", "ES", "IT", "NL", "BE", "IE", "PT", "MX", "BR", "PH", "SG"],
     placeholder: "you@example.com",
   },
   {
@@ -425,12 +477,14 @@ export const RAIL_REGISTRY: Rail[] = [
     // Venmo usernames CAN be public, but the typical handle (often phone-
     // tied or PII-adjacent) defaults to private. Conservative.
     allowPublicHandle: false,
+    countries: ["US"],
     placeholder: "@username",
   },
   {
     key: "zelle",
     displayName: "Zelle",
     allowPublicHandle: false,
+    countries: ["US"],
     placeholder: "you@example.com or +1 555 555 5555",
   },
   {
@@ -517,13 +571,19 @@ export function getRailByKey(key: string | null | undefined): Rail | null {
   return BY_KEY.get(key) ?? null;
 }
 
-/** Rails available to a given community. The picker intentionally shows
- *  the full global-south catalog now, with ordering doing the curation:
- *  phone-number meta rail first, local community rails next, Africa rails
- *  next, broader global-south rails after that, then legacy global apps.
- *  This keeps Afribit/Kenya from hiding Orange Money or Wave while still
- *  putting M-Pesa and Airtel Money where Kenyan users expect them. */
+/** Rails shown by default for a given community. Defaults are country-first:
+ *  a Kenyan Chama should feel Kenyan, a Senegal Chama should feel Senegalese,
+ *  and broad cross-border rails should appear only when they are local to that
+ *  country. Search surfaces the wider catalog via searchableRailsForCommunity.
+ */
 export function railsForCommunity(slug: string | null | undefined): Rail[] {
+  return searchableRailsForCommunity(slug).filter(rail => railIsDefaultForCommunity(rail, slug));
+}
+
+/** Full catalog, ranked for the community. Used when a user explicitly
+ *  searches beyond their local defaults, and for matching legacy/listing rails
+ *  that may have been selected in another country. */
+export function searchableRailsForCommunity(slug: string | null | undefined): Rail[] {
   return [...RAIL_REGISTRY].sort((a, b) => railCommunityRank(a, slug) - railCommunityRank(b, slug));
 }
 
@@ -547,20 +607,21 @@ export function railAllowsPublicHandle(key: string | null | undefined): boolean 
  *  +cc-formatted placeholder. We don't ship a strict type bit on the
  *  Rail interface to keep registry rows minimal; placeholder is a
  *  reliable proxy for now and easy to upgrade later. */
-export function phoneNetworksForCommunity(slug: string | null | undefined): Rail[] {
-  // v0.6.5: return region-relevant rails FIRST, then cross-region
-  // universally available rails. Never strand a user with an empty
-  // list — they may have a phone in a country whose community isn't
-  // in the registry yet (Ghana, Tanzania, Bangladesh, Philippines,
-  // Brazil, …), and they still need to tag their phone honestly.
-  //
-  // "Phone-shaped" proxy = placeholder starts with "+". Easy to keep
-  // in sync as the registry grows.
+export function phoneNetworksForCommunity(
+  slug: string | null | undefined,
+  options: { includeSearchable?: boolean } = {},
+): Rail[] {
+  // "Phone-shaped" proxy = placeholder starts with "+". Easy to keep in sync
+  // as the registry grows. Defaults are country-local; search can opt into the
+  // full catalog so travelers/cross-border sellers can still find their rail.
   const isPhoneShaped = (r: Rail) =>
     r.key !== "phone-number"
     && (r.placeholder ? r.placeholder.startsWith("+") : false);
 
-  return railsForCommunity(slug).filter(isPhoneShaped);
+  const source = options.includeSearchable
+    ? searchableRailsForCommunity(slug)
+    : railsForCommunity(slug);
+  return source.filter(isPhoneShaped);
 }
 
 // #1: US-leaning Chamas (GBF, and Global USD / us-blf) almost certainly mean a
@@ -571,6 +632,28 @@ export function phoneNetworksForCommunity(slug: string | null | undefined): Rail
 const US_LEANING_COMMUNITY_SLUGS = new Set(["us-gbf", "us-blf", "global-usd"]);
 const US_FIRST_RAIL_KEYS = ["strike", "cashtag", "zelle", "bank-transfer"];
 
+const UNIVERSAL_DEFAULT_RAIL_KEYS = new Set(["phone-number", "bank-transfer"]);
+
+function communityCountryCodes(slug: string | null | undefined): Set<string> {
+  const countries = new Set<string>();
+  if (slug && US_LEANING_COMMUNITY_SLUGS.has(slug)) countries.add("US");
+  // Keep payment rails independent from the community registry. This file is
+  // imported during boot/HMR, and the community registry already has federation
+  // dependencies; deriving the country from stable country-currency slugs keeps
+  // this path cycle-free.
+  const slugPrefix = slug?.split("-")[0]?.toUpperCase();
+  if (slugPrefix && /^[A-Z]{2}$/.test(slugPrefix)) countries.add(slugPrefix);
+  return countries;
+}
+
+function railIsDefaultForCommunity(rail: Rail, slug: string | null | undefined): boolean {
+  if (UNIVERSAL_DEFAULT_RAIL_KEYS.has(rail.key)) return true;
+  if (slug && rail.region?.includes(slug)) return true;
+  const countries = communityCountryCodes(slug);
+  if (countries.size === 0) return false;
+  return (rail.countries ?? []).some(country => countries.has(country.toUpperCase()));
+}
+
 function railCommunityRank(rail: Rail, slug: string | null | undefined): number {
   const registryIndex = RAIL_REGISTRY.findIndex(r => r.key === rail.key);
   if (slug && US_LEANING_COMMUNITY_SLUGS.has(slug)) {
@@ -580,6 +663,10 @@ function railCommunityRank(rail: Rail, slug: string | null | undefined): number 
   if (rail.key === "phone-number") return registryIndex / 1000;
   const local = slug && rail.region?.includes(slug);
   if (local) return 100 + registryIndex / 1000;
+  const countries = communityCountryCodes(slug);
+  if ((rail.countries ?? []).some(country => countries.has(country.toUpperCase()))) {
+    return 110 + registryIndex / 1000;
+  }
   const africaIndex = AFRICA_FIRST_RAIL_KEYS.indexOf(rail.key);
   if (africaIndex >= 0) return 200 + africaIndex;
   const globalSouthIndex = GLOBAL_SOUTH_TAIL_RAIL_KEYS.indexOf(rail.key);
@@ -628,7 +715,7 @@ export function matchRails(
   community: string | null | undefined,
 ): RailMatch {
   const rankOf = new Map<string, number>();
-  railsForCommunity(community).forEach((r, i) => rankOf.set(r.key, i));
+  searchableRailsForCommunity(community).forEach((r, i) => rankOf.set(r.key, i));
   const byRank = (a: string, b: string) =>
     (rankOf.get(a) ?? Number.MAX_SAFE_INTEGER) - (rankOf.get(b) ?? Number.MAX_SAFE_INTEGER);
 
