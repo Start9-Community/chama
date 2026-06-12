@@ -169,7 +169,15 @@ import {
   clearAllPendingRedemptions,
   listPendingRedemptions,
   stashPendingRedemption,
+  drainPendingRedemptions,
+  markPoisoned,
+  markUnresolvedCredit,
+  listStrandedRedemptions,
+  MAX_DRAIN_ATTEMPTS,
+  PENDING_REDEMPTIONS_KEY,
 } from "../fedimint/pending-redemptions.js";
+import { decideOrphanWipe, NO_CLIENT_OPEN_ERROR_RE } from "../fedimint/orphan-wipe-policy.js";
+import { collectClaimEnvelopeCandidates } from "./holder-shares.js";
 import {
   stashEcashExport,
   getEcashExport,
@@ -14961,6 +14969,393 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
   );
 
   orderClient.disconnect();
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// v3.4.0 FUND SAFETY — "no sats stranded" (audit C5 / C12 / C13 / C14 / C15)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// Every test here pins a client-side wallet/stash/mint-op invariant from
+// the 2026-06 fund-safety pass. None touch state-machine transitions or
+// wire formats (non-consensus release).
+//
+// In Node there is no navigator.locks, so the mint-mutex tests exercise
+// the in-process fallback queue — which shares the exact acquire/release
+// semantics of the Web Locks path minus cross-tab coverage. The
+// cross-tab (two real browser tabs) behavior is flagged for the device
+// pass.
+
+console.log("\n── V3.4.0 FUND SAFETY ──");
+
+/** Mock IFedimintWallet for FedimintClient-level fund-safety tests. */
+function makeFundSafetyWallet(overrides: {
+  spendNotes?: (msat: number) => Promise<string>;
+  redeemEcash?: (oob: string) => Promise<void>;
+  parseNotes?: (oob: string) => Promise<{ total_amount: number }>;
+  getBalance?: () => Promise<number>;
+}) {
+  return {
+    async open() {},
+    isOpen() { return true; },
+    recovery: {
+      async hasPendingRecoveries() { return false; },
+      async waitForAllRecoveries() {},
+    },
+    async joinFederation(_invite: string) {},
+    balance: {
+      getBalance: overrides.getBalance ?? (async () => 0),
+      subscribeBalance(_cb: (b: number) => void) { return () => {}; },
+    },
+    mint: {
+      spendNotes: overrides.spendNotes ?? (async (msat: number) => `oob_${msat}`),
+      redeemEcash: overrides.redeemEcash ?? (async () => {}),
+      parseNotes: overrides.parseNotes ?? (async () => ({ total_amount: 0 })),
+    },
+    lightning: {
+      async createInvoice(_msat: number, _desc: string) {
+        return { invoice: "lnbc0", operationId: "op0" };
+      },
+      async payInvoice(_b: string) { return { operationId: "op0" }; },
+    },
+    federation: {
+      async getFederationId() { return "fed_fund_safety"; },
+      async getInviteCode() { return "fed1fundsafety"; },
+    },
+    async cleanup() {},
+  };
+}
+
+// ── C12 · invariant_mint-mutex__concurrent_spends_serialize ──────────────
+{
+  const { FedimintClient } = await import("../fedimint/fedimint-client.js");
+  let active = 0;
+  let maxActive = 0;
+  const order: string[] = [];
+  const wallet = makeFundSafetyWallet({
+    spendNotes: async (msat: number) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      order.push(`spend-start-${msat}`);
+      await new Promise(r => setTimeout(r, 20));
+      order.push(`spend-end-${msat}`);
+      active--;
+      return `oob_${msat}`;
+    },
+  });
+  const client = new FedimintClient({}, async () => wallet as any);
+  await client.init();
+  await Promise.all([client.spendNotes(1_000), client.spendNotes(2_000)]);
+  assert(maxActive === 1,
+    "invariant_mint-mutex__concurrent_spends_serialize: two concurrent spendNotes never overlap on the shared wallet");
+  assert(order.join(",") === "spend-start-1000,spend-end-1000,spend-start-2000,spend-end-2000",
+    "invariant_mint-mutex__concurrent_spends_serialize: serialized FIFO — second spend starts only after the first ends");
+  await client.cleanup();
+}
+
+// ── C12 · invariant_mint-mutex__drain_waits_for_fund ──────────────────────
+{
+  const { FedimintClient } = await import("../fedimint/fedimint-client.js");
+  clearAllPendingRedemptions();
+  let releaseSpend!: () => void;
+  const spendGate = new Promise<void>(r => { releaseSpend = r; });
+  const order: string[] = [];
+  const wallet = makeFundSafetyWallet({
+    spendNotes: async (msat: number) => {
+      order.push("spend-start");
+      await spendGate;
+      order.push("spend-end");
+      return `oob_${msat}`;
+    },
+    redeemEcash: async () => { order.push("redeem"); },
+    parseNotes: async () => ({ total_amount: 5_000 }),
+  });
+  const client = new FedimintClient({}, async () => wallet as any);
+  await client.init();
+
+  stashPendingRedemption({
+    escrowId: "drain_vs_fund",
+    oobNotes: "oob_pending_drain",
+    notesHash: "hash_pending_drain",
+    amountMsats: 5_000,
+  });
+
+  // Fund takes the mint lock and parks inside spendNotes...
+  const fundP = client.createEscrowLock(50_000, { arbiterFeeMsats: 0 });
+  await new Promise(r => setTimeout(r, 15));
+  assert(order.includes("spend-start"),
+    "invariant_mint-mutex__drain_waits_for_fund: fund spend is in flight before the drain starts");
+
+  // ...then the boot drain arrives. It must ACQUIRE AND WAIT — neither
+  // skip the lock (racing the spend) nor skip the entry.
+  const drainP = drainPendingRedemptions(client);
+  await new Promise(r => setTimeout(r, 40));
+  assert(!order.includes("redeem"),
+    "invariant_mint-mutex__drain_waits_for_fund: drain redeem WAITS while the fund spend holds the mint lock");
+
+  releaseSpend();
+  await fundP;
+  const summary = await drainP;
+  assert(order.indexOf("redeem") > order.indexOf("spend-end"),
+    "invariant_mint-mutex__drain_waits_for_fund: drain redeem runs only after the fund spend released the lock");
+  assert(summary.succeeded === 1,
+    "invariant_mint-mutex__drain_waits_for_fund: the waited-for drain entry still redeems successfully");
+  assert(listPendingRedemptions().length === 0,
+    "invariant_mint-mutex__drain_waits_for_fund: drained entry is cleared from the stash");
+  await client.cleanup();
+  clearAllPendingRedemptions();
+}
+
+// ── C5 · invariant_already-spent__requires_confirmed_credit ───────────────
+{
+  const { FedimintClient } = await import("../fedimint/fedimint-client.js");
+
+  // (a) Front-run shape: "already spent" and the balance never moves.
+  //     Must throw ALREADY_SPENT_UNCONFIRMED — never silent success.
+  {
+    const wallet = makeFundSafetyWallet({
+      redeemEcash: async () => { throw new Error("Notes already spent by the federation"); },
+      parseNotes: async () => ({ total_amount: 7_000 }),
+      getBalance: async () => 0,
+    });
+    const client = new FedimintClient({}, async () => wallet as any);
+    await client.init();
+    client.alreadySpentConfirmTimeoutMs = 60;
+    let thrownCode = "";
+    let resolvedSilently = false;
+    try {
+      await client.redeemWithRetry("oob_front_run");
+      resolvedSilently = true;
+    } catch (e) {
+      thrownCode = (e as { code?: string })?.code ?? "";
+    }
+    assert(!resolvedSilently,
+      "invariant_already-spent__requires_confirmed_credit: unconfirmed credit is NEVER reported as success");
+    assert(thrownCode === "ALREADY_SPENT_UNCONFIRMED",
+      "invariant_already-spent__requires_confirmed_credit: unconfirmed credit throws the structured needs-attention code");
+    await client.cleanup();
+  }
+
+  // (b) Late-landing shape: a transient attempt actually credited this
+  //     wallet, the retry sees "already spent", and the balance delta
+  //     confirms the credit → success (no false alarm).
+  {
+    let bal = 0;
+    let calls = 0;
+    const wallet = makeFundSafetyWallet({
+      redeemEcash: async () => {
+        calls++;
+        if (calls === 1) {
+          bal += 7_000; // the reissue actually landed...
+          throw new Error("operation timed out"); // ...but the submit looked transient
+        }
+        throw new Error("Notes already spent by the federation");
+      },
+      parseNotes: async () => ({ total_amount: 7_000 }),
+      getBalance: async () => bal,
+    });
+    const client = new FedimintClient({}, async () => wallet as any);
+    await client.init();
+    client.alreadySpentConfirmTimeoutMs = 200;
+    await client.redeemWithRetry("oob_late_landing");
+    assert(true,
+      "invariant_already-spent__requires_confirmed_credit: a balance-confirmed credit resolves as success (no cry-wolf)");
+    await client.cleanup();
+  }
+
+  // (c) Drain integration: an unconfirmed already-spent entry is marked
+  //     unresolved-credit (surfaced, skipped by future drains) instead of
+  //     burning retry attempts forever.
+  {
+    clearAllPendingRedemptions();
+    const wallet = makeFundSafetyWallet({
+      redeemEcash: async () => { throw new Error("Notes already spent by the federation"); },
+      parseNotes: async () => ({ total_amount: 7_000 }),
+      getBalance: async () => 0,
+    });
+    const client = new FedimintClient({}, async () => wallet as any);
+    await client.init();
+    client.alreadySpentConfirmTimeoutMs = 60;
+    stashPendingRedemption({
+      escrowId: "front_run_drain",
+      oobNotes: "oob_front_run_drain",
+      notesHash: "hash_front_run",
+      amountMsats: 7_000,
+    });
+    const first = await drainPendingRedemptions(client);
+    assert(first.unresolved === 1,
+      "invariant_already-spent__requires_confirmed_credit: drain marks the unconfirmed entry unresolved");
+    const entry = listPendingRedemptions().find(e => e.escrowId === "front_run_drain");
+    assert(entry?.unresolvedCredit === true && !!entry?.lastError,
+      "invariant_already-spent__requires_confirmed_credit: stash entry carries the unresolved-credit flag + reason");
+    const second = await drainPendingRedemptions(client);
+    assert(second.attempted === 0 && second.unresolved === 1,
+      "invariant_already-spent__requires_confirmed_credit: future drains skip the unresolved entry (no attempt burn)");
+
+    // Adversarial-review fix: a manual claim retry re-stashes the same
+    // escrowId; the unresolved-credit classification must survive it.
+    stashPendingRedemption({
+      escrowId: "front_run_drain",
+      oobNotes: "oob_front_run_drain",
+      notesHash: "hash_front_run",
+      amountMsats: 7_000,
+    });
+    const restashed = listPendingRedemptions().find(e => e.escrowId === "front_run_drain");
+    assert(restashed?.unresolvedCredit === true,
+      "invariant_already-spent__requires_confirmed_credit: re-stashing on retry preserves the unresolved-credit classification");
+    await client.cleanup();
+    clearAllPendingRedemptions();
+  }
+}
+
+// ── C13 · invariant_stranded-notes__surfaced_and_exportable ───────────────
+{
+  clearAllPendingRedemptions();
+  const stashFour = () => {
+    for (const id of ["fresh", "poisoned", "unresolved", "exhausted"]) {
+      stashPendingRedemption({
+        escrowId: id,
+        oobNotes: `oob_${id}`,
+        notesHash: `hash_${id}`,
+        amountMsats: 9_000,
+      });
+    }
+  };
+  stashFour();
+  markPoisoned("poisoned", "malformed notes");
+  markUnresolvedCredit("unresolved", "already spent, credit unconfirmed");
+  {
+    // attempts is only bumped by real drains; simulate an exhausted entry
+    // by editing the stash JSON the way 12 failed boots would have.
+    const raw = (globalThis as any).localStorage.getItem(PENDING_REDEMPTIONS_KEY);
+    const stash = JSON.parse(raw);
+    stash["exhausted"].attempts = MAX_DRAIN_ATTEMPTS;
+    (globalThis as any).localStorage.setItem(PENDING_REDEMPTIONS_KEY, JSON.stringify(stash));
+  }
+
+  const stranded = listStrandedRedemptions();
+  assert(stranded.length === 3,
+    "invariant_stranded-notes__surfaced_and_exportable: poisoned + unresolved + retries-exhausted entries all surface");
+  assert(!stranded.some(s => s.escrowId === "fresh"),
+    "invariant_stranded-notes__surfaced_and_exportable: an entry still inside its retry budget is NOT alarmed (the drain owns it)");
+  assert(stranded.find(s => s.escrowId === "unresolved")?.stranded === "unresolved-credit",
+    "invariant_stranded-notes__surfaced_and_exportable: unresolved-credit entries are distinguished for honest UI copy");
+  assert(stranded.find(s => s.escrowId === "poisoned")?.stranded === "poisoned" &&
+         stranded.find(s => s.escrowId === "exhausted")?.stranded === "retries-exhausted",
+    "invariant_stranded-notes__surfaced_and_exportable: poison and retry-exhaustion are classified");
+  assert(stranded.every(s => s.oobNotes === `oob_${s.escrowId}`),
+    "invariant_stranded-notes__surfaced_and_exportable: every stranded entry carries its full bearer note verbatim (exportable)");
+  clearAllPendingRedemptions();
+}
+
+// ── C14 · invariant_no-wipe__unknown_balance_refuses ──────────────────────
+{
+  // Thrown/uncertain peek: NEVER wipe. Unscoped (or already-scoped file)
+  // sessions refuse loudly; a legacy file under a scoped session parks
+  // untouched instead (non-destructive, boot continues).
+  assert(decideOrphanWipe({
+    peek: { kind: "unknown", reason: "federation unreachable" },
+    storageScope: null,
+    filenameSource: "legacy",
+  }).action === "refuse-unknown",
+    "invariant_no-wipe__unknown_balance_refuses: unknown balance + no scope ⇒ refuse, nothing deleted");
+  assert(decideOrphanWipe({
+    peek: { kind: "unknown", reason: "getBalance threw" },
+    storageScope: "npub_alice",
+    filenameSource: "scoped",
+  }).action === "refuse-unknown",
+    "invariant_no-wipe__unknown_balance_refuses: unknown balance on the identity's own scoped file ⇒ refuse");
+  assert(decideOrphanWipe({
+    peek: { kind: "unknown", reason: "worker flake" },
+    storageScope: "npub_alice",
+    filenameSource: "legacy",
+  }).action === "preserve-and-rescope",
+    "invariant_no-wipe__unknown_balance_refuses: unknown balance on a legacy file parks it untouched (never deletes)");
+
+  // Positive confirmation is the ONLY wipe ticket.
+  assert(decideOrphanWipe({
+    peek: { kind: "balance", balanceMsats: 0 },
+    storageScope: null,
+    filenameSource: "legacy",
+  }).action === "wipe",
+    "invariant_no-wipe__unknown_balance_refuses: a positively-read zero balance permits the reset");
+  assert(decideOrphanWipe({
+    peek: { kind: "no-client" },
+    storageScope: null,
+    filenameSource: "legacy",
+  }).action === "wipe",
+    "invariant_no-wipe__unknown_balance_refuses: a provably-clientless file (ecash structurally impossible) permits the reset");
+
+  // Balance present: unchanged v0.1.76 semantics.
+  assert(decideOrphanWipe({
+    peek: { kind: "balance", balanceMsats: 21_000 },
+    storageScope: null,
+    filenameSource: "legacy",
+  }).action === "refuse-balance",
+    "invariant_no-wipe__unknown_balance_refuses: a real orphan balance still refuses (v0.1.76 guard intact)");
+  assert(decideOrphanWipe({
+    peek: { kind: "balance", balanceMsats: 21_000 },
+    storageScope: "npub_alice",
+    filenameSource: "legacy",
+  }).action === "preserve-and-rescope",
+    "invariant_no-wipe__unknown_balance_refuses: a funded legacy file under a scoped session parks untouched (v0.1.76 path intact)");
+
+  // The no-client classification trusts only the SDK's first-run taxonomy.
+  assert(NO_CLIENT_OPEN_ERROR_RE.test("Client database not initialized"),
+    "invariant_no-wipe__unknown_balance_refuses: first-run open error classifies as no-client");
+  assert(!NO_CLIENT_OPEN_ERROR_RE.test("network request failed"),
+    "invariant_no-wipe__unknown_balance_refuses: a generic failure does NOT classify as no-client (stays unknown ⇒ refuses)");
+}
+
+// ── C15 · invariant_claim__tries_all_envelopes ─────────────────────────────
+{
+  const ME = "f".repeat(64);
+  const VOTER_A = "a".repeat(64);
+  const VOTER_B = "b".repeat(64);
+  const OUTCOME = "release";
+  const vote = (voter: string, env: Record<string, unknown> | undefined) => ({
+    kind: EscrowEventKind.VOTE,
+    raw: { pubkey: voter },
+    payload: { type: "escrow:vote", outcome: OUTCOME, shareEnvelope: env },
+  });
+  const env = (shareIndex: number, opts: { outcome?: string; recipient?: string; ct?: string | null } = {}) => ({
+    shareIndex,
+    outcome: opts.outcome ?? OUTCOME,
+    notesHash: "hash_c15",
+    recipientPubkey: opts.recipient ?? ME,
+    encryptedFor: opts.ct === null ? {} : { [opts.recipient ?? ME]: opts.ct ?? `ct_${shareIndex}` },
+  });
+
+  const chain = [
+    { kind: 38100, raw: { pubkey: VOTER_A }, payload: { type: "escrow:create" } }, // non-VOTE: skipped
+    vote(ME, env(0, { ct: "ct_mine" })),                  // my own shareIndex: skipped
+    vote(VOTER_A, env(1, { ct: "ct_voterA" })),           // candidate 1
+    vote(VOTER_B, env(2, { outcome: "refund" })),         // wrong outcome: skipped
+    vote(VOTER_B, env(2, { recipient: VOTER_A })),        // wrong recipient: skipped
+    vote(VOTER_B, env(2, { ct: null })),                  // no ciphertext for me: skipped
+    vote(VOTER_B, env(2, { ct: "ct_voterB" })),           // candidate 2
+  ];
+
+  const candidates = collectClaimEnvelopeCandidates(chain as any, {
+    resolvedOutcome: OUTCOME as any,
+    myPubkey: ME,
+    ownShareIndex: 0,
+  });
+  assert(candidates.length === 2,
+    "invariant_claim__tries_all_envelopes: ALL matching envelopes are collected, not just the first");
+  assert(candidates[0]?.ciphertext === "ct_voterA" && candidates[1]?.ciphertext === "ct_voterB",
+    "invariant_claim__tries_all_envelopes: candidates surface in chain order with their ciphertexts");
+  assert(candidates[0]?.voterPubkey === VOTER_A && candidates[1]?.voterPubkey === VOTER_B,
+    "invariant_claim__tries_all_envelopes: each candidate carries its voter (the NIP-44 sender) for decryption");
+  assert(!candidates.some(c => c.shareIndex === 0),
+    "invariant_claim__tries_all_envelopes: the winner's own share index is never offered as the second share");
+
+  const refundView = collectClaimEnvelopeCandidates(chain as any, {
+    resolvedOutcome: "refund" as any,
+    myPubkey: ME,
+    ownShareIndex: 0,
+  });
+  assert(refundView.length === 1 && refundView[0]?.ciphertext === "ct_2",
+    "invariant_claim__tries_all_envelopes: outcome binding is exact — only envelopes bound to the resolved outcome qualify");
 }
 
 // ══════════════════════════════════════════════════════════════════════════

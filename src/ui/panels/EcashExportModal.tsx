@@ -31,6 +31,7 @@ export function EcashExportModal({
   spendNotes,
   onExported,
   onClose,
+  preset,
 }: {
   /** Full local balance to export, in msats. */
   balanceMsats: number;
@@ -41,13 +42,29 @@ export function EcashExportModal({
   /** Fired after a successful generate so the shell can refresh the balance. */
   onExported?: () => void;
   onClose: () => void;
+  /** v3.4.0 C13 — show an EXISTING bearer note (a stranded claim stash
+   *  entry) instead of spending balance into a fresh one. The modal
+   *  opens straight on the ready phase with QR + copy; the two-tap
+   *  "clear" confirms the user secured the note and clears the SOURCE
+   *  stash entry via onConfirmCleared (not the ecash-export stash). */
+  preset?: {
+    notes: string;
+    amountMsats: number;
+    /** Small mono headline, e.g. "STRANDED CLAIM · EXPORT YOUR SATS". */
+    headline: string;
+    /** Replaces the ready-phase explainer copy. */
+    body: string;
+    onConfirmCleared: () => void;
+  };
 }) {
   // Resume a prior unconfirmed export if one is stashed (the balance may now
   // read 0, so this modal is the only way back to it).
-  const stashed = getEcashExport();
-  const [phase, setPhase] = useState<Phase>(stashed ? "ready" : "intro");
-  const [notes, setNotes] = useState<string>(stashed?.notes ?? "");
-  const [exportedMsats, setExportedMsats] = useState<number>(stashed?.amountMsats ?? balanceMsats);
+  const stashed = preset ? null : getEcashExport();
+  const [phase, setPhase] = useState<Phase>(preset || stashed ? "ready" : "intro");
+  const [notes, setNotes] = useState<string>(preset?.notes ?? stashed?.notes ?? "");
+  const [exportedMsats, setExportedMsats] = useState<number>(
+    preset?.amountMsats ?? stashed?.amountMsats ?? balanceMsats
+  );
   const [error, setError] = useState<string>("");
   const [copied, setCopied] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -77,7 +94,13 @@ export function EcashExportModal({
       setConfirmClear(true);
       return;
     }
-    clearEcashExport();
+    if (preset) {
+      // Stranded-claim mode: the bearer note lives in the
+      // pending-redemptions stash, not the ecash-export stash.
+      preset.onConfirmCleared();
+    } else {
+      clearEcashExport();
+    }
     onClose();
   };
 
@@ -100,8 +123,8 @@ export function EcashExportModal({
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
-            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 4 }}>
-              WITHDRAW AS ECASH · NO LN FEES
+            <div style={{ fontSize: 9, color: preset ? T.amber : T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 4 }}>
+              {preset ? preset.headline : "WITHDRAW AS ECASH · NO LN FEES"}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
               <BitcoinAmount sats={phase === "ready" ? exportedSats : sats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -166,11 +189,15 @@ export function EcashExportModal({
           <>
             <div style={{
               padding: "9px 11px", borderRadius: T.rs, marginBottom: 12,
-              background: T.greenDim, border: `1px solid ${T.green}44`,
-              color: T.green, fontFamily: T.mono, fontSize: 10, lineHeight: 1.55,
+              background: preset ? T.amberDim : T.greenDim,
+              border: `1px solid ${preset ? T.amber : T.green}44`,
+              color: preset ? T.amber : T.green,
+              fontFamily: T.mono, fontSize: 10, lineHeight: 1.55,
             }}>
-              ✓ Fedimint ecash · {federationLabel}. Import this into Fedi or any
-              Fedimint wallet on {federationLabel}. Save it now — it's bearer money.
+              {preset
+                ? preset.body
+                : <>✓ Fedimint ecash · {federationLabel}. Import this into Fedi or any
+                   Fedimint wallet on {federationLabel}. Save it now — it's bearer money.</>}
             </div>
 
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>

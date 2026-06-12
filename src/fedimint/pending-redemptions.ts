@@ -91,6 +91,11 @@ export interface PendingRedemption {
   lastError?: string;
   /** When the entry was first poisoned (Unix ms) */
   poisonedAt?: number;
+  /** C5 (v3.4.0): the federation reported these notes "already spent"
+   *  but no credit to this wallet could be confirmed. Possible front-run
+   *  — or a credit that landed in an earlier session. Either way the
+   *  user must look (C13 surface); retrying can't resolve it. */
+  unresolvedCredit?: boolean;
 }
 
 export interface DrainSummary {
@@ -98,6 +103,16 @@ export interface DrainSummary {
   succeeded: number;
   stillPending: number;
   poisoned: number;
+  /** C5: entries marked unresolved-credit this drain (already spent,
+   *  no confirmed wallet credit). Subset semantics like `poisoned`:
+   *  they're skipped by future drains and surfaced to the user. */
+  unresolved: number;
+}
+
+/** A stash entry that automatic retry can no longer help — the C13
+ *  "stranded bearer notes" surface renders exactly this list. */
+export interface StrandedRedemption extends PendingRedemption {
+  stranded: "unresolved-credit" | "poisoned" | "retries-exhausted";
 }
 
 // ── Internal: load/save the whole map ──────────────────────────────────────
@@ -157,10 +172,13 @@ export function stashPendingRedemption(input: {
     amountMsats: input.amountMsats,
     createdAt: existing?.createdAt ?? Date.now(),
     attempts: existing?.attempts ?? 0,
-    // Preserve poisoned state across re-stashes (shouldn't happen in
-    // practice, but defensive)
+    // Preserve poisoned/unresolved state across re-stashes — a manual
+    // claim retry after ALREADY_SPENT_UNCONFIRMED re-stashes the same
+    // escrowId, and dropping unresolvedCredit here would silently
+    // reclassify the entry as plain-poisoned (wrong C13 card copy).
     lastError: existing?.lastError,
     poisonedAt: existing?.poisonedAt,
+    unresolvedCredit: existing?.unresolvedCredit,
   };
   saveStash(stash);
   console.info(
@@ -206,6 +224,46 @@ export function markPoisoned(escrowId: string, reason: string): void {
 }
 
 /**
+ * C5 (v3.4.0): mark an entry as "already spent, credit unconfirmed".
+ * Shares poison semantics (skipped by future drains — retrying an
+ * already-spent note can never change the outcome) but is flagged
+ * separately so the C13 surface can explain it honestly: the balance
+ * may already include these sats, or they were claimed elsewhere.
+ * Surface, don't assume — in either direction.
+ */
+export function markUnresolvedCredit(escrowId: string, reason: string): void {
+  const stash = loadStash();
+  const entry = stash[escrowId];
+  if (!entry) return;
+  entry.lastError = reason.slice(0, 500);
+  entry.poisonedAt = entry.poisonedAt ?? Date.now();
+  entry.unresolvedCredit = true;
+  saveStash(stash);
+}
+
+/**
+ * C13 (v3.4.0): the entries automatic retry can no longer help, in the
+ * order the UI should show them. INVARIANT(stranded-notes-surfaced):
+ * every entry that is poisoned, unresolved-credit, or out of drain
+ * attempts appears here with its full oobNotes bearer string, so the
+ * UI can offer export-to-safety. An entry still inside its retry
+ * budget is NOT stranded — the boot drain owns it.
+ */
+export function listStrandedRedemptions(): StrandedRedemption[] {
+  const stranded: StrandedRedemption[] = [];
+  for (const entry of Object.values(loadStash())) {
+    if (entry.unresolvedCredit) {
+      stranded.push({ ...entry, stranded: "unresolved-credit" });
+    } else if (entry.lastError && entry.poisonedAt) {
+      stranded.push({ ...entry, stranded: "poisoned" });
+    } else if (entry.attempts >= MAX_DRAIN_ATTEMPTS) {
+      stranded.push({ ...entry, stranded: "retries-exhausted" });
+    }
+  }
+  return stranded.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/**
  * Attempt to redeem every stashed entry that isn't poisoned and hasn't
  * exceeded MAX_DRAIN_ATTEMPTS. Returns a summary for logging / UI.
  *
@@ -229,15 +287,18 @@ export async function drainPendingRedemptions(
     succeeded: 0,
     stillPending: 0,
     poisoned: 0,
+    unresolved: 0,
   };
 
   const stash = loadStash();
   const entries = Object.values(stash);
 
   for (const entry of entries) {
-    // Skip poisoned entries — they've been diagnosed as unrecoverable.
+    // Skip poisoned / unresolved entries — they've been diagnosed as
+    // unrecoverable-by-retry. The C13 surface owns them now.
     if (entry.lastError && entry.poisonedAt) {
-      summary.poisoned++;
+      if (entry.unresolvedCredit) summary.unresolved++;
+      else summary.poisoned++;
       continue;
     }
 
@@ -269,6 +330,28 @@ export async function drainPendingRedemptions(
       );
     } catch (e) {
       const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+      const code = typeof (e as { code?: unknown })?.code === "string"
+        ? (e as { code: string }).code
+        : "";
+
+      // C5 (v3.4.0): "already spent" with no confirmed wallet credit.
+      // Retrying across boots can never resolve this — the notes are
+      // consumed and either the credit already sits in this balance
+      // (earlier session) or another wallet took it (front-run). Mark
+      // it unresolved so the drain stops burning attempts and the C13
+      // surface puts it in front of the user.
+      if (code === "ALREADY_SPENT_UNCONFIRMED") {
+        markUnresolvedCredit(
+          entry.escrowId,
+          e instanceof Error ? e.message : String(e)
+        );
+        summary.unresolved++;
+        console.error(
+          `[chama] pending redemption for ${entry.escrowId} needs attention ` +
+          `(already spent, credit unconfirmed): ${msg}`
+        );
+        continue;
+      }
 
       // Match the same hard-failure taxonomy as redeemWithRetry itself.
       // If redeemWithRetry already threw past its 3 internal retries on

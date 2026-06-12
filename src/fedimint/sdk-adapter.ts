@@ -34,6 +34,8 @@
 import type { IFedimintWallet } from "./fedimint-client.js";
 import type { ChamaOperationMeta } from "../payments/sats-trace.js";
 import { randomId } from "../storage/random-id.js";
+import { setMintLockScope } from "./mint-mutex.js";
+import { decideOrphanWipe, NO_CLIENT_OPEN_ERROR_RE, type OrphanPeek } from "./orphan-wipe-policy.js";
 
 // ── Minimal structural types for the real SDK ────────────────────────────
 // We define these locally so that a consumer without @fedimint/core
@@ -2314,14 +2316,22 @@ export async function createRealWallet(
           await directorTyped.setMnemonic(opts.mnemonic!);
           console.info("[chama] Local seed overwritten with Nostr-backed seed");
         } catch (setErr: any) {
-          // v0.1.76 fund-loss protection: before the auto-reset path
-          // destroys the orphan OPFS, peek at its balance. Fedimint
-          // ecash is bearer cash and lives ONLY in this file — wiping
-          // it without checking has destroyed real user sats in the
-          // past. If balance > 0, throw a structured refusal that the
-          // UI can surface; require explicit user override before
-          // proceeding with destruction.
-          let orphanBalanceMsats: number | null = null;
+          // v0.1.76 fund-loss protection, hardened in v3.4.0 (C14):
+          // before the auto-reset path destroys the orphan OPFS, peek
+          // at its balance. Fedimint ecash is bearer cash and lives
+          // ONLY in this file — wiping it without checking has
+          // destroyed real user sats in the past.
+          //
+          // INVARIANT(no-wipe-unknown-balance): the wipe requires a
+          // POSITIVE confirmed zero (balance read = 0, or provably no
+          // federation client in the file). A thrown/uncertain peek —
+          // federation momentarily unreachable, worker flake — must
+          // refuse or park, never reset. Decision table lives in
+          // orphan-wipe-policy.ts (pure, unit-tested).
+          let peek: OrphanPeek = {
+            kind: "unknown",
+            reason: "balance peek did not run",
+          };
           try {
             const orphanWallet = await (director as unknown as {
               createWallet(): Promise<{
@@ -2333,58 +2343,88 @@ export async function createRealWallet(
             }).createWallet();
             try {
               await orphanWallet.open();
-            } catch {
-              // open() throws if no client exists in the DB; that means
-              // there's no orphan balance to worry about.
-            }
-            if (orphanWallet.isOpen()) {
-              orphanBalanceMsats = await orphanWallet.balance.getBalance();
+              if (orphanWallet.isOpen()) {
+                peek = {
+                  kind: "balance",
+                  balanceMsats: await orphanWallet.balance.getBalance(),
+                };
+              } else {
+                peek = { kind: "unknown", reason: "wallet did not open" };
+              }
+            } catch (openErr) {
+              const openMsg = typeof openErr === "string"
+                ? openErr
+                : (openErr as Error)?.message || String(openErr);
+              peek = NO_CLIENT_OPEN_ERROR_RE.test(openMsg)
+                // First-run taxonomy: no federation client in this DB →
+                // ecash structurally impossible. Positive confirmation.
+                ? { kind: "no-client" }
+                : { kind: "unknown", reason: openMsg.slice(0, 200) };
             }
             try { await orphanWallet.cleanup(); } catch {}
           } catch (peekErr) {
-            console.debug(
-              "[chama] orphan-balance peek threw (non-fatal):",
-              peekErr,
-            );
+            peek = {
+              kind: "unknown",
+              reason: (peekErr instanceof Error ? peekErr.message : String(peekErr)).slice(0, 200),
+            };
+            console.warn("[chama] orphan-balance peek threw — wipe will be refused:", peekErr);
           }
-          if (orphanBalanceMsats !== null && orphanBalanceMsats > 0) {
-            if (opts.storageScope && filenameSource === "legacy") {
-              const sats = Math.floor(orphanBalanceMsats / 1000);
-              await installMnemonicInFreshFile(
-                false,
-                `Legacy OPFS file '${filename}' holds ${sats} sats under a different seed. ` +
-                "Preserving it and starting a scoped Fedimint file for this Nostr key."
-              );
-            } else {
-              const orphanFingerprint = (existing ?? []).slice(0, 4).join(" ");
-              const nostrFingerprint = (opts.mnemonic ?? []).slice(0, 4).join(" ");
-              const sats = Math.floor(orphanBalanceMsats / 1000);
-              const refuseErr = new Error(
-                `Refusing to reset local Fedimint wallet: ${sats} sats are ` +
-                `held under a seed that differs from your Nostr backup. ` +
-                `Resetting destroys them permanently because Fedimint ecash ` +
-                `is bearer cash and is not recoverable from the federation. ` +
-                `Local seed: "${orphanFingerprint}…". ` +
-                `Nostr seed: "${nostrFingerprint}…".`,
-              );
-              (refuseErr as Error & {
-                code?: string;
-                orphanBalanceMsats?: number;
-              }).code = "ORPHAN_BALANCE_REFUSED";
-              (refuseErr as Error & {
-                code?: string;
-                orphanBalanceMsats?: number;
-              }).orphanBalanceMsats = orphanBalanceMsats;
-              throw refuseErr;
-            }
+
+          const decision = decideOrphanWipe({
+            peek,
+            storageScope: opts.storageScope,
+            filenameSource,
+          });
+
+          if (decision.action === "preserve-and-rescope") {
+            const satsNote = decision.balanceMsats === null
+              ? "an UNCONFIRMABLE balance"
+              : `${Math.floor(decision.balanceMsats / 1000)} sats`;
+            await installMnemonicInFreshFile(
+              false,
+              `Legacy OPFS file '${filename}' holds ${satsNote} under a different seed. ` +
+              "Preserving it untouched and starting a scoped Fedimint file for this Nostr key."
+            );
+          } else if (decision.action === "refuse-balance") {
+            const orphanFingerprint = (existing ?? []).slice(0, 4).join(" ");
+            const nostrFingerprint = (opts.mnemonic ?? []).slice(0, 4).join(" ");
+            const sats = Math.floor(decision.balanceMsats / 1000);
+            const refuseErr = new Error(
+              `Refusing to reset local Fedimint wallet: ${sats} sats are ` +
+              `held under a seed that differs from your Nostr backup. ` +
+              `Resetting destroys them permanently because Fedimint ecash ` +
+              `is bearer cash and is not recoverable from the federation. ` +
+              `Local seed: "${orphanFingerprint}…". ` +
+              `Nostr seed: "${nostrFingerprint}…".`,
+            );
+            (refuseErr as Error & {
+              code?: string;
+              orphanBalanceMsats?: number;
+            }).code = "ORPHAN_BALANCE_REFUSED";
+            (refuseErr as Error & {
+              code?: string;
+              orphanBalanceMsats?: number;
+            }).orphanBalanceMsats = decision.balanceMsats;
+            throw refuseErr;
+          } else if (decision.action === "refuse-unknown") {
+            const refuseErr = new Error(
+              "Refusing to reset the local Fedimint wallet: its balance " +
+              "couldn't be confirmed right now (" + decision.reason + "). " +
+              "If it holds ecash, resetting would destroy those sats " +
+              "permanently — bearer cash is not recoverable from the " +
+              "federation. Nothing was deleted. Check your connection and " +
+              "reload to retry; if you're certain this wallet is empty, " +
+              "reset it explicitly from Me → Advanced."
+            );
+            (refuseErr as Error & { code?: string }).code = "ORPHAN_BALANCE_UNKNOWN";
+            (refuseErr as Error & { cause?: unknown }).cause = setErr;
+            throw refuseErr;
           } else {
-            // Safe to reset — no orphan balance OR balance unknown and
-            // user has implicitly accepted the risk by reaching this
-            // path (which only fires when seed is already mismatched).
+            // decision.action === "wipe" — positively confirmed empty.
             await installMnemonicInFreshFile(
               true,
               "setMnemonic rejected overwrite — auto-resetting OPFS " +
-              `(orphan balance: ${orphanBalanceMsats ?? "unknown"} msats): ${setErr?.message}`
+              `(orphan balance confirmed ${peek.kind === "no-client" ? "no-client" : "zero"}): ${setErr?.message}`
             );
           }
         }
@@ -2417,6 +2457,12 @@ export async function createRealWallet(
   }
 
   const wallet = await director.createWallet();
+
+  // C12 (v3.4.0): register the settled OPFS filename as the mint-lock
+  // scope, so every mint op in every tab of this origin serializes on
+  // the same Web Lock for THIS wallet file (and only this one — other
+  // identities' wallet files get their own lock).
+  setMintLockScope(filename);
 
   return adaptRealWallet(
     wallet as unknown as RealFedimintWallet,

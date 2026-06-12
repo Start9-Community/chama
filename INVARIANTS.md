@@ -55,11 +55,12 @@ Seeded from the 2026-06 consensus threat audit (findings **C1–C17**) plus the 
 ## Fund safety — "no sats stranded"
 | Invariant | Enforced at | Status | Audit |
 |---|---|---|---|
-| **mint-op mutual exclusion** — all mint ops incl. the boot drain under one lock | `fundingInProgress` (Fund only; drain unguarded; per-tab) | ⚠️ | **C12** |
-| **already-spent verified** — "already spent" confirmed as THIS wallet credited | `redeemWithRetry` (treats as success) | ⚠️ | **C5** |
-| **stranded notes surfaced** — post-claim redeem failure alarms + escape hatch | localStorage, silent | ⚠️ | **C13** |
-| **no wipe on unknown balance** — unknown = refuse, ask | reset path resets anyway | ⚠️ | **C14** |
-| **claim tries all envelopes + deadline re-heal** | claim uses `[0]` only; APPROVED never re-opens | ⚠️ | **C15** |
+| **mint-op mutual exclusion** — all mint ops incl. the boot drain under one lock | `mint-mutex.ts` `withMintLock` (Web Locks keyed on OPFS filename → cross-tab; in-process FIFO fallback) wrapping `FedimintClient.spendNotes` / `redeemEcash` / `redeemWithRetry` / `createEscrowLock` · tests `invariant_mint-mutex__*` (fallback path; cross-tab two-tab race needs the device pass) | ✅ | **C12** (v3.4.0) |
+| **already-spent verified** — "already spent" confirmed as THIS wallet credited | `fedimint-client.ts` `confirmAlreadySpentCredit` (balance-delta poll under the mint mutex); unconfirmed ⇒ `ALREADY_SPENT_UNCONFIRMED` → `markUnresolvedCredit` + C13 surface — never silent success, never silent loss · test `invariant_already-spent__requires_confirmed_credit` · honest caveat: an unrelated LN receive of ≥ the claim amount inside the ≤10s confirm window can false-confirm (LN ops aren't under the mint lock; accepted as rare, do not widen the window) | ✅ | **C5** (v3.4.0) |
+| **stranded notes surfaced** — post-claim redeem failure alarms + escape hatch | `pending-redemptions.ts` `listStrandedRedemptions` → MeScreen alarm card → `EcashExportModal` preset mode (QR + copy + two-tap clear) · test `invariant_stranded-notes__surfaced_and_exportable` (card/modal rendering needs the device pass) | ✅ | **C13** (v3.4.0) |
+| **no wipe on unknown balance** — unknown = refuse, ask | `orphan-wipe-policy.ts` `decideOrphanWipe` (wipe requires positive zero or provably-clientless; unknown ⇒ `ORPHAN_BALANCE_UNKNOWN` refusal, or park a legacy file untouched) wired in `sdk-adapter.ts` · test `invariant_no-wipe__unknown_balance_refuses` | ✅ | **C14** (v3.4.0) |
+| **claim tries all envelopes** (client half) | `holder-shares.ts` `collectClaimEnvelopeCandidates` + bridge try-all loop (per-candidate decrypt/reconstruct failures fall through to the next envelope) · test `invariant_claim__tries_all_envelopes` | ✅ | **C15** (v3.4.0 — client half) |
+| **claim deadline re-heal** — APPROVED re-opens to refund-heal after a claim deadline | reducer untouched (changes vote/state acceptance ⇒ coordinated consensus release) | 📐 | **C15** (deferred half) |
 
 ## Build / environment
 | Invariant | Enforced at | Status | Audit |

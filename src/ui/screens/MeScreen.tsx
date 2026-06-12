@@ -56,6 +56,7 @@ import {
   type SatsTraceEntry,
 } from "../../payments/sats-trace.js";
 import { getEcashExport } from "../../payments/ecash-exports.js";
+import { listStrandedRedemptions, type StrandedRedemption } from "../../fedimint/pending-redemptions.js";
 import { T, ROLE_COLOR, type ThemeMode } from "../theme.js";
 import {
   notificationsEnabled,
@@ -101,6 +102,7 @@ export function MeScreen({
   onSelectCommunity,
   onRateCounterparty,
   myGivenRatings,
+  onExportStrandedClaim,
 }: {
   pubkey: string;
   kind0Enabled?: boolean;
@@ -129,6 +131,9 @@ export function MeScreen({
   onRecoverSats: () => void;
   /** v2.4 #56 — open the "withdraw as ecash" (fee-free Fedimint note) flow. */
   onWithdrawEcash?: () => void;
+  /** v3.4.0 C13 — open the export modal for a stranded claim's bearer
+   *  note (a pending-redemption entry automatic retry gave up on). */
+  onExportStrandedClaim?: (entry: StrandedRedemption) => void;
   onSignOut: () => void;
   /** v2.3.1: the user's current Chama. The Browse pill is now view-only;
    *  this screen is the deliberate place to CHANGE it. */
@@ -163,6 +168,11 @@ export function MeScreen({
   // imported). Surfaced even when the balance reads 0, so the user can always
   // get back to the bearer note they minted.
   const pendingEcashExport = getEcashExport();
+  // v3.4.0 C13 — claims whose bearer notes automatic retry gave up on.
+  // These sit in clearable localStorage while the chain reads COMPLETED;
+  // without a loud surface, a data-clear or federation switch destroys
+  // the only copy of the money. Rendered as the topmost alarm card.
+  const strandedClaims = listStrandedRedemptions();
   const isClaimPayoutRecovery = !isSmallLeftover && Boolean(satsTrace?.escrowId);
   const traceCopy = describeSatsTrace(satsTrace ?? null);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -216,6 +226,50 @@ export function MeScreen({
           onSelectCommunity={onSelectCommunity}
         />
       )}
+
+      {/* v3.4.0 C13 — stranded claim notes. INVARIANT(stranded-notes-surfaced):
+          a bearer note the drain gave up on gets a persistent, actionable
+          alarm — not a console line. Tap → EcashExportModal (preset mode)
+          with QR + copy, so the user can move the money to safety. */}
+      {onExportStrandedClaim && strandedClaims.map((entry) => (
+        <div
+          key={entry.escrowId}
+          onClick={() => onExportStrandedClaim(entry)}
+          style={{
+            background: T.redDim, border: `1px solid ${T.red}88`,
+            borderRadius: T.r, padding: 20, marginBottom: 16, cursor: "pointer",
+            boxShadow: `0 0 30px ${T.red}22`,
+          }}
+        >
+          <div style={{
+            fontSize: 11, fontWeight: 600, color: T.red,
+            fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
+          }}>
+            {entry.stranded === "unresolved-credit"
+              ? "CLAIM NEEDS ATTENTION"
+              : "STRANDED CLAIM — ACTION NEEDED"}
+          </div>
+          <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.5 }}>
+            {entry.stranded === "unresolved-credit" ? (
+              <>
+                Chama couldn't confirm{" "}
+                <BitcoinAmount sats={Math.floor(entry.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
+                {" "}from a settled trade arrived in your wallet. Your balance may
+                already include them — or the note was claimed elsewhere. Tap to
+                view and save the note, then check your balance.
+              </>
+            ) : (
+              <>
+                <BitcoinAmount sats={Math.floor(entry.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
+                {" "}from a settled trade couldn't land in your wallet automatically.
+                The bearer note — the money itself — is saved only in this browser.
+                Tap to export it now, before clearing data or switching federations
+                can destroy the only copy.
+              </>
+            )}
+          </div>
+        </div>
+      ))}
 
       {showLocalRecovery && (
         <div style={{

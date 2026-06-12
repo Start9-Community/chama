@@ -31,6 +31,7 @@ import type { LnReceiveStateKind } from "./sdk-adapter.js";
 export type { LnReceiveStateKind };
 import type { ChamaOperationMeta } from "../payments/sats-trace.js";
 import { expectedFederationIdForInvite } from "./federation-config.js";
+import { withMintLock } from "./mint-mutex.js";
 
 export interface OnchainInfo {
   network: string;
@@ -291,6 +292,11 @@ export class FedimintClient {
   private _federationId: string | null = null;
   /** v0.1.69: cache the invite we actually joined with, to detect switch attempts */
   private _joinedInvite: string | null = null;
+  /** C5 (v3.4.0): how long the "already spent" path polls for a
+   *  confirmed balance credit before declaring the redeem unresolved.
+   *  Public so tests can shrink it; production default is generous
+   *  because a reissue that landed moments ago may still be settling. */
+  alreadySpentConfirmTimeoutMs = 10_000;
 
   /**
    * Factory function to create the actual wallet instance.
@@ -725,7 +731,10 @@ export class FedimintClient {
    */
   async spendNotes(amountMsats: number, meta?: ChamaOperationMeta): Promise<string> {
     const wallet = this.requireWallet();
-    return wallet.mint.spendNotes(amountMsats, meta);
+    // INVARIANT(mint-mutex): every spend/redeem on the shared OPFS
+    // wallet serializes on the cross-tab mint lock (C12). The wrapped
+    // fn calls the raw wallet directly — never another locked method.
+    return withMintLock("spend-notes", () => wallet.mint.spendNotes(amountMsats, meta));
   }
 
   /**
@@ -734,7 +743,8 @@ export class FedimintClient {
    */
   async redeemEcash(oobNotes: string, meta?: ChamaOperationMeta): Promise<void> {
     const wallet = this.requireWallet();
-    await wallet.mint.redeemEcash(oobNotes, meta);
+    // INVARIANT(mint-mutex): see spendNotes.
+    await withMintLock("redeem-ecash", () => wallet.mint.redeemEcash(oobNotes, meta));
   }
 
   /**
@@ -985,6 +995,23 @@ export class FedimintClient {
       throw new Error("Arbiter fee exceeds total amount — seller would receive nothing");
     }
 
+    // INVARIANT(mint-mutex): the Fund spend serializes on the cross-tab
+    // mint lock (C12) — a boot-drain redeem or a second tab's spend
+    // cannot overlap this spendNotes on the shared OPFS wallet. The
+    // locked section calls the raw wallet only (no nesting).
+    return withMintLock("fund-spend", () =>
+      this.createEscrowLockLocked(wallet, totalMsats, arbiterFeeMsats, sellerReceivesMsats, meta)
+    );
+  }
+
+  /** Body of createEscrowLock, run while holding the mint lock. */
+  private async createEscrowLockLocked(
+    wallet: IFedimintWallet,
+    totalMsats: number,
+    arbiterFeeMsats: number,
+    sellerReceivesMsats: number,
+    meta?: ChamaOperationMeta,
+  ): Promise<EscrowLockBundle> {
     // [$$] LOCK-IN — entering the spend
     let _lockBalBefore: number | undefined;
     try { _lockBalBefore = await wallet.balance.getBalance(); } catch {}
@@ -1199,7 +1226,22 @@ export class FedimintClient {
     meta?: ChamaOperationMeta,
   ): Promise<void> {
     const wallet = this.requireWallet();
+    // INVARIANT(mint-mutex): claim and boot-drain redeems serialize on
+    // the cross-tab mint lock (C12), so a drain in one tab can't race a
+    // Fund spend in another on the shared OPFS wallet. The locked body
+    // calls the raw wallet only (no nesting).
+    return withMintLock("claim-redeem", () =>
+      this.redeemWithRetryLocked(wallet, oobNotes, maxAttempts, meta)
+    );
+  }
 
+  /** Body of redeemWithRetry, run while holding the mint lock. */
+  private async redeemWithRetryLocked(
+    wallet: IFedimintWallet,
+    oobNotes: string,
+    maxAttempts: number,
+    meta?: ChamaOperationMeta,
+  ): Promise<void> {
     // [$$] REDEEM-IN — entering redeem with intended amount
     let _redeemAmount: number | undefined;
     try {
@@ -1269,8 +1311,11 @@ export class FedimintClient {
         const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
         const code = typeof (e as any)?.code === "string" ? (e as any).code : "";
 
-        // Already-accepted variants — federation has the notes, balance
-        // will reflect shortly. Treat as success.
+        // Already-accepted variants — the federation has consumed the
+        // notes. That alone is NOT success: it proves SOMEONE redeemed
+        // them, not that it was this wallet (C5 — the front-run hole:
+        // if another party redeemed first, "already spent" here used to
+        // clear the stash while the winner's wallet stayed empty).
         if (
           msg.includes("already spent") ||
           msg.includes("already redeemed") ||
@@ -1279,8 +1324,52 @@ export class FedimintClient {
           msg.includes("double-spend") ||
           msg.includes("note already")
         ) {
+          // INVARIANT(already-spent-verified): "already spent" is only
+          // success once a credit to THIS wallet is confirmed via
+          // balance delta. The real SDK adapter never lands here for a
+          // self-credit — it resumes from local op history and returns
+          // cleanly — so an unconfirmed delta is a strong front-run
+          // signal. Unconfirmed ⇒ surface as needs-attention, never
+          // silent success, never silent loss.
+          const credit = await this.confirmAlreadySpentCredit(
+            wallet,
+            _redeemAmount,
+            _redeemBalBefore,
+          );
+          if (!credit.confirmed) {
+            mlog("REDEEM-TRY", {
+              fed: this._federationId,
+              attempt,
+              result: "already-spent-unconfirmed",
+              expectedMsats: _redeemAmount,
+              balanceBefore: _redeemBalBefore,
+              balanceAfter: credit.balanceAfter,
+              errMsg: msg.slice(0, 80),
+            });
+            claimTrace("redeem-try", {
+              fed: this._federationId,
+              attempt,
+              result: "already-spent-unconfirmed",
+              errMsg: msg.slice(0, 80),
+            });
+            mlog("REDEEM-OUT", {
+              fed: this._federationId,
+              expectedMsats: _redeemAmount,
+              balanceBefore: _redeemBalBefore,
+              balanceAfter: credit.balanceAfter,
+              note: "already-spent-no-confirmed-credit",
+            });
+            const unconfirmed: Error & { code?: string; cause?: unknown } = new Error(
+              "The federation reports these escrow notes were redeemed, but no matching " +
+              "credit to this wallet could be confirmed. Don't assume the sats arrived — " +
+              "the notes stay stashed and this claim needs attention."
+            );
+            unconfirmed.code = "ALREADY_SPENT_UNCONFIRMED";
+            unconfirmed.cause = e;
+            throw unconfirmed;
+          }
           console.debug(
-            `[chama] redeem attempt ${attempt}: notes already accepted by federation, treating as success`
+            `[chama] redeem attempt ${attempt}: notes already accepted by federation, wallet credit confirmed (+${_redeemAmount} msats)`
           );
           // [$$] REDEEM-TRY — already-spent treated as success
           mlog("REDEEM-TRY", {
@@ -1394,6 +1483,55 @@ export class FedimintClient {
     throw lastErr instanceof Error
       ? lastErr
       : new Error(`redeemEcash failed after ${maxAttempts} attempts`);
+  }
+
+  /**
+   * C5 (v3.4.0): confirm that an "already spent" redeem actually
+   * credited THIS wallet, by polling for a balance delta of at least
+   * the parsed note amount relative to the balance captured at
+   * redeemWithRetry entry.
+   *
+   * Under the mint mutex (C12) no other mint op moves this wallet's
+   * balance concurrently, so `delta >= expected` is a sound credit
+   * signal for mint traffic. Lightning receives are NOT under the mint
+   * lock, so one accepted residual risk remains: an unrelated LN
+   * receive of >= the claim amount landing inside this poll window
+   * would false-confirm a front-run — success is reported and the
+   * stash entry is cleared with no alarm. That window is bounded by
+   * alreadySpentConfirmTimeoutMs (default 10s) from a baseline taken
+   * at redeem entry, and the real SDK adapter never reaches this
+   * branch for a self-credit (it resumes from local op history), so
+   * the coincidence-of-amount-and-timing is judged acceptably rare.
+   * Do NOT widen this window without revisiting that trade-off.
+   *
+   * Returns confirmed=false when the entry balance or the parsed
+   * amount was unreadable — "can't confirm" must surface, not pass.
+   */
+  private async confirmAlreadySpentCredit(
+    wallet: IFedimintWallet,
+    expectedMsats: number | undefined,
+    balanceBefore: number | undefined,
+  ): Promise<{ confirmed: boolean; balanceAfter?: number }> {
+    if (expectedMsats === undefined || balanceBefore === undefined) {
+      return { confirmed: false };
+    }
+    const timeoutMs = Math.max(0, this.alreadySpentConfirmTimeoutMs);
+    const deadline = Date.now() + timeoutMs;
+    const pollMs = Math.min(1_500, Math.max(25, Math.floor(timeoutMs / 5)));
+    let balanceAfter: number | undefined;
+    for (;;) {
+      try {
+        balanceAfter = await wallet.balance.getBalance();
+        if (balanceAfter - balanceBefore >= expectedMsats) {
+          return { confirmed: true, balanceAfter };
+        }
+      } catch {
+        // Balance unreadable right now — keep polling until deadline;
+        // an unreadable balance can never confirm a credit.
+      }
+      if (Date.now() >= deadline) return { confirmed: false, balanceAfter };
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
   }
 
   /**

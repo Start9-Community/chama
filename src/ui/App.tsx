@@ -100,7 +100,11 @@ import {
   recordSatsTrace,
   type SatsTraceEntry,
 } from "../payments/sats-trace.js";
-import { listPendingRedemptions } from "../fedimint/pending-redemptions.js";
+import {
+  listPendingRedemptions,
+  clearPendingRedemption,
+  type StrandedRedemption,
+} from "../fedimint/pending-redemptions.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
   minimumAtomicFundingMessage,
@@ -361,6 +365,10 @@ export default function App() {
   const [showFundModal, setShowFundModal] = useState(false);
   // v2.4 #56: "withdraw as ecash" modal (fee-free Fedimint note export).
   const [showEcashExport, setShowEcashExport] = useState(false);
+  // v3.4.0 C13 — a stranded claim entry being exported via the
+  // EcashExportModal preset mode (bearer note from the
+  // pending-redemptions stash that automatic retry gave up on).
+  const [strandedClaimExport, setStrandedClaimExport] = useState<StrandedRedemption | null>(null);
   const [autoLoginChecked, setAutoLoginChecked] = useState(false);
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<PendingDestroyConfirm | null>(null);
@@ -1642,6 +1650,36 @@ export default function App() {
         />
       )}
 
+      {/* v3.4.0 C13 — stranded-claim bearer-note export. Same modal in
+          preset mode: shows the EXISTING note from the pending-
+          redemptions stash (no spend), QR + copy, two-tap clear that
+          removes the stash entry only after the user confirms it's
+          secured elsewhere. */}
+      {strandedClaimExport && (
+        <EcashExportModal
+          balanceMsats={fedimint.balanceMsats ?? 0}
+          federationLabel={
+            getCommunityBySlug(routeCommunitySlug)?.displayName
+            ?? fedimint.federationName
+            ?? "your federation"
+          }
+          spendNotes={(amountMsats) => actions.spendNotes(amountMsats)}
+          preset={{
+            notes: strandedClaimExport.oobNotes,
+            amountMsats: strandedClaimExport.amountMsats,
+            headline: "STRANDED CLAIM · BEARER NOTE",
+            body: strandedClaimExport.stranded === "unresolved-credit"
+              ? "⚠ This note was reported already-redeemed, but Chama couldn't confirm YOUR wallet was credited. Save it anyway, then check your balance — if the sats aren't there, this string is your evidence and recovery path."
+              : "⚠ This note IS the sats from your settled trade. Chama couldn't redeem it automatically — import it into Fedi or any Fedimint wallet on this federation, or save it somewhere safe NOW. Clearing browser data destroys the only copy.",
+            onConfirmCleared: () => {
+              clearPendingRedemption(strandedClaimExport.escrowId);
+              setStrandedClaimExport(null);
+            },
+          }}
+          onClose={() => setStrandedClaimExport(null)}
+        />
+      )}
+
       {pendingClaim && (
         <ClaimPayoutModal
           escrowId={pendingClaim.escrowId}
@@ -2314,6 +2352,7 @@ export default function App() {
             onOpenAdvanced={() => { setAdvancedFocusNwc(false); setView("advanced"); }}
             onSignOut={handleSignOut}
             onWithdrawEcash={() => setShowEcashExport(true)}
+            onExportStrandedClaim={(entry) => setStrandedClaimExport(entry)}
             communitySlug={browseCommunity}
             onSelectCommunity={handleSelectCommunity}
           />

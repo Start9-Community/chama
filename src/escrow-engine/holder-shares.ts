@@ -10,7 +10,14 @@
 // share→holder mapping and the reconstruction-selection logic are unit-testable
 // in isolation; the Fedimint bridge wires them to real encrypt/decrypt.
 
-import { Role, type EscrowState, type VoteShareEnvelope, type Outcome } from "./types.js";
+import {
+  Role,
+  EscrowEventKind,
+  type EscrowState,
+  type VoteShareEnvelope,
+  type VotePayload,
+  type Outcome,
+} from "./types.js";
 import { payoutRecipientFor } from "./recipients.js";
 
 export const HOLDER_ONLY_SHARE_POLICY = "holder-only-v1" as const;
@@ -82,4 +89,56 @@ export function validateVoteShareEnvelope(
     return "share is not encrypted to the recipient";
   }
   return null;
+}
+
+/** One VOTE-carried envelope the claim path can try: the ciphertext routed
+ *  to the winner plus the voter (= NIP-44 sender) needed to decrypt it. */
+export interface ClaimEnvelopeCandidate {
+  ciphertext: string;
+  voterPubkey: string;
+  shareIndex: number;
+}
+
+/**
+ * C15 (v3.4.0): every VOTE-carried share envelope the winner can attempt
+ * reconstruction with, in chain order — not just the first match.
+ *
+ * INVARIANT(claim-tries-all-envelopes): one poisoned / old-client /
+ * uncooperative envelope must not strand the winner when another
+ * agreeing voter's envelope reconstructs fine. The bridge tries these
+ * in order; each attempt is a local SSS combine + hash check (no
+ * federation mutation), so trying several is idempotent.
+ *
+ * Filters (same rules the single-envelope scan enforced since v2.x):
+ *   - VOTE events only;
+ *   - envelope outcome must equal the resolved outcome;
+ *   - envelope recipient must be the winner (`myPubkey`);
+ *   - envelopes at the winner's own shareIndex are skipped — the winner
+ *     usually also voted, and their own re-encrypted share would feed
+ *     SSS two copies of one share ("shares must contain unique values");
+ *   - the envelope must actually carry a ciphertext for the winner.
+ */
+export function collectClaimEnvelopeCandidates(
+  eventChain: ReadonlyArray<{ kind: number; payload?: unknown; raw: { pubkey: string } }>,
+  opts: {
+    resolvedOutcome: Outcome | null | undefined;
+    myPubkey: string;
+    ownShareIndex: number;
+  },
+): ClaimEnvelopeCandidate[] {
+  const candidates: ClaimEnvelopeCandidate[] = [];
+  for (const ve of eventChain) {
+    if (ve.kind !== EscrowEventKind.VOTE) continue;
+    const env = (ve.payload as VotePayload | undefined)?.shareEnvelope;
+    if (!env || env.outcome !== opts.resolvedOutcome || env.recipientPubkey !== opts.myPubkey) continue;
+    if (env.shareIndex === opts.ownShareIndex) continue; // my own share — not a 2nd
+    const ct = env.encryptedFor?.[opts.myPubkey];
+    if (!ct) continue;
+    candidates.push({
+      ciphertext: ct,
+      voterPubkey: ve.raw.pubkey,
+      shareIndex: env.shareIndex,
+    });
+  }
+  return candidates;
 }

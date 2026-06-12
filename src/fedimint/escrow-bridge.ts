@@ -13,7 +13,7 @@
 
 import { type EscrowClient, type Signer } from "../escrow-engine/escrow-client.js";
 import { type EscrowLockBundle, type FedimintClient, type SSSShare } from "./fedimint-client.js";
-import { stashPendingRedemption, clearPendingRedemption } from "./pending-redemptions.js";
+import { stashPendingRedemption, clearPendingRedemption, markUnresolvedCredit } from "./pending-redemptions.js";
 import {
   type EscrowState,
   type SelectedMenuItem,
@@ -30,6 +30,7 @@ import {
   HOLDER_ONLY_SHARE_POLICY,
   holderRoleForShareIndex,
   shareIndexForRole,
+  collectClaimEnvelopeCandidates,
 } from "../escrow-engine/holder-shares.js";
 import { arbiterPriorityOrderFor } from "../escrow-engine/arbiter-substitution.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
@@ -371,7 +372,14 @@ export class EscrowFedimintBridge {
     const lockerPubkey = lockEvent?.raw?.pubkey || lockEvent?.pubkey || myPubkey;
 
     let decryptedMyShare: SSSShare;
-    let decryptedPartnerShare: SSSShare;
+    // C15 (v3.4.0): every decryptable partner share, in chain order —
+    // not just the first. One poisoned / old-client / uncooperative
+    // envelope must not strand the winner when another agreeing voter's
+    // envelope reconstructs fine. Trying several is idempotent: each
+    // try is a local SSS combine + hash check; nothing touches the
+    // federation until exactly one reconstruction has succeeded.
+    const partnerCandidates: Array<{ share: SSSShare; voterPubkey: string }> = [];
+    const candidateDecryptErrors: string[] = [];
 
     if (state.lock.sharePolicy === HOLDER_ONLY_SHARE_POLICY) {
       // Holder-only: the winner reconstructs from their OWN LOCK share (the
@@ -387,25 +395,50 @@ export class EscrowFedimintBridge {
       // LOCK share: locker is the sender.
       decryptedMyShare = await this.decryptShareDual(ownEntry, myPubkey, lockerPubkey);
 
-      // VOTE share: scan for an agreeing voter's share routed to me — but it
+      // VOTE share: scan for agreeing voters' shares routed to me — but each
       // must be a DISTINCT share from my own. The winner usually also voted, and
       // their own vote re-encrypts their own share (same index) back to
       // themselves; using it would feed SSS two copies of one share ("shares
       // must contain unique values"). Skip any envelope at my own shareIndex so
       // we take a different holder's agreeing share.
-      let partner: SSSShare | null = null;
-      for (const ve of state.eventChain) {
-        if (ve.kind !== EscrowEventKind.VOTE) continue;
-        const env = (ve.payload as VotePayload | undefined)?.shareEnvelope;
-        if (!env || env.outcome !== state.resolvedOutcome || env.recipientPubkey !== myPubkey) continue;
-        if (env.shareIndex === ownShareIndex) continue; // my own share — not a 2nd
-        const ct = env.encryptedFor?.[myPubkey];
-        if (!ct) continue;
-        // VOTE share: the VOTER is the sender (not the locker).
-        partner = await this.decryptShare(ct, ve.raw.pubkey);
-        break;
+      //
+      // INVARIANT(claim-tries-all-envelopes): collect EVERY matching
+      // envelope (C15) — a per-envelope decrypt failure is recorded and
+      // skipped, not fatal, because a later envelope may still unlock
+      // the claim. Selection rules live in collectClaimEnvelopeCandidates
+      // (pure, pinned by invariant_claim__tries_all_envelopes).
+      for (const candidate of collectClaimEnvelopeCandidates(state.eventChain, {
+        resolvedOutcome: state.resolvedOutcome,
+        myPubkey,
+        ownShareIndex,
+      })) {
+        try {
+          // VOTE share: the VOTER is the sender (not the locker).
+          partnerCandidates.push({
+            share: await this.decryptShare(candidate.ciphertext, candidate.voterPubkey),
+            voterPubkey: candidate.voterPubkey,
+          });
+        } catch (decErr) {
+          candidateDecryptErrors.push(
+            decErr instanceof Error ? decErr.message : String(decErr)
+          );
+        }
       }
-      if (!partner) {
+      claimTrace("bridge-envelopes", {
+        escrowId,
+        candidates: partnerCandidates.length,
+        decryptFailures: candidateDecryptErrors.length,
+      });
+      if (partnerCandidates.length === 0) {
+        // Some envelopes existed but none could be decrypted — that's a
+        // different (and more actionable) failure than "nobody agreed".
+        if (candidateDecryptErrors.length > 0) {
+          throw new Error(
+            `Found ${candidateDecryptErrors.length} release key${candidateDecryptErrors.length === 1 ? "" : "s"} for this claim, but none could be unlocked ` +
+            `(${candidateDecryptErrors[candidateDecryptErrors.length - 1]}). ` +
+            "Ask a voter who agreed with the outcome to update Chama and vote again, then retry."
+          );
+        }
         // Tell apart "no one has agreed yet" from a VERSION MISMATCH: a voter on
         // a pre-2.0 build votes WITHOUT a holder-only shareEnvelope, so their
         // agreement carries no release key and the winner can never assemble the
@@ -422,7 +455,6 @@ export class EscrowFedimintBridge {
         }
         throw new Error("Waiting on a second agreeing vote — someone other than you must vote your way before you can claim.");
       }
-      decryptedPartnerShare = partner;
     } else {
       // Legacy dual-encryption: every share is locker-encrypted to all three,
       // so any two reconstruct.
@@ -431,7 +463,10 @@ export class EscrowFedimintBridge {
         throw new Error("Not enough shares: got " + shareEntries.length + ", need 2");
       }
       decryptedMyShare = await this.decryptShareDual(shareEntries[0], myPubkey, lockerPubkey);
-      decryptedPartnerShare = await this.decryptShareDual(shareEntries[1], myPubkey, lockerPubkey);
+      partnerCandidates.push({
+        share: await this.decryptShareDual(shareEntries[1], myPubkey, lockerPubkey),
+        voterPubkey: lockerPubkey,
+      });
     }
 
     // v0.1.63: Publish CLAIM before redeem
@@ -449,15 +484,47 @@ export class EscrowFedimintBridge {
     // If step 3 hard-fails, we throw a marked error so the hook can
     // route to the "watching" UI state instead of red-toasting.
 
-    const { notesHash, oobNotes } = await this.fedimint.reconstructAndVerify(
-      decryptedMyShare,
-      decryptedPartnerShare,
-      state.lock.notesHash
-    );
+    // C15 (v3.4.0): try EVERY candidate envelope before giving up. Each
+    // attempt is local (Shamir combine + hash check + parse) — no
+    // federation mutation — so trying several cannot double-spend. The
+    // first candidate whose reconstruction matches the LOCK hash wins;
+    // a corrupted or hostile envelope just falls through to the next.
+    let reconstructed: { notesHash: string; oobNotes: string } | null = null;
+    const reconstructErrors: string[] = [];
+    for (const candidate of partnerCandidates) {
+      try {
+        const result = await this.fedimint.reconstructAndVerify(
+          decryptedMyShare,
+          candidate.share,
+          state.lock.notesHash
+        );
+        reconstructed = { notesHash: result.notesHash, oobNotes: result.oobNotes };
+        break;
+      } catch (reconErr) {
+        reconstructErrors.push(
+          reconErr instanceof Error ? reconErr.message : String(reconErr)
+        );
+        claimTrace("bridge-reconstruct-candidate-failed", {
+          escrowId,
+          voter: candidate.voterPubkey.slice(0, 8),
+          errMsg: (reconErr instanceof Error ? reconErr.message : String(reconErr)).slice(0, 120),
+        });
+      }
+    }
+    if (!reconstructed) {
+      throw new Error(
+        `Couldn't rebuild your sats from any release key (${partnerCandidates.length} tried). ` +
+        `Last error: ${reconstructErrors[reconstructErrors.length - 1] ?? "none"}. ` +
+        "Your sats are still locked and safe. Ask a voter who agreed with the outcome to update Chama and vote again, then retry."
+      );
+    }
+    const { notesHash, oobNotes } = reconstructed;
     claimTrace("bridge-reconstructed", {
       escrowId,
       notesHashPrefix: notesHash.slice(0, 16),
       oobNotesLen: oobNotes.length,
+      candidatesTried: reconstructErrors.length + 1,
+      candidatesAvailable: partnerCandidates.length,
     });
 
     // v0.4.4 federation gates (fed-ID equality) ──────────────────────────
@@ -601,6 +668,16 @@ export class EscrowFedimintBridge {
         code: redeemCode,
         errMsg: (redeemErr instanceof Error ? redeemErr.message : String(redeemErr)).slice(0, 120),
       });
+      // C5 (v3.4.0): "already spent, credit unconfirmed" — retrying is
+      // pointless (the notes are consumed), so mark the stash entry now
+      // rather than burning boot-drain attempts before the C13 surface
+      // lights up. The entry (with the bearer notes) stays exportable.
+      if (redeemCode === "ALREADY_SPENT_UNCONFIRMED") {
+        markUnresolvedCredit(
+          escrowId,
+          redeemErr instanceof Error ? redeemErr.message : String(redeemErr)
+        );
+      }
       // Stash stays. The boot-drain on next initFedimint() will retry.
       // UI error surface is unchanged from v0.1.67.
       const wrapped = new Error(
@@ -611,7 +688,12 @@ export class EscrowFedimintBridge {
       if (
         opts.redeemWith === "fedi-internal" ||
         redeemCode === "MINT_REISSUE_FAILED" ||
-        redeemCode === "MINT_REISSUE_UNKNOWN"
+        redeemCode === "MINT_REISSUE_UNKNOWN" ||
+        // C5: balance growth from THIS redeem is impossible (notes
+        // consumed); let the orchestrator skip the growth poll and
+        // judge by the absolute-balance cover check, exactly like the
+        // terminal mint-reissue codes.
+        redeemCode === "ALREADY_SPENT_UNCONFIRMED"
       ) {
         (wrapped as any).settlementFailed = true;
         (wrapped as any).code = opts.redeemWith === "fedi-internal"
