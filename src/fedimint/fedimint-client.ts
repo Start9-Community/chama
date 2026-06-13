@@ -484,6 +484,33 @@ export class FedimintClient {
   async joinFederation(inviteCode: string): Promise<string> {
     const wallet = this.requireWallet();
 
+    // v3.4.x sim mode: the sim wallet models a single synthetic federation
+    // (SIM_FEDERATION_ID) that is intentionally invite-agnostic — it never
+    // equals the real fed id that expectedFederationIdForInvite() derives
+    // from a community invite. The real-mode switch guard and the
+    // assertJoinedFederationMatchesInvite() check below would therefore
+    // throw FED_JOIN_MISMATCH for every real community invite, aborting
+    // init so fedimint.joined never flips true (ChamaBar stuck on
+    // "Reconnect"). Sim has no real bearer ecash to orphan, so we take a
+    // self-contained join path that records the invite, wires the balance
+    // stream, and skips the real-fed identity guards. Real mode is below.
+    const { isSimModeOn } = await import("../sim/simMode.js");
+    if (isSimModeOn()) {
+      if (!wallet.isOpen()) {
+        await wallet.joinFederation(inviteCode);
+      }
+      this._federationId = await wallet.federation.getFederationId();
+      this._joinedInvite = inviteCode.trim();
+      wallet.rememberInviteCode?.(this._joinedInvite);
+      if (!this.balanceUnsubscribe) {
+        this.balanceUnsubscribe = wallet.balance.subscribeBalance((balance) => {
+          this.callbacks.onBalanceUpdate?.(balance);
+        });
+      }
+      this.callbacks.onFederationJoined?.(this._federationId);
+      return this._federationId;
+    }
+
     // v0.1.69 / v0.1.70: Gate federation switching (with re-open fix).
     // ─────────────────────────────────────────────────────────────────
     // Ecash is federation-bound. Until Chama supports proper per-

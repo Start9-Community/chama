@@ -1824,7 +1824,16 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // during v0.1.81 testing).
       const walletIsJoined = fedimint.isJoined();
       const walletFederationId = fedimint.getFederationId();
-      const driftDetected = shouldReconcileFederation({
+      // v3.4.x sim-mode fix: the sim wallet exposes a single synthetic
+      // federation id (SIM_FEDERATION_ID) that never equals the real
+      // community invite's expected fed id, so shouldReconcileFederation()
+      // returns true on every re-init — driving a perpetual wipe→rejoin
+      // churn that leaves fedimint.joined flapping false (ChamaBar stuck on
+      // "Reconnect", Browse stuck on "reconnect to see what's trading").
+      // Sim has no real bearer ecash to protect, so the reconcile/fund-loss
+      // guard is meaningless here; bypass it like probeReachable() and the
+      // wallet factory already do. Real mode is unaffected.
+      const driftDetected = !isSimModeOn() && shouldReconcileFederation({
         previousActiveInvite,
         desiredInvite,
         walletIsJoined,
