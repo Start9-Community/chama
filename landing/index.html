@@ -7,193 +7,231 @@
 <title>Chama — Bitcoin commerce woven from community trust</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700;800&family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 :root{
-  /* Woven Trust palette — BRAND.md is law */
-  --black:#0A0A0A;--card:rgba(255,255,255,.03);--card2:rgba(255,255,255,.05);
-  --t1:#F5F5F7;--t2:#A1A1A6;--t3:#86868B;--t4:#6E6E73;--t5:#48484A;
-  --hairline:rgba(255,255,255,.10);--hairline2:rgba(255,255,255,.06);
-  --orange:#F7931A;--orange-l:#FFB340;
+  /* Woven Trust palette — BRAND.md + deployment-kit tokens */
+  --black:#0A0A0A;--surface:#0E0E10;--card:rgba(255,255,255,.035);--card2:rgba(255,255,255,.06);
+  --t1:#F5F5F7;--t2:#C7C7CC;--t3:#9A9AA0;--t4:#6E6E73;--t5:#48484A;
+  --hairline:rgba(255,255,255,.10);--hairline2:rgba(255,255,255,.07);
+  --orange:#F7931A;--orange-l:#FFB340;--orange-d:#C76A00;
   --purple:#BF5AF2;--purple-d:#7A3CD0;
   --teal:#2EE6D6;--teal-m:#12C7B7;--teal-d:#078C8C;
   --core:#FFB340;
+  --r-card:20px;--r-ctl:14px;--r-pill:999px;
   --sora:'Sora',-apple-system,sans-serif;
   --sans:'Inter',-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif;
   --mono:'JetBrains Mono','SF Mono',monospace;
+  --weave:repeating-linear-gradient(135deg,var(--orange) 0 6px,var(--teal) 6px 12px,var(--purple) 12px 18px);
 }
 html{scroll-behavior:smooth;background:var(--black);color:var(--t1);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;overflow-x:hidden}
-body{font-family:var(--sans);background:var(--black);line-height:1.47;overflow-x:hidden}
+body{font-family:var(--sans);background:var(--black);line-height:1.5;overflow-x:hidden}
 a{color:inherit;text-decoration:none}
-h1,h2,h3{font-family:var(--sora)}
+img{display:block}
+h1,h2,h3,h4{font-family:var(--sora);font-weight:700}
 ::selection{background:rgba(247,147,26,.3)}
 .c-o{color:var(--orange)}.c-p{color:var(--purple)}.c-t{color:var(--teal-m)}.c-g{color:var(--core)}
 
 /* reveal */
-.r{opacity:0;transform:translateY(24px);transition:opacity .8s cubic-bezier(.16,1,.3,1),transform .8s cubic-bezier(.16,1,.3,1)}
+.r{opacity:0;transform:translateY(20px);transition:opacity .7s cubic-bezier(.16,1,.3,1),transform .7s cubic-bezier(.16,1,.3,1)}
 .r.v{opacity:1;transform:none}
-.d1{transition-delay:.08s}.d2{transition-delay:.16s}.d3{transition-delay:.24s}.d4{transition-delay:.32s}.d5{transition-delay:.4s}
+.d1{transition-delay:.07s}.d2{transition-delay:.14s}.d3{transition-delay:.21s}.d4{transition-delay:.28s}.d5{transition-delay:.35s}
+@media(prefers-reduced-motion:reduce){.r{transition:none;opacity:1;transform:none}}
+
+/* buttons — deployment-kit system (orange gradient primary, bordered secondary) */
+.btn-primary{display:inline-flex;align-items:center;gap:8px;padding:13px 22px;border-radius:var(--r-pill);background:linear-gradient(135deg,var(--orange),var(--orange-l));color:#0A0A0A;font-weight:700;font-size:15px;transition:filter .25s,transform .25s;box-shadow:0 10px 34px rgba(247,147,26,.20)}
+.btn-primary:hover{filter:brightness(1.06);transform:translateY(-1px)}
+.btn-ghost{display:inline-flex;align-items:center;gap:6px;padding:13px 20px;border-radius:var(--r-pill);border:1px solid var(--hairline);background:rgba(255,255,255,.04);color:var(--t1);font-size:15px;font-weight:500;transition:border-color .25s,background .25s}
+.btn-ghost:hover{border-color:rgba(255,255,255,.28);background:rgba(255,255,255,.07)}
+.arrow{display:inline-block;transition:transform .25s}
+a:hover .arrow{transform:translateX(3px)}
 
 /* nav */
-nav{position:fixed;top:0;left:0;right:0;z-index:100;height:52px;display:flex;align-items:center;justify-content:center;background:rgba(10,10,10,.78);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:.5px solid var(--hairline2)}
-.nav-c{width:100%;max-width:1024px;padding:0 22px;display:flex;align-items:center;gap:24px}
-.nav-brand{display:flex;align-items:center;gap:9px;font-family:var(--sora);font-size:18px;font-weight:600;letter-spacing:-.02em}
-.nav-brand svg{display:block}
-.nav-l{display:flex;gap:26px;margin-left:auto}
-.nav-l a{font-size:12.5px;color:var(--t3);transition:color .25s}
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,10,10,.86);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--hairline2)}
+nav::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,var(--orange),var(--teal),var(--purple));opacity:.5}
+.nav-c{max-width:1180px;margin:0 auto;height:58px;padding:0 24px;display:flex;align-items:center;gap:20px}
+.nav-brand{display:flex;align-items:center;gap:10px;font-family:var(--sora);font-size:18px;font-weight:700;letter-spacing:-.02em}
+.nav-l{display:flex;gap:22px;margin-left:16px}
+.nav-l a{font-size:13px;color:var(--t3);transition:color .25s}
 .nav-l a:hover{color:var(--t1)}
 .nav-r{display:flex;align-items:center;gap:14px;margin-left:auto}
-.nav-l+.nav-r{margin-left:0}
-.lang{display:flex;border:1px solid var(--hairline);border-radius:980px;overflow:hidden}
-.lang button{appearance:none;border:0;background:transparent;color:var(--t4);font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;padding:5px 10px;cursor:pointer;transition:all .25s}
-.lang button.on{background:rgba(255,255,255,.1);color:var(--t1)}
-.nav-cta{font-size:12.5px;color:var(--teal-m);transition:opacity .25s;white-space:nowrap}
-.nav-cta:hover{opacity:.7}
-@media(max-width:860px){.nav-l{display:none}.nav-r{margin-left:auto}}
+.lang{display:flex;border:1px solid var(--hairline);border-radius:var(--r-pill);overflow:hidden}
+.lang button{appearance:none;border:0;background:transparent;color:var(--t4);font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;padding:5px 9px;cursor:pointer;transition:all .2s}
+.lang button.on{background:var(--orange);color:#0A0A0A}
+.nav-open{font-size:13px;color:var(--t1);font-weight:600;display:inline-flex;gap:5px;align-items:center}
+.nav-open:hover{color:var(--orange-l)}
+@media(max-width:880px){.nav-l{display:none}}
+
+/* ===== woven spine wrapper ===== */
+.weave{position:relative;max-width:1180px;margin:0 auto;padding:0 24px 0 92px}
+.spine{position:absolute;left:42px;top:0;bottom:0;width:1.5px;pointer-events:none;
+  background:linear-gradient(180deg,transparent 0,var(--orange) 10%,var(--teal-m) 50%,var(--purple) 90%,transparent 100%);opacity:.38}
+@media(max-width:760px){.weave{padding:0 20px}.spine{display:none}}
+
+/* section block + editorial kicker */
+.blk{position:relative;padding:62px 0}
+.kick{font-family:var(--mono);font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--t3);display:flex;align-items:center;gap:11px;margin-bottom:20px}
+.kick .node{width:10px;height:10px;border-radius:50%;background:var(--ac,var(--orange));box-shadow:0 0 14px var(--ac,var(--orange));flex:none}
+.hl{font-size:clamp(30px,4.4vw,46px);letter-spacing:-.03em;line-height:1.08;max-width:20ch}
+.lead{font-size:clamp(16px,1.6vw,18px);color:var(--t3);max-width:62ch;margin-top:16px;line-height:1.55}
 
 /* hero */
-.hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:128px 24px 88px;position:relative;overflow:hidden}
-.hero-glow{position:absolute;top:42%;left:50%;width:780px;height:780px;background:radial-gradient(circle,rgba(247,147,26,.07) 0%,rgba(46,230,214,.035) 38%,rgba(191,90,242,.03) 55%,transparent 72%);transform:translate(-50%,-50%);pointer-events:none;animation:breathe 9s ease-in-out infinite}
-@keyframes breathe{0%,100%{opacity:.7;transform:translate(-50%,-50%) scale(1)}50%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}}
-.hero>:not(.hero-glow){position:relative;z-index:1}
-.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;border-radius:980px;background:rgba(247,147,26,.08);border:1px solid rgba(247,147,26,.12);font-family:var(--mono);font-size:11px;color:var(--orange);letter-spacing:.5px;margin-bottom:30px}
+.hero{padding-top:122px;padding-bottom:26px}
+.hero-grid{display:grid;grid-template-columns:1.12fr .88fr;gap:44px;align-items:center}
+@media(max-width:860px){.hero-grid{grid-template-columns:1fr;gap:10px}}
+.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 15px;border-radius:var(--r-pill);background:rgba(247,147,26,.08);border:1px solid rgba(247,147,26,.16);font-family:var(--mono);font-size:11px;color:var(--orange);letter-spacing:.5px;margin-bottom:24px}
 .hero-badge::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--orange);animation:pulse 2s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.hero-mark{width:clamp(180px,24vw,256px);height:auto;margin-bottom:30px;animation:mark-breathe 9s ease-in-out infinite;filter:drop-shadow(0 18px 56px rgba(247,147,26,.10))}
-@keyframes mark-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.025)}}
-.hero h1{font-size:clamp(36px,6.2vw,64px);font-weight:700;letter-spacing:-.035em;line-height:1.07;margin-bottom:18px;max-width:820px}
-.grad{background:linear-gradient(90deg,var(--orange),var(--teal),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.hero-sub{font-size:clamp(16px,2vw,19px);color:var(--t3);max-width:600px;line-height:1.55;margin-bottom:34px}
-.hero-btns{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;align-items:center}
-.btn-w{display:inline-flex;align-items:center;gap:6px;padding:13px 26px;border-radius:980px;background:#fff;color:var(--black);font-size:16px;font-weight:600;transition:all .25s;letter-spacing:-.01em}
-.btn-w:hover{background:var(--t1);transform:scale(1.02)}
-.btn-g{display:inline-flex;align-items:center;gap:4px;padding:13px 22px;border-radius:980px;color:var(--teal-m);font-size:16px;transition:color .25s}
-.btn-g:hover{color:var(--teal)}
-.btn-g span{transition:transform .25s;display:inline-block}
-.btn-g:hover span{transform:translateX(3px)}
-.hero-tagline{margin-top:38px;font-family:var(--mono);font-size:11px;letter-spacing:2.5px;color:var(--t5);text-transform:lowercase}
+.hero h1{font-size:clamp(38px,5.6vw,62px);letter-spacing:-.035em;line-height:1.05;margin-bottom:20px}
+.grad{background:linear-gradient(115deg,var(--orange) 0%,var(--orange-l) 20%,var(--teal) 50%,var(--purple) 78%,var(--orange) 100%);background-size:220% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;animation:weave-shimmer 9s ease-in-out infinite}
+@keyframes weave-shimmer{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+.hero-sub{font-size:clamp(16px,1.8vw,19px);color:var(--t3);max-width:48ch;line-height:1.55;margin-bottom:30px}
+.hero-btns{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+.hero-tagline{margin-top:30px;font-family:var(--mono);font-size:11px;letter-spacing:2.5px;color:var(--t5);text-transform:lowercase}
+.hero-art{display:flex;flex-direction:column;align-items:center;gap:22px;animation:float 9s ease-in-out 1300ms infinite}
+.hero-mark{width:clamp(190px,26vw,300px);height:auto;filter:drop-shadow(0 20px 60px rgba(247,147,26,.14));animation:mark-in 1300ms cubic-bezier(.16,1,.3,1) both}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+@keyframes mark-in{0%{opacity:0;transform:scale(.78) rotate(-16deg)}55%{opacity:1}100%{opacity:1;transform:scale(1) rotate(0)}}
+@media(prefers-reduced-motion:reduce){.hero-art,.hero-mark{animation:none}}
+.hero-roles{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.rolechip{font-family:var(--mono);font-size:11px;letter-spacing:.5px;padding:5px 12px;border-radius:var(--r-pill);border:1px solid}
+.rc-o{color:var(--orange);border-color:rgba(247,147,26,.3);background:rgba(247,147,26,.06)}
+.rc-p{color:var(--purple);border-color:rgba(191,90,242,.3);background:rgba(191,90,242,.06)}
+.rc-t{color:var(--teal-m);border-color:rgba(46,230,214,.3);background:rgba(46,230,214,.06)}
+@media(max-width:860px){.hero-art{margin-top:18px;align-items:flex-start}}
 
 /* ticker */
-.ticker{padding:14px 24px;text-align:center;font-family:var(--mono);font-size:11.5px;color:var(--t5);letter-spacing:1.5px;text-transform:uppercase;border-top:.5px solid var(--hairline2);border-bottom:.5px solid var(--hairline2)}
+.ticker{margin-top:26px;padding:13px 18px;font-family:var(--mono);font-size:11px;color:var(--t5);letter-spacing:1.5px;text-transform:uppercase;border-top:1px solid var(--hairline2);border-bottom:1px solid var(--hairline2)}
 
-/* section headers */
-.sec-h{text-align:center;padding:108px 24px 52px;max-width:720px;margin:0 auto}
-.sec-h h2{font-size:clamp(34px,5vw,52px);font-weight:700;letter-spacing:-.03em;line-height:1.08;margin-bottom:14px}
-.sec-h p{font-size:18px;color:var(--t3);line-height:1.5}
+/* weave role cards — photo-led (natural color + dark veil + role-color frame) */
+.roles3{margin-top:34px;display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:820px){.roles3{grid-template-columns:1fr}}
+.rcard{position:relative;background:var(--card);border:1px solid var(--hairline2);border-radius:var(--r-card);overflow:hidden;transition:transform .5s cubic-bezier(.16,1,.3,1)}
+.rcard:hover{transform:translateY(-3px)}
+.rcard::before{content:'';position:absolute;inset:0;border:1.5px solid var(--ac);opacity:.34;border-radius:inherit;pointer-events:none;z-index:3}
+.rcard .ph{position:relative;height:206px}
+.rcard .ph img{width:100%;height:100%;object-fit:cover;display:block}
+.rcard .ph::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,10,0) 28%,rgba(10,10,10,.5) 68%,rgba(10,10,10,.96) 100%)}
+.rcard .who{position:absolute;left:20px;bottom:13px;z-index:2;font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--ac)}
+.rcard .rbody{padding:16px 22px 24px}
+.rcard h3{font-size:19px;font-weight:600;letter-spacing:-.02em;margin-bottom:8px}
+.rcard p{font-size:14px;color:var(--t3);line-height:1.55}
+.weave-rule{margin-top:30px;font-family:var(--mono);font-size:13px;color:var(--t4);line-height:1.95;letter-spacing:.3px}
 
-/* weave roles */
-.roles{max-width:1024px;margin:0 auto;padding:0 24px;display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-@media(max-width:820px){.roles{grid-template-columns:1fr}}
-.role{position:relative;background:var(--card);border:1px solid var(--hairline2);border-radius:22px;padding:34px 28px;overflow:hidden;transition:background .3s,transform .5s cubic-bezier(.16,1,.3,1)}
-.role:hover{background:var(--card2);transform:translateY(-3px)}
-.role::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
-.role-o::before{background:linear-gradient(90deg,var(--orange),var(--orange-l))}
-.role-p::before{background:linear-gradient(90deg,var(--purple),var(--purple-d))}
-.role-t::before{background:linear-gradient(90deg,var(--teal),var(--teal-d))}
-.role .who{font-family:var(--mono);font-size:10.5px;letter-spacing:1.8px;text-transform:uppercase;margin-bottom:14px;display:block}
-.role-o .who{color:var(--orange)}.role-p .who{color:var(--purple)}.role-t .who{color:var(--teal-m)}
-.role h3{font-size:21px;font-weight:600;letter-spacing:-.02em;margin-bottom:10px}
-.role p{font-size:14.5px;color:var(--t3);line-height:1.6}
-.weave-rule{max-width:680px;margin:0 auto;padding:46px 24px 96px;text-align:center;font-size:15px;color:var(--t4);line-height:1.7}
-
-/* products */
-.products{max-width:1024px;margin:0 auto;padding:0 24px 90px}
-.p-hero{position:relative;border-radius:26px;overflow:hidden;padding:52px 44px;margin-bottom:16px;min-height:380px;display:flex;flex-direction:column;justify-content:flex-end;border:1px solid var(--hairline2);transition:transform .5s cubic-bezier(.16,1,.3,1)}
-.p-hero:hover{transform:scale(1.006)}
-.p-hero::before{content:'';position:absolute;inset:0;z-index:0}
-.p-hero>*{position:relative;z-index:1}
-.p-billpay::before{background:radial-gradient(120% 110% at 12% 0%,rgba(247,147,26,.13) 0%,rgba(247,147,26,.04) 42%,transparent 75%)}
-.p-p2p::before{background:radial-gradient(120% 110% at 12% 0%,rgba(255,179,64,.10) 0%,transparent 70%)}
-.p-stores::before{background:radial-gradient(120% 110% at 12% 0%,rgba(191,90,242,.11) 0%,transparent 70%)}
-.p-lend::before{background:radial-gradient(120% 110% at 12% 0%,rgba(255,179,64,.07) 0%,transparent 70%)}
-.p-escrow::before{background:radial-gradient(120% 110% at 12% 0%,rgba(46,230,214,.08) 0%,transparent 70%)}
-.p-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:780px){.p-grid{grid-template-columns:1fr}.p-hero{padding:38px 26px;min-height:330px}}
-.p-name{font-family:var(--sora);font-size:clamp(26px,3.6vw,36px);font-weight:700;letter-spacing:-.02em;line-height:1.1;margin-bottom:6px}
-.p-billpay .p-name{color:var(--orange-l)}
-.p-p2p .p-name{color:var(--orange)}
-.p-stores .p-name{color:var(--purple)}
-.p-lend .p-name{color:var(--core)}
-.p-escrow .p-name{color:var(--teal-m)}
-.p-tag{font-family:var(--mono);font-size:11.5px;color:var(--t4);letter-spacing:1px;text-transform:uppercase;margin-bottom:16px;display:block}
-.p-desc{font-size:16px;color:var(--t3);line-height:1.55;max-width:520px}
-.p-cta{display:inline-flex;align-items:center;gap:4px;margin-top:20px;font-size:17px;color:var(--teal-m)}
-.p-cta span{transition:transform .25s;display:inline-block}
-.p-cta:hover span{transform:translateX(3px)}
-.live{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:980px;background:rgba(46,230,214,.07);border:1px solid rgba(46,230,214,.14);font-family:var(--mono);font-size:10px;color:var(--teal-m);letter-spacing:.8px;text-transform:uppercase;margin-bottom:16px;width:fit-content}
-.live::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--teal-m);animation:pulse 2s ease-in-out infinite}
+/* products — editorial list */
+.prod-list{margin-top:30px;border-top:1px solid var(--hairline2)}
+.prod{position:relative;display:grid;grid-template-columns:140px 1fr auto;gap:26px;align-items:center;padding:24px 8px 24px 20px;border-bottom:1px solid var(--hairline2);transition:background .3s}
+.prod::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ac);transform:scaleY(0);transition:transform .35s}
+.prod:hover{background:rgba(255,255,255,.022)}
+.prod:hover::before{transform:scaleY(1)}
+.prod-thumb{position:relative;width:140px;height:94px;border-radius:12px;overflow:hidden;box-shadow:inset 0 0 0 1.5px var(--ac)}
+.prod-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.prod-thumb::after{content:'';position:absolute;inset:0;border-radius:12px;background:linear-gradient(180deg,rgba(10,10,10,0) 42%,rgba(10,10,10,.5))}
+.prod-name{font-family:var(--sora);font-weight:700;font-size:clamp(20px,2.4vw,26px);letter-spacing:-.02em;color:var(--ac);margin-bottom:4px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.prod-tag{font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--t4);margin-bottom:11px}
+.prod-desc{font-size:15px;color:var(--t3);line-height:1.55;max-width:62ch}
+.prod-cta{font-size:14px;color:var(--t2);white-space:nowrap;display:inline-flex;gap:5px;align-items:center}
+.prod-cta:hover{color:var(--ac)}
+.live{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:var(--r-pill);background:rgba(46,230,214,.07);border:1px solid rgba(46,230,214,.16);font-family:var(--mono);font-size:9.5px;color:var(--teal-m);letter-spacing:.8px;text-transform:uppercase}
+.live::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--teal-m);animation:pulse 2s ease-in-out infinite}
+@media(max-width:760px){.prod{grid-template-columns:1fr;gap:12px;padding:24px 8px 24px 18px}.prod-thumb{width:100%;height:150px}.prod-cta{margin-top:10px}}
 
 /* communities */
-.comm{max-width:1024px;margin:0 auto;padding:0 24px 96px;display:grid;grid-template-columns:1.15fr .85fr;gap:16px}
+.comm-band{position:relative;margin-top:30px;border-radius:var(--r-card);overflow:hidden;height:300px;border:1px solid var(--hairline2)}
+.comm-band img{width:100%;height:100%;object-fit:cover;display:block}
+.comm-band::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,10,.05) 25%,rgba(10,10,10,.4) 60%,rgba(10,10,10,.88) 100%)}
+.comm-band .cap{position:absolute;left:28px;bottom:22px;z-index:2;font-family:var(--sora);font-weight:600;font-size:clamp(20px,2.6vw,30px);letter-spacing:-.02em;color:var(--t1);max-width:18ch}
+@media(max-width:600px){.comm-band{height:220px}}
+.comm{margin-top:16px;display:grid;grid-template-columns:1.1fr .9fr;gap:16px}
 @media(max-width:820px){.comm{grid-template-columns:1fr}}
-.comm-card{background:var(--card);border:1px solid var(--hairline2);border-radius:24px;padding:38px 32px}
-.comm-card h3{font-size:22px;font-weight:600;letter-spacing:-.02em;margin-bottom:12px}
-.comm-card>p{font-size:15px;color:var(--t3);line-height:1.6;margin-bottom:22px}
+.card{position:relative;background:var(--card);border:1px solid var(--hairline2);border-radius:var(--r-card);padding:32px 30px;overflow:hidden}
+.card h3{font-size:20px;font-weight:600;letter-spacing:-.02em;margin-bottom:12px}
+.card>p{font-size:15px;color:var(--t3);line-height:1.6;margin-bottom:20px}
+.flags{font-size:21px;letter-spacing:6px;margin-bottom:18px;filter:saturate(.92)}
 .rails{display:flex;flex-wrap:wrap;gap:8px}
-.rail{padding:7px 14px;border-radius:980px;border:1px solid var(--hairline);font-family:var(--mono);font-size:12px;color:var(--t2);background:rgba(255,255,255,.02);transition:all .25s}
+.rail{padding:6px 13px;border-radius:var(--r-pill);border:1px solid var(--hairline);font-family:var(--mono);font-size:12px;color:var(--t2);background:rgba(255,255,255,.02);transition:all .25s}
 .rail:hover{border-color:rgba(46,230,214,.4);color:var(--teal)}
 .rail.more{border-style:dashed;color:var(--t4)}
-.comm-org{position:relative;overflow:hidden;display:flex;flex-direction:column}
-.comm-org::after{content:'';position:absolute;right:-70px;bottom:-70px;width:240px;height:240px;background:url('data:image/svg+xml,') no-repeat;opacity:.07}
-.org-mark{position:absolute;right:-46px;bottom:-46px;width:200px;height:200px;opacity:.10;pointer-events:none}
-.flags{font-size:22px;letter-spacing:6px;margin-bottom:18px;filter:saturate(.9)}
-.comm-org .p-cta{margin-top:auto}
+.card-org{display:flex;flex-direction:column}
+.org-mark{position:absolute;right:-44px;bottom:-44px;width:190px;height:190px;opacity:.10;pointer-events:none}
+.card-org .prod-cta{margin-top:auto;color:var(--teal-m)}
 
-/* protocol */
-.proto{max-width:720px;margin:0 auto;padding:0 24px 100px}
-.steps{position:relative;padding-left:48px}
-.steps::before{content:'';position:absolute;left:19px;top:4px;bottom:4px;width:1.5px;background:linear-gradient(180deg,var(--hairline2) 0%,var(--orange) 35%,var(--teal-d) 70%,var(--hairline2) 100%)}
-.st{position:relative;padding-bottom:40px}
+/* protocol steps */
+.steps{position:relative;margin-top:30px;padding-left:46px;max-width:680px}
+.steps::before{content:'';position:absolute;left:18px;top:6px;bottom:6px;width:2px;background:linear-gradient(180deg,var(--orange),var(--purple) 50%,var(--teal-d))}
+.st{position:relative;padding-bottom:34px}
 .st:last-child{padding-bottom:0}
-.st-n{position:absolute;left:-48px;top:0;width:38px;height:38px;border-radius:50%;background:#141414;border:1.5px solid var(--t5);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:13px;font-weight:700;color:var(--t4);transition:all .4s}
-.st:hover .st-n{border-color:var(--orange);color:var(--orange);background:rgba(247,147,26,.06);box-shadow:0 0 24px rgba(247,147,26,.08)}
-.st h3{font-size:20px;font-weight:600;letter-spacing:-.02em;margin-bottom:4px}
-.st p{font-size:14.5px;color:var(--t4);line-height:1.55}
-.tags{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
-.tag{padding:3px 10px;border-radius:980px;font-family:var(--mono);font-size:10px;letter-spacing:.3px;font-weight:500}
-.tag-n{background:rgba(191,90,242,.08);color:var(--purple);border:1px solid rgba(191,90,242,.12)}
-.tag-e{background:rgba(247,147,26,.08);color:var(--orange);border:1px solid rgba(247,147,26,.12)}
-.tag-s{background:rgba(46,230,214,.07);color:var(--teal-m);border:1px solid rgba(46,230,214,.14)}
+.st-n{position:absolute;left:-46px;top:-2px;width:38px;height:38px;border-radius:50%;background:#121214;border:1.5px solid var(--ac,var(--t5));color:var(--ac,var(--t4));display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:13px;font-weight:700;transition:box-shadow .35s}
+.st:hover .st-n{box-shadow:0 0 0 5px rgba(255,255,255,.03)}
+.st h3{font-size:19px;font-weight:600;margin-bottom:4px;letter-spacing:-.01em}
+.st p{font-size:14.5px;color:var(--t4);line-height:1.55;max-width:56ch}
+.tags{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
+.tag{padding:3px 10px;border-radius:var(--r-pill);font-family:var(--mono);font-size:10px;letter-spacing:.3px}
+.tag-n{background:rgba(191,90,242,.08);color:var(--purple);border:1px solid rgba(191,90,242,.14)}
+.tag-e{background:rgba(247,147,26,.08);color:var(--orange);border:1px solid rgba(247,147,26,.14)}
+.tag-s{background:rgba(46,230,214,.07);color:var(--teal-m);border:1px solid rgba(46,230,214,.16)}
 
 /* tech grid */
-.tech{max-width:1024px;margin:0 auto;padding:0 24px 90px}
-.tech-g{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--hairline2);border-radius:22px;overflow:hidden;border:1px solid var(--hairline2)}
-.tech-c{background:var(--black);padding:38px 28px;transition:background .3s}
-.tech-c:hover{background:#101010}
-.tech-c h4{font-size:16.5px;font-weight:600;margin-bottom:8px;letter-spacing:-.01em;font-family:var(--sora)}
+.tech-g{margin-top:30px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:820px){.tech-g{grid-template-columns:1fr 1fr}}
+@media(max-width:540px){.tech-g{grid-template-columns:1fr}}
+.tech-c{position:relative;background:var(--card);border:1px solid var(--hairline2);border-left:3px solid var(--ac,var(--hairline));border-radius:var(--r-ctl);padding:24px 22px;transition:background .3s}
+.tech-c:hover{background:var(--card2)}
+.tech-c .k{display:block;font-family:var(--mono);font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--ac);margin-bottom:12px}
+.tech-c h4{font-size:16px;font-weight:600;margin-bottom:7px;letter-spacing:-.01em}
 .tech-c p{font-size:13.5px;color:var(--t4);line-height:1.55}
-.tech-c .k{display:block;font-family:var(--mono);font-size:10px;letter-spacing:1px;margin-bottom:14px;text-transform:uppercase}
-@media(max-width:780px){.tech-g{grid-template-columns:1fr 1fr}}
-@media(max-width:500px){.tech-g{grid-template-columns:1fr}}
 
-/* numbers */
-.nums{padding:78px 24px;border-top:.5px solid var(--hairline2);border-bottom:.5px solid var(--hairline2)}
-.nums-g{max-width:880px;margin:0 auto;display:grid;grid-template-columns:repeat(5,1fr);text-align:center;gap:16px}
-.n-v{font-family:var(--mono);font-size:clamp(30px,4.2vw,46px);font-weight:700;line-height:1}
-.n-l{font-size:13px;color:var(--t4);margin-top:8px}
-@media(max-width:620px){.nums-g{grid-template-columns:repeat(3,1fr);gap:30px}}
+/* numbers ribbon */
+.nums-strip{position:relative;display:flex;flex-wrap:wrap;border:1px solid var(--hairline2);border-radius:var(--r-card);overflow:hidden;background:var(--card)}
+.nums-strip::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--orange),var(--teal),var(--purple))}
+.nstat{flex:1 1 0;min-width:128px;padding:26px 22px;border-right:1px solid var(--hairline2)}
+.nstat:last-child{border-right:0}
+.nstat .v{font-family:var(--mono);font-size:clamp(26px,3vw,38px);font-weight:700;line-height:1}
+.nstat .l{font-size:12.5px;color:var(--t4);margin-top:8px}
+@media(max-width:620px){.nstat{flex-basis:50%;border-bottom:1px solid var(--hairline2)}}
 
 /* manifesto */
-.mani{position:relative;max-width:780px;margin:0 auto;padding:120px 24px;text-align:center;overflow:hidden}
-.mani-mark{position:absolute;top:50%;left:50%;width:560px;height:560px;transform:translate(-50%,-50%);opacity:.05;pointer-events:none}
-.mani>:not(.mani-mark){position:relative;z-index:1}
-.mani h2{font-size:clamp(32px,5vw,50px);font-weight:700;letter-spacing:-.03em;line-height:1.1;margin-bottom:24px}
-.mani p{font-size:17px;color:var(--t3);line-height:1.65;max-width:620px;margin:0 auto 18px}
+.mani{position:relative;overflow:hidden}
+.mani-mark{position:absolute;right:-30px;top:52%;transform:translateY(-50%);width:340px;height:340px;opacity:.06;pointer-events:none}
+.mani .hl{max-width:16ch}
+.mani p{font-size:clamp(16px,1.7vw,18px);color:var(--t3);line-height:1.7;max-width:60ch;margin-top:16px}
 .mani p strong{color:var(--t1);font-weight:600}
-.mani .hero-btns{margin-top:34px}
+.mani-btns{display:flex;gap:14px;flex-wrap:wrap;margin-top:28px}
+@media(max-width:760px){.mani-mark{opacity:.045;right:-70px;width:280px;height:280px}}
 
 /* cta */
-.cta{padding:110px 24px 130px;text-align:center;position:relative;overflow:hidden}
-.cta-glow{position:absolute;top:50%;left:50%;width:640px;height:640px;background:radial-gradient(circle,rgba(247,147,26,.05),transparent 60%);transform:translate(-50%,-50%);pointer-events:none}
-.cta>:not(.cta-glow){position:relative;z-index:1}
-.cta h2{font-size:clamp(38px,6vw,62px);font-weight:700;letter-spacing:-.03em;line-height:1.08;margin-bottom:18px}
-.cta h2 em{font-style:normal;color:var(--orange)}
-.cta p{font-size:18px;color:var(--t3);max-width:460px;margin:0 auto 34px;line-height:1.5}
+.cta .hl{font-size:clamp(34px,5vw,56px);max-width:14ch}
+.cta em{font-style:normal;color:var(--orange)}
+.cta p{font-size:18px;color:var(--t3);margin-top:16px;max-width:48ch;line-height:1.5}
+.cta-btns{display:flex;gap:14px;flex-wrap:wrap;margin-top:30px}
+
+/* get chama — two ways in */
+.get-grid{margin-top:30px;display:grid;grid-template-columns:.82fr 1.18fr;gap:16px;align-items:stretch}
+@media(max-width:820px){.get-grid{grid-template-columns:1fr}}
+.getcard{position:relative;background:var(--card);border:1px solid var(--hairline2);border-radius:var(--r-card);padding:30px 28px;display:flex;flex-direction:column;overflow:hidden}
+.getcard::before{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--ac)}
+.getcard-top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.getcard-name{font-family:var(--sora);font-weight:700;font-size:22px;letter-spacing:-.02em;color:var(--ac)}
+.getcard-tag{font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--t4)}
+.getcard-desc{font-size:15px;color:var(--t3);line-height:1.55;margin-bottom:22px}
+.getcard .btn-ghost,.getcard .btn-primary{align-self:flex-start;margin-top:auto}
+.zs{border-top:1px solid var(--hairline2);padding-top:18px;margin-bottom:22px}
+.zs-title{font-family:var(--mono);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--t3);margin-bottom:15px}
+.zs-list{list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:15px 18px}
+@media(max-width:560px){.zs-list{grid-template-columns:1fr}}
+.zs-list li{display:flex;gap:11px;align-items:flex-start;font-size:13.5px;color:var(--t2);line-height:1.4}
+.zs-ico{flex:none;width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;border:1px solid var(--hairline2)}
+.zs-ico svg{width:17px;height:17px;display:block}
+.zs-o{color:var(--orange);background:rgba(247,147,26,.08)}
+.zs-p{color:var(--purple);background:rgba(191,90,242,.08)}
+.zs-g{color:var(--core);background:rgba(255,179,64,.08)}
+.zs-t{color:var(--teal-m);background:rgba(46,230,214,.08)}
 
 /* footer */
-footer{padding:22px 24px;border-top:.5px solid var(--hairline2)}
-.ft{max-width:1024px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+footer{position:relative;border-top:1px solid var(--hairline2);padding:26px 24px;margin-top:18px}
+footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;background:linear-gradient(90deg,var(--orange),var(--teal),var(--purple));opacity:.4}
+.ft{max-width:1180px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
 .ft-l{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11px;color:var(--t5)}
 .ft-r{display:flex;gap:20px}
 .ft-r a{font-size:12px;color:var(--t4);transition:color .25s}
@@ -222,11 +260,10 @@ footer{padding:22px 24px;border-top:.5px solid var(--hairline2)}
 </head>
 <body>
 
-
 <!-- NAV -->
 <nav>
   <div class="nav-c">
-    <a href="#" class="nav-brand"><img src="icons/chama-mark-64.png" srcset="icons/chama-mark-64.png 1x, icons/chama-mark-128.png 2x" width="26" height="26" alt="">Chama</a>
+    <a href="#" class="nav-brand"><img src="icons/chama-mark-64.png" srcset="icons/chama-mark-64.png 1x, icons/chama-mark-128.png 2x" width="28" height="28" alt="">Chama</a>
     <div class="nav-l">
       <a href="#trust" data-i18n="nav.trust">The weave</a>
       <a href="#products" data-i18n="nav.products">Products</a>
@@ -237,220 +274,255 @@ footer{padding:22px 24px;border-top:.5px solid var(--hairline2)}
     <div class="nav-r">
       <div class="lang" role="group" aria-label="Language">
         <button type="button" class="lang-btn" data-lang="en">EN</button>
+        <button type="button" class="lang-btn" data-lang="es">ES</button>
         <button type="button" class="lang-btn" data-lang="fr">FR</button>
       </div>
-      <a href="https://getchama.app" class="nav-cta" target="_blank" rel="noopener"><span data-i18n="nav.open">Open app</span> →</a>
+      <a href="https://zapstore.dev/apps/app.chama.market" class="nav-open" target="_blank" rel="noopener"><span data-i18n="nav.open">Get the app</span> <span class="arrow">→</span></a>
     </div>
   </div>
 </nav>
 
-<!-- HERO -->
-<section class="hero">
-  <div class="hero-glow"></div>
-  <div class="hero-badge r" data-i18n="hero.badge">Open source · Non-custodial · Live now</div>
-  <img class="hero-mark r d1" src="icons/chama-mark-512.png" srcset="icons/chama-mark-512.png 1x, icons/chama-mark-1024.png 2x" width="512" height="512" alt="Chama — Woven Trust mark">
-  <h1 class="r d2" data-i18n="hero.h1">Bitcoin commerce, <span class="grad">woven</span> from community trust.</h1>
-  <p class="hero-sub r d3" data-i18n="hero.sub">Buyer, seller, and arbiter — three roles woven into one accountable trade. Pay bills, swap sats for cash, shop local stores, lend within your community. Nobody holds your money. Not even us.</p>
-  <div class="hero-btns r d4">
-    <a href="https://getchama.app" class="btn-w" target="_blank" rel="noopener" data-i18n="hero.cta1">Open Chama</a>
-    <a href="#trust" class="btn-g"><span data-i18n="hero.cta2">How it works</span> <span>→</span></a>
-  </div>
-  <div class="hero-tagline r d5" data-i18n="hero.tagline">community • trust • reputation</div>
-</section>
+<main class="weave">
+  <div class="spine" aria-hidden="true"></div>
 
-<!-- TICKER -->
-<div class="ticker">Fedimint ecash · Nostr identity · 2-of-3 Shamir · NIP-44 encrypted · No KYC · EN / FR / ES / SW</div>
-
-<!-- THE WEAVE -->
-<div id="trust">
-  <div class="sec-h">
-    <h2 class="r" data-i18n="weave.h2">No role dominates. Ever.</h2>
-    <p class="r d1" data-i18n="weave.sub">Every trade weaves three participants together. Sats move only when two of the three agree — cooperation enforced by mathematics, not promises.</p>
-  </div>
-  <div class="roles">
-    <div class="role role-o r">
-      <span class="who" data-i18n="weave.seller.role">Seller</span>
-      <h3 data-i18n="weave.seller.h3">Locks the sats</h3>
-      <p data-i18n="weave.seller.p">The moment the Lightning invoice is paid, the sats become ecash locked in escrow — split into three cryptographic shares. No one can move them alone. Not even Chama.</p>
-    </div>
-    <div class="role role-p r d1">
-      <span class="who" data-i18n="weave.buyer.role">Buyer</span>
-      <h3 data-i18n="weave.buyer.h3">Claims the sats</h3>
-      <p data-i18n="weave.buyer.p">Pays by any local rail — mobile money, bank transfer, cash in hand. Two of three shares reconstruct the funds. Identity is a Nostr key, not a passport.</p>
-    </div>
-    <div class="role role-t r d2">
-      <span class="who" data-i18n="weave.arbiter.role">Arbiter</span>
-      <h3 data-i18n="weave.arbiter.h3">Breaks the ties</h3>
-      <p data-i18n="weave.arbiter.p">A reputation-staked community member who votes only when buyer and seller disagree. Open roster, public track record, calm judgment.</p>
-    </div>
-  </div>
-  <p class="weave-rule r" data-i18n="weave.rule"><span class="c-t">Teal passes over orange.</span> <span class="c-o">Orange passes over purple.</span> <span class="c-p">Purple passes over teal.</span><br>No role dominates forever — the weave rule lives in the logo and in the protocol.</p>
-</div>
-
-<!-- PRODUCTS -->
-<div id="products">
-  <div class="sec-h">
-    <h2 class="r" data-i18n="products.h2">Five products.<br>One trust primitive.</h2>
-    <p class="r d1" data-i18n="products.sub">Everything runs on the same 2-of-3 escrow. Different flows, identical trust model: zero.</p>
-  </div>
-  <div class="products">
-    <div class="p-hero p-billpay r">
-      <div class="live" data-i18n="live">Live</div>
-      <div class="p-name" data-i18n="p.billpay.name">Bill Pay</div>
-      <span class="p-tag" data-i18n="p.billpay.tag">The front door to Bitcoin</span>
-      <p class="p-desc" data-i18n="p.billpay.desc">Post any bill — electricity, rent, school fees. Lock sats in escrow. A community volunteer pays it and claims the sats. No wallet required to understand it. This is how the next billion people meet Bitcoin.</p>
-      <a href="https://getchama.app" class="p-cta" target="_blank" rel="noopener"><span data-i18n="p.billpay.cta">Start a bill</span> <span>→</span></a>
-    </div>
-    <div class="p-grid">
-      <div class="p-hero p-p2p r">
-        <div class="live" data-i18n="live">Live</div>
-        <div class="p-name" data-i18n="p.p2p.name">P2P Exchange</div>
-        <span class="p-tag" data-i18n="p.p2p.tag">Sats ↔ fiat</span>
-        <p class="p-desc" data-i18n="p.p2p.desc">Seller locks sats. Buyer sends fiat by bank, mobile money, or cash. Both confirm, escrow settles. No order books, no custody, no KYC.</p>
-        <a href="https://getchama.app" class="p-cta" target="_blank" rel="noopener"><span data-i18n="p.p2p.cta">Trade now</span> <span>→</span></a>
+  <!-- HERO -->
+  <header class="hero blk">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <div class="hero-badge r" data-i18n="hero.badge">Open source · Non-custodial · Live now</div>
+        <h1 class="r d1" data-i18n="hero.h1">Bitcoin commerce, <span class="grad">woven</span> from community trust.</h1>
+        <p class="hero-sub r d2" data-i18n="hero.sub">Buyer, seller, and arbiter — three roles woven into one accountable trade. Pay bills, swap sats for cash, shop local stores, lend within your community. Nobody holds your money. Not even us.</p>
+        <div class="hero-btns r d3">
+          <a href="https://getchama.app/?sim=1" class="btn-primary" target="_blank" rel="noopener" data-i18n="hero.cta1">Try the sandbox</a>
+          <a href="#trust" class="btn-ghost"><span data-i18n="hero.cta2">How it works</span> <span class="arrow">→</span></a>
+        </div>
+        <div class="hero-tagline r d4" data-i18n="hero.tagline">community • trust • reputation</div>
       </div>
-      <div class="p-hero p-stores r d1">
-        <div class="live" data-i18n="live">Live</div>
-        <div class="p-name" data-i18n="p.stores.name">Stores</div>
-        <span class="p-tag" data-i18n="p.stores.tag">Every seller is a store</span>
-        <p class="p-desc" data-i18n="p.stores.desc">Community storefronts with real reputations. Pay sats, goods ship, escrow protects both sides — ratings follow the npub, not the platform.</p>
-        <a href="https://getchama.app" class="p-cta" target="_blank" rel="noopener"><span data-i18n="p.stores.cta">Browse stores</span> <span>→</span></a>
-      </div>
-      <div class="p-hero p-lend r d2">
-        <div class="live" data-i18n="live">Live</div>
-        <div class="p-name" data-i18n="p.lend.name">Community Lending</div>
-        <span class="p-tag" data-i18n="p.lend.tag">Digital tontines</span>
-        <p class="p-desc" data-i18n="p.lend.desc">Lock sats as loans with trust-tiered limits. Auto-generated repayment escrows, interest tracking, arbiter-verified repayments. Microfinance on Bitcoin.</p>
-        <a href="https://getchama.app" class="p-cta" target="_blank" rel="noopener"><span data-i18n="p.lend.cta">Lend sats</span> <span>→</span></a>
-      </div>
-      <div class="p-hero p-escrow r d3">
-        <div class="live" data-i18n="live">Live</div>
-        <div class="p-name" data-i18n="p.escrow.name">Raw Escrow</div>
-        <span class="p-tag" data-i18n="p.escrow.tag">The primitive</span>
-        <p class="p-desc" data-i18n="p.escrow.desc">The naked 2-of-3 tool. Lock sats, pick any arbiter, vote release or refund. Encrypted trade chat built in. The building block everything else runs on.</p>
-        <a href="https://getchama.app" class="p-cta" target="_blank" rel="noopener"><span data-i18n="p.escrow.cta">Create escrow</span> <span>→</span></a>
+      <div class="hero-art r d2">
+        <img class="hero-mark" src="icons/chama-mark-512.png" srcset="icons/chama-mark-512.png 1x, icons/chama-mark-1024.png 2x" width="512" height="512" alt="Chama — Woven Trust mark" loading="eager" fetchpriority="high" decoding="async">
+        <div class="hero-roles">
+          <span class="rolechip rc-o" data-i18n="weave.seller.role">Seller</span>
+          <span class="rolechip rc-p" data-i18n="weave.buyer.role">Buyer</span>
+          <span class="rolechip rc-t" data-i18n="weave.arbiter.role">Arbiter</span>
+        </div>
       </div>
     </div>
-  </div>
-</div>
+    <div class="ticker">Fedimint ecash · Nostr identity · 2-of-3 Shamir · NIP-44 encrypted · No KYC · Bring your own federation · EN / ES / FR</div>
+  </header>
 
-<!-- COMMUNITIES -->
-<div id="communities">
-  <div class="sec-h">
-    <h2 class="r" data-i18n="comm.h2">Every country gets a community.</h2>
-    <p class="r d1" data-i18n="comm.sub">Pick your flag at sign-in — currency, languages, payment rails, and arbiters are all local. The cryptography stays invisible plumbing.</p>
-  </div>
-  <div class="comm">
-    <div class="comm-card r">
-      <div class="flags">🇧🇯 🇸🇳 🇰🇪 🇳🇬 🇨🇮 🇧🇷 🇸🇻 🇺🇸 🇫🇷 🌍</div>
-      <h3 data-i18n="comm.rails.h3">Pay the way your neighbors already pay</h3>
-      <p data-i18n="comm.rails.p">A community is a currency, a culture, and the payment rails people actually use. Listings advertise the rail; your handle stays private until sats are locked.</p>
-      <div class="rails">
-        <span class="rail">Wave</span><span class="rail">Orange Money</span><span class="rail">M-Pesa</span><span class="rail">MTN MoMo</span><span class="rail">Airtel Money</span><span class="rail">PIX</span><span class="rail">Zelle</span><span class="rail">Cash App</span><span class="rail">Revolut</span><span class="rail">Wise</span><span class="rail">SEPA</span><span class="rail" data-i18n="comm.rails.cash">Cash in hand</span><span class="rail more" data-i18n="comm.rails.more">+ whatever your community uses</span>
+  <!-- THE WEAVE -->
+  <section class="blk" id="trust">
+    <div class="kick r" style="--ac:var(--orange-l)"><span class="node"></span><span data-i18n="kick.weave">01 · The weave</span></div>
+    <h2 class="hl r d1" data-i18n="weave.h2">No role dominates. Ever.</h2>
+    <p class="lead r d2" data-i18n="weave.sub">Every trade weaves three participants together. Sats move only when two of the three agree — cooperation enforced by mathematics, not promises.</p>
+    <div class="roles3">
+      <div class="rcard r" style="--ac:var(--orange-l)">
+        <div class="ph"><img src="img/role-seller.jpg" alt="A vibrant market fruit stall piled with produce" loading="lazy"><span class="who" data-i18n="weave.seller.role">Seller</span></div>
+        <div class="rbody">
+          <h3 data-i18n="weave.seller.h3">Locks the sats</h3>
+          <p data-i18n="weave.seller.p">The moment the Lightning invoice is paid, the sats become ecash locked in escrow — split into three cryptographic shares. No one can move them alone. Not even Chama.</p>
+        </div>
+      </div>
+      <div class="rcard r d1" style="--ac:var(--purple)">
+        <div class="ph"><img src="img/role-buyer.jpg" alt="Shoppers and vendors at a busy open-air market" loading="lazy"><span class="who" data-i18n="weave.buyer.role">Buyer</span></div>
+        <div class="rbody">
+          <h3 data-i18n="weave.buyer.h3">Claims the sats</h3>
+          <p data-i18n="weave.buyer.p">Pays by any local rail — mobile money, bank transfer, cash in hand. Two of three shares reconstruct the funds. Identity is a Nostr key, not a passport.</p>
+        </div>
+      </div>
+      <div class="rcard r d2" style="--ac:var(--teal-m)">
+        <div class="ph"><img src="img/role-arbiter.jpg" alt="A person holding a hand-painted 'Liberty and justice for all' sign" loading="lazy"><span class="who" data-i18n="weave.arbiter.role">Arbiter</span></div>
+        <div class="rbody">
+          <h3 data-i18n="weave.arbiter.h3">Breaks the ties</h3>
+          <p data-i18n="weave.arbiter.p">A reputation-staked community member who votes only when buyer and seller disagree. Open roster, public track record, calm judgment.</p>
+        </div>
+      </div>
       </div>
     </div>
-    <div class="comm-card comm-org r d1">
-      <img class="org-mark" src="icons/chama-mark-512.png" alt="" aria-hidden="true">
-      <h3 data-i18n="comm.org.h3">Bring Chama home</h3>
-      <p data-i18n="comm.org.p">Anyone can light up a community: claim your flag, recruit local arbiters, plug in your own Fedimint federation — or start on the default one today. No approval gate. No application form.</p>
-      <a href="https://getchama.app" class="p-cta" target="_blank" rel="noopener"><span data-i18n="comm.org.cta">Open the globe</span> <span>→</span></a>
-    </div>
-  </div>
-</div>
+    <p class="weave-rule r" data-i18n="weave.rule"><span class="c-t">Teal passes over orange.</span> <span class="c-o">Orange passes over purple.</span> <span class="c-p">Purple passes over teal.</span><br>No role dominates forever — the weave rule lives in the logo and in the protocol.</p>
+  </section>
 
-<!-- PROTOCOL -->
-<div id="protocol">
-  <div class="sec-h">
-    <h2 class="r" data-i18n="proto.h2">Five signed events.<br>One trustless trade.</h2>
-    <p class="r d1" data-i18n="proto.sub">The entire escrow lifecycle is a Nostr event chain. No database required — replay the chain, reconstruct the state.</p>
-  </div>
-  <div class="proto">
+  <!-- PRODUCTS -->
+  <section class="blk" id="products">
+    <div class="kick r" style="--ac:var(--orange)"><span class="node"></span><span data-i18n="kick.products">02 · Five products</span></div>
+    <h2 class="hl r d1" data-i18n="products.h2">Five products.<br>One trust primitive.</h2>
+    <p class="lead r d2" data-i18n="products.sub">Everything runs on the same 2-of-3 escrow. Different flows, identical trust model: zero.</p>
+    <div class="prod-list">
+      <div class="prod r" style="--ac:var(--orange-l)">
+        <div class="prod-thumb"><img src="img/p-billpay.jpg" alt="Naira notes beside a mobile-money app" loading="lazy"></div>
+        <div class="prod-main">
+          <div class="prod-name"><span data-i18n="p.billpay.name">Bill Pay</span> <span class="live" data-i18n="live">Live</span></div>
+          <div class="prod-tag" data-i18n="p.billpay.tag">The front door to Bitcoin</div>
+          <p class="prod-desc" data-i18n="p.billpay.desc">Post any bill — electricity, rent, school fees. Lock sats in escrow. A community volunteer pays it and claims the sats. No wallet required to understand it. This is how the next billion people meet Bitcoin.</p>
+        </div>
+        <a class="prod-cta" href="https://getchama.app/?sim=1" target="_blank" rel="noopener"><span data-i18n="p.billpay.cta">Start a bill</span> <span class="arrow">→</span></a>
+      </div>
+      <div class="prod r" style="--ac:var(--orange)">
+        <div class="prod-thumb"><img src="img/p-p2p.jpg" alt="Cash held out in hand" loading="lazy"></div>
+        <div class="prod-main">
+          <div class="prod-name"><span data-i18n="p.p2p.name">P2P Exchange</span> <span class="live" data-i18n="live">Live</span></div>
+          <div class="prod-tag" data-i18n="p.p2p.tag">Sats ↔ fiat</div>
+          <p class="prod-desc" data-i18n="p.p2p.desc">Seller locks sats. Buyer sends fiat by bank, mobile money, or cash. Both confirm, escrow settles. No order books, no custody, no KYC.</p>
+        </div>
+        <a class="prod-cta" href="https://getchama.app/?sim=1" target="_blank" rel="noopener"><span data-i18n="p.p2p.cta">Trade now</span> <span class="arrow">→</span></a>
+      </div>
+      <div class="prod r" style="--ac:var(--purple)">
+        <div class="prod-thumb"><img src="img/p-stores.jpg" alt="A small storefront with goods on display" loading="lazy"></div>
+        <div class="prod-main">
+          <div class="prod-name"><span data-i18n="p.stores.name">Stores</span> <span class="live" data-i18n="live">Live</span></div>
+          <div class="prod-tag" data-i18n="p.stores.tag">Every seller is a store</div>
+          <p class="prod-desc" data-i18n="p.stores.desc">Community storefronts with real reputations. Pay sats, goods ship, escrow protects both sides — ratings follow the npub, not the platform.</p>
+        </div>
+        <a class="prod-cta" href="https://getchama.app/?sim=1" target="_blank" rel="noopener"><span data-i18n="p.stores.cta">Browse stores</span> <span class="arrow">→</span></a>
+      </div>
+      <div class="prod r" style="--ac:var(--core)">
+        <div class="prod-thumb"><img src="img/p-lend.jpg" alt="Hands counting bundles of banknotes" loading="lazy"></div>
+        <div class="prod-main">
+          <div class="prod-name"><span data-i18n="p.lend.name">Community Lending</span> <span class="live" data-i18n="live">Live</span></div>
+          <div class="prod-tag" data-i18n="p.lend.tag">Digital tontines</div>
+          <p class="prod-desc" data-i18n="p.lend.desc">Lock sats as loans with trust-tiered limits. Auto-generated repayment escrows, interest tracking, arbiter-verified repayments. Microfinance on Bitcoin.</p>
+        </div>
+        <a class="prod-cta" href="https://getchama.app/?sim=1" target="_blank" rel="noopener"><span data-i18n="p.lend.cta">Lend sats</span> <span class="arrow">→</span></a>
+      </div>
+    </div>
+  </section>
+
+  <!-- COMMUNITIES -->
+  <section class="blk" id="communities">
+    <div class="kick r" style="--ac:var(--purple)"><span class="node"></span><span data-i18n="kick.comm">03 · Communities</span></div>
+    <h2 class="hl r d1" data-i18n="comm.h2">Every country gets a community.</h2>
+    <p class="lead r d2" data-i18n="comm.sub">Pick your flag at sign-in — currency, languages, payment rails, and arbiters are all local. The cryptography stays invisible plumbing.</p>
+    <div class="comm-band r d2"><img src="img/comm.jpg" alt="A community gathering of people seated together" loading="lazy"><div class="cap" data-i18n="comm.band">Every user has a home.</div></div>
+    <div class="comm">
+      <div class="card r">
+        <div class="flags">🇧🇯 🇸🇳 🇰🇪 🇳🇬 🇨🇮 🇧🇷 🇸🇻 🇺🇸 🇫🇷 🌍</div>
+        <h3 data-i18n="comm.rails.h3">Pay the way your neighbors already pay</h3>
+        <p data-i18n="comm.rails.p">A community is a currency, a culture, and the payment rails people actually use. Listings advertise the rail; your handle stays private until sats are locked.</p>
+        <div class="rails">
+          <span class="rail">Wave</span><span class="rail">Orange Money</span><span class="rail">M-Pesa</span><span class="rail">MTN MoMo</span><span class="rail">Airtel Money</span><span class="rail">PIX</span><span class="rail">Zelle</span><span class="rail">Cash App</span><span class="rail">Revolut</span><span class="rail">Wise</span><span class="rail">SEPA</span><span class="rail" data-i18n="comm.rails.cash">Cash in hand</span><span class="rail more" data-i18n="comm.rails.more">+ whatever your community uses</span>
+        </div>
+      </div>
+      <div class="card card-org r d1">
+        <img class="org-mark" src="icons/chama-mark-512.png" alt="" aria-hidden="true">
+        <h3 data-i18n="comm.org.h3">Bring Chama home</h3>
+        <p data-i18n="comm.org.p">Anyone can light up a community: claim your flag, recruit local arbiters, plug in your own Fedimint federation — or start on the default one today. No approval gate. No application form.</p>
+        <a class="prod-cta" href="https://getchama.app/?sim=1" target="_blank" rel="noopener"><span data-i18n="comm.org.cta">Open the globe</span> <span class="arrow">→</span></a>
+      </div>
+    </div>
+  </section>
+
+  <!-- PROTOCOL -->
+  <section class="blk" id="protocol">
+    <div class="kick r" style="--ac:var(--teal-m)"><span class="node"></span><span data-i18n="kick.proto">04 · The protocol</span></div>
+    <h2 class="hl r d1" data-i18n="proto.h2">Five signed events.<br>One trustless trade.</h2>
+    <p class="lead r d2" data-i18n="proto.sub">The entire escrow lifecycle is a Nostr event chain. No database required — replay the chain, reconstruct the state.</p>
     <div class="steps">
-      <div class="st r">
+      <div class="st r" style="--ac:var(--orange)">
         <div class="st-n">1</div>
         <h3 data-i18n="proto.1.h3">Create</h3>
         <p data-i18n="proto.1.p">Trade terms published as kind:38100. NIP-44 encrypted, multi-relay broadcast. Participants only.</p>
         <div class="tags"><span class="tag tag-n">Nostr</span></div>
       </div>
-      <div class="st r d1">
+      <div class="st r d1" style="--ac:var(--purple)">
         <div class="st-n">2</div>
         <h3 data-i18n="proto.2.h3">Join</h3>
         <p data-i18n="proto.2.p">Counterparty and arbiter sign kind:38101 events. Three present → escrow can fund. Federation validated at join, not later.</p>
         <div class="tags"><span class="tag tag-n">Nostr</span></div>
       </div>
-      <div class="st r d2">
+      <div class="st r d2" style="--ac:var(--teal-m)">
         <div class="st-n">3</div>
         <h3 data-i18n="proto.3.h3">Lock</h3>
         <p data-i18n="proto.3.p">Ecash notes split into 3 Shamir shares in browser WASM. Each share encrypted to its recipient. The server never touches funds.</p>
         <div class="tags"><span class="tag tag-e">Ecash</span><span class="tag tag-s">2-of-3 SSS</span></div>
       </div>
-      <div class="st r d3">
+      <div class="st r d3" style="--ac:var(--orange)">
         <div class="st-n">4</div>
         <h3 data-i18n="proto.4.h3">Vote</h3>
         <p data-i18n="proto.4.p">2-of-3 consensus resolves the trade. Agreement is instant. Disagreement goes to the arbiter — timeout, then auto-rotation.</p>
         <div class="tags"><span class="tag tag-n">Nostr</span></div>
       </div>
-      <div class="st r d4">
+      <div class="st r d4" style="--ac:var(--purple)">
         <div class="st-n">5</div>
         <h3 data-i18n="proto.5.h3">Claim</h3>
         <p data-i18n="proto.5.p">Winner combines 2 shares, reconstructs the ecash, and withdraws over Lightning. 0.5% fee at payout. Trade complete.</p>
         <div class="tags"><span class="tag tag-e">Ecash</span><span class="tag tag-s">SSS</span></div>
       </div>
     </div>
-  </div>
-</div>
+  </section>
 
-<!-- TECHNOLOGY -->
-<div id="tech">
-  <div class="sec-h">
-    <h2 class="r" data-i18n="tech.h2">Built different.</h2>
-    <p class="r d1" data-i18n="tech.sub">Every design decision eliminates a trust assumption.</p>
-  </div>
-  <div class="tech">
+  <!-- UNDER THE HOOD -->
+  <section class="blk" id="tech">
+    <div class="kick r" style="--ac:var(--orange)"><span class="node"></span><span data-i18n="kick.tech">05 · Under the hood</span></div>
+    <h2 class="hl r d1" data-i18n="tech.h2">Built different.</h2>
+    <p class="lead r d2" data-i18n="tech.sub">Every design decision eliminates a trust assumption.</p>
     <div class="tech-g">
-      <div class="tech-c r"><span class="k c-o">2-of-3</span><h4 data-i18n="tech.1.h4">Shamir Secret Sharing</h4><p data-i18n="tech.1.p">Ecash split into 2-of-3 shares in browser WASM, each NIP-44 encrypted to its participant. The server is mathematically blind.</p></div>
-      <div class="tech-c r d1"><span class="k c-o">ecash</span><h4 data-i18n="tech.2.h4">Fedimint underneath</h4><p data-i18n="tech.2.p">Blinded tokens, instant settlement, zero routing fees. A fully client-side wallet that drains to zero after every trade.</p></div>
-      <div class="tech-c r d2"><span class="k c-p">npub</span><h4 data-i18n="tech.3.h4">Nostr identity</h4><p data-i18n="tech.3.p">One key across every product. NIP-98 signed sessions. No passwords, no emails, no accounts to freeze.</p></div>
-      <div class="tech-c r d3"><span class="k c-p">NIP-44</span><h4 data-i18n="tech.4.h4">Encrypted trade chat</h4><p data-i18n="tech.4.p">Per-trade messaging between the three participants. Private during the trade, replayable as evidence in a dispute.</p></div>
-      <div class="tech-c r d4"><span class="k c-t">38120</span><h4 data-i18n="tech.5.h4">Arbiter marketplace</h4><p data-i18n="tech.5.p">An open roster with applications and public track records. Reputation is the backbone — earned, not bought.</p></div>
-      <div class="tech-c r d5"><span class="k c-t">relays</span><h4 data-i18n="tech.6.h4">Multi-relay by design</h4><p data-i18n="tech.6.p">Custom kinds 38100–38121. Publish to all relays, succeed on one. Any client can replay full escrow state.</p></div>
+      <div class="tech-c r" style="--ac:var(--orange)"><span class="k">2-of-3</span><h4 data-i18n="tech.1.h4">Shamir Secret Sharing</h4><p data-i18n="tech.1.p">Ecash split into 2-of-3 shares in browser WASM, each NIP-44 encrypted to its participant. The server is mathematically blind.</p></div>
+      <div class="tech-c r d1" style="--ac:var(--orange)"><span class="k">ecash</span><h4 data-i18n="tech.2.h4">Fedimint underneath</h4><p data-i18n="tech.2.p">Blinded tokens, instant settlement, zero routing fees. A fully client-side wallet that drains to zero after every trade.</p></div>
+      <div class="tech-c r d2" style="--ac:var(--purple)"><span class="k">npub</span><h4 data-i18n="tech.3.h4">Nostr identity</h4><p data-i18n="tech.3.p">One key across every product. NIP-98 signed sessions. No passwords, no emails, no accounts to freeze.</p></div>
+      <div class="tech-c r d3" style="--ac:var(--purple)"><span class="k">NIP-44</span><h4 data-i18n="tech.4.h4">Encrypted trade chat</h4><p data-i18n="tech.4.p">Per-trade messaging between the three participants. Private during the trade, replayable as evidence in a dispute.</p></div>
+      <div class="tech-c r d4" style="--ac:var(--teal-m)"><span class="k">38120</span><h4 data-i18n="tech.5.h4">Arbiter marketplace</h4><p data-i18n="tech.5.p">An open roster with applications and public track records. Reputation is the backbone — earned, not bought.</p></div>
+      <div class="tech-c r d5" style="--ac:var(--teal-m)"><span class="k">relays</span><h4 data-i18n="tech.6.h4">Multi-relay by design</h4><p data-i18n="tech.6.p">Custom kinds 38100–38121. Publish to all relays, succeed on one. Any client can replay full escrow state.</p></div>
     </div>
-  </div>
-</div>
+    <div class="nums-strip r" style="margin-top:30px">
+      <div class="nstat"><div class="v c-t">0</div><div class="l" data-i18n="nums.1">Custodians</div></div>
+      <div class="nstat"><div class="v c-o">∞</div><div class="l" data-i18n="nums.2">Federations</div></div>
+      <div class="nstat"><div class="v c-g">8+</div><div class="l" data-i18n="nums.3">Fiat currencies</div></div>
+      <div class="nstat"><div class="v c-p">3</div><div class="l" data-i18n="nums.4">Languages</div></div>
+      <div class="nstat"><div class="v" style="color:var(--t2)">0.5%</div><div class="l" data-i18n="nums.5">Platform fee</div></div>
+    </div>
+  </section>
 
-<!-- NUMBERS -->
-<div class="nums">
-  <div class="nums-g">
-    <div class="r"><div class="n-v c-t">0</div><div class="n-l" data-i18n="nums.1">Custodians</div></div>
-    <div class="r d1"><div class="n-v c-o">10+</div><div class="n-l" data-i18n="nums.2">Federations</div></div>
-    <div class="r d2"><div class="n-v c-g">8+</div><div class="n-l" data-i18n="nums.3">Fiat currencies</div></div>
-    <div class="r d3"><div class="n-v c-p">4</div><div class="n-l" data-i18n="nums.4">Languages</div></div>
-    <div class="r d4"><div class="n-v" style="color:var(--t3)">0.5%</div><div class="n-l" data-i18n="nums.5">Platform fee</div></div>
-  </div>
-</div>
+  <!-- GET CHAMA -->
+  <section class="blk get" id="get">
+    <div class="kick r" style="--ac:var(--orange)"><span class="node"></span><span data-i18n="kick.get">Get Chama</span></div>
+    <h2 class="hl r d1" data-i18n="get.h2">Two ways in.</h2>
+    <p class="lead r d2" data-i18n="get.sub">Play in the browser with no money on the line, then trade for real on your phone.</p>
+    <div class="get-grid">
+      <div class="getcard r d1" style="--ac:var(--teal-m)">
+        <div class="getcard-top"><span class="getcard-name" data-i18n="get.sandbox.name">Sandbox</span><span class="getcard-tag" data-i18n="get.sandbox.tag">Browser · play money</span></div>
+        <p class="getcard-desc" data-i18n="get.sandbox.desc">Walk through every flow — fund, lock, vote, claim — with simulated sats. No keys, no risk, nothing to lose.</p>
+        <a class="btn-ghost" href="https://getchama.app/?sim=1" target="_blank" rel="noopener"><span data-i18n="get.sandbox.cta">Launch the sandbox</span> <span class="arrow">→</span></a>
+      </div>
+      <div class="getcard getcard-store r d2" style="--ac:var(--orange)">
+        <div class="getcard-top"><span class="getcard-name" data-i18n="get.store.name">Zapstore</span><span class="getcard-tag" data-i18n="get.store.tag">Android · real sats</span></div>
+        <p class="getcard-desc" data-i18n="get.store.desc">Install the real app and trade with your own keys. Distributed on Zapstore — a permissionless app store built on Nostr.</p>
+        <div class="zs">
+          <div class="zs-title" data-i18n="get.zs.title">What’s Zapstore?</div>
+          <ul class="zs-list">
+            <li><span class="zs-ico zs-o"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-1.9"/></svg></span><span data-i18n="get.zs.1">Permissionless — no gatekeeper, no review board</span></li>
+            <li><span class="zs-ico zs-p"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.3 1.7 2.8-.2 1 2.6 2.4 1.5-.6 2.8.6 2.8-2.4 1.5-1 2.6-2.8-.2L12 21l-2.3-1.7-2.8.2-1-2.6L3.5 18l.6-2.8L3.5 12.4l2.4-1.5 1-2.6 2.8.2z"/><path d="M9 12l2 2 4-4"/></svg></span><span data-i18n="get.zs.2">Every build signed by the developer’s key</span></li>
+            <li><span class="zs-ico zs-g"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M13 2L4.5 13.2H11l-1.4 8.8L19.5 10.2H13z"/></svg></span><span data-i18n="get.zs.3">Discover and tip apps with Lightning zaps</span></li>
+            <li><span class="zs-ico zs-t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M7.5 7.5a6 6 0 0 0 0 9M16.5 7.5a6 6 0 0 1 0 9M4.5 4.5a10 10 0 0 0 0 15M19.5 4.5a10 10 0 0 1 0 15"/></svg></span><span data-i18n="get.zs.4">Android APKs delivered straight over Nostr</span></li>
+          </ul>
+        </div>
+        <a class="btn-primary" href="https://zapstore.dev/apps/app.chama.market" target="_blank" rel="noopener" data-i18n="get.store.cta">Get it on Zapstore</a>
+      </div>
+    </div>
+  </section>
 
-<!-- MANIFESTO -->
-<section class="mani">
-  <img class="mani-mark" src="icons/chama-mark-1024.png" alt="" aria-hidden="true">
-  <h2 class="r" data-i18n="mani.h2">A coordinator.<br>Not a wallet.</h2>
-  <p class="r d1" data-i18n="mani.p1">Lightning moves value in. Ecash exists only inside the escrow window. Lightning moves value out. Sats are never parked, never pooled, <strong>never ours</strong>.</p>
-  <p class="r d2" data-i18n="mani.p2">The promise: <strong>no sats stranded, ever.</strong> Every guard, every recovery path, every refusal in the codebase is that one promise wearing different clothes.</p>
-  <div class="hero-btns r d3">
-    <a href="https://github.com/jesuspirate/chama" class="btn-g" target="_blank" rel="noopener"><span data-i18n="mani.cta1">Read the code</span> <span>→</span></a>
-    <a href="https://github.com/jesuspirate/chama/blob/main/PHILOSOPHY.md" class="btn-g" target="_blank" rel="noopener"><span data-i18n="mani.cta2">Read the philosophy</span> <span>→</span></a>
-  </div>
-</section>
+  <!-- MANIFESTO -->
+  <section class="blk mani">
+    <img class="mani-mark" src="icons/chama-mark-1024.png" alt="" aria-hidden="true">
+    <div class="kick r" style="--ac:var(--core)"><span class="node"></span><span data-i18n="kick.ethos">The ethos</span></div>
+    <h2 class="hl r d1" data-i18n="mani.h2">A coordinator.<br>Not a wallet.</h2>
+    <p class="r d2" data-i18n="mani.p1">Lightning moves value in. Ecash exists only inside the escrow window. Lightning moves value out. Sats are never parked, never pooled, <strong>never ours</strong>.</p>
+    <p class="r d3" data-i18n="mani.p2">The promise: <strong>no sats stranded, ever.</strong> Every guard, every recovery path, every refusal in the codebase is that one promise wearing different clothes.</p>
+    <div class="mani-btns r d4">
+      <a class="btn-ghost" href="https://github.com/jesuspirate/chama" target="_blank" rel="noopener"><span data-i18n="mani.cta1">Read the code</span> <span class="arrow">→</span></a>
+      <a class="btn-ghost" href="https://github.com/jesuspirate/chama/blob/main/PHILOSOPHY.md" target="_blank" rel="noopener"><span data-i18n="mani.cta2">Read the philosophy</span> <span class="arrow">→</span></a>
+    </div>
+  </section>
 
-<!-- CTA -->
-<section class="cta">
-  <div class="cta-glow"></div>
-  <h2 class="r" data-i18n="cta.h2">Your community.<br>Your money.<br><em>Your rules.</em></h2>
-  <p class="r d1" data-i18n="cta.p">Open source. No incorporation. No token. Just cryptography, community, and freedom.</p>
-  <div class="hero-btns r d2">
-    <a href="https://getchama.app" class="btn-w" target="_blank" rel="noopener" data-i18n="cta.btn1">Open Chama</a>
-    <a href="https://github.com/jesuspirate/chama" class="btn-g" target="_blank" rel="noopener"><span data-i18n="cta.btn2">View source</span> <span>→</span></a>
-  </div>
-</section>
+  <!-- CTA -->
+  <section class="blk cta">
+    <h2 class="hl r" data-i18n="cta.h2">Your community.<br>Your money.<br><em>Your rules.</em></h2>
+    <p class="r d1" data-i18n="cta.p">Open source. No incorporation. No token. Just cryptography, community, and freedom.</p>
+    <div class="cta-btns r d2">
+      <a class="btn-primary" href="https://getchama.app/?sim=1" target="_blank" rel="noopener" data-i18n="cta.btn1">Try the sandbox</a>
+      <a class="btn-ghost" href="https://zapstore.dev/apps/app.chama.market" target="_blank" rel="noopener"><span data-i18n="cta.btn2">Get it on Zapstore</span> <span class="arrow">→</span></a>
+    </div>
+  </section>
+</main>
 
 <!-- FOOTER -->
 <footer>
@@ -458,8 +530,9 @@ footer{padding:22px 24px;border-top:.5px solid var(--hairline2)}
     <div class="ft-l"><img src="icons/chama-mark-64.png" width="18" height="18" alt="">Chama · est. block 934,669 · chama.community</div>
     <div class="ft-r">
       <a href="https://github.com/jesuspirate/chama" target="_blank" rel="noopener">GitHub</a>
-      <a href="https://getchama.app" target="_blank" rel="noopener" data-i18n="footer.app">App</a>
+      <a href="https://zapstore.dev/apps/app.chama.market" target="_blank" rel="noopener" data-i18n="footer.app">App</a>
       <a href="https://stacker.news" target="_blank" rel="noopener">Stacker News</a>
+      <a href="https://unsplash.com" target="_blank" rel="noopener">Photos: Unsplash</a>
     </div>
   </div>
 </footer>
@@ -469,16 +542,30 @@ footer{padding:22px 24px;border-top:.5px solid var(--hairline2)}
 const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('v');io.unobserve(e.target)}})},{threshold:.08,rootMargin:'0px 0px -32px 0px'});
 document.querySelectorAll('.r').forEach(el=>io.observe(el));
 
-/* i18n — EN is the inline default; FR mirrors every key */
+/* i18n — EN is the inline default; ES and FR mirror every key */
 const I18N={
 en:{
  'meta.title':'Chama — Bitcoin commerce woven from community trust',
  'meta.desc':'Chama coordinates trust between buyer, seller, and arbiter — non-custodial Bitcoin commerce for every community on Earth. Fedimint ecash, 2-of-3 Shamir escrow, Nostr-native.',
- 'nav.trust':'The weave','nav.products':'Products','nav.communities':'Communities','nav.how':'Protocol','nav.open':'Open app',
+ 'nav.trust':'The weave','nav.products':'Products','nav.communities':'Communities','nav.how':'Protocol','nav.open':'Get the app',
+ 'kick.weave':'01 · The weave','kick.products':'02 · Products','kick.comm':'03 · Communities','kick.proto':'04 · The protocol','kick.tech':'05 · Under the hood','kick.ethos':'The ethos','kick.get':'Get Chama',
+ 'get.h2':'Two ways in.',
+ 'get.sub':'Play in the browser with no money on the line, then trade for real on your phone.',
+ 'get.sandbox.name':'Sandbox','get.sandbox.tag':'Browser · play money',
+ 'get.sandbox.desc':'Walk through every flow — fund, lock, vote, claim — with simulated sats. No keys, no risk, nothing to lose.',
+ 'get.sandbox.cta':'Launch the sandbox',
+ 'get.store.name':'Zapstore','get.store.tag':'Android · real sats',
+ 'get.store.desc':'Install the real app and trade with your own keys. Distributed on Zapstore — a permissionless app store built on Nostr.',
+ 'get.store.cta':'Get it on Zapstore',
+ 'get.zs.title':'What’s Zapstore?',
+ 'get.zs.1':'Permissionless — no gatekeeper, no review board',
+ 'get.zs.2':'Every build signed by the developer’s key',
+ 'get.zs.3':'Discover and tip apps with Lightning zaps',
+ 'get.zs.4':'Android APKs delivered straight over Nostr',
  'hero.badge':'Open source · Non-custodial · Live now',
  'hero.h1':'Bitcoin commerce, <span class="grad">woven</span> from community trust.',
  'hero.sub':'Buyer, seller, and arbiter — three roles woven into one accountable trade. Pay bills, swap sats for cash, shop local stores, lend within your community. Nobody holds your money. Not even us.',
- 'hero.cta1':'Open Chama','hero.cta2':'How it works','hero.tagline':'community • trust • reputation',
+ 'hero.cta1':'Try the sandbox','hero.cta2':'How it works','hero.tagline':'community • trust • reputation',
  'weave.h2':'No role dominates. Ever.',
  'weave.sub':'Every trade weaves three participants together. Sats move only when two of the three agree — cooperation enforced by mathematics, not promises.',
  'weave.seller.role':'Seller','weave.seller.h3':'Locks the sats',
@@ -488,7 +575,7 @@ en:{
  'weave.arbiter.role':'Arbiter','weave.arbiter.h3':'Breaks the ties',
  'weave.arbiter.p':'A reputation-staked community member who votes only when buyer and seller disagree. Open roster, public track record, calm judgment.',
  'weave.rule':'<span class="c-t">Teal passes over orange.</span> <span class="c-o">Orange passes over purple.</span> <span class="c-p">Purple passes over teal.</span><br>No role dominates forever — the weave rule lives in the logo and in the protocol.',
- 'products.h2':'Five products.<br>One trust primitive.',
+ 'products.h2':'Four products.<br>One trust primitive.',
  'products.sub':'Everything runs on the same 2-of-3 escrow. Different flows, identical trust model: zero.',
  'live':'Live',
  'p.billpay.name':'Bill Pay','p.billpay.tag':'The front door to Bitcoin',
@@ -503,14 +590,12 @@ en:{
  'p.lend.name':'Community Lending','p.lend.tag':'Digital tontines',
  'p.lend.desc':'Lock sats as loans with trust-tiered limits. Auto-generated repayment escrows, interest tracking, arbiter-verified repayments. Microfinance on Bitcoin.',
  'p.lend.cta':'Lend sats',
- 'p.escrow.name':'Raw Escrow','p.escrow.tag':'The primitive',
- 'p.escrow.desc':'The naked 2-of-3 tool. Lock sats, pick any arbiter, vote release or refund. Encrypted trade chat built in. The building block everything else runs on.',
- 'p.escrow.cta':'Create escrow',
  'comm.h2':'Every country gets a community.',
  'comm.sub':'Pick your flag at sign-in — currency, languages, payment rails, and arbiters are all local. The cryptography stays invisible plumbing.',
  'comm.rails.h3':'Pay the way your neighbors already pay',
  'comm.rails.p':'A community is a currency, a culture, and the payment rails people actually use. Listings advertise the rail; your handle stays private until sats are locked.',
  'comm.rails.cash':'Cash in hand','comm.rails.more':'+ whatever your community uses',
+ 'comm.band':'Every user has a home.',
  'comm.org.h3':'Bring Chama home',
  'comm.org.p':'Anyone can light up a community: claim your flag, recruit local arbiters, plug in your own Fedimint federation — or start on the default one today. No approval gate. No application form.',
  'comm.org.cta':'Open the globe',
@@ -535,16 +620,30 @@ en:{
  'mani.cta1':'Read the code','mani.cta2':'Read the philosophy',
  'cta.h2':'Your community.<br>Your money.<br><em>Your rules.</em>',
  'cta.p':'Open source. No incorporation. No token. Just cryptography, community, and freedom.',
- 'cta.btn1':'Open Chama','cta.btn2':'View source','footer.app':'App'
+ 'cta.btn1':'Try the sandbox','cta.btn2':'Get it on Zapstore','footer.app':'App'
 },
 fr:{
  'meta.title':'Chama — Le commerce Bitcoin tissé de confiance communautaire',
  'meta.desc':'Chama coordonne la confiance entre acheteur, vendeur et arbitre — le commerce Bitcoin sans garde de fonds, pour chaque communauté du monde. Ecash Fedimint, séquestre Shamir 2-sur-3, natif Nostr.',
- 'nav.trust':'Le tissage','nav.products':'Produits','nav.communities':'Communautés','nav.how':'Protocole','nav.open':'Ouvrir l’app',
+ 'nav.trust':'Le tissage','nav.products':'Produits','nav.communities':'Communautés','nav.how':'Protocole','nav.open':'Obtenir l’app',
+ 'kick.weave':'01 · Le tissage','kick.products':'02 · Produits','kick.comm':'03 · Communautés','kick.proto':'04 · Le protocole','kick.tech':'05 · Sous le capot','kick.ethos':'Le principe','kick.get':'Obtenir Chama',
+ 'get.h2':'Deux façons d’entrer.',
+ 'get.sub':'Jouez dans le navigateur sans argent en jeu, puis échangez pour de vrai sur votre téléphone.',
+ 'get.sandbox.name':'Bac à sable','get.sandbox.tag':'Navigateur · argent fictif',
+ 'get.sandbox.desc':'Parcourez chaque étape — financer, verrouiller, voter, réclamer — avec des sats simulés. Pas de clés, pas de risque, rien à perdre.',
+ 'get.sandbox.cta':'Lancer le bac à sable',
+ 'get.store.name':'Zapstore','get.store.tag':'Android · vrais sats',
+ 'get.store.desc':'Installez la vraie app et échangez avec vos propres clés. Distribuée sur Zapstore — une boutique d’applications sans permission, bâtie sur Nostr.',
+ 'get.store.cta':'Obtenir sur Zapstore',
+ 'get.zs.title':'C’est quoi Zapstore ?',
+ 'get.zs.1':'Sans permission — aucun gardien, aucun comité de validation',
+ 'get.zs.2':'Chaque version signée par la clé du développeur',
+ 'get.zs.3':'Découvrez et soutenez les apps par des zaps Lightning',
+ 'get.zs.4':'Des APK Android livrés directement via Nostr',
  'hero.badge':'Open source · Sans garde de fonds · Disponible',
  'hero.h1':'Le commerce Bitcoin, <span class="grad">tissé</span> de confiance communautaire.',
  'hero.sub':'Acheteur, vendeur, arbitre : trois rôles tissés en un seul échange responsable. Payez des factures, échangez des sats contre du cash, achetez en boutique locale, prêtez au sein de votre communauté. Personne ne détient votre argent. Pas même nous.',
- 'hero.cta1':'Ouvrir Chama','hero.cta2':'Comment ça marche','hero.tagline':'communauté • confiance • réputation',
+ 'hero.cta1':'Essayer le bac à sable','hero.cta2':'Comment ça marche','hero.tagline':'communauté • confiance • réputation',
  'weave.h2':'Aucun rôle ne domine. Jamais.',
  'weave.sub':'Chaque échange tisse trois participants ensemble. Les sats ne bougent que lorsque deux sur trois sont d’accord — une coopération garantie par les mathématiques, pas par des promesses.',
  'weave.seller.role':'Vendeur','weave.seller.h3':'Verrouille les sats',
@@ -554,7 +653,7 @@ fr:{
  'weave.arbiter.role':'Arbitre','weave.arbiter.h3':'Tranche les litiges',
  'weave.arbiter.p':'Un membre de la communauté, engagé sur sa réputation, qui ne vote que si l’acheteur et le vendeur sont en désaccord. Liste ouverte, historique public, jugement posé.',
  'weave.rule':'<span class="c-t">Le turquoise passe sur l’orange.</span> <span class="c-o">L’orange passe sur le violet.</span> <span class="c-p">Le violet passe sur le turquoise.</span><br>Aucun rôle ne domine pour toujours — la règle du tissage vit dans le logo comme dans le protocole.',
- 'products.h2':'Cinq produits.<br>Une seule primitive de confiance.',
+ 'products.h2':'Quatre produits.<br>Une seule primitive de confiance.',
  'products.sub':'Tout repose sur le même séquestre 2-sur-3. Des parcours différents, un modèle de confiance identique : zéro.',
  'live':'En ligne',
  'p.billpay.name':'Paiement de factures','p.billpay.tag':'La porte d’entrée vers Bitcoin',
@@ -569,14 +668,12 @@ fr:{
  'p.lend.name':'Prêts communautaires','p.lend.tag':'Tontines numériques',
  'p.lend.desc':'Verrouillez des sats en prêts avec des plafonds gradués par la confiance. Séquestres de remboursement automatiques, suivi des intérêts, remboursements vérifiés par arbitre. La microfinance sur Bitcoin.',
  'p.lend.cta':'Prêter des sats',
- 'p.escrow.name':'Séquestre brut','p.escrow.tag':'La primitive',
- 'p.escrow.desc':'L’outil 2-sur-3 à l’état pur. Verrouillez des sats, choisissez votre arbitre, votez libération ou remboursement. Chat chiffré intégré. La brique sur laquelle tout le reste repose.',
- 'p.escrow.cta':'Créer un séquestre',
  'comm.h2':'Chaque pays a sa communauté.',
  'comm.sub':'Choisissez votre drapeau à l’inscription — devise, langues, moyens de paiement et arbitres sont tous locaux. La cryptographie reste de la plomberie invisible.',
  'comm.rails.h3':'Payez comme vos voisins paient déjà',
  'comm.rails.p':'Une communauté, c’est une devise, une culture et les moyens de paiement que les gens utilisent vraiment. L’annonce affiche le moyen de paiement ; votre numéro reste privé jusqu’au verrouillage des sats.',
  'comm.rails.cash':'Espèces','comm.rails.more':'+ tout ce que votre communauté utilise',
+ 'comm.band':'Chaque utilisateur a un foyer.',
  'comm.org.h3':'Ramenez Chama chez vous',
  'comm.org.p':'N’importe qui peut lancer une communauté : revendiquez votre drapeau, recrutez des arbitres locaux, branchez votre propre fédération Fedimint — ou démarrez dès aujourd’hui sur celle par défaut. Aucune validation. Aucun formulaire.',
  'comm.org.cta':'Ouvrir le globe',
@@ -601,7 +698,85 @@ fr:{
  'mani.cta1':'Lire le code','mani.cta2':'Lire la philosophie',
  'cta.h2':'Votre communauté.<br>Votre argent.<br><em>Vos règles.</em>',
  'cta.p':'Open source. Pas de société. Pas de token. Juste de la cryptographie, de la communauté et de la liberté.',
- 'cta.btn1':'Ouvrir Chama','cta.btn2':'Voir le code source','footer.app':'App'
+ 'cta.btn1':'Essayer le bac à sable','cta.btn2':'Obtenir sur Zapstore','footer.app':'App'
+},
+es:{
+ 'meta.title':'Chama — Comercio Bitcoin tejido con la confianza de la comunidad',
+ 'meta.desc':'Chama coordina la confianza entre comprador, vendedor y árbitro — comercio Bitcoin sin custodia para cada comunidad del mundo. Ecash de Fedimint, custodia Shamir 2-de-3, nativo de Nostr.',
+ 'nav.trust':'El tejido','nav.products':'Productos','nav.communities':'Comunidades','nav.how':'Protocolo','nav.open':'Obtener la app',
+ 'kick.weave':'01 · El tejido','kick.products':'02 · Productos','kick.comm':'03 · Comunidades','kick.proto':'04 · El protocolo','kick.tech':'05 · Bajo el capó','kick.ethos':'El principio','kick.get':'Obtener Chama',
+ 'get.h2':'Dos formas de entrar.',
+ 'get.sub':'Juega en el navegador sin dinero en juego, y luego intercambia de verdad en tu teléfono.',
+ 'get.sandbox.name':'Sandbox','get.sandbox.tag':'Navegador · dinero de práctica',
+ 'get.sandbox.desc':'Recorre cada flujo — financiar, bloquear, votar, reclamar — con sats simulados. Sin claves, sin riesgo, nada que perder.',
+ 'get.sandbox.cta':'Abrir el sandbox',
+ 'get.store.name':'Zapstore','get.store.tag':'Android · sats reales',
+ 'get.store.desc':'Instala la app real e intercambia con tus propias claves. Distribuida en Zapstore — una tienda de apps sin permisos, construida sobre Nostr.',
+ 'get.store.cta':'Conseguir en Zapstore',
+ 'get.zs.title':'¿Qué es Zapstore?',
+ 'get.zs.1':'Sin permisos — sin guardianes ni comité de revisión',
+ 'get.zs.2':'Cada versión firmada con la clave del desarrollador',
+ 'get.zs.3':'Descubre y apoya apps con zaps de Lightning',
+ 'get.zs.4':'APKs de Android entregados directamente por Nostr',
+ 'hero.badge':'Código abierto · Sin custodia · Ya disponible',
+ 'hero.h1':'Comercio Bitcoin, <span class="grad">tejido</span> con la confianza de la comunidad.',
+ 'hero.sub':'Comprador, vendedor y árbitro — tres roles tejidos en un solo trato responsable. Paga facturas, cambia sats por efectivo, compra en tiendas locales, presta dentro de tu comunidad. Nadie retiene tu dinero. Ni siquiera nosotros.',
+ 'hero.cta1':'Probar el sandbox','hero.cta2':'Cómo funciona','hero.tagline':'comunidad • confianza • reputación',
+ 'weave.h2':'Ningún rol domina. Nunca.',
+ 'weave.sub':'Cada trato teje a tres participantes. Los sats se mueven solo cuando dos de los tres están de acuerdo — cooperación garantizada por las matemáticas, no por promesas.',
+ 'weave.seller.role':'Vendedor','weave.seller.h3':'Bloquea los sats',
+ 'weave.seller.p':'En cuanto se paga la factura Lightning, los sats se convierten en ecash bloqueado en custodia — dividido en tres fragmentos criptográficos. Nadie puede moverlos solo. Ni siquiera Chama.',
+ 'weave.buyer.role':'Comprador','weave.buyer.h3':'Reclama los sats',
+ 'weave.buyer.p':'Paga por cualquier medio local — dinero móvil, transferencia bancaria, efectivo en mano. Dos de los tres fragmentos reconstruyen los fondos. La identidad es una clave Nostr, no un pasaporte.',
+ 'weave.arbiter.role':'Árbitro','weave.arbiter.h3':'Desempata',
+ 'weave.arbiter.p':'Un miembro de la comunidad que respalda su reputación y solo vota cuando comprador y vendedor no se ponen de acuerdo. Lista abierta, historial público, juicio sereno.',
+ 'weave.rule':'<span class="c-t">El turquesa pasa sobre el naranja.</span> <span class="c-o">El naranja pasa sobre el morado.</span> <span class="c-p">El morado pasa sobre el turquesa.</span><br>Ningún rol domina para siempre — la regla del tejido vive en el logo y en el protocolo.',
+ 'products.h2':'Cuatro productos.<br>Una sola primitiva de confianza.',
+ 'products.sub':'Todo corre sobre la misma custodia 2-de-3. Flujos distintos, modelo de confianza idéntico: cero.',
+ 'live':'En vivo',
+ 'p.billpay.name':'Pago de facturas','p.billpay.tag':'La puerta de entrada a Bitcoin',
+ 'p.billpay.desc':'Publica cualquier factura — luz, alquiler, colegiatura. Bloquea sats en custodia. Un voluntario de la comunidad la paga y reclama los sats. No hace falta una wallet para entenderlo. Así conocerá Bitcoin el próximo billón de personas.',
+ 'p.billpay.cta':'Publicar una factura',
+ 'p.p2p.name':'Intercambio P2P','p.p2p.tag':'Sats ↔ fiat',
+ 'p.p2p.desc':'El vendedor bloquea sats. El comprador envía fiat por banco, dinero móvil o efectivo. Ambos confirman, la custodia se liquida. Sin libros de órdenes, sin custodia, sin KYC.',
+ 'p.p2p.cta':'Intercambiar',
+ 'p.stores.name':'Tiendas','p.stores.tag':'Cada vendedor es una tienda',
+ 'p.stores.desc':'Escaparates comunitarios con reputaciones reales. Pagas sats, la mercancía se envía, la custodia protege a ambas partes — la valoración sigue al npub, no a la plataforma.',
+ 'p.stores.cta':'Explorar tiendas',
+ 'p.lend.name':'Préstamos comunitarios','p.lend.tag':'Tandas digitales',
+ 'p.lend.desc':'Bloquea sats como préstamos con límites según el nivel de confianza. Custodias de reembolso automáticas, seguimiento de intereses, reembolsos verificados por árbitro. Microfinanzas sobre Bitcoin.',
+ 'p.lend.cta':'Prestar sats',
+ 'comm.h2':'Cada país tiene su comunidad.',
+ 'comm.sub':'Elige tu bandera al registrarte — moneda, idiomas, medios de pago y árbitros son todos locales. La criptografía queda como plomería invisible.',
+ 'comm.rails.h3':'Paga como ya pagan tus vecinos',
+ 'comm.rails.p':'Una comunidad es una moneda, una cultura y los medios de pago que la gente realmente usa. El anuncio muestra el medio de pago; tu número queda privado hasta que se bloquean los sats.',
+ 'comm.rails.cash':'Efectivo en mano','comm.rails.more':'+ lo que use tu comunidad',
+ 'comm.band':'Cada usuario tiene un hogar.',
+ 'comm.org.h3':'Lleva Chama a tu tierra',
+ 'comm.org.p':'Cualquiera puede encender una comunidad: reclama tu bandera, recluta árbitros locales, conecta tu propia federación Fedimint — o empieza hoy en la predeterminada. Sin filtro de aprobación. Sin formulario.',
+ 'comm.org.cta':'Abrir el globo',
+ 'proto.h2':'Cinco eventos firmados.<br>Un trato sin terceros de confianza.',
+ 'proto.sub':'Todo el ciclo de vida de la custodia es una cadena de eventos Nostr. Sin base de datos — reproduce la cadena, reconstruye el estado.',
+ 'proto.1.h3':'Crear','proto.1.p':'Las condiciones del trato se publican como kind:38100. Cifrado NIP-44, difusión multi-relé. Solo participantes.',
+ 'proto.2.h3':'Unirse','proto.2.p':'La contraparte y el árbitro firman eventos kind:38101. Tres presentes → la custodia puede financiarse. Federación validada al unirse, no después.',
+ 'proto.3.h3':'Bloquear','proto.3.p':'Las notas ecash se dividen en 3 fragmentos de Shamir en el WASM del navegador. Cada fragmento cifrado para su destinatario. El servidor nunca toca los fondos.',
+ 'proto.4.h3':'Votar','proto.4.p':'Un consenso 2-de-3 resuelve el trato. El acuerdo es instantáneo. El desacuerdo pasa al árbitro — vencimiento del plazo y rotación automática.',
+ 'proto.5.h3':'Reclamar','proto.5.p':'El ganador combina 2 fragmentos, reconstruye el ecash y retira por Lightning. 0,5 % de comisión al pagar. Trato completo.',
+ 'tech.h2':'Construido distinto.','tech.sub':'Cada decisión de diseño elimina una suposición de confianza.',
+ 'tech.1.h4':'Reparto de secreto de Shamir','tech.1.p':'El ecash se divide en fragmentos 2-de-3 en el WASM del navegador, cada uno cifrado con NIP-44 para su participante. El servidor es matemáticamente ciego.',
+ 'tech.2.h4':'Fedimint por debajo','tech.2.p':'Tokens cegados, liquidación instantánea, cero comisiones de enrutamiento. Una wallet totalmente del lado del cliente que se vacía a cero tras cada trato.',
+ 'tech.3.h4':'Identidad Nostr','tech.3.p':'Una sola clave para todos los productos. Sesiones firmadas con NIP-98. Sin contraseñas, sin correos, sin cuentas que congelar.',
+ 'tech.4.h4':'Chat de trato cifrado','tech.4.p':'Mensajería por trato entre los tres participantes. Privada durante el trato, reproducible como prueba en una disputa.',
+ 'tech.5.h4':'Mercado de árbitros','tech.5.p':'Una lista abierta con candidaturas e historiales públicos. La reputación es la columna vertebral — se gana, no se compra.',
+ 'tech.6.h4':'Multi-relé por diseño','tech.6.p':'Kinds personalizados 38100–38121. Publica en todos los relés, basta con que uno acepte. Cualquier cliente puede reproducir el estado completo de la custodia.',
+ 'nums.1':'Custodios','nums.2':'Federaciones','nums.3':'Monedas fiat','nums.4':'Idiomas','nums.5':'Comisión',
+ 'mani.h2':'Un coordinador.<br>No una wallet.',
+ 'mani.p1':'Lightning hace entrar el valor. El ecash solo existe dentro de la ventana de custodia. Lightning hace salir el valor. Los sats nunca se estacionan, nunca se mancomunan, <strong>nunca son nuestros</strong>.',
+ 'mani.p2':'La promesa: <strong>ningún sat abandonado, jamás.</strong> Cada salvaguarda, cada vía de recuperación, cada negativa en el código es esa misma promesa con otra ropa.',
+ 'mani.cta1':'Leer el código','mani.cta2':'Leer la filosofía',
+ 'cta.h2':'Tu comunidad.<br>Tu dinero.<br><em>Tus reglas.</em>',
+ 'cta.p':'Código abierto. Sin sociedad. Sin token. Solo criptografía, comunidad y libertad.',
+ 'cta.btn1':'Probar el sandbox','cta.btn2':'Conseguir en Zapstore','footer.app':'App'
 }};
 
 function setLang(l){
@@ -618,7 +793,8 @@ function setLang(l){
 }
 document.querySelectorAll('.lang-btn').forEach(b=>b.addEventListener('click',()=>setLang(b.dataset.lang)));
 let saved=null;try{saved=localStorage.getItem('chama_lang')}catch(e){}
-setLang(saved||(((navigator.language||'').toLowerCase().startsWith('fr'))?'fr':'en'));
+const nl=(navigator.language||'').toLowerCase();
+setLang(saved||(nl.startsWith('es')?'es':nl.startsWith('fr')?'fr':'en'));
 </script>
 </body>
 </html>
