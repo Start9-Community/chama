@@ -138,11 +138,12 @@ nav::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:1px;ba
 @media(max-width:760px){.prod{grid-template-columns:1fr;gap:12px;padding:24px 8px 24px 18px}.prod-thumb{width:100%;height:150px}.prod-cta{margin-top:10px}}
 
 /* communities */
-.comm-band{position:relative;margin-top:30px;border-radius:var(--r-card);overflow:hidden;height:300px;border:1px solid var(--hairline2)}
-.comm-band img{width:100%;height:100%;object-fit:cover;display:block}
-.comm-band::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,10,.05) 25%,rgba(10,10,10,.4) 60%,rgba(10,10,10,.88) 100%)}
-.comm-band .cap{position:absolute;left:28px;bottom:22px;z-index:2;font-family:var(--sora);font-weight:600;font-size:clamp(20px,2.6vw,30px);letter-spacing:-.02em;color:var(--t1);max-width:18ch}
-@media(max-width:600px){.comm-band{height:220px}}
+.comm-cap{font-family:var(--sora);font-weight:600;font-size:clamp(20px,2.8vw,32px);letter-spacing:-.025em;text-align:center;margin:34px 0 16px}
+.comm-band{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.comm-band .cb{position:relative;height:230px;border-radius:var(--r-card);overflow:hidden;border:1px solid var(--hairline2)}
+.comm-band .cb img{width:100%;height:100%;object-fit:cover;display:block}
+.comm-band .cb::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,10,0) 55%,rgba(10,10,10,.45))}
+@media(max-width:700px){.comm-band{grid-template-columns:1fr}.comm-band .cb{height:200px}}
 .comm{margin-top:16px;display:grid;grid-template-columns:1.1fr .9fr;gap:16px}
 @media(max-width:820px){.comm{grid-template-columns:1fr}}
 .card{position:relative;background:var(--card);border:1px solid var(--hairline2);border-radius:var(--r-card);padding:32px 30px;overflow:hidden}
@@ -320,21 +321,21 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
         <div class="ph"><img src="img/role-seller.jpg" alt="A vibrant market fruit stall piled with produce" loading="lazy"><span class="who" data-i18n="weave.seller.role">Seller</span></div>
         <div class="rbody">
           <h3 data-i18n="weave.seller.h3">Locks the sats</h3>
-          <p data-i18n="weave.seller.p">The moment the Lightning invoice is paid, the sats become ecash locked in escrow — split into three cryptographic shares. No one can move them alone. Not even Chama.</p>
+          <p data-i18n="weave.seller.p">The seller has sats and wants fiat. The instant the deal is struck, their sats lock in escrow — split into three cryptographic shares. No one can move them alone. Not even Chama.</p>
         </div>
       </div>
       <div class="rcard r d1" style="--ac:var(--purple)">
         <div class="ph"><img src="img/role-buyer.jpg" alt="Shoppers and vendors at a busy open-air market" loading="lazy"><span class="who" data-i18n="weave.buyer.role">Buyer</span></div>
         <div class="rbody">
           <h3 data-i18n="weave.buyer.h3">Claims the sats</h3>
-          <p data-i18n="weave.buyer.p">Pays by any local rail — mobile money, bank transfer, cash in hand. Two of three shares reconstruct the funds. Identity is a Nostr key, not a passport.</p>
+          <p data-i18n="weave.buyer.p">The buyer brings fiat — mobile money, bank transfer, or cash in hand — and walks away with sats. Two of three shares release the funds. Identity is a Nostr key, not a passport.</p>
         </div>
       </div>
       <div class="rcard r d2" style="--ac:var(--teal-m)">
         <div class="ph"><img src="img/role-arbiter.jpg" alt="A person holding a hand-painted 'Liberty and justice for all' sign" loading="lazy"><span class="who" data-i18n="weave.arbiter.role">Arbiter</span></div>
         <div class="rbody">
-          <h3 data-i18n="weave.arbiter.h3">Breaks the ties</h3>
-          <p data-i18n="weave.arbiter.p">A reputation-staked community member who votes only when buyer and seller disagree. Open roster, public track record, calm judgment.</p>
+          <h3 data-i18n="weave.arbiter.h3">Justice for all</h3>
+          <p data-i18n="weave.arbiter.p">Steps in only when the two disagree, and rules for whoever is telling the truth. A reputation-staked community member: open roster, public record, calm judgment.</p>
         </div>
       </div>
       </div>
@@ -392,7 +393,12 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
     <div class="kick r" style="--ac:var(--purple)"><span class="node"></span><span data-i18n="kick.comm">03 · Communities</span></div>
     <h2 class="hl r d1" data-i18n="comm.h2">Every country gets a community.</h2>
     <p class="lead r d2" data-i18n="comm.sub">Pick your flag at sign-in — currency, languages, payment rails, and arbiters are all local. The cryptography stays invisible plumbing.</p>
-    <div class="comm-band r d2"><img src="img/comm.jpg" alt="A community gathering of people seated together" loading="lazy"><div class="cap" data-i18n="comm.band">Every user has a home.</div></div>
+    <div class="comm-cap r d2" data-i18n="comm.band">Every user has a home.</div>
+    <div class="comm-band r d2">
+      <span class="cb"><img src="img/comm.jpg" alt="A community gathering in East Africa" loading="lazy"></span>
+      <span class="cb"><img src="img/comm-2.jpg" alt="A colorful hillside neighborhood in Latin America" loading="lazy"></span>
+      <span class="cb"><img src="img/comm-3.jpg" alt="A flower-draped street in Southeast Asia" loading="lazy"></span>
+    </div>
     <div class="comm">
       <div class="card r">
         <div class="flags">🇧🇯 🇸🇳 🇰🇪 🇳🇬 🇨🇮 🇧🇷 🇸🇻 🇺🇸 🇫🇷 🌍</div>
@@ -507,6 +513,7 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
     <h2 class="hl r d1" data-i18n="mani.h2">A coordinator.<br>Not a wallet.</h2>
     <p class="r d2" data-i18n="mani.p1">Lightning moves value in. Ecash exists only inside the escrow window. Lightning moves value out. Sats are never parked, never pooled, <strong>never ours</strong>.</p>
     <p class="r d3" data-i18n="mani.p2">The promise: <strong>no sats stranded, ever.</strong> Every guard, every recovery path, every refusal in the codebase is that one promise wearing different clothes.</p>
+    <p class="r d4" data-i18n="mani.p3">And it’s all in the open. You don’t have to read the code to trust Chama — but it’s there if you do. Every honest act is rewarded: ratings become reputation — your credibility, your superpower — and arbiters earn a direct 1% only when they settle a dispute fairly. Good behavior compounds; bad behavior goes nowhere.</p>
     <div class="mani-btns r d4">
       <a class="btn-ghost" href="https://github.com/jesuspirate/chama" target="_blank" rel="noopener"><span data-i18n="mani.cta1">Read the code</span> <span class="arrow">→</span></a>
       <a class="btn-ghost" href="https://github.com/jesuspirate/chama/blob/main/PHILOSOPHY.md" target="_blank" rel="noopener"><span data-i18n="mani.cta2">Read the philosophy</span> <span class="arrow">→</span></a>
@@ -532,6 +539,8 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
       <a href="https://github.com/jesuspirate/chama" target="_blank" rel="noopener">GitHub</a>
       <a href="https://zapstore.dev/apps/app.chama.market" target="_blank" rel="noopener" data-i18n="footer.app">App</a>
       <a href="https://stacker.news" target="_blank" rel="noopener">Stacker News</a>
+      <a href="fedi:community210v3xzat5dphhyhmsw43xketeygazyv33vvmnzvmxx5unqwpkxdnxxvfs893rjwfcvsukxcmzxsmkxcnyvf3kywpnxscxzdnyxq6rvcmpxuengvp4xdsn2wfcvymrgvpexesjytpzvdhk6mt4de5hg72lw46kjezldpjhsg36yfskyephv5cnqwpjvdnrqenrxpnrxvmrxs6nscfkxymnvdrpv4jngwpjvdskgce3xy6nvdf5vfjxyef4x9jrvceevejrvcenxcekydtrygkzyer9vde8jur5d9hkuhmtv4ujyw3zvymkvmr0gcu4wuth2eh9zkr9vdc8z3m4w4m56v60w3j9zwrpxdvhw3n9ga3kwcfcgc4kk0fz05fkv4p3">Chat · EN</a>
+      <a href="fedi:community210v3xzat5dphhyhmsw43xketeygazyde5xf3kzvpnx9skzdnyxpjrvdm9xpskzc3kxucrxwpex33xxe3exvmnxvtxv9jryefexsmnqvty8yunvd35vgunywrzxvmrsvpj8q6jytpzvdhk6mt4de5hg72lw46kjezldpjhsg36yfnrqcf3vserxvfevyck2wtyxanxzvf5x9skgdfhvd3rwc3jv5crsetyx3jxvdesxserxerpvdskzcehxpjr2wf5vymkxenpx56kvwrpygkzyer9vde8jur5d9hkuhmtv4ujyw3zfphhy3t3vym8sd6vg4a9v6n2fsek7m6k23ux6v6ytp65jeekd4pkj5nzw39xcanh0pkrg0fz055t3dve">Chat · FR</a>
       <a href="https://unsplash.com" target="_blank" rel="noopener">Photos: Unsplash</a>
     </div>
   </div>
@@ -569,11 +578,11 @@ en:{
  'weave.h2':'No role dominates. Ever.',
  'weave.sub':'Every trade weaves three participants together. Sats move only when two of the three agree — cooperation enforced by mathematics, not promises.',
  'weave.seller.role':'Seller','weave.seller.h3':'Locks the sats',
- 'weave.seller.p':'The moment the Lightning invoice is paid, the sats become ecash locked in escrow — split into three cryptographic shares. No one can move them alone. Not even Chama.',
+ 'weave.seller.p':'The seller has sats and wants fiat. The instant the deal is struck, their sats lock in escrow — split into three cryptographic shares. No one can move them alone. Not even Chama.',
  'weave.buyer.role':'Buyer','weave.buyer.h3':'Claims the sats',
- 'weave.buyer.p':'Pays by any local rail — mobile money, bank transfer, cash in hand. Two of three shares reconstruct the funds. Identity is a Nostr key, not a passport.',
- 'weave.arbiter.role':'Arbiter','weave.arbiter.h3':'Breaks the ties',
- 'weave.arbiter.p':'A reputation-staked community member who votes only when buyer and seller disagree. Open roster, public track record, calm judgment.',
+ 'weave.buyer.p':'The buyer brings fiat — mobile money, bank transfer, or cash in hand — and walks away with sats. Two of three shares release the funds. Identity is a Nostr key, not a passport.',
+ 'weave.arbiter.role':'Arbiter','weave.arbiter.h3':'Justice for all',
+ 'weave.arbiter.p':'Steps in only when the two disagree, and rules for whoever is telling the truth. A reputation-staked community member: open roster, public record, calm judgment.',
  'weave.rule':'<span class="c-t">Teal passes over orange.</span> <span class="c-o">Orange passes over purple.</span> <span class="c-p">Purple passes over teal.</span><br>No role dominates forever — the weave rule lives in the logo and in the protocol.',
  'products.h2':'Four products.<br>One trust primitive.',
  'products.sub':'Everything runs on the same 2-of-3 escrow. Different flows, identical trust model: zero.',
@@ -617,6 +626,7 @@ en:{
  'mani.h2':'A coordinator.<br>Not a wallet.',
  'mani.p1':'Lightning moves value in. Ecash exists only inside the escrow window. Lightning moves value out. Sats are never parked, never pooled, <strong>never ours</strong>.',
  'mani.p2':'The promise: <strong>no sats stranded, ever.</strong> Every guard, every recovery path, every refusal in the codebase is that one promise wearing different clothes.',
+ 'mani.p3':'And it’s all in the open. You don’t have to read the code to trust Chama — but it’s there if you do. Every honest act is rewarded: ratings become reputation — your credibility, your superpower — and arbiters earn a direct 1% only when they settle a dispute fairly. Good behavior compounds; bad behavior goes nowhere.',
  'mani.cta1':'Read the code','mani.cta2':'Read the philosophy',
  'cta.h2':'Your community.<br>Your money.<br><em>Your rules.</em>',
  'cta.p':'Open source. No incorporation. No token. Just cryptography, community, and freedom.',
@@ -647,11 +657,11 @@ fr:{
  'weave.h2':'Aucun rôle ne domine. Jamais.',
  'weave.sub':'Chaque échange tisse trois participants ensemble. Les sats ne bougent que lorsque deux sur trois sont d’accord — une coopération garantie par les mathématiques, pas par des promesses.',
  'weave.seller.role':'Vendeur','weave.seller.h3':'Verrouille les sats',
- 'weave.seller.p':'Dès que la facture Lightning est payée, les sats deviennent de l’ecash verrouillé sous séquestre — découpé en trois parts cryptographiques. Personne ne peut les déplacer seul. Pas même Chama.',
+ 'weave.seller.p':'Le vendeur a des sats et veut du fiat. Dès que l’accord est conclu, ses sats sont verrouillés sous séquestre — découpés en trois parts cryptographiques. Personne ne peut les déplacer seul. Pas même Chama.',
  'weave.buyer.role':'Acheteur','weave.buyer.h3':'Réclame les sats',
- 'weave.buyer.p':'Paie par n’importe quel moyen local — mobile money, virement bancaire, espèces. Deux parts sur trois reconstituent les fonds. L’identité est une clé Nostr, pas un passeport.',
- 'weave.arbiter.role':'Arbitre','weave.arbiter.h3':'Tranche les litiges',
- 'weave.arbiter.p':'Un membre de la communauté, engagé sur sa réputation, qui ne vote que si l’acheteur et le vendeur sont en désaccord. Liste ouverte, historique public, jugement posé.',
+ 'weave.buyer.p':'L’acheteur apporte du fiat — mobile money, virement ou espèces — et repart avec des sats. Deux parts sur trois libèrent les fonds. L’identité est une clé Nostr, pas un passeport.',
+ 'weave.arbiter.role':'Arbitre','weave.arbiter.h3':'La justice pour tous',
+ 'weave.arbiter.p':'N’intervient que si les deux sont en désaccord, et tranche en faveur de celui qui dit la vérité. Membre engagé sur sa réputation : liste ouverte, historique public, jugement posé.',
  'weave.rule':'<span class="c-t">Le turquoise passe sur l’orange.</span> <span class="c-o">L’orange passe sur le violet.</span> <span class="c-p">Le violet passe sur le turquoise.</span><br>Aucun rôle ne domine pour toujours — la règle du tissage vit dans le logo comme dans le protocole.',
  'products.h2':'Quatre produits.<br>Une seule primitive de confiance.',
  'products.sub':'Tout repose sur le même séquestre 2-sur-3. Des parcours différents, un modèle de confiance identique : zéro.',
@@ -695,6 +705,7 @@ fr:{
  'mani.h2':'Un coordinateur.<br>Pas un wallet.',
  'mani.p1':'Lightning fait entrer la valeur. L’ecash n’existe que pendant la fenêtre de séquestre. Lightning fait sortir la valeur. Les sats ne sont jamais immobilisés, jamais mutualisés, <strong>jamais à nous</strong>.',
  'mani.p2':'La promesse : <strong>aucun sat abandonné, jamais.</strong> Chaque garde-fou, chaque chemin de récupération, chaque refus dans le code est cette même promesse sous un autre habit.',
+ 'mani.p3':'Et tout est à découvert. Pas besoin de lire le code pour faire confiance à Chama — mais il est là si vous le voulez. Chaque acte honnête est récompensé : les notes deviennent une réputation — votre crédibilité, votre super-pouvoir — et les arbitres touchent 1 % directement, uniquement lorsqu’ils règlent un litige équitablement. Le bon comportement s’accumule ; le mauvais ne mène nulle part.',
  'mani.cta1':'Lire le code','mani.cta2':'Lire la philosophie',
  'cta.h2':'Votre communauté.<br>Votre argent.<br><em>Vos règles.</em>',
  'cta.p':'Open source. Pas de société. Pas de token. Juste de la cryptographie, de la communauté et de la liberté.',
@@ -725,11 +736,11 @@ es:{
  'weave.h2':'Ningún rol domina. Nunca.',
  'weave.sub':'Cada trato teje a tres participantes. Los sats se mueven solo cuando dos de los tres están de acuerdo — cooperación garantizada por las matemáticas, no por promesas.',
  'weave.seller.role':'Vendedor','weave.seller.h3':'Bloquea los sats',
- 'weave.seller.p':'En cuanto se paga la factura Lightning, los sats se convierten en ecash bloqueado en custodia — dividido en tres fragmentos criptográficos. Nadie puede moverlos solo. Ni siquiera Chama.',
+ 'weave.seller.p':'El vendedor tiene sats y quiere fiat. En cuanto se cierra el trato, sus sats quedan bloqueados en custodia — divididos en tres fragmentos criptográficos. Nadie puede moverlos solo. Ni siquiera Chama.',
  'weave.buyer.role':'Comprador','weave.buyer.h3':'Reclama los sats',
- 'weave.buyer.p':'Paga por cualquier medio local — dinero móvil, transferencia bancaria, efectivo en mano. Dos de los tres fragmentos reconstruyen los fondos. La identidad es una clave Nostr, no un pasaporte.',
- 'weave.arbiter.role':'Árbitro','weave.arbiter.h3':'Desempata',
- 'weave.arbiter.p':'Un miembro de la comunidad que respalda su reputación y solo vota cuando comprador y vendedor no se ponen de acuerdo. Lista abierta, historial público, juicio sereno.',
+ 'weave.buyer.p':'El comprador trae fiat — dinero móvil, transferencia o efectivo — y se va con sats. Dos de tres fragmentos liberan los fondos. La identidad es una clave Nostr, no un pasaporte.',
+ 'weave.arbiter.role':'Árbitro','weave.arbiter.h3':'Justicia para todos',
+ 'weave.arbiter.p':'Interviene solo cuando ambos discrepan, y falla a favor de quien dice la verdad. Un miembro que respalda su reputación: lista abierta, historial público, juicio sereno.',
  'weave.rule':'<span class="c-t">El turquesa pasa sobre el naranja.</span> <span class="c-o">El naranja pasa sobre el morado.</span> <span class="c-p">El morado pasa sobre el turquesa.</span><br>Ningún rol domina para siempre — la regla del tejido vive en el logo y en el protocolo.',
  'products.h2':'Cuatro productos.<br>Una sola primitiva de confianza.',
  'products.sub':'Todo corre sobre la misma custodia 2-de-3. Flujos distintos, modelo de confianza idéntico: cero.',
@@ -773,6 +784,7 @@ es:{
  'mani.h2':'Un coordinador.<br>No una wallet.',
  'mani.p1':'Lightning hace entrar el valor. El ecash solo existe dentro de la ventana de custodia. Lightning hace salir el valor. Los sats nunca se estacionan, nunca se mancomunan, <strong>nunca son nuestros</strong>.',
  'mani.p2':'La promesa: <strong>ningún sat abandonado, jamás.</strong> Cada salvaguarda, cada vía de recuperación, cada negativa en el código es esa misma promesa con otra ropa.',
+ 'mani.p3':'Y todo está a la vista. No necesitas leer el código para confiar en Chama — pero ahí está si quieres. Cada acto honesto se recompensa: las valoraciones se vuelven reputación — tu credibilidad, tu superpoder — y los árbitros ganan un 1 % directo, solo cuando resuelven una disputa con justicia. El buen comportamiento se acumula; el malo no llega a ninguna parte.',
  'mani.cta1':'Leer el código','mani.cta2':'Leer la filosofía',
  'cta.h2':'Tu comunidad.<br>Tu dinero.<br><em>Tus reglas.</em>',
  'cta.p':'Código abierto. Sin sociedad. Sin token. Solo criptografía, comunidad y libertad.',
