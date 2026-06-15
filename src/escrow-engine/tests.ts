@@ -305,6 +305,11 @@ import {
   getTrustedArbiterPool,
   normalizeTrustedArbiterInput,
   classifyArbiterProvenance,
+  classifyArbiterAssignment,
+  classifySelfRoster,
+  requiresVerifiedRosterConsent,
+  HIGH_VALUE_CONSENT_MSATS,
+  pickArbiterFromPool as pickArbiterFromPoolV35,
 } from "../arbiters/pool.js";
 import {
   AMBIENT_ARBITER_FEE_BPS,
@@ -3617,6 +3622,234 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     const withLocalTrust = classifyArbiterProvenance([SOCK], [...OFFICIAL, SOCK]);
     assert(withLocalTrust.verified === true,
       "provenance: a key in THIS device's trusted pool reads as recognized (operator-added)");
+  }
+
+  // ── v3.5: pool integrity (C1 assignment + C7 roster) — consent layer ─────
+  //
+  // C1 stays OUT of the reducer on purpose: a LOCK-side assignment reject
+  // recomputed with today's rules strands genuine old chains on replay
+  // (ARBITER_NOT_ASSIGNED is not benign → unloadable funds). The classifier
+  // below is the informed-consent version — a miss warns, never strands —
+  // and must accept EVERY assignment basis a LOCK builder ever shipped:
+  // pool[0] (pre-v0.6.5), no-exclusion pick (v0.6.5+), excluded pick (v0.7.2+).
+  console.log("\n── POOL INTEGRITY (v3.5 — C1 assignment + C7 self-roster) ──");
+  {
+    const P1 = "11".repeat(32), P2 = "22".repeat(32), P3 = "33".repeat(32), P4 = "44".repeat(32);
+    const POOL = [P1, P2, P3, P4];
+    const BUYER = "b1".repeat(32);
+    const SELLER = "f1".repeat(32);
+    const ID = "escrow-v35-assignment";
+
+    // The honest v0.7.2+ pick passes clean.
+    const assigned = pickArbiterFromPoolV35(POOL, ID, [BUYER, SELLER])!;
+    const clean = classifyArbiterAssignment({
+      pool: POOL, escrowId: ID, committedArbiter: assigned,
+      buyerPubkey: BUYER, sellerPubkey: SELLER,
+    });
+    assert(clean.status === "as-assigned",
+      "invariant_arbiter-assignment__assigned_arbiter_passes_clean");
+
+    // A hand-seated pool member matching NO historical basis is flagged.
+    const acceptedSet = new Set(clean.accepted);
+    const colluder = POOL.find(pk => !acceptedSet.has(pk));
+    assert(!!colluder,
+      "invariant_arbiter-assignment__off_assignment_flagged: a 4-member pool leaves at least one non-basis member to test with");
+    const off = classifyArbiterAssignment({
+      pool: POOL, escrowId: ID, committedArbiter: colluder!,
+      buyerPubkey: BUYER, sellerPubkey: SELLER,
+    });
+    assert(off.status === "off-assignment",
+      "invariant_arbiter-assignment__off_assignment_flagged");
+    assert(off.accepted.includes(assigned),
+      "invariant_arbiter-assignment__off_assignment_flagged: the accepted set names the expected arbiter");
+
+    // Genuine v0.6.5..v0.7.2 chains used the NO-EXCLUSION pick. Build a pool
+    // where exclusions actually shift the pick (a party sits in the pool) and
+    // confirm the old basis is not false-warned.
+    {
+      const poolWithBuyer = [BUYER, P1, P2, P3];
+      let historicId: string | null = null;
+      let eraNoExcl: string | undefined;
+      for (let i = 0; i < 400 && !historicId; i++) {
+        const id = `legacy-chain-${i}`;
+        const a = pickArbiterFromPoolV35(poolWithBuyer, id);
+        const b = pickArbiterFromPoolV35(poolWithBuyer, id, [BUYER, SELLER]);
+        if (a && b && a !== b && a !== BUYER) {
+          historicId = id;
+          eraNoExcl = a;
+        }
+      }
+      assert(historicId !== null,
+        "invariant_arbiter-assignment__historical_no_exclusion_pick_not_false_warned: found an id where the eras diverge");
+      const legacy = classifyArbiterAssignment({
+        pool: poolWithBuyer, escrowId: historicId!, committedArbiter: eraNoExcl!,
+        buyerPubkey: BUYER, sellerPubkey: SELLER,
+      });
+      assert(legacy.status === "as-assigned",
+        "invariant_arbiter-assignment__historical_no_exclusion_pick_not_false_warned");
+    }
+
+    // Genuine pre-v0.6.5 chains committed communityArbiters[0]. Find an id
+    // where neither pick lands on pool[0] and confirm pool[0] still passes.
+    {
+      let preId: string | null = null;
+      for (let i = 0; i < 400 && !preId; i++) {
+        const id = `ancient-chain-${i}`;
+        if (pickArbiterFromPoolV35(POOL, id) !== POOL[0]
+            && pickArbiterFromPoolV35(POOL, id, [BUYER, SELLER]) !== POOL[0]) {
+          preId = id;
+        }
+      }
+      assert(preId !== null,
+        "invariant_arbiter-assignment__pre_v065_pool_first_not_false_warned: found an id whose picks avoid pool[0]");
+      const ancient = classifyArbiterAssignment({
+        pool: POOL, escrowId: preId!, committedArbiter: POOL[0],
+        buyerPubkey: BUYER, sellerPubkey: SELLER,
+      });
+      assert(ancient.status === "as-assigned",
+        "invariant_arbiter-assignment__pre_v065_pool_first_not_false_warned");
+    }
+
+    // Nothing to judge: empty pool / no committed arbiter / case-variants.
+    assert(classifyArbiterAssignment({
+      pool: [], escrowId: ID, committedArbiter: P1,
+    }).status === "not-applicable",
+      "assignment: empty pool is not-applicable (legacy volunteer-arbiter trades stay neutral)");
+    assert(classifyArbiterAssignment({
+      pool: POOL, escrowId: ID, committedArbiter: null,
+    }).status === "not-applicable",
+      "assignment: no committed arbiter (pre-LOCK) is not-applicable");
+    assert(classifyArbiterAssignment({
+      pool: POOL, escrowId: ID, committedArbiter: assigned.toUpperCase(),
+      buyerPubkey: BUYER, sellerPubkey: SELLER,
+    }).status === "as-assigned",
+      "assignment: committed arbiter matches case-insensitively");
+
+    // End-to-end pin of the CONSENSUS posture this whole layer rests on: the
+    // reducer ACCEPTS a LOCK seating any pool member (membership only), so the
+    // consent classifier is the ONLY thing standing between the performer and
+    // a hand-seated colluder. If this ever starts failing because handleLock
+    // grew an assignment reject, stop: that's the replay-strand path v3.3
+    // explicitly pulled (see INVARIANTS C1).
+    {
+      const create = createEvent({ communityArbiters: POOL });
+      const r1 = applyEvent(null, create);
+      const assignedHere = pickArbiterFromPoolV35(POOL, ESCROW_ID, [BUYER_PK, SELLER_PK])!;
+      const seated = POOL.find(pk => {
+        const probe = classifyArbiterAssignment({
+          pool: POOL, escrowId: ESCROW_ID, committedArbiter: pk,
+          buyerPubkey: BUYER_PK, sellerPubkey: SELLER_PK,
+        });
+        return probe.status === "off-assignment";
+      });
+      assert(!!seated && r1.ok,
+        "consent posture: setup — found an off-assignment pool member to seat");
+      if (r1.ok && seated) {
+        const lock = lockEvent(create.raw.id, { arbiterPubkey: seated });
+        const r2 = applyEvent(r1.state, lock);
+        if (assertOk(r2, "consent posture: the reducer ACCEPTS an off-assignment LOCK (membership only — no replay strand)")) {
+          assert(r2.state.participants[Role.ARBITER] === seated,
+            "consent posture: the off-assignment arbiter is seated in committed state");
+          const judged = classifyArbiterAssignment({
+            pool: r2.state.communityArbiters,
+            escrowId: r2.state.id,
+            committedArbiter: r2.state.participants[Role.ARBITER],
+            buyerPubkey: r2.state.participants[Role.BUYER],
+            sellerPubkey: r2.state.participants[Role.SELLER],
+          });
+          assert(judged.status === "off-assignment",
+            "consent posture: the classifier flags the seated colluder the reducer let through");
+          assert(judged.accepted.includes(assignedHere),
+            "consent posture: the classifier names the arbiter the trade SHOULD have");
+        }
+      }
+    }
+  }
+
+  // ── v3.5 C7: self-rostered pools must refuse the green badge ─────────────
+  {
+    const CREATOR = "c1".repeat(32);
+    const STEWARD = "d1".repeat(32);
+    const BUYER = "b2".repeat(32);
+    const SELLER = "f2".repeat(32);
+    const SOCK1 = "e1".repeat(32);
+    const SOCK2 = "e2".repeat(32);
+
+    // The load-bearing hole: a permissionless-shell creator self-rosters sock
+    // puppets, then creates a trade in their own community. The roster signer
+    // is a party to the trade and the recognition is roster-only → refused.
+    assert(classifySelfRoster({
+      communityArbiters: [SOCK1, SOCK2],
+      sources: { deviceTrusted: [], rosterArbiters: [SOCK1, SOCK2], rosterSigner: CREATOR },
+      tradeParties: [CREATOR, BUYER, SELLER],
+    }) === true,
+      "invariant_roster__self_rostered_badge_refused");
+
+    // Same shape but the signer is a JOINING counterparty (the shell creator
+    // joins someone else's trade in their own community) — equally conflicted.
+    assert(classifySelfRoster({
+      communityArbiters: [SOCK1],
+      sources: { deviceTrusted: [], rosterArbiters: [SOCK1], rosterSigner: BUYER },
+      tradeParties: [CREATOR, BUYER, SELLER],
+    }) === true,
+      "invariant_roster__self_rostered_badge_refused: a roster signed by the joining counterparty is refused too");
+
+    // An authority DISTINCT from every trade party verifies normally.
+    assert(classifySelfRoster({
+      communityArbiters: [SOCK1, SOCK2],
+      sources: { deviceTrusted: [], rosterArbiters: [SOCK1, SOCK2], rosterSigner: STEWARD },
+      tradeParties: [CREATOR, BUYER, SELLER],
+    }) === false,
+      "invariant_roster__distinct_authority_verifies");
+
+    // Recognition that survives WITHOUT the conflicted roster is not refused:
+    // the device already trusts these arbiters on its own anchor.
+    assert(classifySelfRoster({
+      communityArbiters: [SOCK1],
+      sources: { deviceTrusted: [SOCK1], rosterArbiters: [SOCK1], rosterSigner: CREATOR },
+      tradeParties: [CREATOR, BUYER, SELLER],
+    }) === false,
+      "invariant_roster__distinct_authority_verifies: device-anchored trust is independent of the conflicted roster");
+
+    // A steward who also ARBITRATES in their own community is the trust
+    // anchor, not a conflict — only stake-holding identities count.
+    assert(classifySelfRoster({
+      communityArbiters: [STEWARD, SOCK1],
+      sources: { deviceTrusted: [], rosterArbiters: [STEWARD, SOCK1], rosterSigner: STEWARD },
+      tradeParties: [CREATOR, BUYER, SELLER],
+    }) === false,
+      "invariant_roster__distinct_authority_verifies: a steward-arbiter signing their own roster is not a stake conflict");
+
+    // No verifiable roster → nothing to refuse.
+    assert(classifySelfRoster({
+      communityArbiters: [SOCK1],
+      sources: { deviceTrusted: [], rosterArbiters: [], rosterSigner: null },
+      tradeParties: [CREATOR, BUYER, SELLER],
+    }) === false,
+      "self-roster: no verifiable roster → flag stays down (membership warning owns that case)");
+
+    // ── C7 consent gate: fee-bearing / high-value trades (wired ahead of the
+    //    economic layer; NEVER a hard block, and NEVER for everyday trades).
+    assert(requiresVerifiedRosterConsent({
+      arbiterFeeMsats: 0, amountMsats: 100_000_000, poolSize: 2, distinctAuthorityVerified: false,
+    }) === false,
+      "fee-gate: an everyday trade on the 2-member default pool is NEVER gated");
+    assert(requiresVerifiedRosterConsent({
+      arbiterFeeMsats: 1_000, amountMsats: 100_000_000, poolSize: 5, distinctAuthorityVerified: false,
+    }) === true,
+      "fee-gate: a fee-bearing trade without a distinct-authority-verified pool arms the consent gate");
+    assert(requiresVerifiedRosterConsent({
+      arbiterFeeMsats: 1_000, amountMsats: 100_000_000, poolSize: 2, distinctAuthorityVerified: true,
+    }) === true,
+      "fee-gate: fee-bearing + verified but a sub-3 pool still arms the gate (min-pool is fee-tier only)");
+    assert(requiresVerifiedRosterConsent({
+      arbiterFeeMsats: 1_000, amountMsats: 100_000_000, poolSize: 3, distinctAuthorityVerified: true,
+    }) === false,
+      "fee-gate: fee-bearing + distinct-authority-verified + 3-member pool passes without the gate");
+    assert(requiresVerifiedRosterConsent({
+      arbiterFeeMsats: 0, amountMsats: HIGH_VALUE_CONSENT_MSATS, poolSize: 2, distinctAuthorityVerified: false,
+    }) === true,
+      "fee-gate: a high-value trade arms the gate even with fees off");
   }
 
   // Lookup with valid + missing slug

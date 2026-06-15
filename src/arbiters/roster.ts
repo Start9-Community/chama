@@ -238,19 +238,30 @@ export function readCachedRosterEvent(community: string): NostrEvent | null {
   }
 }
 
-/** The roster-sourced arbiter pool for a community: cached event, re-parsed,
- *  re-verified, authority-checked on EVERY read. Returns [] when there is no
- *  verifiable roster — callers merge with the existing pools. */
+/** The verified roster itself: cached event, re-parsed, re-verified,
+ *  authority-checked on EVERY read. Null when there is no verifiable roster.
+ *  v3.5 (C7): the SIGNER is part of the contract now — provenance must refuse
+ *  the green badge when the vouching key is itself a party to the trade being
+ *  judged, so callers need to know WHO vouched, not just who was vouched for. */
+export function readVerifiedRoster(
+  community: string | null | undefined,
+  authority: readonly string[],
+  options?: { verifyEvent?: (event: NostrEvent) => boolean },
+): VerifiedArbiterRoster | null {
+  if (!community) return null;
+  const cached = readCachedRosterEvent(community);
+  if (!cached) return null;
+  return selectLatestRoster([cached], authority, options);
+}
+
+/** The roster-sourced arbiter pool for a community. Returns [] when there is
+ *  no verifiable roster — callers merge with the existing pools. */
 export function readRosterPool(
   community: string | null | undefined,
   authority: readonly string[],
   options?: { verifyEvent?: (event: NostrEvent) => boolean },
 ): string[] {
-  if (!community) return [];
-  const cached = readCachedRosterEvent(community);
-  if (!cached) return [];
-  const best = selectLatestRoster([cached], authority, options);
-  return best?.arbiters ?? [];
+  return readVerifiedRoster(community, authority, options)?.arbiters ?? [];
 }
 
 // ── Relay sync ──────────────────────────────────────────────────────────────

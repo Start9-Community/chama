@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type EscrowState,
   type ChatImageAttachment,
@@ -31,7 +31,16 @@ import { listingPremiumLine } from "../listing-metrics.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
 import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
-import { pickArbiterFromPool, getTrustedArbiterPool, classifyArbiterProvenance } from "../../arbiters/pool.js";
+import {
+  pickArbiterFromPool,
+  classifyArbiterProvenance,
+  classifyArbiterAssignment,
+  classifySelfRoster,
+  getTrustedArbiterPoolSources,
+  requiresVerifiedRosterConsent,
+  type ArbiterAssignment,
+  type ArbiterProvenance,
+} from "../../arbiters/pool.js";
 import { isPerformanceContest } from "../../escrow-engine/arbiter-substitution.js";
 import { counterpartyToRate, type RatingThumb, type AggregateRatings } from "../../reputation/ratings.js";
 import { RatingTap } from "../components/RatingTap.js";
@@ -234,6 +243,9 @@ export function TradeDetail({
   // Two-tap confirm for the vote-#1 "cancel this trade" hatch (a quiet link
   // shouldn't end a trade on one mis-tap). Reset per trade below.
   const [cancelArmed, setCancelArmed] = useState(false);
+  // v3.5 (C1/C7): two-tap acknowledge before the PERFORMER's release vote on
+  // a trade whose arbiter is off-assignment / self-rostered / fee-gated.
+  const [riskAckArmed, setRiskAckArmed] = useState(false);
   // v3.1 B2: two-tap confirm for the buyer's PRE-lock "leave this trade" link.
   const [leaveArmed, setLeaveArmed] = useState(false);
   // v3.2: Mark-delivered debounce (chat echo flips the durable done-state) +
@@ -414,6 +426,51 @@ export function TradeDetail({
         participants[Role.SELLER],
       ]) ?? null)
     : null;
+  // v3.5 pool integrity (C1+C7) — consent-layer assessment, shared by the
+  // provenance banner and the performer's vote gate. All client-side: a wrong
+  // answer here warns (or under-warns), never strands. Memoized on the state
+  // object (every reducer apply produces a fresh one) because the roster read
+  // re-verifies a Schnorr signature — too heavy for timer-driven re-renders.
+  const { arbiterProv, arbiterAssignment, selfRostered, feeGateUnmet } = useMemo(() => {
+    const sources = getTrustedArbiterPoolSources({ community: state.community });
+    const trusted = [...new Set([...sources.rosterArbiters, ...sources.deviceTrusted])];
+    const prov = classifyArbiterProvenance(state.communityArbiters, trusted);
+    // Assignment is judged on the LOCK-committed arbiter only. Pre-LOCK there
+    // is nothing committed (the preview above is computed honestly by THIS
+    // device), and a JOIN-seated arbiter is already reducer-gated to the
+    // assigned pick.
+    const assignment: ArbiterAssignment = classifyArbiterAssignment({
+      pool: state.communityArbiters ?? [],
+      escrowId: state.id,
+      committedArbiter: state.status !== EscrowStatus.CREATED
+        ? state.participants[Role.ARBITER]
+        : null,
+      buyerPubkey: state.participants[Role.BUYER],
+      sellerPubkey: state.participants[Role.SELLER],
+    });
+    // Stake-holding identities only — a steward who also arbitrates in their
+    // own community is the trust anchor, not a conflict (see classifySelfRoster).
+    const rostered = classifySelfRoster({
+      communityArbiters: state.communityArbiters,
+      sources,
+      tradeParties: [
+        state.initiator.pubkey,
+        state.participants[Role.BUYER],
+        state.participants[Role.SELLER],
+      ],
+    });
+    return {
+      arbiterProv: prov,
+      arbiterAssignment: assignment,
+      selfRostered: rostered,
+      feeGateUnmet: requiresVerifiedRosterConsent({
+        arbiterFeeMsats: state.fees.arbiterMsats,
+        amountMsats: state.amountMsats,
+        poolSize: (state.communityArbiters ?? []).length,
+        distinctAuthorityVerified: prov.verified && !rostered,
+      }),
+    };
+  }, [state]);
   const votePrompt = decideVotePrompt(state, pubkey, participants);
   const winner = getWinner(state);
   const iAmWinner = samePubkey(winner?.pubkey, pubkey);
@@ -476,6 +533,7 @@ export function TradeDetail({
   useEffect(() => {
     setCancelArmed(false);
     setLeaveArmed(false);
+    setRiskAckArmed(false);
   }, [state.id, state.votes[Role.BUYER], state.votes[Role.SELLER]]);
 
   useEffect(() => {
@@ -2073,6 +2131,56 @@ export function TradeDetail({
             const isOversoldVoterView = isOversoldOrder && voteRole !== Role.ARBITER;
             const showRelease = votePrompt.outcomes.includes(Outcome.RELEASE) && !isOversoldVoterView;
             const showRefund = votePrompt.outcomes.includes(Outcome.REFUND);
+            // v3.5 (C1/C7): the PERFORMER — the non-locker whom RELEASE pays —
+            // is the party a colluding arbiter can rob (locker + arbiter hold
+            // 2 of 3 shares and can force a REFUND after the performer paid
+            // fiat / delivered). Their release action is the at-risk moment,
+            // so it sits behind an explicit two-tap acknowledge whenever
+            // arbiter trust is degraded. Refund (backing out) is never gated.
+            const releaseRecipient = payoutRecipientFor(state, Outcome.RELEASE);
+            const iAmPerformer = !isArbiter && !!releaseRecipient && voteRole === releaseRecipient.role;
+            const performRisk = !iAmPerformer ? null
+              : arbiterAssignment.status === "off-assignment"
+                ? {
+                    loud: true,
+                    line: "The arbiter on this trade isn't the one it should have been assigned.",
+                    ack: "I understand this arbiter is off-assignment",
+                  }
+              : selfRostered
+                ? {
+                    loud: true,
+                    line: "This trade's arbiters are vouched for only by a roster signed by a party to this trade.",
+                    ack: "I understand these arbiters are self-rostered",
+                  }
+              : feeGateUnmet
+                ? {
+                    loud: false,
+                    line: "High-value or fee-bearing trade without an independent verified arbiter roster of 3+ members.",
+                    ack: "I understand this trade lacks a verified arbiter roster",
+                  }
+                : null;
+            const releaseArmed = !!performRisk && riskAckArmed;
+            const handleReleaseTap = () => {
+              if (performRisk && !riskAckArmed) {
+                setRiskAckArmed(true);
+                return;
+              }
+              setRiskAckArmed(false);
+              handleVote(Outcome.RELEASE);
+            };
+            const riskNotice = performRisk && showRelease ? (
+              <div style={{
+                gridColumn: "1 / -1",
+                padding: "9px 11px", borderRadius: T.rs,
+                background: performRisk.loud ? T.redDim : T.amberDim,
+                border: `1px solid ${performRisk.loud ? T.red : T.amber}55`,
+                color: performRisk.loud ? T.red : T.amber,
+                fontFamily: T.mono, fontSize: 10, fontWeight: 700, lineHeight: 1.5,
+              }}>
+                ⚠ {performRisk.line} Proceed only if you trust it — a neutral
+                arbiter is what protects you once you've done your side of the deal.
+              </div>
+            ) : null;
             // Who wins on RELEASE / REFUND
             const releaseWinner = isMarketplace ? "seller" : "buyer";
             const refundWinner = isMarketplace ? "buyer" : "seller";
@@ -2126,17 +2234,25 @@ export function TradeDetail({
               <button
                 key="release"
                 disabled={voting}
-                onClick={() => handleVote(Outcome.RELEASE)}
-                aria-label={`Vote release: ${releaseLabel}`}
+                onClick={handleReleaseTap}
+                aria-label={releaseArmed && performRisk
+                  ? `Confirm release: ${performRisk.ack}`
+                  : `Vote release: ${releaseLabel}`}
                 style={voteActionButtonStyle({
                   disabled: voting,
-                  background: releaseBg,
-                  border: releaseBorder,
-                  color: releaseText,
+                  background: releaseArmed ? T.amberDim : releaseBg,
+                  border: releaseArmed ? `${T.amber}66` : releaseBorder,
+                  color: releaseArmed ? T.amber : releaseText,
                 })}
               >
-                <span aria-hidden="true" style={voteActionIconStyle(releaseText)}>✓</span>
-                <span style={voteActionLabelStyle()}>{releaseLabel}</span>
+                <span aria-hidden="true" style={voteActionIconStyle(releaseArmed ? T.amber : releaseText)}>
+                  {releaseArmed ? "⚠" : "✓"}
+                </span>
+                <span style={voteActionLabelStyle()}>
+                  {releaseArmed && performRisk
+                    ? `${performRisk.ack} — tap again to confirm`
+                    : releaseLabel}
+                </span>
               </button>
             ) : null;
             const refundButton = showRefund ? (
@@ -2168,8 +2284,9 @@ export function TradeDetail({
                   : "the locked sats are returned";
               return (
                 <div className="trade-vote-actions" style={{
-                  display: "grid", gridTemplateColumns: "1fr", marginBottom: 16,
+                  display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 16,
                 }}>
+                  {riskNotice}
                   {releaseButton}
                   <button
                     disabled={voting}
@@ -2207,6 +2324,7 @@ export function TradeDetail({
                 gap: 10,
                 marginBottom: 16,
               }}>
+                {riskNotice}
                 {isMarketplace ? <>{refundButton}{releaseButton}</> : <>{releaseButton}{refundButton}</>}
               </div>
             );
@@ -2710,7 +2828,12 @@ export function TradeDetail({
             </div>
           )}
         </div>
-        <ArbiterProvenanceBanner state={state} />
+        <ArbiterProvenanceBanner
+          state={state}
+          prov={arbiterProv}
+          assignment={arbiterAssignment}
+          selfRostered={selfRostered}
+        />
         {/* Match the vote tally's 3-column grid (below) exactly so the arbiter
             (middle) sits directly above the FINAL DECISION chip and the buyer /
             seller align over their vote columns. */}
@@ -3208,50 +3331,118 @@ export function TradeDetail({
 // THIS device recognizes for the community, an amber warning the instant the
 // pool contains keys it doesn't. Soft by design (Pillar 2.7) — the locker's
 // Fund moment carries the louder version of the same check.
-function ArbiterProvenanceBanner({ state }: { state: EscrowState }) {
+// v3.5 (C1+C7): the banner grew two louder states on top of membership —
+// OFF-ASSIGNMENT (the seated arbiter matches no historical deterministic
+// assignment for this escrow id; someone hand-picked it) and SELF-ROSTERED
+// (the pool is recognized only via a kind:38120 roster signed by a party to
+// this very trade). Both stay informed-consent, never a reducer reject; the
+// performer's vote gate carries the matching two-tap acknowledge.
+function ArbiterProvenanceBanner({ state, prov, assignment, selfRostered }: {
+  state: EscrowState;
+  prov: ArbiterProvenance;
+  assignment: ArbiterAssignment;
+  selfRostered: boolean;
+}) {
   const pool = state.communityArbiters ?? [];
   if (pool.length === 0) return null;
-  const trusted = getTrustedArbiterPool({ community: state.community });
-  const prov = classifyArbiterProvenance(pool, trusted);
   const communityName = state.community
     ? getCommunityBySlug(state.community)?.displayName ?? "this community"
     : "this community";
 
-  if (prov.verified) {
-    return (
-      <div style={{
-        marginTop: 10, marginBottom: 16, padding: "7px 10px", borderRadius: T.rs,
+  const blocks: React.ReactNode[] = [];
+
+  if (assignment.status === "off-assignment") {
+    const seated = state.participants[Role.ARBITER];
+    blocks.push(
+      <div key="off-assignment" style={{
+        padding: "9px 11px", borderRadius: T.rs,
+        background: T.redDim, border: `1px solid ${T.red}55`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <span style={{ fontSize: 12, color: T.red }}>⚠</span>
+          <span style={{ fontSize: 10, color: T.red, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
+            ARBITER OFF-ASSIGNMENT
+          </span>
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
+          The arbiter on this trade{seated ? ` (${shortParticipantPubkey(seated)})` : ""} isn't
+          the one it should have been assigned
+          {assignment.accepted.length > 0 && (
+            <> (expected {assignment.accepted.map(shortParticipantPubkey).join(" or ")})</>
+          )}. Whoever locked the sats picked it by hand — proceed only if you trust it.
+        </div>
+      </div>
+    );
+  }
+
+  if (selfRostered) {
+    blocks.push(
+      <div key="self-rostered" style={{
+        padding: "9px 11px", borderRadius: T.rs,
+        background: T.amberDim, border: `1px solid ${T.amber}55`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <span style={{ fontSize: 12, color: T.amber }}>⚠</span>
+          <span style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
+            SELF-ROSTERED ARBITERS
+          </span>
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
+          These arbiters are vouched for only by a roster signed by a party to this
+          trade — a vouch from your counterparty is not a vouch. Treat them as
+          unverified before putting anything at risk.
+        </div>
+      </div>
+    );
+  }
+
+  if (!prov.verified) {
+    // Has unrecognized members — the sock-puppet signal.
+    blocks.push(
+      <div key="unrecognized" style={{
+        padding: "9px 11px", borderRadius: T.rs,
+        background: T.amberDim, border: `1px solid ${T.amber}55`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <span style={{ fontSize: 12, color: T.amber }}>⚠</span>
+          <span style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
+            UNRECOGNIZED ARBITER{prov.unrecognized.length !== 1 ? "S" : ""}
+          </span>
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
+          {prov.unrecognized.length} of {pool.length} arbiter{pool.length !== 1 ? "s" : ""} on this trade
+          {prov.unrecognized.length !== 1 ? " are" : " is"} not in {communityName}'s known pool
+          {prov.unrecognized.length > 0 && (
+            <> ({prov.unrecognized.map(shortParticipantPubkey).join(", ")})</>
+          )}. A neutral arbiter is what protects a dispute — if you don't know who set
+          these, treat the trade with extra care before locking sats.
+        </div>
+      </div>
+    );
+  } else if (!selfRostered && blocks.length === 0) {
+    // The genuine green — refused outright when the verification depends on a
+    // conflicted roster (C7) or the seated arbiter is off-assignment (C1).
+    blocks.push(
+      <div key="verified" style={{
+        padding: "7px 10px", borderRadius: T.rs,
         background: T.greenDim, border: `1px solid ${T.green}33`,
         display: "flex", alignItems: "center", gap: 8,
       }}>
         <span style={{ fontSize: 11, color: T.green }}>✓</span>
         <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.4 }}>
           Community-verified arbiters — every name here is in {communityName}'s known pool.
+          {pool.length < 3 && (
+            <> {pool.length === 1 ? "1 arbiter backs" : `${pool.length} arbiters back`} this
+            trade — a small pool means fewer backups if a dispute needs a substitute.</>
+          )}
         </span>
       </div>
     );
   }
 
-  // Has unrecognized members — the sock-puppet signal.
   return (
-    <div style={{
-      marginTop: 10, marginBottom: 16, padding: "9px 11px", borderRadius: T.rs,
-      background: T.amberDim, border: `1px solid ${T.amber}55`,
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-        <span style={{ fontSize: 12, color: T.amber }}>⚠</span>
-        <span style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
-          UNRECOGNIZED ARBITER{prov.unrecognized.length !== 1 ? "S" : ""}
-        </span>
-      </div>
-      <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
-        {prov.unrecognized.length} of {pool.length} arbiter{pool.length !== 1 ? "s" : ""} on this trade
-        {prov.unrecognized.length !== 1 ? " are" : " is"} not in {communityName}'s known pool
-        {prov.unrecognized.length > 0 && (
-          <> ({prov.unrecognized.map(shortParticipantPubkey).join(", ")})</>
-        )}. A neutral arbiter is what protects a dispute — if you don't know who set
-        these, treat the trade with extra care before locking sats.
-      </div>
+    <div style={{ marginTop: 10, marginBottom: 16, display: "grid", gap: 8 }}>
+      {blocks}
     </div>
   );
 }
