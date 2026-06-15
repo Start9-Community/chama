@@ -237,6 +237,7 @@ get punished). The goal is seriousness without scaring off good people who
 occasionally have a bad week. Slashing scales with pattern, not a single miss.
 
 ### F. Bond is a FIDELITY bond, not PoS — REFRAME (maintainer dislikes PoS)
+> ⚠️ **SIZING SUPERSEDED 2026-06-14** — the bond is sized by *exposure* (self-selected stake → max trade ceiling), NOT "a term's earnings" (unmeasurable in dispute-free months, and it perversely rewards manufacturing disputes). The fidelity-not-PoS framing still stands. See the 2026-06-14 section.
 Important framing the maintainer is right to insist on: this is a *performance/
 fidelity bond* (like a contractor's surety bond or a court bond) — collateral
 forfeitable on proven misconduct. It is NOT proof-of-stake: no block production,
@@ -246,6 +247,7 @@ arbiter naturally earns it back before profiting — skin in the game without
 locking out the un-wealthy permanently.
 
 ### G. Bond CUSTODY — held by top-rated chamacitos, not a vague "community escrow" — DECISION + TENSION
+> ⚠️ **SUPERSEDED 2026-06-14** — senators → the **cabinet** (fed-owner + community-owner; k-of-n seeded at n=2, widening). And bonds are **commitment** bonds (self-held, publicly pledged), NOT cryptographic custody — there is nothing to "hold" or seize. See the 2026-06-14 section.
 The maintainer rejects "community-controlled escrow" as under-defined ("who are
 the VIP members?"). Preferred model: the bond is locked with the *highest-rated
 chamacitos in that community* — elected officials with a reputation to lose, "like
@@ -349,4 +351,255 @@ mint); sizing (≈ one period's duty earnings, field-read F) bounds it, and
 top-up cadence doubles as a fed liveness check. Top-up before new high-value
 assignments; exit reclaims only with no open assignments (active-commitment
 guard).
+
+---
+
+## v3 sharpening (2026-06-13) — tiered stake → exposure, and the federation-owner fast-track
+
+Maintainer intent (captured verbatim): *"Anyone can be an arbiter — no degree,
+no KYC. You prove yourself and show up if summoned, and soon pay your bond. Small
+bond → small trades, medium → medium, big → golden — UNLESS you can prove you
+control your own federation (DESIGN-arbiter-federation-proof.md, Level A), which
+fast-tracks you to golden without the big bond. Safe whether or not any given
+arbiter can prove it."*
+
+Right shape, and on-mission. It composes three axes that already live in this
+doc: the **bond** axis (§3.3, field-read F), the **rating-tier** axis
+(field-read C), and the **identity** axis (the federation-proof doc). Honest
+review, in the house tags:
+
+### K. Stake UNLOCKS exposure; it never GATES entry — DECISION (the anti-"too harsh")
+Entry stays free and permissionless. The bottom tier (small trades) needs **no
+capital bond** — reputation + the 2-of-3 (an arbiter can't steal alone, only
+*collude*) carry it while a newcomer earns ratings on small stakes (field-read
+C/D). The bond *unlocks* larger exposure; it is never the turnstile. This is
+load-bearing for the mission: a bond-to-enter would exclude exactly the
+capital-poor, community-trusted arbiters in Benin/Kenya we exist to serve.
+Non-capital roads to the top stay open: federation-ownership (below) and the
+senator co-bond (field-read G).
+
+### L. Keep proof-tier and exposure-tier names distinct — DECISION (naming)
+Two orthogonal axes; do NOT reuse A/B/C for both or they collide:
+- **Proof tier** (identity, federation-proof doc): C unverified < B
+  guardian-verified < **A** federation-endorsed.
+- **Exposure tier** (max trade size): **Bronze / Silver / Gold**.
+Mapping: proof-**A** (an *established* fed) → **Gold** with no big bond. Trap to
+avoid: proof-B ("guardian-verified") is NOT the Silver/"medium" tier.
+
+### M. Federation-ownership replaces a bond's IDENTITY job, not its RECOURSE job — TENSION
+A bond does two things: it makes identities costly (Sybil resistance) AND posts
+slashable recourse capital. Federation *control* is a costly, persistent,
+*named* stake → it fully covers the identity job. It posts **no** recourse
+capital (you can't slash a federation), and a fed is cheap (~$10–30/mo,
+research-confirmed) — less than a golden trade — so a fed-owner *could* rationally
+defect once. So "fed-owner = super safe" is true against impersonation/Sybil,
+**partial** against theft. Resolution: **(a)** the fast-track requires an
+**ESTABLISHED** federation — guardian count ≥ threshold + age + activity +
+on-chain footprint, all observable without trust — so a throwaway solo fed buys
+nothing; **(b)** keep a *small fidelity* bond even at Gold (field-read F sizing
+≈ one period's earnings — affordable, not collateral-to-trade) so there is always
+something to slash; **(c)** Gold safety rests on ratings + established-fed
+identity + the 2-of-3 collusion requirement, not on capital equal to the trade.
+Honest claim to ship: *"as safe as a non-custodial, no-KYC system gets — an
+attack needs collusion AND the burning of a costly, named, persistent identity,
+and is partially slashable"* — excellent, but not literally "100% recourse."
+
+### N. "Proves they paid federation fees" → prove CONTROL + MATURITY — DECISION
+An off-chain G-Bot payment is not cryptographically verifiable, and a solo fed
+pays ~nothing — so "paid fees" is neither checkable nor the right signal. The
+verifiable proxy is federation **control** (Level A meta-endorsement) + the
+**maturity** metrics in (M). Verify the artifact, not the receipt.
+
+### Tension with field-read F (flag, don't bury)
+"Big bond for golden" pulls toward the Bisq rule (bond ≥ max extractable value);
+field-read F locked the opposite (bond ≈ one period's earnings,
+fidelity-not-collateral, "don't lock out the un-wealthy"). Both can't hold if a
+Gold bond must literally cover a golden trade. Resolution (M): keep the *capital*
+bond fidelity-sized at every tier; what scales to reach Gold is the *requirement
+set* (ratings + established-fed identity), payable in multiple currencies of
+trust — capital being only one. Capital-rich-but-new reach Gold via a larger
+(still bounded) bond; trusted-but-poor reach it via ratings + Level A. **Two
+independent doors to Gold = the redundancy that keeps it safe whether or not a
+given arbiter is a fed-owner** — the maintainer's "even if we can't prove it"
+instinct, made precise.
+
+### Locked decision (2026-06-13) — the bond is UNIVERSAL; no exception, no bypass
+Supersedes the "federation-owner fast-track" exploration in (M): there is **no
+bond bypass for anyone, including Level-A federation owners.** Rationale (the
+maintainer's, and the honest one): arbitration is **a real job that demands
+availability and honesty we cannot measure** — so everyone posts skin in the
+game, period. The rules that survive:
+- **Universal bond.** Every arbiter at every exposure tier stakes a bond, Gold
+  included. The 2-of-3 already stops unilateral theft; the universal bond closes
+  the *collusion / self-dealing* door (incl. the C7 cross-identity Sybil) by
+  forcing even an accomplice arbiter to post slashable capital.
+- **Self-selected tier by stake.** An arbiter picks their arbitration ceiling by
+  how many sats they can stake. Bigger stake → bigger trades. No gatekeeper sets
+  it; one's own capital does.
+- **Time-boxed term, auto-return.** The bond is committed for a *period* the
+  arbiter signs up for and is **returned automatically at term end** absent a
+  proven slash (active-commitment guard: no open assignments). This is what makes
+  it a *job/shift*, not a paywall.
+- **Level A is identity, not exemption.** Federation control (Level A) still
+  earns the anti-squat green badge and trust/ratings weight (more for an
+  *established* fed — field-read M(a)), but buys **no** bond discount. Identity
+  and skin-in-the-game are separate gates; Gold needs both.
+- **Protocol, not product.** This flow is deliberately copyable — anyone can run
+  it; it is not a "just use Chama" moat. That generality is a feature.
+
+Honesty note (keep loud, don't overclaim): a universal bond makes self-dealing
+*expensive and visible*, not cryptographically *impossible*. Because the bond is
+fidelity-sized (≈ a term's earnings, field-read F), a single defection on a trade
+larger than the bond can still net the attacker something — which is exactly why
+Gold also requires real ratings (field-read C — dual-signed receipts, slow to
+fake) and an established-fed identity. Bond + ratings + identity + 2-of-3
+compose; no single one is the whole wall. Surface it **loudly**.
+
+---
+
+## v3 sharpening (2026-06-14) — the cabinet, commitment bonds, exposure sizing, tip-funded presence
+
+Locked live with the maintainer + the second arbiter (Chapsmart). **This is now the
+CURRENT bond / pay / rating model.** It supersedes field-read F's *sizing*,
+field-read G *in full*, and the *custody + slash-as-fund-movement* parts of the
+2026-06-07 section. What still stands: "duty pays, not power"; presence-proof is
+objective/replayable; judgment is post-hoc; the epistemic-honesty-about-absence
+reasoning. Build order is unchanged — bonds are still LAST (their OWN money-path release,
+after the verifier + Ratings + cabinet-roster + exposure tiers); this locks the
+*design*, nothing here is built yet. **Refined 2026-06-15:** §2 → n=3 trio; §3 →
+**real SSS lock + strand-by-withholding slash** (the earlier "commitment/pledge"
+framing and the time-released-share idea are corrected below).
+
+Design north star (the maintainer's words): *"I want to lock my bond safely and
+get it back. Everything else builds on that — or fails."* Plus: no DAO ("they
+attract bad luck"), no new complicated tool, lenient on-ramp (many will want to
+test the protocol), and the arbiter as **the most valuable AND most protected
+role** in Chama — pioneers who promote justice, naturally.
+
+### 1. Identity collapses to TWO tiers — DECISION
+- **Anchor** — a Level-A (federation-endorsed, DESIGN-arbiter-federation-proof.md)
+  arbiter who is also a cabinet member.
+- **Bonded arbiter** — everyone else: posts a bond, arbitrates within their
+  exposure cap.
+- **Level B (guardian-verified) is retired** — you bond to the cabinet; you don't
+  prove guardianship. **Level C (unverified)** isn't an arbiter, just a listing.
+- Keep the SEPARATE axis: **exposure tiers** (Bronze/Silver/Gold) sized by bond
+  (§3) — the ramp survives. (Federation-proof's A/B/C remains the *proof
+  mechanism* for becoming an Anchor; the 2 tiers here are the *role*.)
+
+### 2. The cabinet replaces the senators — now an n=3 trio — DECISION (refined 2026-06-15)
+- Custody/standing authority = the **cabinet**: fed-owner + community-owner + a
+  third trusted Level-A anchor. For BLF: the maintainer + Chapsmart + **Graysatoshi**.
+- k-of-n custody, **n=3** (named, accountable, Level-A founders, mutually bonded —
+  "each bonded against the others"), **designed to widen** further as more Level-A
+  anchors join. The trio is the *seed*, not a ceiling.
+- **Why n=3 over n=2** (it hardens §3's asymmetry): a member's bond RETURNS on any
+  **1 of the other 2** healing (robust to one absent/griefing member), and STRANDS
+  only if the **other 2 both** refuse (no unilateral slash; no single colluder can
+  block a legit one). Three rating-graph roots (§6) instead of two; concrete mutual
+  accountability.
+- *Pushback on record (n=2):* a 2-person authority concentrates power and is a
+  griefing point. n=3 + the challenge window + community-consensus backstop (§4)
+  answer it; the residual is all-3 collusion (bounded by community-consensus +
+  exposure caps + total reputational collapse). (Bisq's bonded-role + DAO
+  confiscation is the same shape and has held.)
+- To seat Graysatoshi: add his npub to BLF's `chama:arbiters` meta (a new 3-npub
+  proposal) + he pledges a bond like the others.
+
+### 3. Real SSS lock; slash = strand-by-withholding — DECISION, the keystone (refined 2026-06-15)
+*Corrects the earlier "commitment/pledge, not seizable" framing — it IS a real lock.*
+- **Real lock, reusing escrow.** The bond is ecash **SSS-locked with the cabinet**:
+  the owner holds ONE share, the cabinet holds the rest. Mid-term it is genuinely
+  locked — the owner cannot reconstruct alone. Not a pledge; real custody-by-split.
+- **Return = the existing REFUND-only heal.** At term-end, **any one** cabinet
+  member casts a REFUND-only heal → the bond returns to the owner (engine-computed
+  recipient). Bonds are a distinct lock class **excluded from AUTO-refund** and
+  routed to a *deliberate* cabinet heal — extending the **v2.9 suppression branch**
+  (the locker-ghost-vs-standing-RELEASE guard), so it is another branch of existing
+  logic, not new machinery.
+- **Slash = strand-by-withholding.** To punish a cheat the cabinet simply
+  **declines to heal** → the bond never reconstructs → **stranded forever.** This is
+  the "burn", by *inaction*: it never violates the safety invariant (no third party
+  *moves* the locker's funds — they just don't help; stranded sats benefit no one).
+  Plus reputational delisting (independent of the bond).
+- **The asymmetry IS the safety:** RETURN needs any **1** cabinet member (one honest
+  member rescues an honest arbiter); STRAND needs **all** of them to refuse (a
+  single dissenter protects an honest arbiter; a single colluder cannot strand a
+  peer). Slash hard-by-default, return easy-by-default — free from the SSS structure
+  (and why n=3 matters, §2).
+- **No time-lock needed** (corrects the earlier worry): the lock is the SSS split,
+  not a time primitive; "term" is a coarse wall-clock window (the existing C11 clamp
+  suffices; return-only-to-owner means clock-gaming is not a theft vector).
+- **Declined:** *block height* (the browser can't read absolute height — only peg-in
+  confirmation depth — and an external oracle is a needless dependency for a coarse
+  term); *active burn/seize* (it would rebuild the exact "third-party-moves-your-funds"
+  capability the escrow forbids, and let a compromised cabinet grief-destroy bonds —
+  strand-by-withholding gets the destruction with none of that).
+- **Retracted 2026-06-15:** the "time-released self-recovery share" — incompatible
+  with strand-by-withholding (unilateral recovery would defeat the slash). Return is
+  cabinet-dependent by design; honest-arbiter protection = trio redundancy +
+  reputation + community backstop.
+- **Self-sized by EXPOSURE:** pledged amount = the trade-size ceiling. **Bond =
+  skin; pay = wage.**
+- **Deterrence math:** a caught cheater is delisted (loses role R + reputation) and,
+  if the cabinet agrees, **stranded** (loses bond B). With exposure caps **E < R**,
+  cheating loses even before the strand; the strand is the visible teeth on top.
+
+### 4. This is NOT a DAO — DECISION
+- "Slashing" = the **roster updating (delisting) + the public record** — never a
+  vote to seize funds.
+- The **challenge window (24–48h)** is *due process for a delisting*, not a
+  confiscation court.
+- Slashing a **cabinet member's own** standing escalates to **community consensus**
+  (the high-stakes primitive), never the other founder alone.
+- **The pioneers' own seed bonds:** the **trio** pledges *simultaneously*, each
+  member's bond SSS-held by the other two — return on any 1 of the other 2, strand
+  only if both others refuse. No custodian "above" the root; it bottoms out in
+  reputation + a publicly-visible **real-money stake** + the role itself (the
+  maintainer's thesis: seeders must have real money to lose, provable independently
+  — visible strength from miles away). Slashing a cabinet member escalates to
+  community consensus.
+
+### 5. Pay = availability + work, funded by TIPS (not a treasury) — DECISION
+- Dispute-only pay punishes arbiters whose chamas behave (a quiet month earns
+  nothing). Split pay:
+  - **Availability (presence)** — funded by an **optional per-trade tip**, NOT a
+    treasury. No pool, no funding source, no DAO; self-funding, peer-to-peer ecash.
+  - **Dispute fee (work)** — mandatory when a dispute happens; flat ("duty pays,
+    not power").
+- A dispute-free month is **paid readiness** (on-call doctor / firefighter), not
+  unemployment — a quiet chama is a *success* and the arbiter still eats.
+- **The tip does double duty: pay AND presence-reputation** — a *costly* "I value
+  this arbiter being here," far more Sybil-resistant than a free thumb; weighted by
+  tipper standing (medium, §6).
+- *Honest tradeoff:* tips are voluntary → presence income is variable. A
+  **stimulus, not a salary** — the role's value is standing + dispute fees + the
+  cabinet path; don't promise a living from tips alone at small scale.
+
+### 6. Rating arbiters — two streams, neither gates exposure — DECISION
+- Rep is **no longer the ladder** (bonds self-size exposure), so arbiter rep is a
+  soft **selection/trust** signal, not a Sybil gate.
+- **Presence** — the **tip**, available on *every settled trade* (the arbiter is a
+  seated participant on all of them, not just disputes). This solves the
+  sparse-graph problem your friend flagged.
+- **Performance** — 👍/👎 from the parties *after a dispute resolves* (kind:38123
+  already supports the arbiter as ratee; the UI hook is #73).
+- **Weight = medium** — lenient on newcomers (the bond does the hard Sybil work);
+  the Level-A anchors are the graph roots that give "weight" meaning.
+
+### 7. WHEN the tip is offered — DECISION
+- **Primary: the completion screen (happy path)** — *"[arbiter] was your backstop
+  the whole way — tip them? [small preset] · maybe next time."* Non-pushy.
+- **Secondary: after a dispute resolves** — paired with the 👍/👎.
+- **Never at lock/funding** — don't clutter the money-move.
+- Buyer and seller can each tip independently (both were backstopped).
+
+### Still open (small build-time details)
+- The bond lock-class details: the owner+cabinet **share policy** (owner = 1 share,
+  cabinet = the rest) and the auto-refund-exclusion wiring (extend the v2.9
+  suppression branch). (Proof-of-holding is moot under the real-lock model — it is
+  genuinely locked, not self-held.)
+- Whether the future top-tier cryptographic custody is ever worth building
+  (default: no).
+- Stipend via a community treasury is **dropped** — tips replace it.
 
