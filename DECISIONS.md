@@ -1435,3 +1435,131 @@ arbiter dashboard, and the franchise widening that real history will allow.
 
 **Status:** Active — v1 implemented (primitive + capture + the two scaffolded
 consumers); tiered-assignment consumers (#73) deferred.
+
+---
+
+## 2026-06-14 — Arbiter v3 revised: the cabinet, real-SSS-lock bonds, strand-by-withholding, exposure sizing, tip-funded presence
+
+**Context:** The 2026-06-07 presence-bond model left three pieces unresolved
+once it met build reality (locked live with the maintainer + the second arbiter,
+Chapsmart; refined 2026-06-15): (1) "senator" custody was under-defined ("who
+are the VIPs?"); (2) sizing the bond at "≈ one period's duty earnings" is
+unmeasurable in a dispute-free month AND perversely rewards manufacturing
+disputes to inflate the figure; (3) "slash = move the forfeited bond to the
+backup/treasury" quietly re-introduced the third-party-moves-your-funds
+capability the escrow forbids.
+
+**Options considered:**
+- (a) Keep senator-custody + earnings-sizing + slash-as-fund-movement
+      (2026-06-07). Rejected for the three reasons above.
+- (b) Active burn/seize on slash — a cabinet key destroys or redirects the
+      bond. Rejected: rebuilds the exact "third party moves your funds" power
+      the 2-of-3 forbids, and lets a compromised cabinet grief-destroy bonds.
+- (c) **Cabinet + real-SSS-lock + strand-by-withholding + exposure-sizing.**
+
+**Decision:** Option (c). The current bond / pay / rating model:
+- **Two role tiers** — *Anchor* (a Level-A federation-endorsed arbiter who is
+  also a cabinet member) and *Bonded arbiter* (everyone else: posts a bond,
+  arbitrates within their exposure cap). Level B (guardian-verified) is retired;
+  Level C (unverified) isn't an arbiter, just a listing. Exposure tiers
+  (Bronze/Silver/Gold) survive as a separate axis, sized by bond.
+- **The cabinet replaces the senators — an n=3 trio.** Standing custody =
+  fed-owner + community-owner + a third trusted Level-A anchor (BLF: the
+  maintainer + Chapsmart + Graysatoshi). k-of-n, n=3, designed to widen. Chosen
+  over n=2 because n=3 makes the asymmetry robust: a bond RETURNS on any 1 of
+  the other 2 healing (survives one absent/griefing member) and STRANDS only if
+  the other 2 both refuse — no unilateral slash, no single colluder can block a
+  legit return.
+- **The bond is a real SSS lock, not a pledge** (corrects the interim
+  "commitment/pledge" framing, 2026-06-15). Ecash SSS-locked with the cabinet:
+  the owner holds one share, the cabinet the rest; mid-term the owner cannot
+  reconstruct alone.
+- **Return = the existing REFUND-only heal.** At term-end any one cabinet member
+  casts a REFUND-only heal → the bond returns to the owner (engine-computed
+  recipient). Bonds are a distinct lock class excluded from AUTO-refund and
+  routed to a deliberate cabinet heal — an extension of the v2.9 suppression
+  branch, not new machinery.
+- **Slash = strand-by-withholding.** To punish a cheat the cabinet simply
+  declines to heal → the bond never reconstructs → stranded forever. The "burn"
+  is by inaction; it never moves anyone's funds, so it never violates the safety
+  invariant. Plus reputational delisting, independent of the bond.
+- **Self-sized by EXPOSURE** — pledged amount = the trade-size ceiling. Bond =
+  skin; pay = wage. (Supersedes "≈ a term's earnings.")
+- **Time-boxed term, auto-return** absent a proven slash (active-commitment
+  guard: no open assignments) — a job/shift, not a paywall.
+- **Pay = tips (presence) + flat dispute fee (work); no treasury, no DAO.**
+  Availability is funded by an optional per-trade tip (which doubles as a
+  costly, Sybil-resistant presence signal); the dispute fee stays flat ("duty
+  pays, not power"). A dispute-free month is paid readiness, not unemployment.
+- **Not a DAO:** "slashing" = roster delisting + the public record, never a vote
+  to seize funds; the 24–48h challenge window is due process for a delisting;
+  slashing a cabinet member's OWN standing escalates to community consensus.
+
+**Rationale:** Reuses primitives that already shipped (SSS lock + the v2.9
+suppression branch + REFUND-only heal) instead of new machinery; never grants a
+third party the power to move the owner's funds; the return-any-1 / strand-all
+asymmetry protects an honest arbiter from a lone griefer while still letting the
+cabinet strand a proven cheat; exposure-sizing removes the manufacture-disputes
+perverse incentive; tips fund presence without a treasury or DAO ("they attract
+bad luck").
+
+**Implications:** Supersedes the 2026-06-07 senator-custody + earnings-sizing +
+slash-as-fund-movement design. Build order is unchanged — bonds remain LAST,
+their own money-path release after the verifier + Ratings + cabinet-roster +
+exposure tiers; this entry locks the *design*, nothing here is built yet. Honest
+residual (keep it loud, don't overclaim): a universal bond makes self-dealing
+expensive and visible, not cryptographically impossible — a single defection on
+a trade larger than the bond can still net something, which is why Gold also
+requires ratings + an established-fed identity. For the cabinet itself the
+residual is collusion among the custodians, bounded by community-consensus
+delisting + exposure caps + total reputational collapse — never by an automatic
+bond cascade.
+
+**Status:** Active (design). **Supersedes** the 2026-06-07 "Arbiter v3: presence
+bond (slash-to-cover), fairness by reputation" entry. Home docs:
+`docs/DESIGN-arbiter-economy.md` (2026-06-14, refined 2026-06-15) +
+`docs/DESIGN-arbiter-federation-proof.md` (Level A).
+
+---
+
+## 2026-06-16 — Arbiter bonds: the aggregate exposure cap, multi-community span, cabinet lifecycle
+
+**Context:** Operationalizing the 2026-06-14 cabinet/bond model surfaced the
+exposure question (what bounds the damage a cheating or colluding arbiter can do?)
+and the lifecycle questions (can an arbiter serve multiple communities? how do you
+replace a good-standing cabinet member?). Locked live with the maintainer.
+
+**Decision:**
+- **Aggregate exposure cap (two-sided, hard-enforced).** An arbiter's self-selected
+  bond caps BOTH any single trade AND the **sum of all their open bonded trades
+  across every chama combined**. Live capacity = `bond − Σ(open bonded trades)`; a
+  new assignment that would exceed the bond is refused. This bounds the maximum any
+  arbiter or colluding cabinet can ever burn/wash to the posted bond — the
+  structural backstop the "even if the cabinet are friends, it's safe" claim rests
+  on (NOT fed-owner virtue; a fed is cheap).
+- **Arbiters may span multiple communities** (reverses the earlier one-community
+  lean) — safe because of the aggregate cap + ratings; soft-flag "from another
+  chama" and prefer local arbiters in assignment.
+- **Cabinet member replacement = a term-boundary roster swap.** Heal the departing
+  member's bond back, swap the npub via the threshold roster/meta write, the
+  replacement bonds in, re-lock next term. No funds at risk, no re-founding. Only an
+  emergency (lost key / rogue) needs an off-cycle heal + re-lock.
+- **Cabinet members are public, established Nostr identities** (Genesis-specific) —
+  the cabinet + every arbiter + their ratings are Live on the globe, so a whole
+  chama's reputation is legible at a glance.
+- **Two onboarding paths:** hardcore (own 3 + own Level-A federation) or bootstrap
+  (anchor to BLF until you grow your own 3, then the bonding ceremony → Live).
+- **Loud heal-prompt** (UX invariant): healing an honest peer's bond is the loudest
+  prompt a cabinet member ever gets.
+- **Big-scale fake-cabinet attack** named as the residual; backstopped by
+  public-reputation-at-a-glance + the aggregate cap + the community-gated (ii)
+  escape hatch (`DESIGN-arbiter-economy.md` §4).
+
+**Rationale:** The aggregate cap turns "can't go far" into an enforced number and is
+what makes both multi-community span and a friends-could-be-the-cabinet model safe.
+The lifecycle decisions ride the existing term cycle (heal-then-relock), so no new
+machinery is needed.
+
+**Status:** Active (design). Extends the 2026-06-14 cabinet entry. Home doc:
+`docs/DESIGN-arbiter-economy.md` (v3 sharpening 2026-06-16). Bonds remain LAST in
+the build order.

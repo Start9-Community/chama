@@ -525,8 +525,9 @@ role** in Chama — pioneers who promote justice, naturally.
 - **The asymmetry IS the safety:** RETURN needs any **1** cabinet member (one honest
   member rescues an honest arbiter); STRAND needs **all** of them to refuse (a
   single dissenter protects an honest arbiter; a single colluder cannot strand a
-  peer). Slash hard-by-default, return easy-by-default — free from the SSS structure
-  (and why n=3 matters, §2).
+  peer — though a 2-of-N *coalition* can; that residual is handled by the MAD clause
+  in §4, not by the crypto). Slash hard-by-default, return easy-by-default — free
+  from the SSS structure (and why n=3 matters, §2).
 - **No time-lock needed** (corrects the earlier worry): the lock is the SSS split,
   not a time primitive; "term" is a coarse wall-clock window (the existing C11 clamp
   suffices; return-only-to-owner means clock-gaming is not a theft vector).
@@ -559,6 +560,21 @@ role** in Chama — pioneers who promote justice, naturally.
   maintainer's thesis: seeders must have real money to lose, provable independently
   — visible strength from miles away). Slashing a cabinet member escalates to
   community consensus.
+- **Cabinet-betrayal deterrent — the MAD clause (option i, locked 2026-06-15).**
+  Honest residual: the asymmetry stops a *single* griefer, but a **2-of-N coalition
+  CAN strand an honest member's bond**, and the crypto does NOT make that
+  self-destructive for the coalition. What deters it today — and why it suffices:
+  (a) **zero-gain** — strand *destroys*, never *seizes*, so betraying an honest peer
+  is pure spite at max cost, zero profit; (b) **reputational MAD** — refusing a
+  *provably honest* peer's refund is public (the challenge window) →
+  community-consensus delists the refusers → they lose the role + the chama they
+  built (career suicide).
+- **The upgrade we'll add IF wrongful-refusal griefing ever shows up (option ii,
+  deferred):** strand a proven wrongful-refuser's **own** bond via the
+  community-consensus path — turning reputational MAD into true bond-MAD that closes
+  the 2-coalition hole. Not built now (YAGNI — reputational + zero-gain suffices, and
+  it avoids standing up community-consensus-slash machinery until griefing actually
+  appears). **Airtight now, door open to true MAD later.**
 
 ### 5. Pay = availability + work, funded by TIPS (not a treasury) — DECISION
 - Dispute-only pay punishes arbiters whose chamas behave (a quiet month earns
@@ -602,4 +618,77 @@ role** in Chama — pioneers who promote justice, naturally.
 - Whether the future top-tier cryptographic custody is ever worth building
   (default: no).
 - Stipend via a community treasury is **dropped** — tips replace it.
+
+---
+
+## v3 sharpening (2026-06-16) — exposure cap, multi-community, cabinet lifecycle, the two paths
+
+Locked live with the maintainer; continues the 2026-06-14/15 model. Nothing here
+changes the bond mechanism — it **bounds and operationalizes** it. Build order
+unchanged; bonds last.
+
+### 8. The AGGREGATE exposure cap — the keystone, two-sided — DECISION
+The self-selected bond caps exposure on **two** axes, both enforced HARD:
+1. **Per-trade** — any single trade an arbiter oversees < their bond.
+2. **Aggregate** — the **sum of ALL their open bonded trades, across EVERY chama,
+   combined** < their bond.
+Live capacity = `bond − Σ(open bonded trades)`; the system **refuses any new
+assignment** that would push the sum over the bond. This turns "a cheating arbiter
+can't profit / can't go far" into a *number*, not a hope: it bounds the **maximum
+any arbiter (or colluding cabinet) can ever burn or wash** to the posted bond — no
+silently stacking 8 trades worth 1M against a 200k bond and wiping them in one go.
+This cap — NOT fed-owner virtue (a fed is cheap, field-read M(a)) — is the
+structural backstop the "even if the cabinet are friends, it's safe" conclusion
+rests on.
+
+### 9. Arbiters MAY span multiple communities — DECISION (reverses the earlier one-community lean)
+Earlier instinct was one-arbiter-one-community. **Reversed:** with strong cabinet
+anchors + the aggregate cap (§8) protecting participants, an arbiter can officially
+serve **multiple communities** (they're rated everywhere anyway). UX: soft-surface
+"this arbiter is from a different chama," and give **local arbiters preference** in
+assignment. The aggregate cap is what makes spanning safe — total exposure is
+bounded no matter how many chamas.
+
+### 10. Cabinet lifecycle — replacing a member is a term-boundary roster swap — DECISION
+Replacing a **good-standing** cabinet member rides the natural term cycle (at
+term-end all bonds heal back anyway): (1) the departing member's bond heals back;
+(2) update the roster/meta — drop their npub, add the replacement's — via the same
+threshold write that seated the trio; (3) the replacement posts their own bond;
+(4) the next term re-locks the cabinet as the new three. **No funds at risk**
+(bonds returned before re-locking), **no re-founding** — a roster swap + the
+newcomer's bonding. Only an **emergency** mid-term replacement (lost key / rogue
+member) needs an off-cycle heal + re-lock.
+
+### 11. Cabinet members are PUBLIC, established identities — DECISION (Genesis-specific)
+Every cabinet member must present a **public, established Nostr profile** — NOT a
+net-new key. It's a costly identity signal AND it's what makes whole-Chama
+reputation legible: the cabinet + every arbiter in the chama + their ratings go
+**Live on the globe**, so anyone can read a chama's trustworthiness at a glance
+before trading. Public-by-construction is itself a deterrent.
+
+### 12. Two onboarding paths for a cabinet — DECISION
+- **Hardcore** — bring your own 3 founders + a **federation you control**
+  (Level-A verifiable); sovereign from day one. The PR-to-verify should be easy
+  even though running a fed isn't "normie-easy."
+- **Bootstrap** — anchor to **BLF's** Genesis cabinet (custody by BLF) until you
+  grow your own 3, then run the **bonding ceremony** (simultaneous 3-way lock, §3);
+  the chama flips to **Live** on the globe the moment the locks finalize.
+This is why "path B" (net-new-federation onboarding via a first-time Genesis
+cabinet) is load-bearing, not a side-quest.
+
+### 13. Loud heal-prompt — UX invariant — DECISION
+Healing an honest peer's bond is the **single action that protects a peer** (return
+needs any one cabinet member). So it must be the **loudest prompt a cabinet member
+ever gets** — impossible to miss, surfaced to every member the instant a peer's
+bond is due. (Pairs with §4's reputational MAD: a member who ignores a loud,
+provable heal request is visibly *choosing* to.)
+
+### 14. Big-scale fake-cabinet attack — named, backstopped — THREAT MODEL
+The residual worth naming: an attacker stands up **fake chamas with self-controlled
+3-npub cabinets across many countries** to look legitimate and prey on traders.
+Defanged by: **public-reputation-at-a-glance** (a fresh fake chama has no history,
+§11) + the **aggregate cap** (bounds per-chama damage, §8) + can't-steal
+(burn-not-seize). The coordinated case the per-chama mechanisms miss is exactly
+what the **community-gated (ii)** escape hatch (§4) exists for — locked as an *idea*
+now, built only if it appears. "Guns on the wall."
 

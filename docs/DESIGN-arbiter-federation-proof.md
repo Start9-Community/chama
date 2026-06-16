@@ -1,15 +1,25 @@
 # Design — Arbiter Federation Proof (Level A: the federation-owner credential)
 
-Status: DESIGN — PROPOSED (2026-06-13). Captures the verification *mechanism* and
-the protocol research behind it; the policy choices in §8 are NOT yet locked
-(maintainer "Go" pending). This is the **federation-owner credential** that
-INVARIANTS.md names as the way to close the **C7** residual — "an authority
-outside the attacker's keyspace". Doc-first per maintainer; the verifier build
-follows on sign-off.
+Status: DESIGN — **REPOSITIONED 2026-06-15.** Originally drafted as *the* C7-closer
+(the "federation-owner credential"); it is now the **OPTIONAL, self-hosted-only**
+path. The **primary** C7-closer is the **bonded cabinet's signed `kind:38120`
+roster** (see DESIGN-arbiter-economy.md). What stays first-class in this doc: the
+**invite decoder + squat-check** (§3). What demotes to an optional bonus: the
+**meta-endorsement read** (§4 Level A / §5).
 
-Money-path: read-only. Nothing here moves ecash or touches the 2-of-3. It gates
-who earns the *verified-roster green badge*, i.e. it feeds C7 / the
-roster-as-hard-gate, not the escrow state machine.
+> **Why the demotion (read first).** On a Fedi **G-Bot** federation, OG approval is
+> *template-gated* — Fedi's automation signs only fields already in its template, so
+> a custom `chama:arbiters` proposal never reaches threshold (confirmed on BLF,
+> 2026-06-15; see `reference_fedimint_meta_fields`). And even where it *does* work
+> (feds whose guardians you control), a G-Bot endorsement is Fedi-operated anyway.
+> So the bonded-cabinet roster — a registry-pinned trio of reputation-anchored
+> Level-A founders with real money locked — is the **Fedi-independent** "authority
+> outside the attacker's keyspace" that actually closes C7. Fed-meta Level-A remains
+> a genuine *bonus* proof for self-hosted feds; the §8 "open decisions" are largely
+> moot under this model (the role ladder is just Anchor vs Bonded — economy doc §1).
+
+Money-path: read-only. Nothing here moves ecash or touches the 2-of-3. It feeds the
+verified-roster green badge (C7), not the escrow state machine.
 
 ## 0. Provenance & a correction (so future-you trusts the facts below)
 
@@ -102,7 +112,7 @@ Two problems hide here. Keep them separate:
 
 ## 4. The proof ladder
 
-- **Level A — federation-endorsed (gold).** A meta-module field `chama:arbiters`
+- **Level A — federation-endorsed (gold) — now OPTIONAL / self-hosted-only** (repositioned 2026-06-15; the cabinet roster is the primary C7-closer — see the banner up top; on a G-Bot fed this is Fedi-template-gated and won't reach threshold). A meta-module field `chama:arbiters`
   (a JSON **list of npubs** — format locked 2026-06-13) lists the federation's
   endorsed arbiter keys; the applicant's npub must be among them.
   Threshold-written by the guardians, threshold-read by the chama client. Passing
