@@ -260,7 +260,7 @@ until election events exist.
       graduated sellers once aggregate ratings are populated. Currently hidden;
       gating for graduated sellers is blocked on the Ratings primitive below.
 
-- [ ] **Ratings primitive (core — unblocks graduation).** Implement the actual
+- [x] **Ratings primitive (core — unblocks graduation).** **[✅ PRIMITIVE SHIPPED — `src/reputation/ratings.ts` + kind:38123 (RatingTap/MeScreen/TradeDetail), DECISIONS 2026-06-08. The #73 CONSUMERS — tiered assignment, arbiter dashboard, amount caps — remain, tracked in the arbiter-economy build.]** Implement the actual
       per-counterparty rating capture + aggregation that `canOfferSubscription`
       and graduated-seller features already assume (5 positive / 0 negative =
       graduated). Natural capture point: the post-claim / complete screen, where
@@ -309,7 +309,7 @@ arbiter status. Requires arbiter-status tracking per community slug.
 Civilian key + arbiter key must stay separate; the protocol should
 enforce what the design already requires.
 
-- [ ] Arbiter incentive economics. Dispute-triggered flat fee, not a
+- [ ] Arbiter incentive economics. **[DESIGN LOCKED — tips for presence + flat dispute fee, `DESIGN-arbiter-economy.md` §5; BUILD rides the bond lane.]** Dispute-triggered flat fee, not a
 percentage of trade value on every assignment. Exact amounts are
 a post-v1 empirical question — let Nairobi usage show what arbiters
 actually do before pricing it. Structure is locked: duty pays, not
@@ -446,7 +446,7 @@ Move these into a target section once the shape is clear.
       settings visibility. Browse, Create, and Me each get their own distinct
       two-sided layout. Pure UI/UX; sized with #9 landscape.
 
-- [ ] **#3 — Create-form fiat toggle broken ON TAURI ONLY.** APK and browser
+- [x] **#3 — Create-form fiat toggle broken ON TAURI ONLY.** **[✅ SHIPPED — Tauri HTTP-plugin routing in `market-fetch.ts` + creator-currency `shouldQuoteEstimatedFiat` suppression, DECISIONS 2026-06-06.]** APK and browser
       toggle sats↔fiat correctly during Create; Tauri shows only sats for the
       "BTC" amount entered (e.g. "BTC 12"). The BTC/USD median price itself
       works on Tauri, so it's the toggle / currency-selector state, not the rate
@@ -513,7 +513,7 @@ Move these into a target section once the shape is clear.
         `since` window) → the counterparty's participant feed auto-loads the
         trade. Would heal even old ghosts (the pointer is new). Deferred from
         v1.2.15 — needs its own design + tests, beyond the hotfix.
-  - [ ] **Remaining `window.confirm` / `window.alert` sites.** Same webview
+  - [x] **Remaining `window.confirm` / `window.alert` sites.** **[✅ DONE v2.5 — converted to inline / two-tap; only explanatory comments remain, no live calls.]** Same webview
         no-op class: `CreateForm.tsx` photo-type `window.alert` → convert to an
         inline error. Audit for any others before they bite.
 

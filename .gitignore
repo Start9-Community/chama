@@ -21,3 +21,6 @@ src-tauri/binaries/chama-fedimint-bridge-*
 # scripts/android-release.sh from --zapstore-notes-file before zsp
 # publishes; treated as a build artifact, not source.
 /zapstore/release-notes.md
+
+# agent / build artifacts — not source
+outputs/
