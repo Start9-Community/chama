@@ -22,6 +22,18 @@ updates:
           - "patch"
     # Majors and the excluded crypto/money deps still arrive as individual
     # PRs. Security updates stay individual too — those should be loud.
+    ignore:
+      # React 19 is a deliberate migration (react + react-dom + their @types
+      # move together as one planned task), NOT a Dependabot auto-bump.
+      # Remove this block when you choose to do the React 19 migration.
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
