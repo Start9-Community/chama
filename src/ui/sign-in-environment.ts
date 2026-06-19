@@ -5,11 +5,19 @@ export interface SignInEnvironment {
   hasFediInternal: boolean;
 }
 
+export function isTauriRuntime(): boolean {
+  const global = globalThis as {
+    __TAURI__?: unknown;
+    __TAURI_INTERNALS__?: unknown;
+  };
+  return Boolean(global.__TAURI__ || global.__TAURI_INTERNALS__);
+}
+
 export function getSignInEnvironment(): SignInEnvironment {
   const nav = typeof navigator !== "undefined" ? navigator : null;
 
   return {
-    isNativePlatform: false,
+    isNativePlatform: isTauriRuntime(),
     userAgent: nav?.userAgent || "",
     maxTouchPoints: nav?.maxTouchPoints || 0,
     hasFediInternal: typeof window !== "undefined" && !!(window as any).fediInternal,

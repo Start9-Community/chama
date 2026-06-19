@@ -7,6 +7,7 @@ import { GlobeCountryPicker } from "./GlobeCountryPicker.js";
 import {
   getSignInEnvironment,
   isFediWebViewSignInEnvironment,
+  isTauriRuntime,
   shouldOfferNIP46Signer,
 } from "../sign-in-environment.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
@@ -68,7 +69,7 @@ export function ConnectScreen({
   nip46Uri?: string | null;
   nip46Waiting?: boolean;
 }) {
-  const isNative = Capacitor.isNativePlatform();
+  const isNative = Capacitor.isNativePlatform() || isTauriRuntime();
   const signInEnvironment = {
     ...getSignInEnvironment(),
     isNativePlatform: isNative,

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { T } from "../theme.js";
+import { isTauriRuntime } from "../sign-in-environment.js";
 import { validateRecoveryKeyInput } from "../../escrow-engine/nsec-signer.js";
 
 export function NsecLogin({
@@ -29,7 +30,7 @@ export function NsecLogin({
   // that's asking for an existing one.
   choiceFooter?: ReactNode;
 }) {
-  const isNative = Capacitor.isNativePlatform();
+  const isNative = Capacitor.isNativePlatform() || isTauriRuntime();
   const [showNsec, setShowNsec] = useState(isNative || defaultOpen || friendly);
   const [mode, setMode] = useState<"choice" | "create" | "paste">(
     friendly ? "choice" : "paste",

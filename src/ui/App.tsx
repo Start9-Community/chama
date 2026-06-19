@@ -116,6 +116,7 @@ import { isSimModeOn } from "../sim/simMode.js";
 import {
   getSignInEnvironment,
   isFediWebViewSignInEnvironment,
+  isTauriRuntime,
   shouldApplyCssSafeAreaInsets,
 } from "./sign-in-environment.js";
 import { readKind0Toggle, type NostrProfileNameMap } from "./nostr-profiles.js";
@@ -173,6 +174,54 @@ type GivenRatingSlot = {
 
 const GIVEN_RATINGS_STORAGE_PREFIX = "chama_given_ratings_v1";
 const SWITCH_FEEDBACK_MIN_MS = 550;
+const SAVED_NSEC_KEY = "chama_saved_nsec";
+const NSEC_ORIGIN_KEY = "chama_nsec_origin";
+
+function shouldPersistNsecInShell(): boolean {
+  return Capacitor.isNativePlatform() || isTauriRuntime();
+}
+
+async function readSavedNsec(): Promise<string | null> {
+  if (Capacitor.isNativePlatform()) {
+    const { value } = await Preferences.get({ key: SAVED_NSEC_KEY });
+    return value?.trim() || null;
+  }
+  if (isTauriRuntime()) {
+    try {
+      return localStorage.getItem(SAVED_NSEC_KEY)?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function writeSavedNsec(nsec: string, origin: "generated" | "imported"): Promise<void> {
+  if (Capacitor.isNativePlatform()) {
+    await Preferences.set({ key: SAVED_NSEC_KEY, value: nsec });
+    await Preferences.set({ key: NSEC_ORIGIN_KEY, value: origin });
+    return;
+  }
+  if (isTauriRuntime()) {
+    try {
+      localStorage.setItem(SAVED_NSEC_KEY, nsec);
+      localStorage.setItem(NSEC_ORIGIN_KEY, origin);
+    } catch {
+      // Tauri desktop storage is a convenience cache; sign-in still works manually.
+    }
+  }
+}
+
+async function removeSavedNsec(): Promise<void> {
+  if (Capacitor.isNativePlatform()) {
+    try { await Preferences.remove({ key: SAVED_NSEC_KEY }); } catch {}
+    try { await Preferences.remove({ key: NSEC_ORIGIN_KEY }); } catch {}
+  }
+  if (isTauriRuntime()) {
+    try { localStorage.removeItem(SAVED_NSEC_KEY); } catch {}
+    try { localStorage.removeItem(NSEC_ORIGIN_KEY); } catch {}
+  }
+}
 
 function givenRatingsStorageKey(pubkey: string): string {
   return `${GIVEN_RATINGS_STORAGE_PREFIX}:${pubkey.toLowerCase()}`;
@@ -638,13 +687,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, pubkey]);
 
-  // Auto-login: on native platforms, check for saved nsec in secure storage
+  // Auto-login: in app shells, check for a saved nsec before showing login.
   useEffect(() => {
     if (autoLoginChecked || connected || loading) return;
-    if (!Capacitor.isNativePlatform()) { setAutoLoginChecked(true); return; }
+    if (!shouldPersistNsecInShell()) { setAutoLoginChecked(true); return; }
     (async () => {
       try {
-        const { value } = await Preferences.get({ key: "chama_saved_nsec" });
+        const value = await readSavedNsec();
         if (value) {
           (window as any).__chama_connect_nsec = value;
           actions.connect();
@@ -1256,10 +1305,7 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
-    if (Capacitor.isNativePlatform()) {
-      try { await Preferences.remove({ key: "chama_saved_nsec" }); } catch {}
-      try { await Preferences.remove({ key: "chama_nsec_origin" }); } catch {}
-    }
+    await removeSavedNsec();
     delete (window as any).__chama_connect_nsec;
     window.location.reload();
   };
@@ -1357,9 +1403,10 @@ export default function App() {
                   // in the Capacitor/Tauri webview — so proceed and toast,
                   // rather than gate behind a dialog that never fires.
                   (window as any).__chama_connect_nsec = scanned;
-                  try { await Preferences.set({ key: "chama_saved_nsec", value: scanned }); } catch {}
                   // A scanned key is imported, never Chama-generated.
-                  try { await Preferences.set({ key: "chama_nsec_origin", value: "imported" }); } catch {}
+                  if (shouldPersistNsecInShell()) {
+                    try { await writeSavedNsec(scanned, "imported"); } catch {}
+                  }
                   setToast({ message: "⚡ Key scanned — signing you in.", type: "success" });
                   actions.connect();
                 } else if (scanned.startsWith("nostrconnect://") || scanned.startsWith("bunker://")) {
@@ -1399,17 +1446,13 @@ export default function App() {
           }}
           onConnectNsec={async (nsec: string, remember: boolean, wasGenerated: boolean) => {
             (window as any).__chama_connect_nsec = nsec;
-            if (remember && Capacitor.isNativePlatform()) {
+            if (remember && shouldPersistNsecInShell()) {
               try {
-                await Preferences.set({ key: "chama_saved_nsec", value: nsec });
                 // v2.5: record key origin alongside the saved nsec so Me ›
                 // Advanced reveals the master key ONLY when Chama generated it
                 // (an imported key is the user's to back up where they made it;
                 // NIP-46 keys are never saved here at all).
-                await Preferences.set({
-                  key: "chama_nsec_origin",
-                  value: wasGenerated ? "generated" : "imported",
-                });
+                await writeSavedNsec(nsec, wasGenerated ? "generated" : "imported");
               } catch (e) {
                 console.warn("[chama] Failed to save nsec to secure storage:", e);
               }

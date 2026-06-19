@@ -22,6 +22,7 @@ import {
 import { getCachedSeedWords } from "../../fedimint/seed-manager.js";
 import { QRCode } from "../QRCode.js";
 import { Preferences } from "@capacitor/preferences";
+import { isTauriRuntime } from "../sign-in-environment.js";
 
 // Settings → Advanced — the home of Power-user mode (formerly
 // "Sandbox mode" through v0.4.1) and the federation-switching tools
@@ -873,7 +874,7 @@ function RecoveryPhraseCard() {
 // The nsec is the MASTER key: it owns the Nostr identity AND decrypts the
 // wallet seed stored on Nostr — so it can recover everything. We reveal it
 // ONLY when Chama generated the key (chama_nsec_origin === "generated"), and
-// only when it's actually stored on this device (chama_saved_nsec, native).
+// only when it's actually stored on this device (chama_saved_nsec).
 // An imported key is the user's to back up where they made it; a NIP-46 key
 // never touches this device. Async-loaded from secure storage on mount.
 function NsecRevealCard() {
@@ -891,6 +892,10 @@ function NsecRevealCard() {
       let nsecVal: string | null = null;
       try { originVal = (await Preferences.get({ key: "chama_nsec_origin" })).value; } catch { /* secure storage unavailable */ }
       try { nsecVal = (await Preferences.get({ key: "chama_saved_nsec" })).value; } catch { /* secure storage unavailable */ }
+      if (isTauriRuntime()) {
+        try { originVal = originVal ?? localStorage.getItem("chama_nsec_origin"); } catch { /* local storage unavailable */ }
+        try { nsecVal = nsecVal ?? localStorage.getItem("chama_saved_nsec"); } catch { /* local storage unavailable */ }
+      }
       if (cancelled) return;
       setOrigin(originVal);
       setNsec(nsecVal);
