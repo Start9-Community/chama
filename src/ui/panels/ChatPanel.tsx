@@ -337,12 +337,22 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
           padding: embedded ? "10px 0 0" : "10px 12px",
           borderTop: `1px solid ${T.border}`,
           display: "grid", gap: 8,
+          // R3-3: keep the grid (and its flex input row) shrinkable so a wide
+          // attachment preview / narrow embedded column can never overflow and
+          // push the Send button out of view.
+          minWidth: 0,
         }}>
           {attachment && (
             <div style={{
               display: "flex", alignItems: "center", gap: 10,
               padding: 8, background: T.surface, border: `1px solid ${T.border}`,
               borderRadius: 12,
+              // R3-3 (completing the fix): this preview is a GRID ITEM carrying the
+              // long filename as nowrap text; without minWidth:0 its min-content forces
+              // the grid track wider than the narrow embedded column, pushing Send off
+              // the right edge. The inner ellipsis hides it visually but doesn't shrink
+              // the intrinsic width — only this does. Matches the input row's minWidth:0.
+              minWidth: 0,
             }}>
               <img
                 src={attachment.dataUrl}
@@ -385,7 +395,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
               {err}
             </div>
           )}
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
             <input
               ref={fileRef}
               type="file"

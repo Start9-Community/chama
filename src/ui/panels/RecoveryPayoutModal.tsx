@@ -31,6 +31,12 @@ import type {
   RecoveryPayoutPhase,
   RecoveryPayoutTerminal,
 } from "../../payments/balance-recovery.js";
+import {
+  getPayoutRecord,
+  recordPayoutSubmitted,
+  markPayoutSettled,
+  clearPayoutRecord,
+} from "../../payments/payout-journal.js";
 
 export interface RecoveryPayoutModalProps {
   /** Stranded balance in millisatoshis. */
@@ -44,8 +50,11 @@ export interface RecoveryPayoutModalProps {
   title: string;
   /** Optional subtitle below the amount. */
   subtitle?: string;
-  /** Bound to actions.payInvoice. */
-  payInvoice: (bolt11: string) => Promise<void>;
+  /** Bound to actions.payInvoice. Resolves with the LN-pay operationId. */
+  payInvoice: (bolt11: string) => Promise<string | undefined | void>;
+  /** R3-1: bound to actions.awaitPayoutOutcome — re-attach to a submitted
+   *  recovery payout without re-paying (double-pay guard). */
+  awaitPayoutOutcome?: (operationId: string) => Promise<"settled" | "refunded" | "unknown">;
   /** Optional balance reader for trace cleanup after payout. */
   getBalance?: () => Promise<number>;
   /** Optional provenance for tagging the recovery send. */
@@ -73,6 +82,7 @@ export function RecoveryPayoutModal({
   title,
   subtitle,
   payInvoice,
+  awaitPayoutOutcome,
   getBalance,
   traceContext,
   addOrTouchPayoutDestination,
@@ -124,13 +134,34 @@ export function RecoveryPayoutModal({
             traceContext,
             addOrTouchLightningHandle: addOrTouchPayoutDestination,
             onPhase: (phase) => setStage({ kind: "running", phase }),
+            // R3-1 double-pay guard — shares the claim path's escrow-keyed journal.
+            getPayoutRecord,
+            recordPayoutSubmitted,
+            markPayoutSettled,
+            clearPayoutRecord,
+            awaitPayoutOutcome,
           });
           setStage({ kind: "terminal", terminal });
-          if (terminal.kind === "done") {
+          if (terminal.kind === "done" || terminal.kind === "payout-confirming") {
             if (opts.saveNwcAfter && opts.nwcConnectionString) {
               try { addOrTouchSavedNwcConnection(opts.nwcConnectionString); } catch {}
             }
-            setTimeout(() => onClose(terminal), 1500);
+            // R3-1: on payout-confirming, re-attach once in the background to
+            // flip the journal to settled when the slow payment lands (this
+            // NEVER re-pays). Then close after a beat — a re-tap hits the guard.
+            if (terminal.kind === "payout-confirming" && awaitPayoutOutcome && traceContext?.escrowId) {
+              const escrowId = traceContext.escrowId;
+              const rec = getPayoutRecord(escrowId);
+              if (rec?.status === "submitted" && rec.operationId) {
+                void awaitPayoutOutcome(rec.operationId)
+                  .then((outcome) => {
+                    if (outcome === "settled") markPayoutSettled(escrowId, rec.operationId);
+                    else if (outcome === "refunded") clearPayoutRecord(escrowId);
+                  })
+                  .catch(() => {});
+              }
+            }
+            setTimeout(() => onClose(terminal), terminal.kind === "done" ? 1500 : 2500);
           }
         }}
         onCancel={() => onClose(undefined)}
@@ -236,6 +267,42 @@ function TerminalPanel({
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
           Closing…
         </div>
+      </div>
+    );
+  }
+
+  if (terminal.kind === "payout-confirming") {
+    // R3-1: sent but unconfirmed — deliberately NO retry (re-paying is the
+    // double-send this guards against). Chama re-attaches in the background.
+    return (
+      <div>
+        <div style={{
+          padding: "20px 16px", textAlign: "center",
+          background: T.amberDim, border: `1px solid ${T.amber}66`, borderRadius: T.r,
+          marginBottom: 12,
+        }}>
+          <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: T.amber, fontFamily: T.sans, marginBottom: 4 }}>
+            Payout sent — confirming
+          </div>
+          <div style={{
+            fontSize: 10, color: T.muted, fontFamily: T.mono,
+            whiteSpace: "pre-wrap", wordBreak: "break-word",
+          }}>
+            {terminal.error ?? "Your payout was sent and is confirming. Don't retry — check your destination wallet."}
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          Close
+        </button>
       </div>
     );
   }

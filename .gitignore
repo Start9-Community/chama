@@ -24,3 +24,6 @@ src-tauri/binaries/chama-fedimint-bridge-*
 
 # agent / build artifacts — not source
 outputs/
+
+# scratch dir (agent session) — not source
+tmp/

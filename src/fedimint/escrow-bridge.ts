@@ -536,9 +536,11 @@ export class EscrowFedimintBridge {
     //
     // The CREATE event's `fed` tag is the source of truth for which
     // federation the lock lives on. We compare it to the wallet's own
-    // fed ID. Legacy trades without payload.fed fall through to the
-    // redeem itself, whose native federation rejection still surfaces
-    // a (less-clear) error.
+    // fed ID. Legacy trades without payload.fed (expectedFed === null) skip
+    // this gate and fall through to the redeem itself. v3.5.1: that redeem
+    // is now bounded by REDEEM_ATTEMPT_TIMEOUT_MS, so a cross-fed claim the
+    // gate couldn't catch surfaces a retryable claim-pending terminal
+    // instead of hanging the in-progress spinner forever.
     const claimCreateEvent = state.eventChain.find(
       (e: any) => e.kind === 38100 || e.payload?.type === "escrow:create"
     );
@@ -902,8 +904,20 @@ export class EscrowFedimintBridge {
   // hook layer consistent (always calls bridge.*) and makes it easy to
   // add logging/metrics around wallet ops in one place.
 
-  async payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<void> {
-    await this.fedimint.payInvoice(bolt11, meta);
+  async payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<string | undefined> {
+    // Returns the durable LN-pay operationId so the claim orchestrator can
+    // journal the payout (double-pay guard). Errors thrown here carry a
+    // `code` (LN_PAY_INFLIGHT / LN_PAY_REFUNDED / LN_PAY_SUBMIT_FAILED) and
+    // an `operationId` for re-attach — see sdk-adapter.ts.
+    return await this.fedimint.payInvoice(bolt11, meta);
+  }
+
+  /** 3.5.1 double-pay guard: re-attach to a previously-submitted payout and
+   *  report its terminal outcome without paying again. */
+  async awaitPayoutOutcome(
+    operationId: string,
+  ): Promise<"settled" | "refunded" | "unknown"> {
+    return await this.fedimint.awaitPayOutcome(operationId);
   }
 
   async spendNotes(amountMsats: number, meta?: ChamaOperationMeta): Promise<string> {

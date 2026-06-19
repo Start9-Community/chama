@@ -133,6 +133,10 @@ import {
   getUserCommunitySlug,
   getUserCommunitySlugRaw,
   setUserCommunitySlug,
+  setPendingCommunitySelection,
+  getPendingCommunitySelection,
+  clearPendingCommunitySelection,
+  applyPendingCommunitySelection,
   COMMUNITY_STORAGE_KEY,
 } from "../communities/storage.js";
 import { defaultCurrencyForCommunity } from "../communities/currency.js";
@@ -164,7 +168,7 @@ import {
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
 import { OCA_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
-import { adaptRealWallet, resetLocalFedimintWallet } from "../fedimint/sdk-adapter.js";
+import { adaptRealWallet, resetLocalFedimintWallet, classifyPayOutcome } from "../fedimint/sdk-adapter.js";
 import {
   clearAllPendingRedemptions,
   listPendingRedemptions,
@@ -399,6 +403,7 @@ import {
   resolveEstimatedFiatCurrency,
   shouldQuoteEstimatedFiat,
 } from "../ui/amount-display.js";
+import { listingPremiumLine } from "../ui/listing-metrics.js";
 import {
   isFediWebViewSignInEnvironment,
   isMobileSignInEnvironment,
@@ -797,7 +802,7 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
     if (assertOk(r2, "Buyer JOIN accepted as ACK")) {
       assert(r2.state.participants[Role.BUYER] === BUYER_PK, "Buyer pubkey recorded");
       assert(r2.state.joinHolds?.[Role.BUYER]?.expiresAt === join1.payload.holdExpiresAt,
-        "Buyer JOIN hold expires in 15 minutes");
+        "Buyer JOIN hold expires in 5 minutes");
       assert(r2.state.status === EscrowStatus.CREATED, "Status STAYS CREATED after buyer JOIN");
 
       const join2 = joinEvent(Role.ARBITER, ARBITER_PK, join1.raw.id);
@@ -836,7 +841,7 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
   assertErr(applyEvent(state, join1dup), "ALREADY_JOINED", "Same pubkey re-JOIN is benign duplicate");
 }
 
-// Buyer/seller JOIN holds expire after 15 minutes and release the slot
+// Buyer/seller JOIN holds expire after 5 minutes and release the slot
 {
   const create = createEvent();
   let state = (applyEvent(null, create) as any).state;
@@ -846,11 +851,11 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
 
   assert(
     getEffectiveParticipantAt(state, Role.BUYER, joinedAt + JOIN_HOLD_SECONDS - 1) === BUYER_PK,
-    "Buyer JOIN hold is active before the 15-minute deadline",
+    "Buyer JOIN hold is active before the 5-minute deadline",
   );
   assert(
     getEffectiveParticipantAt(state, Role.BUYER, joinedAt + JOIN_HOLD_SECONDS + 1) === null,
-    "Buyer JOIN hold expires after 15 minutes",
+    "Buyer JOIN hold expires after 5 minutes",
   );
   assert(
     getEffectiveParticipantAt(
@@ -859,7 +864,7 @@ console.log("\n── JOIN (ACK only — does not transition state) ──");
       joinedAt + JOIN_HOLD_SECONDS + 1,
       { includeLockGrace: true },
     ) === BUYER_PK,
-    "Buyer JOIN hold has a hidden lock grace after the visible 15-minute deadline",
+    "Buyer JOIN hold has a hidden lock grace after the visible 5-minute deadline",
   );
   assert(
     getEffectiveParticipantAt(
@@ -1689,7 +1694,7 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
       const saved = applyEvent(joined.state, saveOrder);
       if (assertOk(saved, "Buyer can publish a follow-up JOIN to save menu order")) {
         const hold = saved.state.joinHolds?.[Role.BUYER];
-        assert(hold?.expiresAt === originalExpiresAt, "Saving menu order keeps the original 15-minute lock window");
+        assert(hold?.expiresAt === originalExpiresAt, "Saving menu order keeps the original 5-minute lock window");
         assert(hold?.selectedItems?.[0]?.itemId === "large", "Saved menu order is stored on the buyer hold");
         assert(hold?.amountMsats === 75_000, "Saved menu order amount is stored on the buyer hold");
 
@@ -1709,7 +1714,7 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
         const ready = applyEvent(saved.state, readyOrder);
         if (assertOk(ready, "Buyer can finalize the saved menu order")) {
           const readyHold = ready.state.joinHolds?.[Role.BUYER];
-          assert(readyHold?.expiresAt === originalExpiresAt, "Finalizing menu order keeps the original 15-minute lock window");
+          assert(readyHold?.expiresAt === originalExpiresAt, "Finalizing menu order keeps the original 5-minute lock window");
           assert(readyHold?.orderFinalizedAt === readyOrder.payload.orderFinalizedAt,
             "Finalized timestamp is stored on the buyer hold");
 
@@ -3436,8 +3441,9 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   // v0.7.0: registry includes Tanzania/TZS plus every East/West/Central Africa
   // country Chama shell. Country-first identity is user-facing; the
   // backing federation stays hidden until a claimed local route exists.
-  // v0.7.0: the visible USD default keeps the stable us-blf slug but
-  // presents as Global · USD; legacy global-usd is hidden with BP.
+  // 2026-06-16: us-blf is the hidden universal backup (BLF), nameless
+  // ("Global · Bitcoin"); the one visible US community is us-gbf ("USA ·
+  // USD", GBF); legacy global-usd stays hidden and repoints to BLF.
   // Permissionless additions live in localStorage and are not counted here.
   assert(COMMUNITY_REGISTRY.length === 58,
     "Registry has 58 pre-seeds: Global, GBF, Fedi-approved public routes, Kenya routes, South Africa, East/West/Central Africa, plus hidden legacy entries");
@@ -3465,16 +3471,23 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getCommunityBySlug("sv-usd")?.currency === "USD", "sv-usd is USD");
   assert(getCommunityBySlug("global-usd")?.currency === "USD", "global-usd is USD");
   assert(getCommunityBySlug("us-blf")?.currency === "USD", "us-blf is USD");
-  assert(getCommunityBySlug("us-blf")?.displayName === "Global · USD",
-    "us-blf presents as Global · USD");
+  assert(getCommunityBySlug("us-blf")?.displayName === "Global · Bitcoin",
+    "us-blf presents as the nameless Global · Bitcoin backup (not 'Global · USD')");
   assert(getCommunityBySlug("us-blf")?.pickerLabel === "Bitcoin Life Federation",
     "Global picker names the BLF wallet service as Bitcoin Life Federation");
   assert(getCommunityBySlug("us-gbf")?.pickerLabel === "Global Bitcoin Federation",
     "Global picker names the GBF wallet service as Global Bitcoin Federation");
+  // 2026-06-16 label collision fix: GBF is the one visible US community
+  // ("USA · USD"); the BLF backup is nameless ("Global · Bitcoin"), not the
+  // "Global · USD" identity it used to impersonate.
+  assert(getCommunityBySlug("us-gbf")?.displayName === "USA · USD",
+    "us-gbf is the one visible US community, labeled USA · USD (GBF)");
+  assert(getCommunityBySlug("us-blf")?.displayName !== "Global · USD",
+    "us-blf no longer impersonates 'Global · USD' (label collision fixed)");
   assert(getCommunityBySlug("us-blf")?.flagEmoji === "🌍",
-    "Global · USD uses the Africa-facing globe emoji");
+    "us-blf backup uses the Africa-facing globe emoji");
   assert(getCommunityBySlug("us-blf")?.disambiguator === "BLF",
-    "Global USD shows BLF as its backing route in onboarding");
+    "us-blf shows BLF as its backing route in onboarding");
 
   // #103: communityForInvite keeps a listing's community LABEL honest with the
   // fed it's minted on (so the Browse chip + the off-route amber can't disagree).
@@ -3554,7 +3567,7 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(BLF_OFFICIAL_ARBITERS.length === 2,
     "BLF official arbiter pool has two baked arbiters");
   assert(getTrustedArbiterPool({ community: "us-blf" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
-    "Global USD/BLF listings carry the official BLF arbiters");
+    "us-blf/BLF listings carry the official BLF arbiters");
   assert(getTrustedArbiterPool({ community: "sn-cfa" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
     "Senegal CFA is BLF-backed and carries the official BLF arbiters");
   assert(getTrustedArbiterPool({ community: "tz-tzs" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
@@ -4232,14 +4245,16 @@ console.log("\n── DEFERRED COMMUNITY REPORT STORAGE ──");
 // old global-usd slug stays hidden for legacy listings.
 console.log("\n── BP / BLF RESOLVER ──");
 {
-  // No custom invite, no community: BP fallback
+  // No custom invite, no community: BLF fallback (DECISION 2026-06-16 — BLF
+  // is the universal backup across the board; BP is no longer the silent
+  // default).
   (globalThis as any).localStorage.clear();
-  assert(resolveFederationForCommunity(null) === BP_FEDERATION_INVITE,
-    "Null slug → BP default");
-  assert(resolveFederationForCommunity(undefined) === BP_FEDERATION_INVITE,
-    "Undefined slug → BP default");
-  assert(resolveFederationForCommunity("xx-unknown") === BP_FEDERATION_INVITE,
-    "Unknown slug → BP default");
+  assert(resolveFederationForCommunity(null) === BLF_FEDERATION_INVITE,
+    "Null slug → BLF default");
+  assert(resolveFederationForCommunity(undefined) === BLF_FEDERATION_INVITE,
+    "Undefined slug → BLF default");
+  assert(resolveFederationForCommunity("xx-unknown") === BLF_FEDERATION_INVITE,
+    "Unknown slug → BLF default");
 
   // Pre-seeded communities resolve to their pinned invite, not the BP
   // fallback — the registry now carries the choice explicitly.
@@ -4293,15 +4308,15 @@ console.log("\n── BP / BLF RESOLVER ──");
 
   const globalUsdInvite = getCommunityBySlug("global-usd")!.federationInvite!;
   assert(resolveFederationForCommunity("global-usd") === globalUsdInvite,
-    "hidden global-usd → registry-pinned BP invite for legacy listings");
-  assert(globalUsdInvite === BP_FEDERATION_INVITE,
-    "hidden global-usd still pins BP");
+    "hidden global-usd → registry-pinned BLF invite for legacy listings");
+  assert(globalUsdInvite === BLF_FEDERATION_INVITE,
+    "hidden global-usd now pins BLF (2026-06-16 repoint off BP)");
 
   const usBlfInvite = getCommunityBySlug("us-blf")!.federationInvite!;
   assert(resolveFederationForCommunity("us-blf") === usBlfInvite,
     "us-blf → registry-pinned invite");
   assert(usBlfInvite === BLF_FEDERATION_INVITE,
-    "us-blf pins BLF for the public Global USD route");
+    "us-blf pins BLF for the public backup route");
 
   // Custom invite override only applies when no selected community has a
   // pinned invite. Community identity wins so stale sandbox state cannot
@@ -4323,8 +4338,8 @@ console.log("\n── BP / BLF RESOLVER ──");
 
   // Cleanup so other tests aren't poisoned
   setCustomFederationInvite("");
-  assert(resolveFederationForCommunity(null) === BP_FEDERATION_INVITE,
-    "After clearing custom invite, falls back to BP again");
+  assert(resolveFederationForCommunity(null) === BLF_FEDERATION_INVITE,
+    "After clearing custom invite, falls back to BLF again");
 }
 
 // ── 15b. FEDERATION DRIFT DETECTION ──────────────────────────────────────
@@ -4555,11 +4570,41 @@ console.log("\n── VOTE LABEL DICTIONARY ──");
   assert(getVoteLabel("p2p-trade", "service", Role.SELLER, Outcome.RELEASE) === "Fiat received",
     "p2p/seller/release = 'Fiat received'");
 
-  // Bill Pay — payer is the seller (sats-receiver), payee is the buyer (bill-holder)
-  assert(getVoteLabel("bill-pay", "service", Role.BUYER, Outcome.RELEASE) === "My bill was paid",
-    "bill-pay/buyer/release = 'My bill was paid'");
-  assert(getVoteLabel("bill-pay", "service", Role.SELLER, Outcome.RELEASE) === "I paid the bill as a volunteer",
-    "bill-pay/seller/release = volunteer attestation (deed-doer votes first)");
+  // Bill Pay — the VOLUNTEER (buyer) pays the bill off-chain and is paid in
+  // sats on RELEASE; the BILL OWNER (seller) locks the sats and confirms.
+  // (3.5.1: buyer↔seller were inverted vs the sats routing.)
+  assert(getVoteLabel("bill-pay", "service", Role.BUYER, Outcome.RELEASE) === "I paid the bill as a volunteer",
+    "bill-pay/buyer/release = volunteer attestation (deed-doer votes first)");
+  assert(getVoteLabel("bill-pay", "service", Role.SELLER, Outcome.RELEASE) === "My bill was paid",
+    "bill-pay/seller/release = owner confirms 'My bill was paid'");
+  assert(getVoteLabel("bill-pay", "service", Role.BUYER, Outcome.REFUND) === "Cancel — I can't pay this bill",
+    "bill-pay/buyer/refund = volunteer backs out (routing names the owner as recipient)");
+  assert(getVoteLabel("bill-pay", "service", Role.SELLER, Outcome.REFUND) === "Bill not paid",
+    "bill-pay/seller/refund = owner says bill not paid (refund to owner)");
+
+  // 3.5.1 #3 — premium % label must not lose a trailing zero on ROUND numbers.
+  // formatBps("20".toFixed(0)).replace(/\.?0+$/,"") was "2", so a 20% premium
+  // rendered "+2%" (amount was right; label 10× off). Round numbers are the
+  // repro; decimals like 2.5 always worked, which masked it.
+  {
+    const mk = (bps: number) => ({
+      category: "bill-pay",
+      premiumBps: bps,
+      amountMsats: 0,
+      fiatAmount: 0,
+      fiatCurrency: "USD",
+    } as unknown as EscrowState);
+    assert(listingPremiumLine(mk(2000), 65_000) === "+20% premium",
+      "listing premium 2000bps → +20% (not +2%)");
+    assert(listingPremiumLine(mk(10_000), 65_000) === "+100% premium",
+      "listing premium 10000bps → +100% (not +1%)");
+    assert(listingPremiumLine(mk(700), 65_000) === "+7% premium",
+      "listing premium 700bps → +7%");
+    assert(listingPremiumLine(mk(1250), 65_000) === "+12.5% premium",
+      "listing premium 1250bps → +12.5% (decimal ≥10 preserved)");
+    assert(listingPremiumLine(mk(250), 65_000) === "+2.5% premium",
+      "listing premium 250bps → +2.5% (decimal <10 preserved)");
+  }
 
   // Lending (placeholder labels for v1)
   assert(getVoteLabel("lending", "service", Role.BUYER, Outcome.RELEASE) === "Loan received — I'll repay on time",
@@ -4675,14 +4720,14 @@ console.log("\n── VOTE PROMPT TURN-GATE ──");
     fulfillment: defaultFulfillmentFor("bill-pay"),
     votes: {},
   } as EscrowState;
-  prompt = decideVotePrompt(billPay, SELLER_PK);
-  assert(prompt.kind === "buttons", "Bill Pay starts VOLUNTEER-first (the deed-doer votes first)");
+  prompt = decideVotePrompt(billPay, BUYER_PK);
+  assert(prompt.kind === "buttons", "Bill Pay starts VOLUNTEER-first (the buyer/deed-doer votes first)");
   assert(prompt.kind === "buttons" && prompt.firstVote === true,
     "Bill Pay volunteer's opening prompt is the single-primary firstVote moment");
-  prompt = decideVotePrompt(billPay, BUYER_PK);
+  prompt = decideVotePrompt(billPay, SELLER_PK);
   assert(
     prompt.kind === "waiting"
-    && prompt.waitingOn === Role.SELLER
+    && prompt.waitingOn === Role.BUYER
     && /volunteer/i.test(prompt.message),
     "Bill Pay owner waits on the volunteer to pay the bill",
   );
@@ -4858,9 +4903,9 @@ console.log("\n── RAIL REGISTRY ──");
   assert(railsForCommunity("us-gbf").slice(0, 4).map(r => r.key).join(",") === "strike,cashtag,zelle,bank-transfer",
     "GBF Chama leads with US rails: Strike, Cash App, Zelle, bank transfer");
   assert(railsForCommunity("global-usd").slice(0, 4).map(r => r.key).join(",") === "strike,cashtag,zelle,bank-transfer",
-    "Global USD Chama leads with the same US rails");
+    "legacy global-usd leads with the same US rails");
   assert(railsForCommunity("us-blf").slice(0, 4).map(r => r.key).join(",") === "strike,cashtag,zelle,bank-transfer",
-    "Global · USD (us-blf) leads with the same US rails");
+    "us-blf backup leads with the same US rails");
   assert(!railsForCommunity("ke-kes").slice(0, 4).map(r => r.key).includes("strike"),
     "A non-US Chama (Kenya) does not promote US rails to the top");
   const tanzania = railsForCommunity("tz-tzs");
@@ -6366,7 +6411,7 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
   if (switchSilent.kind === "switch-silent") {
     assert(switchSilent.targetInvite === BLF_FEDERATION_INVITE,
       "Switch-silent targets the community's pinned invite (us-blf → BLF)");
-    assert(switchSilent.displayName === "Global · USD",
+    assert(switchSilent.displayName === "Global · Bitcoin",
       "Switch-silent carries the community's displayName");
   }
 
@@ -7409,7 +7454,7 @@ console.log("\n── setUserCommunitySlug PERSISTENCE ──");
 // ── 31. getUserCommunitySlugRaw — null for first-timers ─────────────────
 //
 // Bug A from v0.1.85 smoke testing: first-time users were seeing the
-// "Global · USD" pill highlighted because `getUserCommunitySlug` falls
+// default-community pill highlighted because `getUserCommunitySlug` falls
 // back to us-blf when nothing is stored (v0.5.0). The Raw variant returns
 // null in that case so the UI can distinguish "explicit choice" from
 // "default fallback" — pill highlight reads from Raw, resolution paths
@@ -7529,6 +7574,75 @@ console.log("\n── per-npub localStorage scoping ──");
     "First npub keeps its pending redemption stash");
 
   clearAllPendingRedemptions();
+  setLocalStorageUserScope(null);
+  (globalThis as any).localStorage.clear();
+}
+
+// ── 31a. deferred onboarding community selection (v3.5.1 leak fix) ───────
+//
+// The globe picker runs before a signer is known. The old flow wrote the
+// legacy global COMMUNITY_STORAGE_KEY directly, so the first npub to connect
+// claimed it and fresh/secondary npubs on the same browser raced to the BLF
+// default ("landed on different federations"). v3.5.1 stashes the pick under
+// its OWN key and commits it to the connecting npub's scope
+// (applyPendingCommunitySelection), clearing the stash so it can't leak to a
+// later npub.
+console.log("\n── deferred onboarding community selection ──");
+{
+  (globalThis as any).localStorage.clear();
+  setLocalStorageUserScope(null);
+
+  // Pre-signer pick lands in the dedicated stash, NOT the legacy global key.
+  setPendingCommunitySelection("us-gbf");
+  assert(getPendingCommunitySelection() === "us-gbf",
+    "Pre-signer pick is readable from the pending stash");
+  assert((globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY) === null,
+    "Deferred pick does NOT write the legacy global community key");
+
+  // Unknown stashed slugs resolve to null (don't flow onward).
+  setPendingCommunitySelection("xx-not-a-real-slug");
+  assert(getPendingCommunitySelection() === null,
+    "Unknown stashed slug resolves to null");
+  setPendingCommunitySelection("us-gbf");
+
+  // Connect: commit the pick to THIS npub's scope, clear the stash.
+  setLocalStorageUserScope("npub_defer_alice");
+  applyPendingCommunitySelection();
+  assert(getUserCommunitySlugRaw() === "us-gbf",
+    "Connecting npub gets the deferred pick committed to its scope");
+  assert(getPendingCommunitySelection() === null,
+    "Stash is cleared after commit");
+  assert((globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY) === null,
+    "No legacy global community key is left behind");
+
+  // The leak fix: a fresh second npub does NOT inherit the first npub's pick.
+  setLocalStorageUserScope("npub_defer_bob");
+  applyPendingCommunitySelection(); // no stash → no-op
+  assert(getUserCommunitySlugRaw() === null,
+    "Fresh npub does not inherit the prior npub's deferred pick (no leak)");
+
+  // A returning npub re-picking on the globe overrides its stored choice
+  // (matches the old claim-legacy overwrite semantics).
+  setUserCommunitySlug("ke-kes");
+  assert(getUserCommunitySlugRaw() === "ke-kes", "Returning npub has a stored choice");
+  setLocalStorageUserScope(null);
+  setPendingCommunitySelection("sn-cfa");
+  setLocalStorageUserScope("npub_defer_bob");
+  applyPendingCommunitySelection();
+  assert(getUserCommunitySlugRaw() === "sn-cfa",
+    "Re-pick on the globe overrides the npub's stored choice");
+
+  // The "Change" affordance drops the stash without committing it.
+  setLocalStorageUserScope(null);
+  setPendingCommunitySelection("za-zar");
+  clearPendingCommunitySelection();
+  assert(getPendingCommunitySelection() === null,
+    "Change drops the pending pick without committing");
+
+  // Community-blind fallback also lands on BLF now (federation-config.ts:87).
+  assert(getFederationInvite() === BLF_FEDERATION_INVITE,
+    "Community-blind getFederationInvite falls back to BLF (no custom)");
+
   setLocalStorageUserScope(null);
   (globalThis as any).localStorage.clear();
 }
@@ -8258,6 +8372,27 @@ console.log("\n── shouldShowRecoveryBanner + identifyStrandedEcashSource ─
     }) === false,
     "hasAnyActiveEscrow (new name) suppresses the banner just like hasCurrentEscrow",
   );
+  // Phase 1: sim manual-fund balances are intentional & fake. The recovery
+  // banner is a production real-stranded-funds alarm, so sim mode suppresses
+  // it even for a MATERIAL unexplained balance that would otherwise fire it
+  // (contrast the "orphan case" assertion above, which returns true with the
+  // same balance and no sim flag — so this guards the gate, not the dust line).
+  assert(
+    shouldShowRecoveryBanner({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasAnyActiveEscrow: false,
+      simModeOn: true,
+    }) === false,
+    "Sim mode suppresses the recovery banner even with a material unexplained balance",
+  );
+  assert(
+    shouldShowRecoveryBanner({
+      balanceMsats: 1_000_000,
+      hasAnyActiveEscrow: false,
+      simModeOn: true,
+    }) === false,
+    "Sim mode keeps the recovery banner quiet for a manual-fund balance",
+  );
 
   // identifyStrandedEcashSource: find the most recent CLAIM signed by user.
   const me = "me_pubkey_dddd";
@@ -8436,7 +8571,7 @@ console.log("\n── decideListingTapEffect ──");
   if (switchSilent.kind === "switch-silent") {
     assert(switchSilent.targetInvite === BLF_FEDERATION_INVITE,
       "Target invite matches the listing's fed");
-    assert(switchSilent.displayName === "Global · USD",
+    assert(switchSilent.displayName === "Global · Bitcoin",
       "Display name carries community name for narration");
   }
 
@@ -8727,9 +8862,9 @@ console.log("\n── CreateForm-derived mintUrl ──");
   // us-blf pins BLF — listings in us-blf go to BLF.
   assert(resolveFederationForCommunity("us-blf") === BLF_FEDERATION_INVITE,
     "us-blf listing → BLF invite");
-  // Unknown community → BP fallback.
-  assert(resolveFederationForCommunity("xx-unknown") === BP_FEDERATION_INVITE,
-    "Unknown community → BP fallback (no listing stranded)");
+  // Unknown community → BLF fallback (DECISION 2026-06-16).
+  assert(resolveFederationForCommunity("xx-unknown") === BLF_FEDERATION_INVITE,
+    "Unknown community → BLF fallback (no listing stranded)");
 }
 
 // ── 33. LNURL PARSER (v0.3.0 Phase 1) ────────────────────────────────────
@@ -11711,6 +11846,217 @@ console.log("\n── RUN CLAIM AND PAYOUT ──");
   }
 }
 
+// ── 40b. PAYOUT DOUBLE-PAY GUARD (3.5.1) ─────────────────────────────────
+//
+// The money-critical guard from the round-2 device pass: a payout whose
+// 60s watch window timed out mid-flight must NEVER be re-paid. The journal
+// (payments/payout-journal.ts) records a SUBMITTED payout; runClaimAndPayout
+// re-attaches to the operationId instead of sending a second payment. These
+// tests inject in-memory journal fakes + coded payInvoice errors to prove the
+// guard at the orchestrator boundary (the field bug: two payouts ~78s apart).
+console.log("\n── PAYOUT DOUBLE-PAY GUARD (3.5.1) ──");
+{
+  type Rec = { status: "submitted" | "settled"; operationId?: string } | null;
+  function makeJournal(seed?: Exclude<Rec, null>) {
+    let record: Rec = seed ? { ...seed } : null;
+    const calls = { read: 0, submitted: 0, settled: 0, cleared: 0 };
+    return {
+      calls,
+      get current(): Rec { return record; },
+      getPayoutRecord: (_id: string): Rec => { calls.read++; return record; },
+      recordPayoutSubmitted: (input: { escrowId: string; operationId?: string; amountMsats?: number }) => {
+        calls.submitted++;
+        if (record?.status === "settled") return;
+        record = { status: "submitted", operationId: input.operationId ?? record?.operationId };
+      },
+      markPayoutSettled: (_id: string, operationId?: string) => {
+        calls.settled++;
+        record = { status: "settled", operationId: operationId ?? record?.operationId };
+      },
+      clearPayoutRecord: (_id: string) => { calls.cleared++; record = null; },
+    };
+  }
+  const balances = (arr: number[]) => {
+    let i = 0;
+    return async () => arr[Math.min(i++, arr.length - 1)];
+  };
+  const inflightErr = () =>
+    Object.assign(new Error("payout still confirming"), {
+      code: "LN_PAY_INFLIGHT",
+      operationId: "op_abc",
+    });
+
+  // ── Fresh payout times out IN FLIGHT → payout-confirming, recorded
+  //    submitted, attempted exactly once (no double-send) ───────────────
+  {
+    const journal = makeJournal();
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_dp_inflight",
+      bolt11: "lnbc100n1pdpinflight",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: balances([0, 100_000, 100_000]),
+      claimAndRedeem: async () => ({}),
+      completeClaim: async () => {},
+      payInvoice: async () => { payCalls++; throw inflightErr(); },
+      getPayoutRecord: journal.getPayoutRecord,
+      recordPayoutSubmitted: journal.recordPayoutSubmitted,
+      markPayoutSettled: journal.markPayoutSettled,
+      clearPayoutRecord: journal.clearPayoutRecord,
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async () => {},
+      now: () => 0,
+      confirmTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+    });
+    assert(terminal.kind === "payout-confirming",
+      "in-flight payout → payout-confirming terminal (NOT payout-failed)");
+    assert(payCalls === 1,
+      "in-flight payout: payInvoice attempted exactly once");
+    assert(journal.current?.status === "submitted",
+      "in-flight payout journaled as submitted");
+    assert(journal.current?.operationId === "op_abc",
+      "submitted record carries operationId for re-attach");
+  }
+
+  // ── Retry over a SUBMITTED record + re-attach settles → done, NEVER
+  //    re-pays, NEVER re-claims ──────────────────────────────────────────
+  {
+    const journal = makeJournal({ status: "submitted", operationId: "op_xyz" });
+    let payCalls = 0, claimCalls = 0, completeCalls = 0, reattachOp = "";
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_dp_reattach_ok",
+      bolt11: "lnbc100n1pdpreattach",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: balances([0]),
+      claimAndRedeem: async () => { claimCalls++; return {}; },
+      completeClaim: async () => { completeCalls++; },
+      payInvoice: async () => { payCalls++; },
+      awaitPayoutOutcome: async (op) => { reattachOp = op; return "settled"; },
+      getPayoutRecord: journal.getPayoutRecord,
+      recordPayoutSubmitted: journal.recordPayoutSubmitted,
+      markPayoutSettled: journal.markPayoutSettled,
+      clearPayoutRecord: journal.clearPayoutRecord,
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async () => {},
+      now: () => 0,
+    });
+    assert(terminal.kind === "done",
+      "prior submitted + re-attach settled → done");
+    assert(payCalls === 0,
+      "prior submitted: payInvoice is NEVER called (no double-send)");
+    assert(claimCalls === 0,
+      "prior submitted short-circuits before the claim phase (balance-independent)");
+    assert(reattachOp === "op_xyz",
+      "re-attach uses the stored operationId");
+    assert(journal.current?.status === "settled",
+      "re-attach settled marks the record settled");
+    assert(completeCalls === 1,
+      "re-attach settled publishes COMPLETE");
+  }
+
+  // ── Retry over a SETTLED record → done immediately, no claim, no pay ──
+  {
+    const journal = makeJournal({ status: "settled", operationId: "op_done" });
+    let payCalls = 0, claimCalls = 0, completeCalls = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_dp_settled",
+      bolt11: "lnbc100n1pdpsettled",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: balances([0]),
+      claimAndRedeem: async () => { claimCalls++; return {}; },
+      completeClaim: async () => { completeCalls++; },
+      payInvoice: async () => { payCalls++; },
+      getPayoutRecord: journal.getPayoutRecord,
+      recordPayoutSubmitted: journal.recordPayoutSubmitted,
+      markPayoutSettled: journal.markPayoutSettled,
+      clearPayoutRecord: journal.clearPayoutRecord,
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async () => {},
+      now: () => 0,
+    });
+    assert(terminal.kind === "done",
+      "prior settled → done immediately");
+    assert(payCalls === 0 && claimCalls === 0,
+      "prior settled: neither re-claims nor re-pays");
+    assert(completeCalls === 1,
+      "prior settled re-publishes COMPLETE (idempotent finish)");
+  }
+
+  // ── Retry over a SUBMITTED record + re-attach REFUNDED → clears and
+  //    pays fresh (re-pay is correct once the sats came back) ────────────
+  {
+    const journal = makeJournal({ status: "submitted", operationId: "op_ref" });
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_dp_refunded",
+      bolt11: "lnbc100n1pdprefund",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: balances([0, 100_000, 100_000]),
+      claimAndRedeem: async () => ({}),
+      completeClaim: async () => {},
+      payInvoice: async () => { payCalls++; return "op_fresh"; },
+      awaitPayoutOutcome: async () => "refunded",
+      getPayoutRecord: journal.getPayoutRecord,
+      recordPayoutSubmitted: journal.recordPayoutSubmitted,
+      markPayoutSettled: journal.markPayoutSettled,
+      clearPayoutRecord: journal.clearPayoutRecord,
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async () => {},
+      now: () => 0,
+      confirmTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+    });
+    assert(terminal.kind === "done",
+      "prior submitted + refunded → clears, pays fresh, done");
+    assert(journal.calls.cleared === 1,
+      "confirmed refund clears the stale submitted record");
+    assert(payCalls === 1,
+      "after a confirmed refund a fresh payout IS sent (re-pay is correct here)");
+    assert(journal.current?.status === "settled" && journal.current?.operationId === "op_fresh",
+      "the fresh payout settles the record with its new operationId");
+  }
+
+  // ── Happy path: payInvoice resolves with an operationId → settled ─────
+  {
+    const journal = makeJournal();
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_dp_happy",
+      bolt11: "lnbc100n1pdphappy",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: balances([0, 100_000, 100_000]),
+      claimAndRedeem: async () => ({}),
+      completeClaim: async () => {},
+      payInvoice: async () => "op_happy",
+      getPayoutRecord: journal.getPayoutRecord,
+      recordPayoutSubmitted: journal.recordPayoutSubmitted,
+      markPayoutSettled: journal.markPayoutSettled,
+      clearPayoutRecord: journal.clearPayoutRecord,
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async () => {},
+      now: () => 0,
+      confirmTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+    });
+    assert(terminal.kind === "done",
+      "happy path → done");
+    assert(journal.current?.status === "settled",
+      "happy path journals the payout settled");
+    assert(journal.current?.operationId === "op_happy",
+      "settled record carries the success operationId");
+  }
+}
+
 // ── 41. RUN RECOVERY PAYOUT (v0.3.0 Phase 4) ─────────────────────────────
 //
 // runRecoveryPayout drains an existing wallet balance to a Lightning
@@ -11883,6 +12229,193 @@ console.log("\n── RUN RECOVERY PAYOUT ──");
     assert(payInvoiceCalledAfter,
       "paying-invoice phase fires BEFORE payInvoice is called");
   }
+
+  // ── R3-1: recovery-payout double-pay guard (#2's twin on the refund side) ─
+  // The refund payout reuses runClaimAndPayout in the device pass, but the
+  // recovery path (this orchestrator) had no journal — a timed-out recovery
+  // would show payout-failed and a retry could double-pay the seller. These
+  // tests assert the escrow-keyed guard mirrors the claim side.
+  {
+    type Rec = { status: "submitted" | "settled"; operationId?: string } | null;
+    function makeJournal(seed?: Exclude<Rec, null>) {
+      let record: Rec = seed ? { ...seed } : null;
+      const calls = { submitted: 0, settled: 0, cleared: 0 };
+      return {
+        calls,
+        get current(): Rec { return record; },
+        getPayoutRecord: (_id: string): Rec => record,
+        recordPayoutSubmitted: (input: { escrowId: string; operationId?: string; amountMsats?: number }) => {
+          calls.submitted++;
+          if (record?.status === "settled") return;
+          record = { status: "submitted", operationId: input.operationId ?? record?.operationId };
+        },
+        markPayoutSettled: (_id: string, operationId?: string) => {
+          calls.settled++;
+          record = { status: "settled", operationId: operationId ?? record?.operationId };
+        },
+        clearPayoutRecord: (_id: string) => { calls.cleared++; record = null; },
+      };
+    }
+    const inflightErr = () =>
+      Object.assign(new Error("recovery still confirming"), { code: "LN_PAY_INFLIGHT", operationId: "op_rec" });
+
+    // Fresh in-flight → payout-confirming + journaled submitted, attempted once
+    {
+      const journal = makeJournal();
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_inflight",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; throw inflightErr(); },
+        traceContext: { escrowId: "rec_dp_inflight", amountMsats: 96_000 },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "payout-confirming",
+        "recovery in-flight → payout-confirming (NOT payout-failed)");
+      assert(payCalls === 1,
+        "recovery in-flight: payInvoice attempted exactly once");
+      assert(journal.current?.status === "submitted" && journal.current?.operationId === "op_rec",
+        "recovery in-flight journaled submitted with operationId");
+    }
+
+    // Prior settled → done, never re-pays
+    {
+      const journal = makeJournal({ status: "settled", operationId: "op_done" });
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_settled",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; },
+        traceContext: { escrowId: "rec_dp_settled" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "done",
+        "recovery prior settled → done immediately");
+      assert(payCalls === 0,
+        "recovery prior settled: NEVER re-pays the seller");
+    }
+
+    // Prior submitted + re-attach settled → done, never re-pays
+    {
+      const journal = makeJournal({ status: "submitted", operationId: "op_x" });
+      let payCalls = 0, reattachOp = "";
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_reattach",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; },
+        awaitPayoutOutcome: async (op) => { reattachOp = op; return "settled"; },
+        traceContext: { escrowId: "rec_dp_reattach" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "done",
+        "recovery prior submitted + re-attach settled → done");
+      assert(payCalls === 0,
+        "recovery prior submitted: payInvoice NEVER called");
+      assert(reattachOp === "op_x",
+        "recovery re-attach uses the stored operationId");
+      assert(journal.current?.status === "settled",
+        "recovery re-attach settled marks the record settled");
+    }
+
+    // Prior submitted + re-attach unknown → payout-confirming, never re-pays
+    {
+      const journal = makeJournal({ status: "submitted", operationId: "op_u" });
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_unknown",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; },
+        awaitPayoutOutcome: async () => "unknown",
+        traceContext: { escrowId: "rec_dp_unknown" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "payout-confirming",
+        "recovery prior submitted + unknown re-attach → payout-confirming");
+      assert(payCalls === 0,
+        "recovery unknown re-attach: NEVER re-pays");
+    }
+
+    // Happy path with escrowId → done + journaled settled
+    {
+      const journal = makeJournal();
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_happy",
+        saveAfter: false,
+        payInvoice: async () => "op_happy",
+        traceContext: { escrowId: "rec_dp_happy" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "done",
+        "recovery happy path → done");
+      assert(journal.current?.status === "settled" && journal.current?.operationId === "op_happy",
+        "recovery happy path journals settled with the success operationId");
+    }
+
+    // No escrowId → guard inert, existing behavior preserved
+    {
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_noescrow",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+      });
+      assert(terminal.kind === "done",
+        "recovery without escrowId → done (guard inert)");
+      assert(payCalls === 1,
+        "recovery without escrowId: payInvoice called normally");
+    }
+  }
+}
+
+// ── 41a2. PAY-OUTCOME CLASSIFICATION (R3-1b) ─────────────────────────────
+// The op-log classifier the re-attach uses to decide "did the payout settle?"
+// — the money decision that flips a stuck CLAIMED trade to COMPLETED. A wrong
+// "settled" would complete prematurely; a wrong "pending" leaves it stuck.
+console.log("\n── PAY-OUTCOME CLASSIFICATION (R3-1b) ──");
+{
+  assert(classifyPayOutcome({ success: { preimage: "abc" } }) === "settled",
+    "success{preimage} → settled");
+  assert(classifyPayOutcome("success") === "settled",
+    "string 'success' → settled");
+  assert(classifyPayOutcome({ refunded: { gateway_error: "x" } }) === "refunded",
+    "refunded → refunded (retry-safe)");
+  assert(classifyPayOutcome("canceled") === "refunded",
+    "string 'canceled' → refunded");
+  assert(classifyPayOutcome({ funded: { block_height: 1 } }) === "pending",
+    "funded (HTLC locked) → pending");
+  assert(classifyPayOutcome("created") === "pending",
+    "string 'created' → pending");
+  assert(classifyPayOutcome(null) === "pending",
+    "no outcome yet (null) → pending");
+  assert(classifyPayOutcome({ unexpected_error: { error_message: "x" } }) === "unknown",
+    "unexpected_error → unknown (don't complete, don't re-pay)");
 }
 
 // ── 41b. LIGHTNING PAYOUT FEE RESERVE ───────────────────────────────────
@@ -11996,6 +12529,44 @@ console.log("\n── CHAMA BAR LABEL ──");
       assert(r.sats === MAIN_SURFACE_RECOVERY_MIN_SATS,
         "stranded carries sats");
     }
+  }
+
+  // Phase 1: sim mode suppresses the "stranded → ⚠ Recover" pill — the same
+  // recovery alarm as shouldShowRecoveryBanner, on the SAME condition that
+  // returns "stranded" without the flag (the assertion directly above). Sim
+  // manual-fund balances are intentional & fake, so it must fall through to
+  // "ready". Guards the gate, not the dust line.
+  {
+    const r = decideChamaBarLabel({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasActiveBuyerSellerCommitment: false,
+      simModeOn: true,
+    });
+    assert(r.kind === "ready",
+      "Sim mode: material idle balance → ready, not stranded (no cry-wolf on fake sats)");
+    assert(r.kind !== "stranded",
+      "Sim mode never surfaces the stranded recovery pill");
+  }
+
+  // Phase 1: sim gates ONLY the stranded alarm — real states survive, so the
+  // priority ordering (unreachable > in-trade > stranded > ready) is intact.
+  {
+    const inTrade = decideChamaBarLabel({
+      balanceMsats: 0,
+      hasActiveBuyerSellerCommitment: true,
+      activeCommittedMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      simModeOn: true,
+    });
+    assert(inTrade.kind === "in-trade",
+      "Sim mode preserves in-trade (escrowed funds are real even in sim)");
+    const unreachable = decideChamaBarLabel({
+      balanceMsats: MAIN_SURFACE_RECOVERY_MIN_SATS * 1000,
+      hasActiveBuyerSellerCommitment: false,
+      bootProbeState: "failed",
+      simModeOn: true,
+    });
+    assert(unreachable.kind === "unreachable",
+      "Sim mode preserves unreachable (probe-failed overrides, ordering intact)");
   }
 
   // Sub-msat dust floors to ready (no fractional-sat states)

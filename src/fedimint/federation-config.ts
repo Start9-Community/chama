@@ -3,11 +3,12 @@
 // ══════════════════════════════════════════════════════════════════════════
 //
 // Per PHILOSOPHY.md §2.5, browser users can only reach federations whose
-// guardians expose WebSocket endpoints. BP guardians do; BLF's iroh-only
-// transport does not (reliably, today). The universal fallback is
-// therefore BP — the browser-friendly choice — and BLF is one explicit
-// option among others, opt-in via registry entry, sandbox-mode picker,
-// or pasted custom invite.
+// guardians expose WebSocket endpoints. As of the v0.5.0 canary iroh-relay
+// 0.90 bump, BLF's transport is browser-reliable (registry `browserReliable:
+// true`), so BLF is the universal backup/default across the board
+// (DECISION 2026-06-16). BP remains a curated/visible option but is no
+// longer the silent fallback. GBF is pinned to the one US community
+// (us-gbf, "USA · USD").
 //
 // The federation invite/name CONSTANTS live in ./federation-invites.ts
 // so the community registry can import them without forming a circular
@@ -64,16 +65,16 @@ export {
 
 /**
  * localStorage key for a user-supplied custom invite code.
- * If present, takes precedence over the universal BP fallback.
+ * If present, takes precedence over the universal BLF fallback.
  */
 export const CUSTOM_INVITE_STORAGE_KEY = "chama_federation_invite";
 
 /**
  * Resolve the federation invite code to use at runtime, community-blind.
- * Custom user invite wins; otherwise fall back to BP — the universal
- * browser-friendly default. Community-aware callers should prefer
- * `resolveFederationForCommunity(slug)` so a community-pinned invite
- * (e.g. ke-kes → Afribit) is honored.
+ * Custom user invite wins; otherwise fall back to BLF — the universal
+ * backup federation (browser-reliable since the v0.5.0 canary iroh bump).
+ * Community-aware callers should prefer `resolveFederationForCommunity(slug)`
+ * so a community-pinned invite (e.g. ke-kes → Afribit) is honored.
  */
 export function getFederationInvite(): string {
   try {
@@ -84,7 +85,7 @@ export function getFederationInvite(): string {
   } catch {
     // localStorage unavailable (SSR, etc.) — fall through to default
   }
-  return BP_FEDERATION_INVITE;
+  return BLF_FEDERATION_INVITE;
 }
 
 /**
@@ -257,16 +258,16 @@ export function shouldReconcileFederation(inputs: {
 //
 // Per PHILOSOPHY.md §2.3: communities are the user-facing layer; federations
 // are the technical layer that backs them. A community whose registry entry
-// has federationInvite === null falls back to BP — the universal browser-
-// friendly default. Per §2.5, BLF's iroh-only transport is unreachable
-// from browsers; pinning the universal fallback to BP keeps first-time
-// browser users on a working federation. BLF remains opt-in via the
-// `us-blf` registry entry, sandbox-mode picker, or pasted custom invite.
+// has federationInvite === null falls back to BLF — the universal backup
+// federation, browser-reliable since the v0.5.0 canary iroh bump
+// (DECISION 2026-06-16). The live default community (us-blf, "Global ·
+// Bitcoin") is itself BLF-backed; the one pickable US community (us-gbf,
+// "USA · USD") pins GBF.
 //
 // Precedence (highest first):
 //   1. The community's federationInvite (when the registry has one)
 //   2. User's pasted custom invite (manual override only without a pinned community)
-//   3. BP fallback
+//   3. BLF fallback
 //
 import { getCommunityBySlug } from "../communities/registry.js";
 
@@ -279,7 +280,7 @@ import { getCommunityBySlug } from "../communities/registry.js";
  * - Otherwise, if the user has set a custom invite, use it as the manual
  *   override escape hatch.
  * - Otherwise (community null/unknown, or its federationInvite is null),
- *   fall back to BP.
+ *   fall back to BLF (the universal backup, DECISION 2026-06-16).
  */
 export function resolveFederationForCommunity(slug: string | null | undefined): string {
   // 1. Community-mapped invite, if any. v0.8.0: this intentionally beats
@@ -302,8 +303,11 @@ export function resolveFederationForCommunity(slug: string | null | undefined): 
     // localStorage unavailable — fall through
   }
 
-  // 3. BP fallback. Browser-friendly universal default per §2.5.
-  return BP_FEDERATION_INVITE;
+  // 3. BLF fallback. The universal backup federation across the board
+  //    (DECISION 2026-06-16). BLF is browser-reliable since the v0.5.0
+  //    canary iroh bump, so it is the one default everywhere — community
+  //    null/unknown, or its federationInvite is null.
+  return BLF_FEDERATION_INVITE;
 }
 
 // ══════════════════════════════════════════════════════════════════════════

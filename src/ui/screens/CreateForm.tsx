@@ -776,9 +776,14 @@ function premiumHintForVertical(vertical: Vertical, currency: string): string {
 
 function formatPremiumPercent(premiumBps: number): string {
   const pct = premiumBps / 100;
-  return Math.abs(pct) < 10 && !Number.isInteger(pct)
+  // 3.5.1 #3: integers must NOT pass through the trailing-zero strip below —
+  // `"20".replace(/\.?0+$/, "")` is "2", which rendered a 20% premium as
+  // "+2%" (the amount was right; only this label was 10× off). The strip is
+  // only for trimming a fractional tail, e.g. "12.50" → "12.5".
+  if (Number.isInteger(pct)) return String(pct);
+  return Math.abs(pct) < 10
     ? pct.toFixed(1)
-    : pct.toFixed(Number.isInteger(pct) ? 0 : 2).replace(/\.?0+$/, "");
+    : pct.toFixed(2).replace(/\.?0+$/, "");
 }
 
 function premiumReviewLine(form: FormState, vertical: Vertical): string | null {
@@ -2025,9 +2030,22 @@ function Step2({
               </div>
               <input type="number" value={form.fiat} onChange={e => syncSingleFiat(e.target.value)} placeholder="50" style={{ ...inputStyle, flex: 1 }} />
             </div>
-            <div style={{ marginTop: 5, fontSize: 9, color: T.muted, fontFamily: T.mono }}>
-              auto from {homeCommunity?.flagEmoji ?? "🌐"} Chama
-            </div>
+            {/* 3.5.1 #4 belt-and-suspenders: when the live rate for this
+                currency isn't available yet (fresh instance, forex feed not
+                warm), say so instead of leaving the field silently un-filled.
+                USD needs only the BTC price; other currencies also need the
+                USD→local FX rate. */}
+            {(() => {
+              const liveRateReady = !!btcPrice.usd && btcPrice.usd > 0
+                && (form.cur === "USD" || !!fiatRates.rates?.[form.cur]);
+              return (
+                <div style={{ marginTop: 5, fontSize: 9, color: liveRateReady ? T.muted : T.amber, fontFamily: T.mono }}>
+                  {liveRateReady
+                    ? `auto from ${homeCommunity?.flagEmoji ?? "🌐"} Chama`
+                    : `${form.cur} rate still loading — type the amount, or it'll auto-fill when the live rate lands`}
+                </div>
+              );
+            })()}
           </div>
           )}
         </div>

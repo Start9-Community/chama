@@ -73,10 +73,21 @@ candidate list with the older roadmap.
       show the compact lock window, and TradeDetail surfaces the live
       lock-window countdown.
 
-- [ ] **Sim manual-fund + Recovery Banner collision.** In sim mode, manual
+- [x] **Sim manual-fund + Recovery Banner collision.** In sim mode, manual
       fund can create a recoverable balance with no active trade, triggering
       the production recovery banner. Either remove manual fund from sim
       mode or suppress the banner for intentional sim-only manual balances.
+
+      Fixed (Phase 1): both recovery alarms now take a `simModeOn` gate that
+      defaults falsy (production byte-identical). `shouldShowRecoveryBanner`
+      early-returns false; `decideChamaBarLabel` skips its "stranded → ⚠
+      Recover" pill (falls through to "ready") — the other label states and
+      priority ordering are untouched. Both call sites pass sim mode, so on
+      an intentional sim manual-fund balance neither the full-screen banner
+      nor the header pill fires. The Me-tab "SATS RECOVERY" card is left as-is
+      by design: the fix targets the false *interrupting alarms*, not every
+      recovery surface. That card is a calm, true wallet affordance (and sim's
+      only recover/payout demo path), so gating it would over-apply the fix.
 
 - [x] **Sim funding modal timer cleanup.** Dismissing the funding modal
       repeatedly can leave old auto-credit timers alive in sim mode. Cancel
@@ -85,10 +96,15 @@ candidate list with the older roadmap.
 - [x] **APK rebuild + Zapstore listing.** Rebuild and list after the core
       product surface is stable enough to invite non-developer testers.
 
-- [ ] **Remove browser-default blue button glow.** Smoke testing surfaced a
+- [x] **Remove browser-default blue button glow.** Smoke testing surfaced a
       blue focus/halo behind buttons on Android and desktop. Replace it with
       a subtle Chama focus treatment (amber or role-colored, accessibility-safe)
       so the app does not leak native/browser button styling.
+
+      Landed in v2.5 globalCss: `-webkit-tap-highlight-color:transparent`
+      kills the native tap glow; mouse/touch focus drops the outline via
+      `:focus(:not(:focus-visible))`, and keyboard nav keeps an
+      accessibility-safe amber `:focus-visible` outline.
 
 - [x] **v0.7.0 onboarding + NWC foundation.** Next product push: make first-run feel
       intentional instead of discovered by wandering. Guide a new user

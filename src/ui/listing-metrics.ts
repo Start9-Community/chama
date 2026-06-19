@@ -31,9 +31,14 @@ function lendingPremiumLine(state: EscrowState): string | null {
 
 function formatBps(bps: number): string {
   const value = bps / 100;
-  const display = Math.abs(value) < 10 && !Number.isInteger(value)
-    ? value.toFixed(1)
-    : value.toFixed(Number.isInteger(value) ? 0 : 2).replace(/\.?0+$/, "");
+  // 3.5.1 #3: integers must NOT pass through the trailing-zero strip —
+  // `"20".replace(/\.?0+$/, "")` is "2", which rendered a 20% premium as
+  // "+2%" on the listing too (same bug as CreateForm.formatPremiumPercent).
+  const display = Number.isInteger(value)
+    ? String(value)
+    : Math.abs(value) < 10
+      ? value.toFixed(1)
+      : value.toFixed(2).replace(/\.?0+$/, "");
   return `${display}%`;
 }
 

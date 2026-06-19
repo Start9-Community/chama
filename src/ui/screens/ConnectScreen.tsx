@@ -13,7 +13,10 @@ import {
 import { getCommunityBySlug } from "../../communities/registry.js";
 import {
   getUserCommunitySlugRaw,
-  setUserCommunitySlug,
+  setPendingCommunitySelection,
+  getPendingCommunitySelection,
+  clearPendingCommunitySelection,
+  getLastHomeHint,
 } from "../../communities/storage.js";
 import { getPendingCommunityReport } from "../../communities/community-request.js";
 
@@ -76,7 +79,15 @@ export function ConnectScreen({
   };
   const isFediWebView = isFediWebViewSignInEnvironment(signInEnvironment);
   const offerNIP46Signer = shouldOfferNIP46Signer(signInEnvironment);
-  const [homeSlug, setHomeSlug] = useState<string | null>(() => getUserCommunitySlugRaw());
+  // v3.5.1: a returning npub's choice is scoped (read post-connect); a
+  // pre-signer onboarding pick lives in the pending stash. Read both, plus the
+  // unscoped "last home" hint (#6) — on web there's no auto-login, so the
+  // scoped home is unreadable pre-signin and a returning user was dropped onto
+  // the first-run globe. The hint is display-only and never resolves a
+  // committed home, so it can't leak across npubs.
+  const [homeSlug, setHomeSlug] = useState<string | null>(
+    () => getUserCommunitySlugRaw() ?? getPendingCommunitySelection() ?? getLastHomeHint(),
+  );
   // v2.6: gate the one-time orientation screen ahead of the market picker.
   const [introSeen, setIntroSeen] = useState<boolean>(() => readIntroSeen());
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -131,7 +142,10 @@ export function ConnectScreen({
       <OnboardingShell>
         <GlobeCountryPicker
           onSelect={(slug) => {
-            setUserCommunitySlug(slug);
+            // v3.5.1: stash the pick pre-signer; commit it to the npub's
+            // scope on connect (applyPendingCommunitySelection) instead of
+            // writing the global key that raced fresh npubs to the default.
+            setPendingCommunitySelection(slug);
             setHomeSlug(slug);
           }}
         />
@@ -169,7 +183,7 @@ export function ConnectScreen({
         </div>
         <button
           onClick={() => {
-            setUserCommunitySlug("");
+            clearPendingCommunitySelection();
             setHomeSlug(null);
           }}
           style={{

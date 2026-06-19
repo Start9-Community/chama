@@ -46,6 +46,17 @@
 //                    pending-redemption stash stays intact for the boot
 //                    drain to reconcile the genuinely-pending case.
 // `paying-invoice`   transient — outbound LN to the user's destination
+// `payout-confirming` TERMINAL (3.5.1) — the outbound payout was SUBMITTED
+//                    (the gateway accepted it; an operationId exists) but
+//                    its settlement is not yet CONFIRMED — the watch window
+//                    closed with the HTLC still in flight, the status stream
+//                    broke, or a prior attempt left it submitted. The payout
+//                    journal holds a `submitted` record; the orchestrator
+//                    re-attaches to the operationId to learn the truth and
+//                    NEVER pays again. The modal must NOT offer a re-pay
+//                    retry here — that is exactly the double-send this guards
+//                    against. Distinct from `payout-failed`, where no payment
+//                    is in flight and re-paying is correct.
 // `done`             TERMINAL — payout sent, optional handle saved
 // `claim-failed`     TERMINAL — claim threw a HARD failure (bad shares,
 //                    not the winner, hash mismatch). No orphan, no
@@ -99,6 +110,7 @@ export type ClaimAndPayoutPhase =
   | { kind: "confirming" }
   | { kind: "paying-invoice" }
   | { kind: "paying-onchain" }
+  | { kind: "payout-confirming"; error?: string }
   | { kind: "done" }
   | { kind: "claim-failed"; error: string }
   | { kind: "claim-bridge-threw"; error: string }
@@ -110,6 +122,10 @@ export type ClaimAndPayoutTerminal =
   | { kind: "claim-failed"; error: string }
   | { kind: "claim-bridge-threw"; error: string }
   | { kind: "claim-pending"; error: string }
+  /** 3.5.1 — the payout is in flight (submitted, unconfirmed). RETRY must
+   *  NOT re-pay; the orchestrator re-attaches to the operationId. Carries
+   *  reassurance copy, never a re-pay affordance. */
+  | { kind: "payout-confirming"; error?: string }
   /** `claimCompleted`: false when COMPLETE was deliberately not yet
    *  published because the outbound payout failed. The trade's Claim
    *  button is still alive, so "tap Claim again" is the honest retry
@@ -149,6 +165,12 @@ export const CONFIRM_HARD_CAP_MULTIPLIER = 3;
 /** Accept any delta ≥ 90% of expected as "fully landed". Matches the
  *  Fedimint settlement tolerance baked into startClaimWatchdog. */
 export const DEFAULT_THRESHOLD_PCT = 0.9;
+
+/** 3.5.1 — copy for the `payout-confirming` terminal. Reassures without
+ *  inviting a re-pay: the sats are on their way out and a retry would risk a
+ *  second send, so the user is pointed at their destination wallet instead. */
+export const PAYOUT_CONFIRMING_COPY =
+  "Your payout was sent and is confirming. Don't tap Claim again — check your destination wallet. Chama will finish this claim once the payment confirms.";
 
 const defaultSleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -358,11 +380,31 @@ export interface RunClaimAndPayoutDeps {
    *  + redeem). May resolve before balance has fully settled — the
    *  orchestrator polls separately to handle the watchdog case. */
   claimAndRedeem: (escrowId: string) => Promise<unknown>;
-  /** Bound to bridge.payInvoice. Outbound Lightning send. */
-  payInvoice: (bolt11: string) => Promise<void>;
+  /** Bound to bridge.payInvoice. Outbound Lightning send. Resolves with the
+   *  durable LN-pay operationId (success ⇒ `success{preimage}` reached).
+   *  Throws a coded error on failure: `code` is LN_PAY_INFLIGHT (submitted,
+   *  outcome UNKNOWN ⇒ never re-pay), LN_PAY_REFUNDED (confirmed refund ⇒
+   *  retry-safe) or LN_PAY_SUBMIT_FAILED (no payment made ⇒ retry-safe), and
+   *  `operationId` carries the handle for re-attach. */
+  payInvoice: (bolt11: string) => Promise<string | undefined | void>;
   /** Optional native on-chain payout. Amount is the gross claimed sats
    *  available before wallet-module peg-out fees. */
   payOnchain?: (grossAmountSats: number) => Promise<void>;
+  // ── 3.5.1 payout double-pay guard (Lightning only) ──────────────────────
+  // All optional so existing callers/tests run unchanged (guard becomes a
+  // no-op). Bound to payments/payout-journal.ts + bridge.awaitPayoutOutcome
+  // in the hook. See that module's header for the incident this prevents.
+  /** Read the persisted payout record for this escrow (null when none). */
+  getPayoutRecord?: (escrowId: string) => { status: "submitted" | "settled"; operationId?: string } | null;
+  /** Persist that a payout was submitted (gateway accepted; outcome unknown). */
+  recordPayoutSubmitted?: (input: { escrowId: string; operationId?: string; amountMsats?: number }) => void;
+  /** Persist that a payout reached `success{preimage}`. Blocks all re-pay. */
+  markPayoutSettled?: (escrowId: string, operationId?: string) => void;
+  /** Drop the payout record — ONLY on a CONFIRMED refund (retry becomes safe). */
+  clearPayoutRecord?: (escrowId: string) => void;
+  /** Re-attach to a submitted payout and report its terminal outcome
+   *  without paying again. "unknown" ⇒ keep the record, refuse to re-pay. */
+  awaitPayoutOutcome?: (operationId: string) => Promise<"settled" | "refunded" | "unknown">;
   payoutKind?: "lightning" | "onchain";
   /** Publish escrow COMPLETE after the wallet balance has actually
    *  confirmed. Best-effort: failure must not block payout/recovery. */
@@ -414,6 +456,78 @@ export async function runClaimAndPayout(
   opts: RunClaimAndPayoutOpts,
 ): Promise<ClaimAndPayoutTerminal> {
   const emit = (p: ClaimAndPayoutPhase) => opts.onPhase(p);
+  const payoutKind = opts.payoutKind ?? "lightning";
+
+  // Best-effort COMPLETE publish — shared by the normal success path and the
+  // already-settled short-circuits in the double-pay guard below.
+  const publishCompleteBestEffort = async (via: string): Promise<void> => {
+    if (!opts.completeClaim) return;
+    try {
+      moneyLog("CLAIM-COMPLETE-IN", { escrowId: opts.escrowId, via });
+      claimTrace("orchestrator-complete-in", { escrowId: opts.escrowId, via });
+      await opts.completeClaim(opts.escrowId);
+      moneyLog("CLAIM-COMPLETE-OUT", { escrowId: opts.escrowId, result: "success", via });
+      claimTrace("orchestrator-complete-out", { escrowId: opts.escrowId, result: "success", via });
+    } catch (e: any) {
+      moneyLog("CLAIM-COMPLETE-OUT", {
+        escrowId: opts.escrowId, result: "error", via,
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+      claimTrace("orchestrator-complete-out", {
+        escrowId: opts.escrowId, result: "error", via,
+        errMsg: (e?.message || String(e)).slice(0, 120),
+      });
+      // Advisory protocol event only; the user already has their sats.
+    }
+  };
+
+  // ── 3.5.1 payout double-pay guard (Lightning only) ───────────────────────
+  // BEFORE any claim/redeem/balance work: if a payout was already submitted
+  // or settled for this escrow on a prior attempt, NEVER pay again. This MUST
+  // run first — a successful prior payout drains the balance, so the Phase 2
+  // cover check would otherwise bounce a retry to claim-pending and never
+  // reach the pay step where the journal is consulted. The reported field
+  // double-pay (two payouts ~78s apart) was exactly a retry after the 60s
+  // pay-watch window timed out mid-flight.
+  if (payoutKind === "lightning") {
+    const prior = opts.getPayoutRecord?.(opts.escrowId) ?? null;
+    if (prior?.status === "settled") {
+      claimTrace("orchestrator-payout-already-settled", { escrowId: opts.escrowId });
+      await publishCompleteBestEffort("already-settled");
+      emit({ kind: "done" });
+      return { kind: "done" };
+    }
+    if (prior?.status === "submitted") {
+      // A payout is in flight for this escrow. Resolve its TRUE outcome by
+      // re-attaching to the operationId — never by paying again.
+      emit({ kind: "payout-confirming" });
+      let outcome: "settled" | "refunded" | "unknown" = "unknown";
+      if (opts.awaitPayoutOutcome && prior.operationId) {
+        try {
+          outcome = await opts.awaitPayoutOutcome(prior.operationId);
+        } catch {
+          outcome = "unknown";
+        }
+      }
+      claimTrace("orchestrator-payout-reattach", { escrowId: opts.escrowId, outcome });
+      if (outcome === "settled") {
+        opts.markPayoutSettled?.(opts.escrowId, prior.operationId);
+        await publishCompleteBestEffort("reattach-settled");
+        emit({ kind: "done" });
+        return { kind: "done" };
+      }
+      if (outcome === "refunded") {
+        // The sats came back — clear the record and fall through to a fresh
+        // claim+payout (re-pay is now correct, not a double-send).
+        opts.clearPayoutRecord?.(opts.escrowId);
+      } else {
+        // unknown ⇒ refuse to re-pay. Keep the submitted record so a later
+        // attempt re-attaches again rather than sending a second payment.
+        emit({ kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY });
+        return { kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY };
+      }
+    }
+  }
 
   // Snapshot baseline before we dispatch anything. The polling phase
   // measures growth from here.
@@ -520,7 +634,6 @@ export async function runClaimAndPayout(
   //            Without this, a retry after late settlement loops on
   //            claim-pending FOREVER (baseline includes the credit, so
   //            growth can never be observed again).
-  const payoutKind = opts.payoutKind ?? "lightning";
   emit({ kind: "confirming" });
   let grew: "grew" | "timeout" | "aborted" = "timeout";
   if (!settlementFailedHard) {
@@ -633,9 +746,38 @@ export async function runClaimAndPayout(
       if (!opts.payOnchain) throw new Error("Onchain payout is not available");
       await opts.payOnchain(Math.floor(opts.expectedDeltaMsats / 1000));
     } else {
-      await opts.payInvoice(opts.bolt11);
+      const res = await opts.payInvoice(opts.bolt11);
+      // payInvoice only RESOLVES on `success{preimage}`. Journal it settled
+      // BEFORE COMPLETE so that even a COMPLETE-publish failure + retry is a
+      // no-op (the top guard short-circuits), never a second send.
+      const operationId = typeof res === "string" ? res : undefined;
+      opts.markPayoutSettled?.(opts.escrowId, operationId);
     }
   } catch (e: any) {
+    const code = (e as { code?: string })?.code;
+    const opId = (e as { operationId?: string })?.operationId;
+    // 3.5.1: a SUBMITTED-but-unconfirmed Lightning payout (watch timed out
+    // mid-flight, stream broke, unexpected state) must NOT become a re-payable
+    // failure — that is the exact double-send. Journal it `submitted` and
+    // surface payout-confirming; the next attempt re-attaches to operationId.
+    if (payoutKind === "lightning" && code === "LN_PAY_INFLIGHT") {
+      opts.recordPayoutSubmitted?.({
+        escrowId: opts.escrowId,
+        operationId: opId,
+        amountMsats: opts.expectedDeltaMsats,
+      });
+      moneyLog("CLAIM-PAY-OUT", { escrowId: opts.escrowId, result: "inflight" });
+      claimTrace("orchestrator-pay-inflight", {
+        escrowId: opts.escrowId,
+        op: (opId ?? "?").slice(0, 16),
+      });
+      emit({ kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY });
+      return { kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY };
+    }
+    // Definite failure (confirmed refund, submit-failed, onchain, or any
+    // other throw): the sats are still local, so re-paying is correct. Drop
+    // any record so the top guard doesn't block the legitimate retry.
+    if (payoutKind === "lightning") opts.clearPayoutRecord?.(opts.escrowId);
     const error = errorMessage(e, payoutKind === "onchain" ? "Onchain payout failed" : "Lightning payment failed");
     recordSatsTrace({
       source: "claim",
@@ -672,43 +814,7 @@ export async function runClaimAndPayout(
   // whether settlement was proven by fresh growth or by a covering
   // balance from an earlier/late redeem. Best-effort: the money path
   // succeeded, so a relay publish failure must not undo the payout.
-  if (opts.completeClaim) {
-    try {
-      moneyLog("CLAIM-COMPLETE-IN", {
-        escrowId: opts.escrowId,
-        via: settledBy,
-      });
-      claimTrace("orchestrator-complete-in", {
-        escrowId: opts.escrowId,
-        via: settledBy,
-      });
-      await opts.completeClaim(opts.escrowId);
-      moneyLog("CLAIM-COMPLETE-OUT", {
-        escrowId: opts.escrowId,
-        result: "success",
-        via: settledBy,
-      });
-      claimTrace("orchestrator-complete-out", {
-        escrowId: opts.escrowId,
-        result: "success",
-        via: settledBy,
-      });
-    } catch (e: any) {
-      moneyLog("CLAIM-COMPLETE-OUT", {
-        escrowId: opts.escrowId,
-        result: "error",
-        via: settledBy,
-        errMsg: (e?.message || String(e)).slice(0, 120),
-      });
-      claimTrace("orchestrator-complete-out", {
-        escrowId: opts.escrowId,
-        result: "error",
-        via: settledBy,
-        errMsg: (e?.message || String(e)).slice(0, 120),
-      });
-      // Advisory protocol event only; the user already has their sats.
-    }
-  }
+  await publishCompleteBestEffort(settledBy ?? "payout");
 
   let balanceAfterPayout: number | undefined;
   try { balanceAfterPayout = await opts.getBalance(); } catch {}

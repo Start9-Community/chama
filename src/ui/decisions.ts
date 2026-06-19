@@ -706,6 +706,14 @@ export function decideChamaBarLabel(opts: {
    *  aware in-trade pill copy ("1 active trade" vs "3 active trades").
    *  Optional/defaulted to 1 for backwards compatibility. */
   activeTradeCount?: number;
+  /** Phase 1: true when the app is in sim mode. The "stranded" pill is the
+   *  same recovery alarm as shouldShowRecoveryBanner — a real-stranded-funds
+   *  cry-wolf that must not fire on intentional, fake sim manual-fund
+   *  balances. In sim ONLY the stranded branch is skipped (falls through to
+   *  "ready"); "unreachable", "in-trade", "ready" and the priority ordering
+   *  are all unchanged. Optional/defaulted falsy → production is
+   *  byte-identical. */
+  simModeOn?: boolean;
 }): ChamaBarLabel {
   if (opts.bootProbeState === "failed") return { kind: "unreachable" };
   const activeTradeCount = Math.max(1, opts.activeTradeCount ?? 1);
@@ -716,7 +724,7 @@ export function decideChamaBarLabel(opts: {
   // enough to explain a wallet balance: no money has moved yet.
   const committedSats = Math.floor((opts.activeCommittedMsats ?? 0) / 1000);
   if (committedSats > 0) return { kind: "in-trade", sats: committedSats, activeTradeCount };
-  if (sats > 0 && sats >= MAIN_SURFACE_RECOVERY_MIN_SATS) return { kind: "stranded", sats };
+  if (!opts.simModeOn && sats > 0 && sats >= MAIN_SURFACE_RECOVERY_MIN_SATS) return { kind: "stranded", sats };
   return { kind: "ready" };
 }
 
@@ -774,7 +782,13 @@ export function shouldShowRecoveryBanner(inputs: {
    *  outbound LN send. Suppresses the banner — the claim flow owns
    *  the balance. Optional/defaulted for backwards compatibility. */
   claimPayoutInProgress?: boolean;
+  /** Phase 1: true when the app is in sim mode. The recovery banner is a
+   *  PRODUCTION real-stranded-funds alarm; sim manual-fund balances are
+   *  intentional and fake, so the banner must never fire on them.
+   *  Optional/defaulted falsy → the production path stays byte-identical. */
+  simModeOn?: boolean;
 }): boolean {
+  if (inputs.simModeOn) return false;
   if (!hasMainSurfaceRecoveryBalance(inputs.balanceMsats)) return false;
   const hasActiveEscrow = inputs.hasAnyActiveEscrow ?? inputs.hasCurrentEscrow ?? false;
   if (hasActiveEscrow) return false;
@@ -1125,26 +1139,27 @@ function participantRoleForPubkey(
 }
 
 /** Who votes first on the happy path: the OFF-CHAIN DEED-DOER. Market: the
- *  seller ships/delivers. Bill Pay: the VOLUNTEER (seller role) pays the
- *  owner's bill (maintainer correction 2026-06-05 — the owner only confirms).
+ *  seller ships/delivers. Bill Pay: the VOLUNTEER (buyer role) pays the
+ *  owner's bill off-chain — the bill owner (seller role) only confirms.
  *  Exchange: the buyer sends the fiat. Lending: the borrower acknowledges the
  *  disbursement. The other side responds, which is where real vote duality
- *  begins. */
+ *  begins. (3.5.1 fix: bill-pay was grouped seller-first, inverting the
+ *  volunteer↔owner roles vs the sats routing; the deed-doer is the buyer.) */
 function firstHappyPathVoter(state: EscrowState): Role {
-  return state.category === "marketplace" || state.category === "bill-pay"
+  return state.category === "marketplace"
     ? Role.SELLER
     : Role.BUYER;
 }
 
 function waitingForFirstVoteCopy(state: EscrowState, role: Role): string {
   if (role === Role.SELLER) {
-    if (state.category === "bill-pay") return "Waiting on the volunteer to pay the bill";
+    if (state.category === "bill-pay") return "Waiting on the bill owner to confirm";
     if (state.category !== "marketplace") return "Waiting on seller to confirm";
     if (state.fulfillment === "digital") return "Waiting on seller to deliver the file";
     if (state.fulfillment === "service") return "Waiting on seller to deliver the service";
     return "Waiting on seller to ship";
   }
-  if (state.category === "bill-pay") return "Waiting on buyer to confirm the bill was paid";
+  if (state.category === "bill-pay") return "Waiting on the volunteer to pay the bill";
   if (state.category === "lending") return "Waiting on buyer to confirm the loan arrived";
   return "Waiting on buyer to confirm payment sent";
 }

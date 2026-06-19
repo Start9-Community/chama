@@ -156,7 +156,7 @@ export function BitcoinPricePill({
                   boxShadow: stale ? "none" : `0 0 10px ${T.green}88`,
                 }}
               />
-              BTC/{displayCurrency}
+              1 BTC =
             </span>
             <span style={{
               color: price.usd ? T.text : T.muted,

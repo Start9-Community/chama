@@ -25,6 +25,7 @@ use fedimint_core::core::OperationId;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::secp256k1::PublicKey;
+use fedimint_core::util::SafeUrl;
 use fedimint_ln_client::common::LightningGateway;
 use fedimint_ln_client::{
     LightningClientInit, LightningClientModule, LnReceiveState, OutgoingLightningPayment,
@@ -65,6 +66,10 @@ struct Cli {
     /// Enable Fedimint's parallel next-generation Iroh stack.
     #[arg(long, default_value_t = true)]
     iroh_enable_next: bool,
+
+    /// Optional iROH DNS/PKARR resolver URL for Chama-owned discovery infra.
+    #[arg(long, env = "CHAMA_FEDIMINT_IROH_DNS")]
+    iroh_dns: Option<SafeUrl>,
 
     #[command(subcommand)]
     command: Command,
@@ -208,6 +213,7 @@ struct Bridge {
     data_dir: PathBuf,
     iroh_enable_dht: bool,
     iroh_enable_next: bool,
+    iroh_dns: Option<SafeUrl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -317,6 +323,7 @@ async fn main() -> Result<()> {
         data_dir: cli.data_dir,
         iroh_enable_dht: cli.iroh_enable_dht,
         iroh_enable_next: cli.iroh_enable_next,
+        iroh_dns: cli.iroh_dns,
     };
 
     match cli.command {
@@ -1169,9 +1176,15 @@ impl Bridge {
     }
 
     async fn connectors(&self) -> Result<ConnectorRegistry> {
-        ConnectorRegistry::build_from_client_defaults()
+        let mut builder = ConnectorRegistry::build_from_client_defaults()
             .iroh_pkarr_dht(self.iroh_enable_dht)
-            .iroh_next(self.iroh_enable_next)
+            .iroh_next(self.iroh_enable_next);
+
+        if let Some(iroh_dns) = &self.iroh_dns {
+            builder = builder.set_iroh_dns(iroh_dns.clone());
+        }
+
+        builder
             .bind()
             .await
             .context("failed to bind Fedimint connectors")
@@ -1324,10 +1337,10 @@ async fn serve_bridge(bridge: Bridge, bind: SocketAddr, invite_code: Option<Stri
         .layer(cors)
         .with_state(state);
 
-    eprintln!("chama-fedimint-bridge listening on http://{bind}");
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind {bind}"))?;
+    eprintln!("chama-fedimint-bridge listening on http://{bind}");
     axum::serve(listener, app).await?;
     Ok(())
 }

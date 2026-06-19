@@ -133,7 +133,19 @@ import {
 import { Capacitor } from "@capacitor/core";
 import type { LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
 import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
-import { getUserCommunitySlug, setUserCommunitySlug } from "../communities/storage.js";
+import {
+  getPayoutRecord,
+  recordPayoutSubmitted,
+  markPayoutSettled,
+  clearPayoutRecord,
+} from "../payments/payout-journal.js";
+import {
+  getUserCommunitySlug,
+  getUserCommunitySlugRaw,
+  setUserCommunitySlug,
+  applyPendingCommunitySelection,
+  setLastHomeHint,
+} from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
 import {
   sendCommunityRequestToGlobalArbiters,
@@ -416,6 +428,9 @@ export interface UseEscrowActions {
       onPhase: (phase: import("../payments/claim-and-payout.js").ClaimAndPayoutPhase) => void;
     },
   ) => Promise<import("../payments/claim-and-payout.js").ClaimAndPayoutTerminal>;
+  /** R3-1b: re-attach to a submitted payout and complete the trade if it
+   *  settled (no re-pay). For re-opening a trade stuck on CLAIMED. */
+  reattachPayout: (escrowId: string) => Promise<void>;
   /** Release a subscription period */
   releasePeriod: (escrowId: string, periodIndex: number) => Promise<EscrowState>;
   /** Send a chat message */
@@ -509,7 +524,10 @@ export interface UseEscrowActions {
       signal?: AbortSignal;
     },
   ) => Promise<import("../payments/fund-and-lock.js").FundAndLockTerminal>;
-  payInvoice: (bolt11: string, meta?: ChamaOperationMeta) => Promise<void>;
+  payInvoice: (bolt11: string, meta?: ChamaOperationMeta) => Promise<string | undefined>;
+  /** R3-1: re-attach to a submitted payout and report its terminal outcome
+   *  without paying again (recovery-path double-pay guard). */
+  awaitPayoutOutcome: (operationId: string) => Promise<"settled" | "refunded" | "unknown">;
   spendNotes: (amountMsats: number, meta?: ChamaOperationMeta) => Promise<string>;
   redeemEcash: (oobNotes: string, meta?: ChamaOperationMeta) => Promise<void>;
   /** Read federation wallet-module onchain fees and confirmation policy. */
@@ -826,6 +844,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const pubkey = await signer.getPublicKey();
       signerRef.current = signer;
       setLocalStorageUserScope(pubkey);
+      // v3.5.1: commit a deferred onboarding community pick to THIS npub's
+      // scope now that the signer is known — BEFORE initFedimint resolves
+      // community → federation below — so a fresh/secondary npub's pick can't
+      // race to the BLF default the way the old pre-signer global write did.
+      applyPendingCommunitySelection();
+      // v3.5.1 #6: refresh the unscoped pre-signin "last home" hint from THIS
+      // npub's now-resolvable scoped home, so a web reload (no auto-login)
+      // keeps the user past the first-run globe. Covers users whose home was
+      // set before the hint existed. Skipped when the npub has no pick yet
+      // (fresh npub ⇒ globe is correct).
+      {
+        const resolvedHome = getUserCommunitySlugRaw();
+        if (resolvedHome) setLastHomeHint(resolvedHome);
+      }
       // Hydrate the forgotten-trade denylist NOW, with the reliable pubkey, so
       // the Browse feed (which starts below, before state.pubkey re-renders)
       // can't re-add a ghost the user forgot on a prior run.
@@ -2627,6 +2659,54 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
   }, [createFundingInvoice, lockAndPublishAction, lockAndPublishWithEcashAction, markFedimintWalletNotReady]);
 
+  // R3-1b: re-attach to a submitted payout and, if it settled, transition the
+  // trade to COMPLETED — on BOTH sides (publishing COMPLETE propagates to the
+  // counterparty whose "settling…" resolves). Never re-pays (awaitPayoutOutcome
+  // only watches the existing operationId). Used both as the immediate
+  // background re-attach after a payout-confirming claim AND on re-opening a
+  // trade that's stuck on CLAIMED with a submitted payout (e.g. the seller's
+  // refund landed but the app was closed before the watch resolved).
+  const reattachPayoutAction = useCallback(async (escrowId: string): Promise<void> => {
+    let bridge: EscrowFedimintBridge;
+    let client: EscrowClient;
+    try {
+      bridge = requireBridge();
+      client = requireClient();
+    } catch {
+      return;
+    }
+    const completeIfClaimed = async () => {
+      const st0 = client.getState(escrowId);
+      if (st0 && st0.status === EscrowStatus.CLAIMED) {
+        try { await client.complete(escrowId); } catch (e) {
+          console.debug("[chama] reattach complete failed:", e);
+        }
+      }
+      const st = client.getState(escrowId);
+      if (st) updateEscrow(escrowId, st);
+    };
+    try {
+      const rec = getPayoutRecord(escrowId);
+      if (!rec) return;
+      if (rec.status === "settled") {
+        await completeIfClaimed();
+        return;
+      }
+      if (rec.status !== "submitted" || !rec.operationId) return;
+      const outcome = await bridge.awaitPayoutOutcome(rec.operationId);
+      if (outcome === "settled") {
+        markPayoutSettled(escrowId, rec.operationId);
+        await completeIfClaimed();
+        refreshBalanceRef.current?.().catch(() => {});
+      } else if (outcome === "refunded") {
+        clearPayoutRecord(escrowId);
+      }
+      // unknown: leave the submitted record for the next tap / re-open.
+    } catch (e) {
+      console.debug("[chama] reattachPayout failed:", e);
+    }
+  }, []);
+
   // v0.3.0 Phase 3: atomic claim-and-payout orchestrator. Composes the
   // existing claimAndRedeemAction with a balance watchdog and outbound
   // payInvoice into a single flow with phase callbacks. The pure
@@ -2695,7 +2775,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
       const { runClaimAndPayout } = await import("../payments/claim-and-payout.js");
       const onchainAddress = args.onchainAddress?.trim();
-      return await runClaimAndPayout({
+      const result = await runClaimAndPayout({
         escrowId,
         bolt11: args.bolt11 ?? "onchain-payout",
         expectedDeltaMsats: args.expectedDeltaMsats,
@@ -2725,7 +2805,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         },
         clearPendingRedemption,
         payInvoice: async (bolt11: string) => {
-          await bridge.payInvoice(
+          const operationId = await bridge.payInvoice(
             bolt11,
             buildChamaOperationMeta({
               flow: "claim_payout",
@@ -2734,7 +2814,17 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
             }),
           );
           refreshBalanceRef.current?.().catch(() => {});
+          return operationId;
         },
+        // 3.5.1 payout double-pay guard. The journal is user-scoped
+        // localStorage (payments/payout-journal.ts); awaitPayoutOutcome
+        // re-attaches to a submitted payout's operationId via the bridge.
+        getPayoutRecord,
+        recordPayoutSubmitted,
+        markPayoutSettled,
+        clearPayoutRecord,
+        awaitPayoutOutcome: (operationId: string) =>
+          bridge.awaitPayoutOutcome(operationId),
         payOnchain: async (grossAmountSats: number) => {
           if (!onchainAddress) throw new Error("Paste a bitcoin onchain address");
           let sendSats = grossAmountSats;
@@ -2762,6 +2852,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         addOrTouchLightningHandle: addOrTouchPayoutDestination,
         onPhase: args.onPhase,
       });
+      if (result.kind === "payout-confirming") {
+        // 3.5.1 (a) / R3-1b: the payout was submitted but its watch window
+        // closed before settlement. Re-attach ONCE in the background (never
+        // re-pays) so a slow HTLC that lands flips the trade to COMPLETED on
+        // its own — on both sides — instead of stranding either party.
+        void reattachPayoutAction(escrowId);
+      }
+      return result;
     } finally {
       claimPayoutInProgressRef.current = false;
       setState(prev => prev.claimPayoutInProgress
@@ -2787,6 +2885,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     },
     claimAndRedeem: claimAndRedeemAction,
     claimAndPayout: claimAndPayoutAction,
+    reattachPayout: reattachPayoutAction,
     sendChat,
     cancel: cancelAction,
     loadEscrow,
@@ -2801,8 +2900,15 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     fundAndLock: fundAndLockAction,
     payInvoice: async (bolt11: string, meta?: ChamaOperationMeta) => {
       const bridge = requireBridge();
-      await bridge.payInvoice(bolt11, meta);
+      // R3-1: surface the operationId so the recovery payout can journal it
+      // (same double-pay guard as the claim path).
+      const operationId = await bridge.payInvoice(bolt11, meta);
       refreshBalanceRef.current?.().catch(() => {});
+      return operationId;
+    },
+    awaitPayoutOutcome: async (operationId: string) => {
+      const bridge = requireBridge();
+      return bridge.awaitPayoutOutcome(operationId);
     },
     refreshCommunityRoster: async (community: string) => {
       const client = clientRef.current;

@@ -115,6 +115,10 @@ export interface IFedimintWallet {
     ): Promise<{ invoice: string; operationId: string }>;
     /** Pay a Lightning invoice from federation balance */
     payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<{ operationId: string }>;
+    /** 3.5.1 double-pay guard: re-attach to a previously-submitted payout
+     *  and report its terminal outcome without paying again. Optional —
+     *  mock/native wallets may omit it. */
+    awaitPayOutcome?(operationId: string): Promise<"settled" | "refunded" | "unknown">;
   };
 
   /** Optional native wallet-module on-chain peg-in/peg-out support.
@@ -905,7 +909,7 @@ export class FedimintClient {
    * Pay a Lightning invoice from the federation balance.
    * Used for outbound payments.
    */
-  async payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<void> {
+  async payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<string | undefined> {
     const wallet = this.requireWallet();
     let balanceBefore: number | undefined;
     try { balanceBefore = await wallet.balance.getBalance(); } catch {}
@@ -916,7 +920,9 @@ export class FedimintClient {
       balanceBefore,
     });
     try {
-      await wallet.lightning.payInvoice(bolt11, meta);
+      // 3.5.1: surface the durable operationId so the claim orchestrator can
+      // journal the payout and re-attach to it instead of ever re-paying.
+      const res = await wallet.lightning.payInvoice(bolt11, meta);
       let balanceAfter: number | undefined;
       try { balanceAfter = await wallet.balance.getBalance(); } catch {}
       mlog("PAY-OUT", {
@@ -928,6 +934,7 @@ export class FedimintClient {
           ? balanceAfter - balanceBefore
           : undefined,
       });
+      return res?.operationId;
     } catch (e: any) {
       let balanceAfter: number | undefined;
       try { balanceAfter = await wallet.balance.getBalance(); } catch {}
@@ -940,6 +947,18 @@ export class FedimintClient {
       });
       throw e;
     }
+  }
+
+  /** 3.5.1 double-pay guard: re-attach to a previously-submitted payout and
+   *  report its terminal outcome. Returns "unknown" when the wallet adapter
+   *  cannot watch (mock/native) — the caller then keeps the submitted record
+   *  and refuses to re-pay. */
+  async awaitPayOutcome(
+    operationId: string,
+  ): Promise<"settled" | "refunded" | "unknown"> {
+    const wallet = this.requireWallet();
+    if (!wallet.lightning.awaitPayOutcome) return "unknown";
+    return wallet.lightning.awaitPayOutcome(operationId);
   }
 
   async getOnchainInfo(): Promise<OnchainInfo> {
@@ -1290,9 +1309,29 @@ export class FedimintClient {
     });
 
     let lastErr: unknown;
+    // v3.5.1 claim-hang: bound each redeemEcash so a cross-fed / unreachable
+    // redeem can't stall the in-progress claim forever. On timeout we throw
+    // (handled in the catch below) so withMintLock releases and the
+    // orchestrator can surface a retryable terminal — a held lock would
+    // otherwise deadlock the user's "switch fed and retry".
+    const REDEEM_ATTEMPT_TIMEOUT_MS = 30_000;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const operationId = await wallet.mint.redeemEcash(oobNotes, meta);
+        const operationId = await Promise.race([
+          wallet.mint.redeemEcash(oobNotes, meta),
+          new Promise<never>((_, reject) => {
+            const t = setTimeout(() => {
+              const err: Error & { code?: string } = new Error(
+                `redeemEcash did not resolve within ${REDEEM_ATTEMPT_TIMEOUT_MS / 1000}s ` +
+                  `(federation unreachable or wrong route). Your claim is published — your ` +
+                  `sats are safe and the redeem will be retried.`,
+              );
+              err.code = "REDEEM_TIMEOUT";
+              reject(err);
+            }, REDEEM_ATTEMPT_TIMEOUT_MS);
+            (t as { unref?: () => void }).unref?.();
+          }),
+        ]);
         // [$$] REDEEM-TRY — success path
         let _redeemBalAfter: number | undefined;
         try { _redeemBalAfter = await wallet.balance.getBalance(); } catch {}
@@ -1337,6 +1376,20 @@ export class FedimintClient {
         lastErr = e;
         const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
         const code = typeof (e as any)?.code === "string" ? (e as any).code : "";
+
+        // v3.5.1 claim-hang: a redeem that overran REDEEM_ATTEMPT_TIMEOUT_MS
+        // means the federation is unreachable or on the wrong route (e.g. a
+        // cross-fed claim whose CREATE carried no `fed` tag, so the pre-redeem
+        // fed-ID gate at escrow-bridge.ts couldn't catch it). Re-throw at once
+        // so the mint lock releases and the orchestrator surfaces the
+        // retryable claim-pending terminal; the op may still land in the
+        // background, where boot-drain + the cover check reconcile it.
+        // Retrying in-loop would only stack more stalled SDK calls.
+        if (code === "REDEEM_TIMEOUT") {
+          mlog("REDEEM-TRY", { fed: this._federationId, attempt, result: "timeout" });
+          claimTrace("redeem-try", { fed: this._federationId, attempt, result: "timeout" });
+          throw e;
+        }
 
         // Already-accepted variants — the federation has consumed the
         // notes. That alone is NOT success: it proves SOMEONE redeemed

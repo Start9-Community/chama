@@ -211,6 +211,12 @@ export interface RealFedimintWallet {
 
 const RECEIVE_WATCH_TIMEOUT_MS = 16 * 60 * 1000;
 const PAY_WATCH_TIMEOUT_MS = 60 * 1000;
+// Re-attach watch (3.5.1 double-pay guard): when a payout's first watch
+// window expired with the HTLC still in flight, the claim orchestrator
+// re-attaches to the SAME operationId to learn the true outcome instead of
+// ever paying again. Give settlement a long, patient window here — this is a
+// background confirm, not a user-facing spinner.
+const REATTACH_PAY_WATCH_TIMEOUT_MS = 8 * 60 * 1000;
 const REISSUE_WATCH_TIMEOUT_MS = 90 * 1000;
 // v1.2.2 claim-hang fix: submitting `reissueExternalNotes` to the WASM
 // mint module can silently hang when the federation is unreachable
@@ -389,18 +395,109 @@ function formatPayState(state: RealLnPayState): string {
   return Object.keys(state)[0] ?? "unknown";
 }
 
-function payStateError(state: RealLnPayState): Error | null {
-  if (state === "canceled") return new Error("Lightning payment canceled");
+// ── 3.5.1 payout double-pay guard: outcome classification ──────────────────
+// These codes ride on the Error thrown by payInvoice so the claim
+// orchestrator can tell "submitted, outcome UNKNOWN" (refuse re-pay, re-attach
+// to the operationId) from "definitely failed" (safe to retry with a fresh
+// invoice). See payments/payout-journal.ts and payments/claim-and-payout.ts.
+//
+// Bias: unknown ⇒ INFLIGHT. Only a CONFIRMED refund/cancel — the sats
+// demonstrably came back — is classified REFUNDED (retry-safe).
+export const LN_PAY_INFLIGHT = "LN_PAY_INFLIGHT";
+export const LN_PAY_REFUNDED = "LN_PAY_REFUNDED";
+export const LN_PAY_SUBMIT_FAILED = "LN_PAY_SUBMIT_FAILED";
+
+export interface CodedPayError extends Error {
+  code?: string;
+  operationId?: string;
+}
+
+function codedPayError(
+  message: string,
+  code: string,
+  operationId?: string,
+): CodedPayError {
+  const err: CodedPayError = new Error(message);
+  err.code = code;
+  if (operationId) err.operationId = operationId;
+  return err;
+}
+
+/** Classify a terminal LN-pay state into a coded error, or null when the
+ *  state is non-terminal (keep watching). CONFIRMED refunded/canceled ⇒
+ *  REFUNDED; ambiguous (unexpected_error) ⇒ INFLIGHT (unknown ⇒ refuse). */
+function payStateCodedError(
+  state: RealLnPayState,
+  operationId: string,
+): CodedPayError | null {
+  if (state === "canceled") {
+    return codedPayError("Lightning payment canceled", LN_PAY_REFUNDED, operationId);
+  }
   if (typeof state !== "object" || state === null) return null;
   if ("refunded" in state) {
-    return new Error(state.refunded.gateway_error || "Lightning payment refunded");
+    return codedPayError(
+      state.refunded.gateway_error || "Lightning payment refunded",
+      LN_PAY_REFUNDED,
+      operationId,
+    );
   }
   if ("unexpected_error" in state) {
-    return new Error(
-      state.unexpected_error.error_message || "Lightning payment failed",
+    return codedPayError(
+      state.unexpected_error.error_message || "Lightning payment outcome unconfirmed",
+      LN_PAY_INFLIGHT,
+      operationId,
     );
   }
   return null;
+}
+
+// ── R3-1b: operation-log settlement check ──────────────────────────────────
+// subscribeLnPay does not reliably RE-EMIT a terminal state when we re-attach
+// to an already-settled payout after the fact, so the refund payout could land
+// (sats in wallet) while the re-attach watch timed out to "unknown" — leaving
+// the trade stuck on CLAIMED on both sides. The operation LOG (getOperation)
+// persists the terminal outcome, so it's the reliable signal for a re-attach.
+
+/** Classify a Lightning-pay operation's terminal outcome value (from the
+ *  operation log) into settled / refunded / pending / unknown. Mirrors
+ *  RealLnPayState but tolerant of string-or-object shapes across SDK builds. */
+export function classifyPayOutcome(outcome: unknown): "settled" | "refunded" | "pending" | "unknown" {
+  if (outcome == null) return "pending";
+  if (typeof outcome === "string") {
+    if (outcome === "success") return "settled";
+    if (outcome === "canceled" || outcome === "refunded") return "refunded";
+    return "pending"; // created / funded / awaiting_change / …
+  }
+  const rec = recordOf(outcome);
+  if (!rec) return "unknown";
+  if ("success" in rec || "preimage" in rec) return "settled";
+  if ("refunded" in rec || "canceled" in rec) return "refunded";
+  if ("funded" in rec || "waiting_for_refund" in rec || "awaiting_change" in rec) return "pending";
+  return "unknown";
+}
+
+/** Read a pay operation's terminal outcome from the operation log. Returns
+ *  "unknown" when the log is unavailable so callers fall back to the stream. */
+async function getPayOperationOutcome(
+  real: RealFedimintWallet,
+  operationId: string,
+): Promise<"settled" | "refunded" | "pending" | "unknown"> {
+  const getOperation = real.federation.getOperation;
+  if (typeof getOperation !== "function") return "unknown";
+  try {
+    const log = await getOperation.call(real.federation, operationId);
+    const operation = recordOf(log);
+    const outcomeBox = recordOf(operation?.outcome);
+    // Fedimint wraps the terminal state as operation.outcome.outcome; fall
+    // back to operation.outcome itself for adapters that flatten it.
+    const outcome = outcomeBox && "outcome" in outcomeBox
+      ? outcomeBox.outcome
+      : (outcomeBox ?? operation?.outcome);
+    return classifyPayOutcome(outcome);
+  } catch (e) {
+    console.debug(`[chama] LN pay ${operationId}: getPayOperationOutcome failed`, e);
+    return "unknown";
+  }
 }
 
 function formatInternalPayState(state: RealLnInternalPayState): string {
@@ -1294,17 +1391,24 @@ export function adaptRealWallet(
     }
   };
 
-  const waitForPay = async (operation: RealPayOperation): Promise<void> => {
+  const waitForPay = async (
+    operation: RealPayOperation,
+    timeoutMs: number = PAY_WATCH_TIMEOUT_MS,
+  ): Promise<void> => {
     const operationId = operation.operationId;
     const subscribe =
       operation.kind === "internal"
         ? real.lightning.subscribeInternalPayment?.bind(real.lightning)
         : real.lightning.subscribeLnPay?.bind(real.lightning);
     if (typeof subscribe !== "function") {
-      throw new Error(
+      // Submitted but unwatchable ⇒ outcome UNKNOWN. Tag INFLIGHT so the
+      // claim guard refuses to re-pay (a refund would otherwise be re-sent).
+      throw codedPayError(
         operation.kind === "internal"
           ? "Lightning payment was submitted as an internal federation payment, but this browser Fedimint SDK cannot watch internal pay status."
           : "Lightning payment was submitted, but this browser Fedimint SDK cannot watch pay status. Your sats are still in your Chama wallet if the payment refunds.",
+        LN_PAY_INFLIGHT,
+        operationId,
       );
     }
 
@@ -1337,8 +1441,15 @@ export function adaptRealWallet(
       };
 
       timeoutId = setTimeout(() => {
-        finish(new Error("Lightning payment timed out"));
-      }, PAY_WATCH_TIMEOUT_MS);
+        // The watch window expired with no terminal state — the HTLC may
+        // STILL be in flight. unknown ⇒ INFLIGHT: never let this become a
+        // re-payable failure; the orchestrator re-attaches to operationId.
+        finish(codedPayError(
+          "Lightning payment is taking longer than expected to confirm",
+          LN_PAY_INFLIGHT,
+          operationId,
+        ));
+      }, timeoutMs);
       (timeoutId as { unref?: () => void }).unref?.();
 
       try {
@@ -1355,7 +1466,7 @@ export function adaptRealWallet(
             );
             const error = operation.kind === "internal"
               ? internalPayStateError(state as RealLnInternalPayState)
-              : payStateError(state as RealLnPayState);
+              : payStateCodedError(state as RealLnPayState, operationId);
             if (error) {
               finish(error);
             } else if (
@@ -1367,8 +1478,14 @@ export function adaptRealWallet(
             }
           },
           (error) => {
+            // A broken status stream does NOT mean the payment failed — the
+            // HTLC may still settle. unknown ⇒ INFLIGHT (refuse re-pay).
             console.warn(`[chama] LN pay ${operationId}: stream error`, error);
-            finish(new Error(error || "Lightning payment failed"));
+            finish(codedPayError(
+              error || "Lightning payment status unavailable",
+              LN_PAY_INFLIGHT,
+              operationId,
+            ));
           },
         );
         if (unsubscribeAfterAssign) {
@@ -1822,7 +1939,10 @@ export function adaptRealWallet(
         try {
           result = await real.lightning.payInvoice(bolt11, gateway, meta ?? {});
         } catch (e: any) {
-          const error = normalizePaySubmitError(e);
+          // Submit rejected BEFORE an operationId exists ⇒ no payment was
+          // created. SUBMIT_FAILED = safe to retry with a fresh invoice.
+          const error = normalizePaySubmitError(e) as CodedPayError;
+          if (!error.code) error.code = LN_PAY_SUBMIT_FAILED;
           console.warn(
             `[chama] LN pay submit failed via ${gateway?.gateway_id ?? "default gateway"}: ${error.message}`,
             e,
@@ -1834,8 +1954,12 @@ export function adaptRealWallet(
         );
         const operation = extractPayOperation(result);
         if (!operation) {
-          throw new Error(
+          // No operationId means we can neither watch nor re-attach. There is
+          // no evidence a payment was created, so treat as submit-failed
+          // (retry-safe) rather than strand the claim forever.
+          throw codedPayError(
             `Lightning payment submission did not return a payment operation id: ${summarizePaySubmitResult(result)}`,
+            LN_PAY_SUBMIT_FAILED,
           );
         }
         try {
@@ -1848,6 +1972,33 @@ export function adaptRealWallet(
           throw e;
         }
         return { operationId: operation.operationId };
+      },
+      // 3.5.1 double-pay guard: re-attach to a previously-submitted payout
+      // and report its TRUE terminal outcome, without ever paying again.
+      // Returns "settled" (success{preimage}), "refunded" (confirmed refund
+      // ⇒ retry-safe), or "unknown" (still in flight / unresolved ⇒ keep the
+      // submitted record, do not re-pay).
+      async awaitPayOutcome(operationId: string) {
+        // R3-1b: the operation LOG is the reliable signal for a payout that
+        // already settled before we re-attached — subscribeLnPay won't always
+        // re-emit its terminal state, which left refunds stuck on CLAIMED.
+        const fromLog = await getPayOperationOutcome(real, operationId);
+        if (fromLog === "settled") return "settled" as const;
+        if (fromLog === "refunded") return "refunded" as const;
+        // Still in flight (or log unavailable) → watch the live stream.
+        try {
+          await waitForPay(
+            { kind: "lightning", operationId, source: "reattach" },
+            REATTACH_PAY_WATCH_TIMEOUT_MS,
+          );
+          return "settled" as const;
+        } catch (e: any) {
+          // Final log re-check — it may have landed while we waited / timed out.
+          const after = await getPayOperationOutcome(real, operationId);
+          if (after === "settled") return "settled" as const;
+          if (after === "refunded" || e?.code === LN_PAY_REFUNDED) return "refunded" as const;
+          return "unknown" as const;
+        }
       },
     },
 

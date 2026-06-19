@@ -78,14 +78,20 @@ const TABLE: Record<string, CategoryLabels> = {
     seller: { release: "Fiat received",   refund: "Fiat not received" },
     arbiter: ARBITER_NEUTRAL,
   },
-  // ── Bill Pay — the VOLUNTEER (seller role) pays the owner's fiat bill
-  //    off-chain. The volunteer is the deed-doer, so they vote FIRST
-  //    ("I paid the bill as a volunteer"); the bill owner then confirms.
-  //    The volunteer's refund is the back-out hatch: refund the owner so
-  //    they can find someone else (maintainer wording, 2026-06-05). ────
+  // ── Bill Pay — the VOLUNTEER (buyer role) pays the owner's fiat bill
+  //    off-chain and is paid in sats on RELEASE; the BILL OWNER (seller
+  //    role) locks the sats and is refunded on REFUND. This mirrors the
+  //    sats routing (recipients.ts: RELEASE→buyer, REFUND→seller) and the
+  //    locker convention (state-machine.ts: bill-pay locker = seller). The
+  //    volunteer is the deed-doer, so they vote FIRST ("I paid the bill as
+  //    a volunteer"); the owner then confirms. The volunteer's refund is
+  //    the back-out hatch — cancel so the owner is refunded and can find
+  //    someone else. (3.5.1 fix: buyer↔seller bodies were swapped, which
+  //    read as a role reversal on the device pass; routing was always right,
+  //    only these labels + the turn order in decisions.ts were inverted.) ──
   "bill-pay:service": {
-    buyer:  { release: "My bill was paid",               refund: "Bill not paid" },
-    seller: { release: "I paid the bill as a volunteer", refund: "Cancel — refund the bill owner" },
+    buyer:  { release: "I paid the bill as a volunteer", refund: "Cancel — I can't pay this bill" },
+    seller: { release: "My bill was paid",               refund: "Bill not paid" },
     arbiter: ARBITER_NEUTRAL,
   },
   // ── Lending — first cycle (loan disbursement). The borrower's first

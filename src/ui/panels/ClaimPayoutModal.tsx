@@ -416,7 +416,18 @@ export function ClaimPayoutModal({
           )}
         </div>
 
-        {stage.kind === "running" && <RunningPanel phase={stage.phase} payoutMethod={payoutMethod} />}
+        {stage.kind === "running" && (
+          <RunningPanel
+            phase={stage.phase}
+            payoutMethod={payoutMethod}
+            // v3.5.1 claim-hang: a delayed escape so a stalled redeem/payout
+            // (e.g. a cross-fed claim) is never a dead-end. Closing does not
+            // cancel the in-flight claim — it is published and the notes are
+            // stashed, so boot-drain + the recovery banner reconcile the
+            // sats — it only frees the user from the spinner.
+            onEscape={() => onClose(undefined)}
+          />
+        )}
 
         {stage.kind === "terminal" && (
           <TerminalPanel
@@ -931,14 +942,27 @@ function OnchainPayoutPicker({
 function RunningPanel({
   phase,
   payoutMethod,
+  onEscape,
 }: {
   phase: ClaimAndPayoutPhase;
   payoutMethod: PayoutMethod | null;
+  onEscape?: () => void;
 }) {
+  // v3.5.1 claim-hang: reveal an escape if the in-progress stage runs long.
+  // A healthy claim+payout resolves well under this; a stall (cross-fed or
+  // unreachable federation) would otherwise trap the user on a spinner with
+  // no exit (the close button + click-outside are terminal-only).
+  const [showEscape, setShowEscape] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setShowEscape(true), 25_000);
+    return () => clearTimeout(t);
+  }, []);
+
   const message =
     phase.kind === "claiming" ? "Recovering your share…" :
     phase.kind === "confirming" ? "Confirming with the federation…" :
     phase.kind === "paying-onchain" ? "Broadcasting onchain payout…" :
+    phase.kind === "payout-confirming" ? "Confirming your payout…" :
     phase.kind === "paying-invoice" && payoutMethod?.kind === "external"
       ? `Sending to ${payoutMethod.match.provider.displayName}…`
       : phase.kind === "paying-invoice" ? "Sending to your wallet…" :
@@ -947,11 +971,13 @@ function RunningPanel({
     phase.kind === "paying-onchain" ? T.amber :
     phase.kind === "paying-invoice" ? T.amber :
     phase.kind === "confirming" ? T.amber :
+    phase.kind === "payout-confirming" ? T.amber :
     T.purple;
   const toneDim =
     phase.kind === "paying-onchain" ? T.amberDim :
     phase.kind === "paying-invoice" ? T.amberDim :
     phase.kind === "confirming" ? T.amberDim :
+    phase.kind === "payout-confirming" ? T.amberDim :
     T.purpleDim;
 
   return (
@@ -967,6 +993,25 @@ function RunningPanel({
       <div style={{ fontSize: 11, fontWeight: 600, color: tone, fontFamily: T.mono, letterSpacing: 1 }}>
         {message.toUpperCase()}
       </div>
+      {showEscape && onEscape && (
+        <div style={{ marginTop: 18 }}>
+          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 8, lineHeight: 1.5 }}>
+            Taking longer than expected. Your claim is published and your sats
+            are safe — close and check back, or let it finish in the background.
+          </div>
+          <button
+            onClick={onEscape}
+            style={{
+              width: "100%", padding: "10px 16px", borderRadius: T.rs,
+              background: T.surface, border: `1px solid ${T.border}`,
+              color: T.text, fontFamily: T.mono, fontSize: 12, fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            Close &amp; check later
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1052,6 +1097,16 @@ function TerminalPanel({
     toneDim = T.amberDim;
     icon = "⏳";
     showRetry = true;
+  } else if (terminal.kind === "payout-confirming") {
+    // 3.5.1 — the payout is SUBMITTED but unconfirmed. Deliberately NO retry
+    // affordance: re-paying is the double-send this guards against. Chama
+    // re-attaches to the payment in the background; the user just waits.
+    title = "Payout sent — confirming";
+    subtitle = terminal.error
+      ?? "Your payout was sent and is confirming. Don't tap Claim again — check your destination wallet.";
+    tone = T.amber;
+    toneDim = T.amberDim;
+    icon = "⏳";
   } else {
     // payout-failed
     title = "Payout couldn't be sent";

@@ -22,12 +22,22 @@ import { markSatsTracesDrained, recordSatsTrace } from "./sats-trace.js";
 
 export type RecoveryPayoutPhase =
   | { kind: "paying-invoice" }
+  | { kind: "payout-confirming"; error?: string }
   | { kind: "done" }
   | { kind: "payout-failed"; error: string };
 
 export type RecoveryPayoutTerminal =
   | { kind: "done" }
+  /** R3-1: the payout was submitted but settlement is unconfirmed — RETRY must
+   *  NOT re-pay (the journal re-attaches to operationId). Same as the claim
+   *  path's payout-confirming. */
+  | { kind: "payout-confirming"; error?: string }
   | { kind: "payout-failed"; error: string };
+
+/** Reassurance copy for the recovery payout-confirming terminal — never
+ *  invites a re-pay (that's the double-send this guards against). */
+export const RECOVERY_CONFIRMING_COPY =
+  "Your payout was sent and is confirming. Don't retry — check your destination wallet. Chama finishes this once it confirms.";
 
 export interface RunRecoveryPayoutOpts {
   /** BOLT11 invoice resolved by DestinationPicker for the user's
@@ -37,11 +47,14 @@ export interface RunRecoveryPayoutOpts {
   saveAfter: boolean;
   /** Address to save (if saveAfter). Unset for Tier 3 paste. */
   addressUsed?: string;
-  /** Bound to bridge.payInvoice. */
-  payInvoice: (bolt11: string) => Promise<void>;
+  /** Bound to bridge.payInvoice. Resolves with the durable LN-pay operationId;
+   *  throws a coded error (LN_PAY_INFLIGHT / LN_PAY_REFUNDED / SUBMIT_FAILED)
+   *  on failure — same contract as runClaimAndPayout's payInvoice. */
+  payInvoice: (bolt11: string) => Promise<string | undefined | void>;
   /** Optional balance reader for post-payout trace cleanup. */
   getBalance?: () => Promise<number>;
-  /** Optional provenance when the recovery surface knows the source. */
+  /** Optional provenance when the recovery surface knows the source. The
+   *  escrowId, when present, keys the double-pay journal below. */
   traceContext?: {
     escrowId?: string;
     amountMsats?: number;
@@ -50,6 +63,14 @@ export interface RunRecoveryPayoutOpts {
   addOrTouchLightningHandle: (address: string) => void;
   /** Phase callback. */
   onPhase: (phase: RecoveryPayoutPhase) => void;
+  // ── R3-1 double-pay guard (shares the claim path's escrow-keyed journal) ──
+  // All optional + only active when traceContext.escrowId is set, so existing
+  // callers/tests run unchanged. See payments/payout-journal.ts.
+  getPayoutRecord?: (escrowId: string) => { status: "submitted" | "settled"; operationId?: string } | null;
+  recordPayoutSubmitted?: (input: { escrowId: string; operationId?: string; amountMsats?: number }) => void;
+  markPayoutSettled?: (escrowId: string, operationId?: string) => void;
+  clearPayoutRecord?: (escrowId: string) => void;
+  awaitPayoutOutcome?: (operationId: string) => Promise<"settled" | "refunded" | "unknown">;
 }
 
 function errorMessage(e: unknown, fallback: string): string {
@@ -74,11 +95,62 @@ export async function runRecoveryPayout(
   opts: RunRecoveryPayoutOpts,
 ): Promise<RecoveryPayoutTerminal> {
   const emit = (p: RecoveryPayoutPhase) => opts.onPhase(p);
+  const escrowId = opts.traceContext?.escrowId;
+
+  // ── R3-1 double-pay guard ────────────────────────────────────────────────
+  // Mirrors runClaimAndPayout's top guard, on the SAME escrow-keyed journal:
+  // a settled/submitted record for this escrow means a payout already went
+  // out (the refund's twin of the claim-side bug). Only active with an
+  // escrowId — a generic balance drain has no stable key, and a drained
+  // balance is its own guard.
+  if (escrowId) {
+    const prior = opts.getPayoutRecord?.(escrowId) ?? null;
+    if (prior?.status === "settled") {
+      emit({ kind: "done" });
+      return { kind: "done" };
+    }
+    if (prior?.status === "submitted") {
+      emit({ kind: "payout-confirming" });
+      let outcome: "settled" | "refunded" | "unknown" = "unknown";
+      if (opts.awaitPayoutOutcome && prior.operationId) {
+        try { outcome = await opts.awaitPayoutOutcome(prior.operationId); }
+        catch { outcome = "unknown"; }
+      }
+      if (outcome === "settled") {
+        opts.markPayoutSettled?.(escrowId, prior.operationId);
+        emit({ kind: "done" });
+        return { kind: "done" };
+      }
+      if (outcome === "refunded") {
+        opts.clearPayoutRecord?.(escrowId); // sats came back — pay fresh below
+      } else {
+        emit({ kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY });
+        return { kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY };
+      }
+    }
+  }
 
   emit({ kind: "paying-invoice" });
   try {
-    await opts.payInvoice(opts.bolt11);
+    const res = await opts.payInvoice(opts.bolt11);
+    // payInvoice only resolves on success — journal it settled so a retry is
+    // a no-op, never a second send.
+    if (escrowId) opts.markPayoutSettled?.(escrowId, typeof res === "string" ? res : undefined);
   } catch (e: any) {
+    const code = (e as { code?: string })?.code;
+    const opId = (e as { operationId?: string })?.operationId;
+    // Submitted-but-unconfirmed (watch timed out mid-flight) ⇒ never a
+    // re-payable failure. Journal it and surface payout-confirming.
+    if (code === "LN_PAY_INFLIGHT") {
+      if (escrowId) {
+        opts.recordPayoutSubmitted?.({ escrowId, operationId: opId, amountMsats: opts.traceContext?.amountMsats });
+      }
+      emit({ kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY });
+      return { kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY };
+    }
+    // Definite failure (confirmed refund, submit-failed, other) — re-paying is
+    // correct; drop any record so a retry isn't wrongly blocked.
+    if (escrowId) opts.clearPayoutRecord?.(escrowId);
     const error = errorMessage(e, "Lightning payment failed");
     emit({ kind: "payout-failed", error });
     return { kind: "payout-failed", error };

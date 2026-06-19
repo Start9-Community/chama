@@ -74,7 +74,16 @@ export enum Role {
   ARBITER = "arbiter",
 }
 
-export const JOIN_HOLD_SECONDS = 15 * 60;
+// R3-2 (3.5.x): "window shopping" pre-lock hold. Shortened 15m → 5m so an
+// abandoned seat frees itself fast — this replaces the explicit "Leave"
+// button (removed), so a buyer who wanders off never buries the trade or
+// wipes the chat; the seat just expires. CONSENSUS PARAMETER: every client
+// must run the same value or two buyers briefly disagree on a seat
+// (reservation-only, self-heals on lock/expiry, no funds at risk). Ship as a
+// coordinated version bump, never a silent change. Single source of truth —
+// the seat display, joinHoldExpiresAt, and the locker's lock window all
+// derive from it.
+export const JOIN_HOLD_SECONDS = 5 * 60;
 export const JOIN_HOLD_LOCK_GRACE_SECONDS = 2 * 60;
 
 // ── Vote Outcomes ─────────────────────────────────────────────────────────

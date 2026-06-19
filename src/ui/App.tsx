@@ -881,6 +881,11 @@ export default function App() {
     hasAnyActiveEscrow: committedMsats > 0,
     fundingInProgress: midFunding,
     claimPayoutInProgress,
+    // Phase 1: sim manual-fund balances are intentional & fake — never let
+    // the production stranded-funds alarm fire on them. Read isSimModeOn()
+    // directly (a pure localStorage read); the memoized `simOn` in the
+    // connect-screen block is declared later in this render body.
+    simModeOn: isSimModeOn(),
   });
   const walletBalanceMsats = fedimint.balanceMsats ?? 0;
   const hasTraceableIdleBalance = Math.floor(Math.max(0, walletBalanceMsats) / 1000) > 0
@@ -1574,6 +1579,11 @@ export default function App() {
               // TradeDetail's Fund + Claim buttons (see TradeDetail
               // mount below).
               bootProbeState: fedimint.bootProbeState,
+              // Phase 1: suppress the "stranded → ⚠ Recover" alarm pill on
+              // intentional sim manual-fund balances — the sibling
+              // shouldShowRecoveryBanner is gated the same way. simOn is in
+              // scope here (declared above the connected render).
+              simModeOn: simOn,
             })}
             onTapStranded={() => setPendingRecovery({
               title: "Recover sats",
@@ -1619,7 +1629,7 @@ export default function App() {
           onCreateInvoice={(amountSats, desc) =>
             actions.createFundingInvoice(amountSats * 1000, desc)
           }
-          onPayInvoice={(bolt11) => actions.payInvoice(bolt11)}
+          onPayInvoice={async (bolt11) => { await actions.payInvoice(bolt11); }}
           onSpendNotes={(amountMsats) => actions.spendNotes(amountMsats)}
           onRedeemEcash={(oobNotes) => actions.redeemEcash(oobNotes)}
           balanceMsats={fedimint.balanceMsats ?? 0}
@@ -1873,6 +1883,7 @@ export default function App() {
               reason: pendingRecovery.title,
             }),
           )}
+          awaitPayoutOutcome={actions.awaitPayoutOutcome}
           getBalance={actions.getBalance}
           traceContext={recoveryTraceContext}
           addOrTouchPayoutDestination={(addr) => { addOrTouchPayoutDestination(addr); }}
@@ -1969,6 +1980,9 @@ export default function App() {
                 setToast({ message: e?.message || "Vote failed.", type: "error" });
               },
             )}
+            // R3-1b: re-attach to a submitted payout on view → complete a
+            // CLAIMED trade whose refund/claim already landed (no re-pay).
+            onConfirmPayout={(escrowId) => { void actions.reattachPayout(escrowId); }}
             onClaim={async () => {
               // v0.3.0 Phase 3: open ClaimPayoutModal instead of
               // dispatching claimAndRedeem directly. In browsers this
@@ -2038,17 +2052,9 @@ export default function App() {
               setSelectedId(null);
               maybeSnapBackHome();
             }}
-            onLeave={(escrowId) => {
-              // v3.1 B2: pre-lock leave — drop the reservation locally + go back.
-              // No sats are escrowed before LOCK, so there's nothing to unwind; the
-              // on-relay JOIN hold expires on its own, and LOCK is self-describing
-              // (carries the buyer pubkey), so the counterparty is never blocked.
-              actions.forgetEscrow(escrowId);
-              setToast({ message: "You've left the trade. Your reservation frees up on its own — none of your sats were ever locked.", type: "success" });
-              setView(detailBackView);
-              setSelectedId(null);
-              maybeSnapBackHome();
-            }}
+            // R3-2 (3.5.x): the pre-lock "Leave" handler was removed — a buyer
+            // who wanders off just lets the 5-minute seat hold expire (no
+            // explicit abandon → never buries the trade or wipes the chat).
             // #7 multi-unit storefront: buy N units from a parent listing →
             // spawn the buyer's own child escrow and open it so they fund + lock
             // it via the normal flow. The parent stays a perpetual offer.
@@ -2213,8 +2219,18 @@ export default function App() {
                     opts.onPhase?.(label);
                   },
                 });
-                if (terminal.kind === "done") {
-                  setToast({ message: "Payout sent!", type: "success" });
+                // R3-1: payout-confirming is NOT an error — the payment was
+                // submitted and is settling; the #2 background re-attach flips
+                // the trade to done when it lands. Treat it as success here so
+                // the direct-NWC surface stops "Sending to NWC…" and doesn't
+                // invite a retry (the journal guard makes retry inert anyway).
+                if (terminal.kind === "done" || terminal.kind === "payout-confirming") {
+                  setToast({
+                    message: terminal.kind === "done"
+                      ? "Payout sent!"
+                      : "Payout sent — confirming. Check your wallet; the trade finishes once it lands.",
+                    type: "success",
+                  });
                   try { addOrTouchSavedNwcConnection(opts.nwcConnectionString); } catch {}
                   return { ok: true };
                 }

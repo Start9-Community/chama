@@ -1563,3 +1563,213 @@ machinery is needed.
 **Status:** Active (design). Extends the 2026-06-14 cabinet entry. Home doc:
 `docs/DESIGN-arbiter-economy.md` (v3 sharpening 2026-06-16). Bonds remain LAST in
 the build order.
+
+---
+
+## 2026-06-16 — BLF is the universal backup; GBF is the one US community ("USA · USD")
+
+**Context:** A live 3-instance Exchange test (v3.5.0 dev builds) had three fresh
+nsecs land on different federations, and selecting the USD community resolved to
+BLF instead of GBF. Investigation found the *structure* already matched the
+intended model (us-blf = BLF is the default; us-gbf = GBF is pinned to the US),
+but three things tangled it: (1) a label collision — the hidden BLF default
+carried the displayName "Global · USD" while the GBF community was "USA - USD",
+so a user on the default thought they were on the USD/GBF community; (2) the two
+community-blind fallbacks still returned BP; (3) the pre-signer onboarding pick
+was written to a global localStorage key that only the first connecting npub
+claimed, so fresh/secondary npubs on the same browser raced to the default.
+
+**Options considered:**
+- (a) Make GBF the no-pick default too (DEFAULT_COMMUNITY_SLUG → us-gbf).
+  Rejected: diverges from "BLF backs everything by default."
+- (b) Repoint the legacy `global-usd` slug to GBF (the brief's literal wording).
+  Rejected: leaves the us-blf label collision unfixed and repoints old listings.
+- (c) Fix the collision: GBF is the single visible US community ("USA · USD"); the
+  BLF default stays hidden and nameless ("Global · Bitcoin"); both community-blind
+  fallbacks → BLF; legacy `global-usd` stays hidden but repoints BP → BLF.
+
+**Decision:** (c). BLF is the universal backup federation across the board; GBF is
+pinned to the one pickable US community, labeled "USA · USD". A fallback carries
+no user-facing name.
+
+**Rationale:** BLF has been browser-reliable since the v0.5.0 canary iroh-relay
+0.90 bump (registry `browserReliable: true`), so the old "BP is the only browser-
+safe fallback" reasoning no longer holds. One visible US community + one nameless
+global backup removes the "two USD identities" confusion that made the default
+read as GBF. BP stays a curated/visible option but is no longer the silent default.
+
+**Implications:**
+- `resolveFederationForCommunity` (federation-config.ts:306) and the community-blind
+  `getFederationInvite` (federation-config.ts:87) now fall back to BLF, not BP.
+- Registry: us-gbf displayName "USA - USD" → "USA · USD"; us-blf displayName
+  "Global · USD" → "Global · Bitcoin"; legacy `global-usd` repointed BP → BLF
+  (still hidden, still wire-resolvable so old listings render on the same backup).
+- Onboarding (#1b): the globe pick is deferred — stashed pre-signer
+  (`setPendingCommunitySelection`) and committed to the connecting npub's scope
+  (`applyPendingCommunitySelection`), then cleared, so it can't leak to a later
+  npub. Expected to also clear the Create "set your main Chama" re-prompt (#4) and
+  the per-instance UI variance (#5); both to be confirmed on the device pass.
+- Ships in 3.5.1 alongside the cross-fed claim-hang fix.
+
+**Status:** Active.
+
+---
+
+## 2026-06-17 — Claim payout double-pay guard (escrow-keyed journal)
+
+**Context:** 3.5.1 device pass (round 2). A Community Bill Pay claim looped
+on "still arriving / RETRY" forever even though the 116-sat payout had
+landed in the destination wallet. Root cause: the LN-pay adapter
+(`sdk-adapter.ts` `waitForPay`) rejects on a 60s `subscribeLnPay` timeout
+while the HTLC is still in flight; the payment then settles, but the UI has
+already fallen to a retryable terminal. RETRY mints a FRESH invoice (new
+payment hash, so the gateway can't dedupe) and pays again — the wallet showed
+two near-identical payouts ~78s apart, exactly a 60s-timeout + retry.
+
+**Options considered:**
+- (a) Raise the pay-watch timeout. Reduces the window but doesn't close it,
+  and makes the spinner longer; a slow HTLC still double-pays.
+- (b) Idempotency keyed on the payment hash / invoice. Useless here — each
+  retry resolves a new invoice, so there's nothing stable to dedupe on.
+- (c) Persisted, ESCROW-keyed payout journal + re-attach to the durable
+  Fedimint `operationId` (never re-pay an in-flight payout); classify
+  outcomes so only a CONFIRMED refund frees a retry.
+
+**Decision:** Picked option (c). New `payments/payout-journal.ts` (mirrors
+`pending-redemptions.ts`: synchronous, user-scoped localStorage). The adapter
+tags pay errors `LN_PAY_INFLIGHT` (timeout / stream error / unexpected ⇒
+unknown), `LN_PAY_REFUNDED` (confirmed refund/cancel ⇒ retry-safe), or
+`LN_PAY_SUBMIT_FAILED` (no payment made ⇒ retry-safe), and exposes
+`awaitPayOutcome(operationId)` for re-attach. `runClaimAndPayout` guards at
+the TOP (before claim/balance work — a prior successful payout drains the
+balance, which would otherwise bounce a retry to claim-pending and never reach
+the journal): `settled` ⇒ skip + complete; `submitted` ⇒ re-attach (settled ⇒
+complete; refunded ⇒ clear + pay fresh; unknown ⇒ new `payout-confirming`
+terminal, never re-pay). A fresh in-flight payout also fires one bounded
+background re-attach so a late settle flips the trade to COMPLETED on its own.
+
+**Rationale:** Bearer-cash safety — the same "unknown ⇒ refuse" stance as the
+OPFS-wipe and ALREADY_SPENT_UNCONFIRMED guards. A second send is unrecoverable
+(the counterparty has the sats); a stuck-but-safe "confirming" surface is the
+lesser evil and resolves itself or on the next tap. The escrow key is the only
+stable handle because the destination invoice changes per retry.
+
+**Implications:**
+- New terminal `payout-confirming` (modal shows reassurance, NO retry button).
+- `IFedimintWallet.lightning.payInvoice` now surfaces the `operationId` through
+  `fedimint-client` → `escrow-bridge`; `awaitPayOutcome` is optional
+  (mock/native return "unknown" ⇒ they keep the submitted record, never re-pay).
+- Guard is Lightning-only; the on-chain payout path is unchanged.
+- 20 unit asserts in the escrow test suite cover every guard branch.
+- Ships in 3.5.1. Needs the device-pass re-test (real `subscribeLnPay`
+  re-attach behavior can't be unit-tested).
+- Round-3 follow-up: the device pass found the SAME bug on the REFUND side —
+  an after-lock back-out refund landed but the surface stuck on "Sending to
+  NWC…". The refund reuses `runClaimAndPayout` (journal already there), so its
+  fix was the App-level surface (`onClaimDirectNwc` now treats `payout-
+  confirming` as success, not error). The separate recovery path
+  (`balance-recovery.ts` `runRecoveryPayout`, via RecoveryPayoutModal) had NO
+  journal — it now shares the same escrow-keyed journal + completion-detection
+  + `payout-confirming` terminal, so a timed-out recovery shows "confirming"
+  (not a re-payable failure) and a retry is inert once settled. `actions.pay
+  Invoice` surfaces the operationId; `actions.awaitPayoutOutcome` added. +15
+  recovery-side unit asserts.
+- Round-3b: the after-lock refund still hung — the payout landed but the trade
+  never reached COMPLETED on either side (seller stuck CLAIMED, buyer stuck
+  SETTLING). Root cause: the background re-attach's `awaitPayOutcome` watched
+  only `subscribeLnPay`, which does NOT reliably re-emit a terminal state when
+  re-attaching to an ALREADY-settled op → "unknown" → `client.complete` (which
+  propagates the COMPLETE the buyer waits on) never fired. Fix: `awaitPayOutcome`
+  now checks the operation LOG (`getOperation` → `classifyPayOutcome`) first and
+  after the watch — the reliable settled/refunded signal. Extracted a reusable
+  `reattachPayout` action (also fired on opening a CLAIMED trade with a sent
+  payout, so a trade stuck across an app-close self-heals on view). Inline
+  TradeDetail claim card now shows "Payout sent — confirming" (no RETRY-CLAIM
+  invite) gated on the payout journal, instead of a permanent CLAIMED-retry
+  line. +8 classification asserts.
+
+**Status:** Active.
+
+---
+
+## 2026-06-18 — Pre-lock seat: 5-minute hold, no "Leave" button
+
+**Context:** The pre-lock "Leave" flow was incoherent — it forgot the trade
+forever (denylist), could wipe the chat, and "secretly" kept the seat held
+for the full 15-minute JOIN hold while telling the buyer they'd left. The
+device pass wanted Leave to free the seat immediately.
+
+**Options considered:**
+- (a) New UNJOIN event that expires the leaver's hold. Rejected — a
+  state-machine/protocol addition (new event kind + JOIN-after-UNJOIN
+  overwrite semantics + replay) is too much for a UX round.
+- (b) Shorten the hold + remove the explicit Leave action ("window shopping").
+
+**Decision:** Picked (b). `JOIN_HOLD_SECONDS` 15 min → **5 min** (types.ts) and
+**removed the pre-lock "Leave" button** + its `onLeave` forget-forever path
+(App.tsx, TradeDetail). A buyer who wanders off just lets the seat expire in
+5 min; with no explicit abandon, the trade is never buried and the chat is
+never wiped (both were artifacts of the Leave action). The honest seat
+display ("reserved · frees in Xm", re-joinable if open / "taken" if grabbed)
+already existed and derives from the hold.
+
+**Rationale:** Reservation-only behavior, no funds at risk — the cheapest fix
+that dissolves every original concern without touching the escrow protocol.
+
+**Implications:**
+- `JOIN_HOLD_SECONDS` is a CONSENSUS parameter — every client must run the
+  same value or two buyers briefly disagree on a seat (self-heals on
+  lock/expiry, no funds at risk). **Must ship as a coordinated version bump,
+  never a silent change.** (Per the no-version-bump workflow, the release
+  script owns the actual `package.json` bump — this entry is the coordination
+  flag; the constant change itself is the only code.)
+- It's the single source of truth — the seat display, `joinHoldExpiresAt`,
+  and the locker's lock window all shorten to 5 min; a real fund + CBP
+  cart-build must land inside that window (device re-test).
+- `JOIN_HOLD_LOCK_GRACE_SECONDS` kept at 2 min. No new event kind, no
+  state-machine structural change. Stale "15 minute" test wording updated.
+
+**Status:** Active.
+
+---
+
+## 2026-06-17 — Bill Pay roles: buyer = volunteer, seller = bill owner
+
+**Context:** 3.5.1 device pass read as a buyer↔seller role reversal in CBP —
+the seller instance showed "I paid the bill as a volunteer" and the cancel
+line was self-contradictory ("refund the bill owner · refund me").
+
+**Decision:** The sats ROUTING was always correct (recipients.ts: RELEASE →
+buyer, REFUND → seller; locker = seller) and is the source of truth. The
+2026-06-05 label pass had inverted only the surface: it put the volunteer
+copy + first-vote on the SELLER. Canonical mapping is **buyer = VOLUNTEER**
+(off-chain deed-doer — pays the bill, paid in sats on release, votes first)
+and **seller = BILL OWNER** (locks the sats, confirms, refunded on cancel).
+Fixed the label bodies (`vote-labels.ts`), the first voter
+(`decisions.ts` `firstHappyPathVoter` → buyer-first for bill-pay), the
+waiting copy, and the refund-routing noun (`TradeDetail.tsx` `partyNoun` —
+"bill owner"/"volunteer" instead of generic "seller"/"buyer"). Routing,
+locker, and payout logic were NOT touched — swapping them would have broken
+correct money flow.
+
+**Rationale:** The reversal was a labeling/turn-order bug, not a protocol
+bug; the cheapest correct fix aligns the copy to the routing, not vice versa.
+
+**Implications:** `#5` (saved handles not surfacing) was filed against the
+same screen — the reveal is shown to the locker (seller/owner), the right
+party, and reads the user's own `chama_saved_handles`; no static defect
+found, so it re-tests against the `#6` boot-scope fix. Vote-label + vote-
+prompt tests updated to the corrected mapping.
+
+`#7` (buyer back-out after lock) builds on the same hatch: post-lock CANCEL
+stays hard-blocked (state-machine.ts:1213) and there is NO unilateral auto-
+refund — the back-out is the REFUND vote (→ refund-to-locker, arbiter as
+backstop), so the hatch now opens a confirm that restates the routing and
+steers an already-performed deed-doer onto the RELEASE vote instead of
+forfeiting their sats. Routing/recipients/expiry-auto-refund are untouched
+(UX only). `#7(a)`: local Hide/Forget is now blocked while a trade still
+holds unresolved sats (LOCKED/APPROVED/CLAIMED/EXPIRED, a pending redeem
+stash, or a submitted payout) — only terminally-resolved trades hide, and
+resolved trades still render in Me → Done, so nothing is buried.
+
+**Status:** Active.

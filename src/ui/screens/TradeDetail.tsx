@@ -23,6 +23,8 @@ import {
   handleDisplayForViewer,
 } from "../../payments/saved-handles.js";
 import { getRailByKey, matchRails, toRailKey, categoryUsesPaymentRails } from "../../payments/rail-registry.js";
+import { listPendingRedemptions } from "../../fedimint/pending-redemptions.js";
+import { getPayoutRecord } from "../../payments/payout-journal.js";
 import {
   T, STATUS, ROLE_COLOR, ROLE_COLOR_TEXT, CAT_LABEL, TRINITY_RING_ORDER,
   fmtSats, refundRecipientFor, inputStyle,
@@ -106,9 +108,9 @@ function execCommandCopy(text: string): void {
 export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
-  disableNwc = false, onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc,
+  disableNwc = false, onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc, onConfirmPayout,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
-  onPrewarmFunding, onRebroadcast, onForget, onLeave, onPurchase, stockLeft, isOversoldOrder = false,
+  onPrewarmFunding, onRebroadcast, onForget, onPurchase, stockLeft, isOversoldOrder = false,
   onRateCounterparty, myGivenRatings, fetchRatingSummary,
 }: {
   state: EscrowState; pubkey: string;
@@ -193,6 +195,10 @@ export function TradeDetail({
     nwcConnectionString: string;
     onPhase?: (label: string) => void;
   }) => Promise<{ ok: boolean; error?: string }>;
+  /** R3-1b: re-attach to a submitted payout and complete the trade if it
+   *  settled (no re-pay). Fired when a CLAIMED trade with a sent payout is
+   *  opened, so a stuck refund/claim flips to done on view. */
+  onConfirmPayout?: (escrowId: string) => void;
   onPrewarmFunding?: () => void | Promise<void>;
   onSendChat: (message: string | { message: string; attachments?: ChatImageAttachment[] }) => void;
   onReleasePeriod?: (periodIndex: number) => void | Promise<void>;
@@ -209,10 +215,6 @@ export function TradeDetail({
    *  unrecoverable ghosts. Money stays in escrow; re-loadable by ID. App
    *  navigates back to the list after this resolves. */
   onForget?: (escrowId: string) => void;
-  /** v3.1 B2: buyer "leave / cancel my join" PRE-lock (status CREATED, before any
-   *  funding). Purely local — releases the reservation on this device + navigates
-   *  back to Browse. No sats are ever escrowed pre-lock, so nothing to unwind. */
-  onLeave?: (escrowId: string) => void;
   /** #7 multi-unit storefront: buy `quantity` units from THIS parent listing.
    *  Spawns a child purchase escrow and navigates to it (App handles that), so
    *  the buyer locks the child via the normal flow. */
@@ -246,8 +248,6 @@ export function TradeDetail({
   // v3.5 (C1/C7): two-tap acknowledge before the PERFORMER's release vote on
   // a trade whose arbiter is off-assignment / self-rostered / fee-gated.
   const [riskAckArmed, setRiskAckArmed] = useState(false);
-  // v3.1 B2: two-tap confirm for the buyer's PRE-lock "leave this trade" link.
-  const [leaveArmed, setLeaveArmed] = useState(false);
   // v3.2: Mark-delivered debounce (chat echo flips the durable done-state) +
   // the chat-row anchor the arbiter's "Open chat & evidence" link scrolls to.
   const [markingDelivered, setMarkingDelivered] = useState(false);
@@ -478,6 +478,13 @@ export function TradeDetail({
     state.status === EscrowStatus.CLAIMED &&
     !!claimBlockedReason &&
     /reissue|consumed|settle/i.test(claimBlockedReason);
+  // R3-1b: a CLAIMED trade with a payout-journal record means the payout was
+  // already sent (submitted/settled) — the trade just hasn't flipped to
+  // COMPLETED yet (the background re-attach is confirming it). Show a
+  // "confirming" terminal instead of an active RETRY-CLAIM invite, and never
+  // sit on a permanent "Claim already sent — retrying" line.
+  const payoutConfirming =
+    state.status === EscrowStatus.CLAIMED && !claimRetryBlocked && !!getPayoutRecord(state.id);
   const statusKey = claimRetryBlocked ? "CLAIM_FAILED" : state.status;
   const s = STATUS[statusKey] || STATUS.CREATED;
 
@@ -527,14 +534,20 @@ export function TradeDetail({
   const canJoinTrade = canJoinAsBuyer || canJoinAsSeller || canJoinAsArbiter;
   const prewarmedEscrowRef = useRef<string | null>(null);
 
-  // Disarm the cancel/leave hatches whenever the viewed trade (or its vote
-  // state) changes — an armed confirm must never carry across trades. (No `key`
-  // on TradeDetail, so the component instance is reused between trades.)
+  // Disarm the cancel hatch whenever the viewed trade (or its vote state)
+  // changes — an armed confirm must never carry across trades. (No `key` on
+  // TradeDetail, so the component instance is reused between trades.)
   useEffect(() => {
     setCancelArmed(false);
-    setLeaveArmed(false);
     setRiskAckArmed(false);
   }, [state.id, state.votes[Role.BUYER], state.votes[Role.SELLER]]);
+
+  // R3-1b: opening a CLAIMED trade whose payout was already sent re-attaches
+  // to confirm + complete it, so a refund/claim that landed while the app was
+  // closed flips to done on view (and the counterparty's "settling" resolves).
+  useEffect(() => {
+    if (payoutConfirming && onConfirmPayout) onConfirmPayout(state.id);
+  }, [state.id, payoutConfirming]);
 
   useEffect(() => {
     if (!onPrewarmFunding) return;
@@ -2280,7 +2293,7 @@ export function TradeDetail({
               const cancelRouting = refundRecipient && refundRecipient.pubkey === pubkey
                 ? "refund me"
                 : refundRecipient
-                  ? `sats return to the ${refundRecipient.role}`
+                  ? `sats return to the ${partyNoun(state.category, refundRecipient.role)}`
                   : "the locked sats are returned";
               return (
                 <div className="trade-vote-actions" style={{
@@ -2288,28 +2301,68 @@ export function TradeDetail({
                 }}>
                   {riskNotice}
                   {releaseButton}
-                  <button
-                    disabled={voting}
-                    aria-label={`Vote refund: cancel this trade — ${cancelRouting}`}
-                    onClick={() => {
-                      if (!cancelArmed) { setCancelArmed(true); return; }
-                      setCancelArmed(false);
-                      handleVote(Outcome.REFUND);
-                    }}
-                    style={{
-                      width: "100%", marginTop: 10, padding: "9px 10px",
-                      background: cancelArmed ? T.amberDim : "none",
-                      border: cancelArmed ? `1px solid ${T.amber}66` : `1px dashed ${T.border}`,
-                      borderRadius: T.rs,
-                      color: cancelArmed ? T.amber : T.muted,
-                      fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-                      cursor: voting ? "default" : "pointer",
-                    }}
-                  >
-                    {cancelArmed
-                      ? `Sure? This ends the trade — ${cancelRouting}. Tap again to confirm.`
-                      : `${getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND)} · ${cancelRouting}`}
-                  </button>
+                  {/* 3.5.1 #7: back-out guard. Arming opens a confirm that
+                      restates the routing AND steers a deed-doer who already
+                      performed off the refund hatch onto the RELEASE vote (the
+                      arbiter can still settle, so their sats aren't forfeited).
+                      Routing is unchanged — this is a confirm + copy guard. */}
+                  {!cancelArmed ? (
+                    <button
+                      disabled={voting}
+                      aria-label={`Back out of this trade — ${cancelRouting}`}
+                      onClick={() => setCancelArmed(true)}
+                      style={{
+                        width: "100%", marginTop: 10, padding: "9px 10px",
+                        background: "none",
+                        border: `1px dashed ${T.border}`,
+                        borderRadius: T.rs,
+                        color: T.muted,
+                        fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+                        cursor: voting ? "default" : "pointer",
+                      }}
+                    >
+                      {getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND)} · {cancelRouting}
+                    </button>
+                  ) : (
+                    <div style={{
+                      marginTop: 10, padding: "10px 12px", borderRadius: T.rs,
+                      background: T.amberDim, border: `1px solid ${T.amber}66`,
+                    }}>
+                      <div style={{ color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700, marginBottom: 4 }}>
+                        Back out of this trade?
+                      </div>
+                      <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>
+                        This casts a refund vote — {cancelRouting}.{" "}
+                        {deedDonePrompt(state.category)} Don't back out — mark it done instead and let the arbiter settle, so the sats can still come to you.
+                      </div>
+                      <div style={{ display: "grid", gap: 8 }}>
+                        <button
+                          disabled={voting}
+                          onClick={() => { setCancelArmed(false); handleVote(Outcome.RELEASE); }}
+                          style={{
+                            width: "100%", padding: "9px 10px", borderRadius: T.rs,
+                            background: T.accent, border: `1px solid ${T.accent}`, color: "#000",
+                            fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+                            cursor: voting ? "default" : "pointer",
+                          }}
+                        >
+                          Mark it done — I did my part
+                        </button>
+                        <button
+                          disabled={voting}
+                          onClick={() => { setCancelArmed(false); handleVote(Outcome.REFUND); }}
+                          style={{
+                            width: "100%", padding: "8px 10px", borderRadius: T.rs,
+                            background: "none", border: `1px dashed ${T.amber}66`, color: T.amber,
+                            fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+                            cursor: voting ? "default" : "pointer",
+                          }}
+                        >
+                          Back out anyway — {cancelRouting}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             }
@@ -2355,7 +2408,7 @@ export function TradeDetail({
               )}
 
               <button
-                disabled={claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked}
+                disabled={claiming || directNwcClaimPhase !== null || bootProbeFailed || claimRetryBlocked || payoutConfirming}
                 onClick={async () => {
                   // v1.2.4: direct-NWC claim path. Saved NWC wallet skips
                   // the ClaimPayoutModal chooser → resolveNwcConnectionToInvoice
@@ -2394,6 +2447,8 @@ export function TradeDetail({
                 }}>
                 {directNwcClaimPhase
                   ? directNwcClaimPhase
+                  : payoutConfirming
+                  ? "✓ PAYOUT SENT — CONFIRMING"
                   : claimRetryBlocked
                   ? "✕ CLAIM DID NOT SETTLE"
                   : claiming
@@ -2432,7 +2487,7 @@ export function TradeDetail({
               {/* "Try other method" fallback link — same pattern as the
                   Fund button. Opens ClaimPayoutModal with the full
                   chooser when the user wants a different destination. */}
-              {activeNwc && onClaimDirectNwc && !directNwcClaimPhase && !claiming && (
+              {activeNwc && onClaimDirectNwc && !directNwcClaimPhase && !claiming && !payoutConfirming && (
                 <button
                   onClick={async () => {
                     setClaiming(true);
@@ -2472,9 +2527,11 @@ export function TradeDetail({
               {!bootProbeFailed && !claimRetryBlocked && state.status === EscrowStatus.CLAIMED && (
                 <div style={{
                   textAlign: "center", marginTop: 8,
-                  fontSize: 10, color: T.amber, fontFamily: T.mono,
+                  fontSize: 10, color: payoutConfirming ? T.green : T.amber, fontFamily: T.mono,
                 }}>
-                  Claim already sent — retrying only completes the payout once your wallet confirms
+                  {payoutConfirming
+                    ? "Payout sent — confirming · the trade closes on its own once it lands"
+                    : "Claim already sent — retrying only completes the payout once your wallet confirms"}
                 </div>
               )}
             </div>
@@ -2627,34 +2684,13 @@ export function TradeDetail({
           </div>
         )}
 
-        {/* v3.1 B2: pre-lock exit for a joined buyer waiting on the locker. No sats
-            are escrowed until LOCK, so this just releases the reservation locally +
-            returns to Browse. Gated to the JOINED buyer (not the locker, not the
-            initiator). Distinct from the post-lock cancel hatch below. */}
-        {state.status === EscrowStatus.CREATED && myRole === Role.BUYER && !canILock
-          && state.initiator.pubkey !== pubkey && onLeave && (
-          <button
-            type="button"
-            onClick={() => {
-              if (!leaveArmed) { setLeaveArmed(true); return; }
-              setLeaveArmed(false);
-              onLeave(state.id);
-            }}
-            style={{
-              width: "100%", marginTop: 12, padding: "9px 10px",
-              background: leaveArmed ? T.amberDim : "none",
-              border: leaveArmed ? `1px solid ${T.amber}66` : `1px dashed ${T.border}`,
-              borderRadius: T.rs,
-              color: leaveArmed ? T.amber : T.muted,
-              fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            {leaveArmed
-              ? "Leave this trade? Your reservation frees up — no sats were ever locked. Tap again to confirm."
-              : "← Leave this trade"}
-          </button>
-        )}
+        {/* R3-2 (3.5.x): the explicit pre-lock "Leave" button was removed.
+            "Window shopping" — a joined buyer who wanders off simply lets the
+            5-minute seat hold (JOIN_HOLD_SECONDS) expire; the seat frees on its
+            own. Removing the action also removes its forget-forever path, so a
+            pre-lock trade is never buried and its chat is never wiped. The
+            honest "reserved · frees in Xm" display lives above; the post-lock
+            cancel hatch / hide-gate are unaffected. */}
 
         {/* Ratings (kind:38123): one-tap rate the counterparty the moment the
             trade settles — non-blocking, and the same slot is re-tappable from
@@ -2790,13 +2826,22 @@ export function TradeDetail({
             display: "flex", alignItems: "center", gap: 10,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
-              {TRINITY_RING_ORDER.map(role => (
-                <span key={role} style={{
-                  width: 8, height: 8, borderRadius: "50%",
-                  background: participants[role] ? ROLE_COLOR[role as keyof typeof ROLE_COLOR] : "transparent",
-                  border: `1.5px solid ${ROLE_COLOR[role as keyof typeof ROLE_COLOR]}${participants[role] ? "" : "66"}`,
-                }} />
-              ))}
+              {TRINITY_RING_ORDER.map(role => {
+                // 3.5.1 #8a: mirror the trinity ring — an auto-assigned arbiter
+                // (effective participant, or the pool preview pre-lock) fills
+                // its dot too, so these small header dots don't read "arbiter
+                // not joined" while the ring shows it joined.
+                const dotFilled = role === Role.ARBITER
+                  ? !!(participants[Role.ARBITER] ?? previewArbiterPk)
+                  : !!participants[role];
+                return (
+                  <span key={role} style={{
+                    width: 8, height: 8, borderRadius: "50%",
+                    background: dotFilled ? ROLE_COLOR[role as keyof typeof ROLE_COLOR] : "transparent",
+                    border: `1.5px solid ${ROLE_COLOR[role as keyof typeof ROLE_COLOR]}${dotFilled ? "" : "66"}`,
+                  }} />
+                );
+              })}
             </div>
             <div style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700 }}>
@@ -3265,7 +3310,19 @@ export function TradeDetail({
         )}
         {onForget && (
           <div style={{ marginTop: 12 }}>
-            {!forgetArmed ? (
+            {tradeHoldsUnresolvedSats(state) ? (
+              // 3.5.1 #7(a): never let a trade that still holds sats be hidden
+              // — that's the "cold vanish" burial. Resolved trades still live
+              // in Me → Done, so history is preserved either way.
+              <div style={{
+                background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs,
+                color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
+                padding: "8px 10px",
+              }}>
+                🔒 This trade still has sats in escrow — claim or resolve it first.
+                You can hide it once it's settled or refunded.
+              </div>
+            ) : !forgetArmed ? (
               <button
                 type="button"
                 onClick={() => setForgetArmed(true)}
@@ -4093,6 +4150,61 @@ function roleDisplayName(role: Role): string {
   if (role === Role.BUYER) return "Buyer";
   if (role === Role.SELLER) return "Seller";
   return "Arbiter";
+}
+
+/** Category-aware party noun for routing/copy. Bill Pay reads in its own
+ *  terms — the buyer is the VOLUNTEER, the seller is the BILL OWNER — so the
+ *  refund-routing line agrees with the vote labels instead of leaking the
+ *  generic "seller" (3.5.1 #1). Lending reads borrower/lender; everything
+ *  else falls back to buyer/seller. */
+/** 3.5.1 #7(a): does this trade still hold sats the user could lose track of?
+ *  Mirrors the recovery-banner's "committed/unresolved" notion but per-trade:
+ *  any non-terminal money state (locked/approved/claimed/expired-not-claimed),
+ *  plus an in-flight redeem stash or a submitted-but-unconfirmed payout for
+ *  this escrow. Only terminally-resolved trades (completed+claimed, refunded-
+ *  claimed, or cancelled pre-lock) return false and may be hidden. */
+function tradeHoldsUnresolvedSats(state: EscrowState): boolean {
+  const s = state.status;
+  if (
+    s === EscrowStatus.LOCKED ||
+    s === EscrowStatus.APPROVED ||
+    s === EscrowStatus.CLAIMED ||
+    s === EscrowStatus.EXPIRED
+  ) {
+    return true;
+  }
+  // A terminal chain status can still sit on in-flight sats: a pending redeem
+  // stash, or a payout we submitted but haven't confirmed (the #2 journal).
+  try {
+    if (listPendingRedemptions().some((e) => e.escrowId === state.id)) return true;
+    if (getPayoutRecord(state.id)?.status === "submitted") return true;
+  } catch {
+    // best-effort — storage unavailable shouldn't unblock a risky hide
+  }
+  return false;
+}
+
+/** 3.5.1 #7: category-aware "did you already do your part?" prompt for the
+ *  back-out guard, steering a deed-doer who already performed off the refund
+ *  hatch and onto the RELEASE vote (which the arbiter can still settle). */
+function deedDonePrompt(category: string | undefined): string {
+  if (category === "bill-pay") return "Already paid the bill?";
+  if (category === "p2p-trade") return "Already sent the fiat?";
+  if (category === "marketplace") return "Already delivered?";
+  if (category === "lending") return "Already disbursed the loan?";
+  return "Already did your part?";
+}
+
+function partyNoun(category: string | undefined, role: Role): string {
+  if (category === "bill-pay") {
+    if (role === Role.BUYER) return "volunteer";
+    if (role === Role.SELLER) return "bill owner";
+  }
+  if (category === "lending") {
+    if (role === Role.BUYER) return "borrower";
+    if (role === Role.SELLER) return "lender";
+  }
+  return roleDisplayName(role).toLowerCase();
 }
 
 function parsePositiveWholeSats(value: string): number {

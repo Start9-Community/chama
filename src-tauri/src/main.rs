@@ -108,7 +108,17 @@ fn choose_bridge_runtime() -> Result<BridgeRuntime, Box<dyn std::error::Error>> 
         .transpose()?;
 
     let bind = if let Some(port) = forced_port {
-        loopback_addr(port)
+        let forced = loopback_addr(port);
+        if !port_is_available(forced) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!(
+                    "Chama Fedimint bridge port {port} is already in use. Quit the stale Chama bridge or choose another CHAMA_TAURI_BRIDGE_PORT."
+                ),
+            )
+            .into());
+        }
+        forced
     } else {
         let default = default_bridge_addr();
         if port_is_available(default) {

@@ -27,7 +27,6 @@
 import {
   AFRIBIT_KIBERA_FEDERATION_INVITE,
   BITSACCO_FEDERATION_INVITE,
-  BP_FEDERATION_INVITE,
   BLF_FEDERATION_INVITE,
   BLF_FEDERATION_NAME,
   GBF_FEDERATION_INVITE,
@@ -325,7 +324,7 @@ const CENTRAL_AFRICA_COUNTRY_CHAMAS: Community[] = [
 export const COMMUNITY_REGISTRY: Community[] = [
   {
     slug: "us-blf",
-    displayName: "Global · USD",
+    displayName: "Global · Bitcoin",
     currency: "USD",
     countries: [],
     languages: ["en", "es", "fr"],
@@ -348,7 +347,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
   },
   {
     slug: "us-gbf",
-    displayName: "USA - USD",
+    displayName: "USA · USD",
     currency: "USD",
     countries: ["US"],
     languages: ["en"],
@@ -382,11 +381,15 @@ export const COMMUNITY_REGISTRY: Community[] = [
   ...CENTRAL_AFRICA_COUNTRY_CHAMAS,
   {
     slug: "global-usd",
-    displayName: "Global · USD",
+    displayName: "Global · Bitcoin",
     currency: "USD",
     countries: [],
     languages: ["en", "es"],
-    federationInvite: BP_FEDERATION_INVITE,
+    // 2026-06-16: repointed BP → BLF. BLF is the universal backup federation
+    // across the board; this legacy slug stays hidden but wire-resolvable so
+    // old listings carrying community:"global-usd" render on the same backup
+    // route as the live us-blf default instead of orphaning onto BP.
+    federationInvite: BLF_FEDERATION_INVITE,
     flagEmoji: "🌎",
     country: null,
     browserReliable: true,
@@ -464,9 +467,11 @@ export function communityForInvite(invite: string | null | undefined): Community
   return getCustomCommunities().find(c => c.federationInvite === invite) ?? null;
 }
 
-/** Default community when the user hasn't picked one yet. The stable
- *  us-blf slug now presents as Global · USD while ChamaBar exposes the
- *  backing federation name for users who want that detail. */
+/** Default community when the user hasn't picked one yet. us-blf is the
+ *  silent universal backup (BLF) — hidden from the picker and intentionally
+ *  nameless ("Global · Bitcoin", not "Global · USD"): a fallback shouldn't
+ *  impersonate the one pickable US community (us-gbf, "USA · USD", on GBF).
+ *  ChamaBar exposes the backing federation name for users who want detail. */
 export const DEFAULT_COMMUNITY_SLUG = "us-blf";
 
 /** Pre-seeded entries that should appear in the picker (excludes
