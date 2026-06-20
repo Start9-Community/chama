@@ -101,4 +101,4 @@ Template: `scripts/release-notes-template.txt`.
 
 ## License
 
-Open source. est. block 934,669
+[MIT](./LICENSE) — use it, fork it, build on it, sell it; just keep the copyright line and the license notice. Open source, freely given. est. block 934,669
