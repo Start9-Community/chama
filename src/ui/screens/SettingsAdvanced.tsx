@@ -20,6 +20,18 @@ import {
   maxLightningPayoutSats,
 } from "../../payments/lightning-fees.js";
 import { getCachedSeedWords } from "../../fedimint/seed-manager.js";
+import {
+  getLastDiscoveryRun,
+  subscribeDiscoveryRun,
+  getLastHydrateRun,
+  subscribeHydrateRun,
+  type DiscoveryRunDiag,
+  type FetchLegDiag,
+  type ResolvedBy,
+  type HydrateRunDiag,
+  type HydrateIdDiag,
+} from "../../escrow-engine/discovery-diagnostics.js";
+import { getPinnedIdentity } from "../../storage/identity-pin.js";
 import { QRCode } from "../QRCode.js";
 import { Preferences } from "@capacitor/preferences";
 import { isTauriRuntime } from "../sign-in-environment.js";
@@ -46,11 +58,19 @@ export function SettingsAdvanced({
   userPubkey,
   onPublishRoster,
   onFetchApplications,
+  onRunDiscovery,
+  onProbeFetchById,
 }: {
   fedimint: FedimintState;
   onBack: () => void;
   onSwitchFederation: (inviteCode: string, opts?: { force?: boolean }) => Promise<void>;
   onResetLocalWallet: () => Promise<void>;
+  /** INSTRUMENT-FIRST (Fedi round 3): re-run My Trades discovery (the same
+   *  path Refresh uses) so the debug card can read the last fetch's anatomy. */
+  onRunDiscovery?: () => Promise<number>;
+  /** INSTRUMENT-FIRST (Fedi round 3): pubkey-independent `#d` transport
+   *  control — fetch one known escrow id and return its per-relay probe. */
+  onProbeFetchById?: (escrowId: string) => Promise<FetchLegDiag>;
   /** V3 roster keystone: the active community + the signed-roster publish
    *  path. The steward card renders only when userPubkey is in the
    *  community's roster authority (registry pin or shell creator). */
@@ -425,6 +445,14 @@ export function SettingsAdvanced({
 
       {(powerUserOn || isDev) && (
         <FediWeblnProbeCard />
+      )}
+
+      {(powerUserOn || isDev) && (
+        <DiscoveryDiagnosticCard
+          queriedPubkey={userPubkey ?? null}
+          onRunDiscovery={onRunDiscovery}
+          onProbeFetchById={onProbeFetchById}
+        />
       )}
 
       {!(powerUserOn || isDev) && (
@@ -1397,6 +1425,536 @@ function FediWeblnProbeCard() {
           {copied ? "✓ Copied" : "Copy readout"}
         </button>
       )}
+    </div>
+  );
+}
+
+// ── Discovery diagnostics (Fedi round 3, INSTRUMENT-FIRST) ───────────────────
+// Read-only on-device anatomy of the last "My Trades" discovery fetch, for the
+// Fedi-webview empty/partial defect (relays connected + data present, yet
+// discovery returns empty/partial and Refresh×15 does nothing). Three readouts,
+// each disambiguating a different candidate:
+//   1. resolvedBy per leg (THE headline) — EOSE+0 events = relays answered
+//      "nothing for this key" (wrong query key, candidate 1) vs TIMEOUT+0 = no
+//      frames came back (blocked transport, candidate 2/3).
+//   2. three-way pubkey compare — a FRESH window.nostr.getPublicKey() vs the
+//      key discovery actually queried (state.pubkey — Refresh re-queries this,
+//      not a fresh read) vs the pinned identity. A mismatch is candidate 1, a
+//      connect-time mis-seed at useEscrow.ts:905.
+//   3. #d transport control — fetch one KNOWN escrow id over the SAME fetch
+//      path, pubkey-independent. Events back ⇒ transport fine ⇒ it's the key.
+// Modeled on FediWeblnProbeCard: power-user-gated, copyable, zero side effects.
+
+function shortRelay(url: string): string {
+  return url.replace(/^wss?:\/\//, "").replace(/\/$/, "");
+}
+
+function resolvedTone(by: ResolvedBy): string {
+  switch (by) {
+    case "eose": return T.green;        // every relay responded — transport healthy
+    case "eose-quorum": return T.teal;  // quorum responded, skipped a laggard
+    case "timeout": return T.red;       // no quorum — transport suspect
+    case "no-relays": return T.muted;
+    default: return T.amber;            // pending
+  }
+}
+
+function resolvedLabel(by: ResolvedBy): string {
+  switch (by) {
+    case "eose": return "EOSE";
+    case "eose-quorum": return "EOSE·Q";
+    case "timeout": return "TIMEOUT";
+    case "no-relays": return "NO RELAYS";
+    default: return "PENDING";
+  }
+}
+
+/** One-line read of what a leg's resolvedBy + event count means. */
+function legVerdict(leg: FetchLegDiag): { text: string; tone: string } {
+  const skippedLaggard = leg.perRelay.some(r => r.reqSent && !r.eose);
+  const quorumNote = leg.resolvedBy === "eose-quorum" && skippedLaggard
+    ? " (resolved on quorum — a connected relay never EOSE'd; no full-timeout stall)"
+    : "";
+  if (leg.totalEvents > 0) {
+    return { text: `${leg.totalEvents} event(s) returned — transport OK on this leg${quorumNote}`, tone: T.green };
+  }
+  if (leg.resolvedBy === "eose" || leg.resolvedBy === "eose-quorum") {
+    return { text: `EOSE with 0 events — relays answered EMPTY → query key likely WRONG (candidate 1)${quorumNote}`, tone: T.amber };
+  }
+  if (leg.resolvedBy === "timeout") {
+    return { text: "Timed out, 0 events — REQs out, no frames back → transport blocked (candidate 2/3)", tone: T.red };
+  }
+  if (leg.resolvedBy === "no-relays") {
+    return { text: "No relays connected at dispatch", tone: T.muted };
+  }
+  return { text: "Did not resolve", tone: T.amber };
+}
+
+function legTextLines(leg: FetchLegDiag): string[] {
+  const out: string[] = [];
+  out.push(`[${leg.label}] ${resolvedLabel(leg.resolvedBy)} · unique:${leg.totalEvents} · ${leg.elapsedMs}ms`);
+  out.push(`  filter: ${leg.filterSummary}`);
+  for (const r of leg.perRelay) {
+    out.push(`  ${shortRelay(r.url)} conn:${r.connected ? "Y" : "n"} req:${r.reqSent ? "Y" : "n"} ev:${r.events} eose:${r.eose ? "Y" : "n"}`);
+  }
+  out.push(`  -> ${legVerdict(leg).text}`);
+  return out;
+}
+
+async function readFreshSignerPubkey(): Promise<{ value: string | null; error: string | null }> {
+  try {
+    const nostr = (window as unknown as Record<string, any>).nostr;
+    if (!nostr?.getPublicKey) return { value: null, error: "window.nostr.getPublicKey absent" };
+    const raw = await nostr.getPublicKey();
+    const clean = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+    if (!/^[0-9a-f]{64}$/.test(clean)) {
+      return { value: clean || null, error: clean ? "not 64-hex" : "returned empty" };
+    }
+    return { value: clean, error: null };
+  } catch (e: any) {
+    return { value: null, error: (e?.message || String(e)).slice(0, 120) };
+  }
+}
+
+function LegBlock({ leg }: { leg: FetchLegDiag }) {
+  const verdict = legVerdict(leg);
+  return (
+    <div style={{
+      padding: "10px 12px", borderRadius: T.rs, marginBottom: 8,
+      background: T.bg, border: `1px solid ${T.border}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, color: T.text, fontFamily: T.mono, fontWeight: 800 }}>
+          {leg.label}
+        </span>
+        <span style={{
+          fontSize: 10, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5,
+          padding: "2px 7px", borderRadius: 999,
+          color: resolvedTone(leg.resolvedBy),
+          background: `${resolvedTone(leg.resolvedBy)}1f`,
+          border: `1px solid ${resolvedTone(leg.resolvedBy)}55`,
+        }}>
+          {resolvedLabel(leg.resolvedBy)}
+        </span>
+        <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
+          unique:{leg.totalEvents} · {leg.elapsedMs}ms
+        </span>
+      </div>
+      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, wordBreak: "break-all" }}>
+        {leg.filterSummary}
+      </div>
+      {leg.perRelay.length === 0 ? (
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>(no relays touched)</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 6 }}>
+          {leg.perRelay.map((r) => (
+            <div key={r.url} style={{
+              display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+              fontSize: 10, fontFamily: T.mono, color: T.text,
+            }}>
+              <span style={{ minWidth: 120, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {shortRelay(r.url)}
+              </span>
+              <span style={{ color: r.connected ? T.green : T.muted }}>conn:{r.connected ? "Y" : "n"}</span>
+              <span style={{ color: r.reqSent ? T.green : T.red }}>req:{r.reqSent ? "Y" : "n"}</span>
+              <span style={{ color: r.events > 0 ? T.green : T.muted }}>ev:{r.events}</span>
+              <span style={{ color: r.eose ? T.green : T.muted }}>eose:{r.eose ? "Y" : "n"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: verdict.tone, fontFamily: T.mono, lineHeight: 1.5 }}>
+        → {verdict.text}
+      </div>
+    </div>
+  );
+}
+
+function KeyRow({ label, value, tone = T.text }: { label: string; value: string | null; tone?: string }) {
+  return (
+    <div style={{ marginBottom: 7 }}>
+      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5, marginBottom: 2 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 10, color: value ? tone : T.muted, fontFamily: T.mono, wordBreak: "break-all", lineHeight: 1.45 }}>
+        {value ?? "(none)"}
+      </div>
+    </div>
+  );
+}
+
+function shortId(id: string): string {
+  return id.length > 22 ? `${id.slice(0, 14)}…${id.slice(-5)}` : id;
+}
+
+function hydrateClassTone(cls: HydrateIdDiag["cls"]): string {
+  switch (cls) {
+    case "fresh": return T.accent;
+    case "known": return T.amber;     // the skip-and-never-heal bucket
+    default: return T.muted;          // forgotten
+  }
+}
+
+function hydrateOutcomeTone(d: HydrateIdDiag): string {
+  if (d.discarded || d.outcome.startsWith("load-failed") || d.outcome === "load-null") return T.red;
+  if (/COMPLETED|CANCELLED/.test(d.outcome)) return T.green;   // settled or healed-done
+  if (/EXPIRED/.test(d.outcome)) return T.amber;               // still stuck (pre-heal or unhealed)
+  return T.text;                                               // in-flight: LOCKED/APPROVED/CLAIMED
+}
+
+/** One-line read of a hydrate run (post fix (a): the path now re-heals known
+ *  non-terminal trades, so this is a health readout, not a bug-finder). */
+function hydrateVerdict(run: HydrateRunDiag): { text: string; tone: string } {
+  const healed = run.ids.filter(d => d.outcome.startsWith("loaded:")).length;
+  const settled = run.ids.filter(d => d.outcome.startsWith("settled:")).length;
+  const discarded = run.ids.filter(d => d.discarded).length;
+  const failed = run.ids.filter(d => d.outcome.startsWith("load-failed") || d.outcome === "load-null").length;
+  const stuck = run.ids.filter(d => /loaded:(EXPIRED|LOCKED|APPROVED|CLAIMED)/.test(d.outcome)).length;
+  if (healed > 0) {
+    const tail = [
+      run.added ? `${run.added} new` : "",
+      settled ? `${settled} settled skipped` : "",
+      discarded ? `${discarded} discarded` : "",
+      failed ? `${failed} failed` : "",
+    ].filter(Boolean).join(" · ");
+    return {
+      text: `Re-loaded ${healed} non-terminal trade(s)${tail ? " · " + tail : ""}` +
+        (stuck ? ` — ${stuck} still not COMPLETED (tail may still be missing; try again)` : ""),
+      tone: stuck ? T.amber : T.green,
+    };
+  }
+  if (settled > 0 && discarded === 0 && failed === 0) {
+    return { text: `Nothing to heal — all ${settled} discovered trade(s) already settled`, tone: T.muted };
+  }
+  if (failed > 0) {
+    return { text: `${failed} trade(s) failed to load — slow/blocked fetch? Run the #d control`, tone: T.amber };
+  }
+  if (discarded > 0) {
+    return { text: `${discarded} fresh id(s) discarded as expired-unfunded (never funded, past expiry)`, tone: T.amber };
+  }
+  return { text: `discovered ${run.discovered} · healed ${healed} · added ${run.added}`, tone: T.muted };
+}
+
+function hydrateTextLines(run: HydrateRunDiag): string[] {
+  const out: string[] = [];
+  out.push("-- hydrate run --");
+  out.push(`discovered:${run.discovered} known:${run.knownCount} forgotten:${run.forgottenCount} fresh:${run.freshCount} added:${run.added}`);
+  out.push(`verdict: ${hydrateVerdict(run).text}`);
+  for (const d of run.ids) {
+    out.push(`  [${d.cls}] ${d.id} -> ${d.outcome}${d.terminal ? " (terminal)" : ""}`);
+  }
+  return out;
+}
+
+function HydrateBlock({ run }: { run: HydrateRunDiag }) {
+  const verdict = hydrateVerdict(run);
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+        HYDRATE · discovered:{run.discovered} · known:{run.knownCount} · forgotten:{run.forgottenCount} · fresh:{run.freshCount} · added:{run.added}
+      </div>
+      <div style={{
+        padding: "9px 11px", borderRadius: T.rs, marginBottom: 8,
+        background: T.surface, border: `1px solid ${verdict.tone}55`,
+        color: verdict.tone, fontFamily: T.mono, fontSize: 10, lineHeight: 1.55,
+      }}>
+        {verdict.text}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        {run.ids.slice(0, 30).map((d) => (
+          <div key={d.id} style={{
+            display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+            fontSize: 10, fontFamily: T.mono,
+          }}>
+            <span style={{
+              fontSize: 9, fontWeight: 800, letterSpacing: 0.3, padding: "1px 6px",
+              borderRadius: 999, color: hydrateClassTone(d.cls),
+              background: `${hydrateClassTone(d.cls)}1f`, border: `1px solid ${hydrateClassTone(d.cls)}55`,
+            }}>
+              {d.cls}
+            </span>
+            <span style={{ color: T.muted, minWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {shortId(d.id)}
+            </span>
+            <span style={{ color: hydrateOutcomeTone(d), wordBreak: "break-all" }}>
+              {d.outcome}
+            </span>
+          </div>
+        ))}
+        {run.ids.length > 30 && (
+          <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>
+            … +{run.ids.length - 30} more (in the copied readout)
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DiscoveryDiagnosticCard({
+  queriedPubkey,
+  onRunDiscovery,
+  onProbeFetchById,
+}: {
+  queriedPubkey: string | null;
+  onRunDiscovery?: () => Promise<number>;
+  onProbeFetchById?: (escrowId: string) => Promise<FetchLegDiag>;
+}) {
+  const [run, setRun] = useState<DiscoveryRunDiag | null>(() => getLastDiscoveryRun());
+  const [hydrate, setHydrate] = useState<HydrateRunDiag | null>(() => getLastHydrateRun());
+  const [running, setRunning] = useState(false);
+  const [runResult, setRunResult] = useState<string | null>(null);
+  const [fresh, setFresh] = useState<{ value: string | null; error: string | null } | null>(null);
+  const [idInput, setIdInput] = useState("");
+  const [idProbe, setIdProbe] = useState<FetchLegDiag | null>(null);
+  const [idBusy, setIdBusy] = useState(false);
+  const [idError, setIdError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Reflect auto-runs (connect + relay-growth), not just button presses.
+  useEffect(() => {
+    setRun(getLastDiscoveryRun());
+    return subscribeDiscoveryRun(() => setRun(getLastDiscoveryRun()));
+  }, []);
+  useEffect(() => {
+    setHydrate(getLastHydrateRun());
+    return subscribeHydrateRun(() => setHydrate(getLastHydrateRun()));
+  }, []);
+
+  const checkIdentity = () => { void readFreshSignerPubkey().then(setFresh); };
+  // Fresh signer read on mount — capture failure/empty as a RESULT, not a crash.
+  useEffect(() => { checkIdentity(); }, []);
+
+  const pinned = (() => { try { return getPinnedIdentity(); } catch { return null; } })();
+  const queried = queriedPubkey ? queriedPubkey.toLowerCase() : null;
+
+  const runDiscovery = async () => {
+    if (!onRunDiscovery) return;
+    setRunning(true);
+    setRunResult(null);
+    checkIdentity();
+    try {
+      const added = await onRunDiscovery();
+      setRun(getLastDiscoveryRun());
+      setHydrate(getLastHydrateRun());
+      setRunResult(`Discovery ran · ${added} new trade(s) hydrated`);
+    } catch (e: any) {
+      setRunResult(`Discovery error: ${(e?.message || String(e)).slice(0, 120)}`);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const probeId = async () => {
+    if (!onProbeFetchById) return;
+    const id = idInput.trim();
+    if (!id) { setIdError("Paste an escrow id (e.g. sm_…)."); return; }
+    setIdBusy(true);
+    setIdError(null);
+    setIdProbe(null);
+    try {
+      setIdProbe(await onProbeFetchById(id));
+    } catch (e: any) {
+      setIdError((e?.message || String(e)).slice(0, 120));
+    } finally {
+      setIdBusy(false);
+    }
+  };
+
+  const identityVerdict: { text: string; tone: string } = (() => {
+    if (!fresh) return { text: "Reading signer…", tone: T.muted };
+    if (fresh.error && !fresh.value) return { text: `Fresh signer read failed: ${fresh.error} (a signal, not a crash)`, tone: T.amber };
+    const f = fresh.value;
+    if (f && queried && f !== queried) {
+      return { text: "⚠ MISMATCH: fresh signer ≠ queried key → candidate 1 (signer drift / connect-time mis-seed)", tone: T.red };
+    }
+    if (pinned && queried && pinned.toLowerCase() !== queried) {
+      return { text: "⚠ Queried key ≠ pinned identity — a re-scope happened; confirm which key owns the trades", tone: T.amber };
+    }
+    if (f && queried && f === queried && (!pinned || pinned.toLowerCase() === queried)) {
+      return { text: "✓ Fresh signer = queried key = pin — identity consistent; the defect is transport (see legs above)", tone: T.green };
+    }
+    return { text: "Partial identity info — compare the three keys below", tone: T.muted };
+  })();
+
+  const readoutText = (() => {
+    const lines: string[] = [];
+    lines.push("=== CHAMA DISCOVERY DIAGNOSTIC (Fedi R3) ===");
+    lines.push(`queried pubkey (state): ${queried ?? "(none)"}`);
+    lines.push(`fresh window.nostr:     ${fresh?.value ?? (fresh?.error ? "ERR " + fresh.error : "(unread)")}`);
+    lines.push(`pinned identity:        ${pinned ?? "(none)"}`);
+    lines.push(`identity verdict: ${identityVerdict.text}`);
+    lines.push("");
+    if (run) {
+      lines.push(`-- discovery run --`);
+      lines.push(`queriedPubkey: ${run.queriedPubkey}`);
+      lines.push(`idsDiscovered: ${run.idsDiscovered} · eventsFetched: ${run.eventsFetched}`);
+      for (const leg of run.legs) lines.push(...legTextLines(leg));
+    } else {
+      lines.push("(no discovery run captured yet)");
+    }
+    lines.push("");
+    if (hydrate) {
+      lines.push(...hydrateTextLines(hydrate));
+    } else {
+      lines.push("(no hydrate run captured yet)");
+    }
+    if (idProbe) {
+      lines.push("");
+      lines.push("-- #d transport control --");
+      lines.push(...legTextLines(idProbe));
+    }
+    return lines.join("\n");
+  })();
+
+  const copyReadout = () => {
+    try {
+      navigator.clipboard?.writeText(readoutText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard unavailable — readout is on screen */ }
+  };
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.border}`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+        letterSpacing: 1, marginBottom: 8,
+      }}>
+        MY TRADES DISCOVERY (FEDI R3)
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 12 }}>
+        Run this inside Fedi when My Trades is empty/partial. It shows the last
+        discovery fetch's anatomy: whether each leg ended on EOSE (relays
+        answered) or TIMEOUT (no frames came back), the exact pubkey queried vs a
+        fresh signer read, and a pubkey-independent #d control. Copy the readout
+        and send it back.
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        <button
+          onClick={() => void runDiscovery()}
+          disabled={!onRunDiscovery || running}
+          style={{
+            flex: 1, minWidth: 150, padding: "10px 12px", borderRadius: T.rs,
+            background: T.accentDim, border: `1px solid ${T.accent}66`,
+            color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+            cursor: !onRunDiscovery || running ? "default" : "pointer",
+            opacity: !onRunDiscovery || running ? 0.6 : 1,
+          }}
+        >
+          {running ? "Running…" : "Run discovery now"}
+        </button>
+        <button
+          onClick={checkIdentity}
+          style={{
+            padding: "10px 12px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          Re-check identity
+        </button>
+      </div>
+      {runResult && (
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 12, lineHeight: 1.5 }}>
+          {runResult}
+        </div>
+      )}
+
+      {/* Identity triangulation (candidate 1) */}
+      <div style={{
+        padding: "10px 12px", borderRadius: T.rs, marginBottom: 12,
+        background: T.surface, border: `1px solid ${identityVerdict.tone}55`,
+      }}>
+        <div style={{ fontSize: 10, color: identityVerdict.tone, fontFamily: T.mono, fontWeight: 800, lineHeight: 1.5, marginBottom: 8 }}>
+          {identityVerdict.text}
+        </div>
+        <KeyRow label="QUERIED KEY (state.pubkey — what Refresh queries)" value={queried} />
+        <KeyRow
+          label="FRESH window.nostr.getPublicKey()"
+          value={fresh ? (fresh.value ?? `ERR: ${fresh.error}`) : "reading…"}
+          tone={fresh?.value && queried && fresh.value !== queried ? T.red : T.text}
+        />
+        <KeyRow label="PINNED IDENTITY" value={pinned} />
+      </div>
+
+      {/* Discovery legs (candidate 2/3 — the resolvedBy headline) */}
+      {run ? (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+            DISCOVERY · {run.idsDiscovered} id(s) · {run.eventsFetched} event(s)
+          </div>
+          {run.legs.map((leg, i) => <LegBlock key={i} leg={leg} />)}
+        </div>
+      ) : (
+        <div style={{
+          padding: "10px 12px", borderRadius: T.rs, marginBottom: 12,
+          background: T.bg, border: `1px solid ${T.border}`,
+          color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
+        }}>
+          No discovery run captured yet — tap Run discovery now.
+        </div>
+      )}
+
+      {/* Hydrate path (round 3b — discovery finds them, why aren't they shown?) */}
+      {hydrate && <HydrateBlock run={hydrate} />}
+
+      {/* #d transport control (pubkey-independent) */}
+      <div style={{
+        padding: "10px 12px", borderRadius: T.rs,
+        background: T.surface, border: `1px solid ${T.border}`, marginBottom: 12,
+      }}>
+        <div style={{ fontSize: 10, color: T.text, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.4, marginBottom: 6 }}>
+          #d TRANSPORT CONTROL
+        </div>
+        <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 8 }}>
+          Fetch one KNOWN trade by id over the same path — no signer involved.
+          Events back ⇒ transport works ⇒ an empty discovery is the query key.
+          Times out empty ⇒ transport is blocked.
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: idProbe || idError ? 10 : 0 }}>
+          <input
+            value={idInput}
+            onChange={(e) => setIdInput(e.target.value)}
+            placeholder="sm_mqm0mzwh_mr207nq0"
+            style={{ ...inputStyle, flex: 1, fontFamily: T.mono, fontSize: 11 }}
+          />
+          <button
+            onClick={() => void probeId()}
+            disabled={!onProbeFetchById || idBusy}
+            style={{
+              padding: "8px 12px", borderRadius: T.rs,
+              background: T.tealDim, border: `1px solid ${T.teal}55`,
+              color: T.teal, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+              cursor: !onProbeFetchById || idBusy ? "default" : "pointer",
+              opacity: !onProbeFetchById || idBusy ? 0.6 : 1,
+            }}
+          >
+            {idBusy ? "Probing…" : "Probe by id"}
+          </button>
+        </div>
+        {idError && (
+          <div style={{ fontSize: 10, color: T.red, fontFamily: T.mono, lineHeight: 1.5 }}>⚠ {idError}</div>
+        )}
+        {idProbe && <LegBlock leg={idProbe} />}
+      </div>
+
+      <button
+        onClick={copyReadout}
+        style={{
+          width: "100%", padding: "9px 12px", borderRadius: T.rs,
+          background: copied ? T.greenDim : T.surface,
+          border: `1px solid ${copied ? T.green + "66" : T.border}`,
+          color: copied ? T.green : T.muted,
+          fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
+        }}
+      >
+        {copied ? "✓ Copied" : "Copy readout"}
+      </button>
     </div>
   );
 }

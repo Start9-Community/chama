@@ -14,6 +14,24 @@ import type { NostrEvent } from "./types.js";
 
 const DECRYPT_CACHE_LIMIT = 128;
 
+/**
+ * A Nostr pubkey is 64 lowercase hex chars. A signer that returns anything
+ * else — an empty string, undefined, or a transient cold-boot value before
+ * the provider is ready — must NOT be cached as the active identity: the app
+ * scopes every per-npub store (saved trades, home Chama, payout handles) to
+ * this value, so one bad read would silently mis-scope the whole session and
+ * make the active npub appear to "drift" between sign-ins. Normalize and
+ * validate; throw on garbage so the per-instance cache resets and the next
+ * call retries against a now-ready provider.
+ */
+function normalizeSignerPubkey(raw: unknown): string {
+  const clean = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (!/^[0-9a-f]{64}$/.test(clean)) {
+    throw new Error("Signer returned an invalid public key — try again");
+  }
+  return clean;
+}
+
 function cachePromise<T>(
   cache: Map<string, Promise<T>>,
   key: string,
@@ -58,10 +76,12 @@ export class NIP07Signer implements Signer {
 
   async getPublicKey(): Promise<string> {
     if (!this.pubkeyPromise) {
-      this.pubkeyPromise = Promise.resolve(this.getNostr().getPublicKey()).catch((err) => {
-        this.pubkeyPromise = null;
-        throw err;
-      });
+      this.pubkeyPromise = Promise.resolve(this.getNostr().getPublicKey())
+        .then(normalizeSignerPubkey)
+        .catch((err) => {
+          this.pubkeyPromise = null;
+          throw err;
+        });
     }
     return this.pubkeyPromise;
   }
@@ -151,10 +171,12 @@ export class FediSigner implements Signer {
 
   async getPublicKey(): Promise<string> {
     if (!this.pubkeyPromise) {
-      this.pubkeyPromise = Promise.resolve(this.getNostr().getPublicKey()).catch((err) => {
-        this.pubkeyPromise = null;
-        throw err;
-      });
+      this.pubkeyPromise = Promise.resolve(this.getNostr().getPublicKey())
+        .then(normalizeSignerPubkey)
+        .catch((err) => {
+          this.pubkeyPromise = null;
+          throw err;
+        });
     }
     return this.pubkeyPromise;
   }

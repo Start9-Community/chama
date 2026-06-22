@@ -15167,6 +15167,73 @@ console.log("\n── FIRST-ACK PUBLISH ──");
   await new Promise(resolve => setTimeout(resolve, 250));
 }
 
+// ── EOSE QUORUM — one hung relay must not stall the fetch (round 3b step 2) ──
+//
+// A relay can complete the WS handshake then never answer (field:
+// relay.primal.net — conn:Y req:Y eose:n). The old fetch resolved only on
+// ALL-EOSE-or-timeout, so that one zombie pinned every fetch — and the
+// parallel My-Trades heal — to the full timeout. Now a QUORUM of EOSEs plus a
+// short grace resolves it. This pins: events still arrive, and resolution
+// happens on the ~1s grace, NOT the 8s timeout.
+console.log("\n── RELAY MANAGER — EOSE quorum ──");
+{
+  class FakeWebSocket {
+    static instances: FakeWebSocket[] = [];
+    sent: string[] = [];
+    onopen: ((event: Event) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+    constructor(public url: string) { FakeWebSocket.instances.push(this); }
+    send(message: string) { this.sent.push(message); }
+    close() {}
+    emit(message: unknown[]) { this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
+  }
+
+  // 4 relays so the EOSE quorum (3) is strictly below the connected count (4):
+  // 3 relays answer, the 4th is a zombie that never EOSEs.
+  const rm = new RelayManager(
+    ["wss://r1.test", "wss://r2.test", "wss://r3.test", "wss://r4.test"],
+    {},
+    FakeWebSocket as unknown as typeof WebSocket,
+  );
+  rm.connect();
+  for (const s of FakeWebSocket.instances) s.onopen?.({} as Event);
+
+  const started = Date.now();
+  const fetchPromise = rm.fetchOnce(
+    { kinds: [EscrowEventKind.CREATE], "#d": ["sm_quorum_probe"] },
+    8_000,
+  );
+
+  await new Promise(r => setTimeout(r, 10));
+  const subIdOf = (s: FakeWebSocket): string =>
+    JSON.parse(s.sent.find(raw => JSON.parse(raw)[0] === "REQ")!)[1];
+  const ev = {
+    id: "ev_quorum", pubkey: "pk", created_at: 1, kind: EscrowEventKind.CREATE,
+    tags: [["d", "sm_quorum_probe"]], content: JSON.stringify({ type: "escrow:create" }), sig: "sig",
+  } as NostrEvent;
+
+  const [s1, s2, s3] = FakeWebSocket.instances;
+  s1.emit(["EVENT", subIdOf(s1), ev]);
+  s1.emit(["EOSE", subIdOf(s1)]);
+  s2.emit(["EOSE", subIdOf(s2)]);
+  s3.emit(["EOSE", subIdOf(s3)]);
+  // s4 (zombie) stays silent.
+
+  const fetched = await fetchPromise;
+  const elapsed = Date.now() - started;
+  assert(
+    fetched.length === 1 && fetched[0].id === "ev_quorum",
+    "EOSE quorum: fetch returns the events the responsive relays delivered",
+  );
+  assert(
+    elapsed < 4_000,
+    `EOSE quorum: resolves on the ~1s grace, not the 8s timeout — one zombie relay does not stall the fetch (resolved in ${elapsed}ms)`,
+  );
+  rm.disconnect();
+}
+
 // ── SIGNED ARBITER ROSTER — kind:38120 (V3 keystone, field-read J) ──────
 //
 // The roster lands on 38120, NOT the 38104 the design notes used — 38104 is

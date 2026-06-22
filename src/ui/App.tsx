@@ -2381,6 +2381,16 @@ export default function App() {
               traceContext: recoveryTraceContext,
             })}
             onOpenTrade={(id) => openEscrow(id, "me")}
+            onRefreshTrades={async () => {
+              const added = await actions.refreshMyTrades();
+              setToast({
+                message: added > 0
+                  ? `Found ${added} trade${added === 1 ? "" : "s"} from relays.`
+                  : "Your trades are up to date.",
+                type: added > 0 ? "success" : "info",
+              });
+              return added;
+            }}
             onSellerEditListing={(id) => {
               setToast({
                 message: "Edit will clone, cancel, and republish soon. Opening listing for now.",
@@ -2462,6 +2472,8 @@ export default function App() {
             onSandboxFund={() => setShowFundModal(true)}
             communitySlug={browseCommunity}
             userPubkey={pubkey}
+            onRunDiscovery={actions.refreshMyTrades}
+            onProbeFetchById={actions.probeFetchById}
             onPublishRoster={async (community, arbiters) => {
               await actions.publishCommunityRoster(community, arbiters);
             }}

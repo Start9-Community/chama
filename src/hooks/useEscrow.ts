@@ -5,6 +5,10 @@
 // ── localStorage helpers for escrow ID persistence ────────────────────────
 const LEGACY_STORAGE_KEY = "chama_escrow_ids";
 const MAX_SAVED_ESCROW_IDS = 50;
+// Re-fire active discovery this long after the connected-relay set last grew.
+// A slow webview brings relays up staggered; the timer resets on each new
+// connection, so a burst coalesces into ONE re-discovery once things settle.
+const RELAY_GROWTH_DEBOUNCE_MS = 1_500;
 const FEDIMINT_WALLET_NOT_READY =
   "Chama wallet disconnected. Tap Reconnect and try again.";
 const FEDI_ECASH_UNAVAILABLE =
@@ -173,6 +177,10 @@ import {
   type AggregateRatings,
 } from "../reputation/ratings.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
+import {
+  recordHydrateRun,
+  type HydrateIdDiag,
+} from "../escrow-engine/discovery-diagnostics.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import { addOrTouchPayoutDestination } from "../payments/payout-destinations.js";
 import { payInvoiceWithNwc } from "../payments/nwc.js";
@@ -215,6 +223,7 @@ import {
   minimumAtomicFundingMessage,
 } from "../payments/funding-limits.js";
 import { setLocalStorageUserScope } from "../storage/user-scope.js";
+import { reconcileIdentity } from "../storage/identity-pin.js";
 import { extractNostrProfileName, type NostrProfileNameMap } from "../ui/nostr-profiles.js";
 
 function isExpiredUnfundedEscrow(escrowState: EscrowState, nowSec = Math.floor(Date.now() / 1000)): boolean {
@@ -224,6 +233,213 @@ function isExpiredUnfundedEscrow(escrowState: EscrowState, nowSec = Math.floor(D
     && escrowState.expiresAt > 0
     && nowSec > escrowState.expiresAt
   );
+}
+
+/** Max simultaneous loadEscrow re-heals. The Fedi webview enforces a low
+ *  per-connection subscription cap; a flood of ~12 concurrent #d fetches trips
+ *  it and most come back null/partial (field-proven). A small pool keeps every
+ *  fetch under the cap; paired with the EOSE-quorum (~300ms/fetch) it still
+ *  clears a dozen trades in ~1–2s. */
+const HEAL_CONCURRENCY = 3;
+
+/** Run `worker` over `items` with at most `limit` in flight at once, returning
+ *  results in input order. A bounded alternative to Promise.all for work that
+ *  would otherwise flood a constrained transport (the Fedi webview's WS sub
+ *  cap). `limit` lanes each pull the next index and process sequentially. */
+async function mapPool<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    for (let i = next++; i < items.length; i = next++) {
+      results[i] = await worker(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, lane));
+  return results;
+}
+
+/**
+ * Active relay discovery → hydrate. Asks the relays for every escrow ID this
+ * npub took part in (EscrowClient.discoverMyEscrowIds: events it authored ∪
+ * events tagging it), then loadEscrow()s each *new* one so "My Trades"
+ * rebuilds itself from relays even after a localStorage wipe or on a fresh
+ * install. Union-only: discovered IDs are ADDED to the saved list, never
+ * pruned — a relay briefly missing an event must never delete a known trade.
+ * The forgotten-denylist still hides what the user hid. Returns how many new
+ * trades were hydrated. Best-effort throughout — one bad relay/ID can't blank
+ * the list. Used by connect() (background) and the manual refresh action.
+ */
+async function discoverAndLoadMyTrades(
+  client: EscrowClient,
+  pubkey: string,
+  forgottenIds: Set<string>,
+): Promise<number> {
+  let added = 0;
+  try {
+    const ids = await client.discoverMyEscrowIds(pubkey);
+    const known = new Set(getSavedEscrowIds(pubkey));
+
+    // Round 3b fix (a): RE-HEAL, don't just hydrate-new. The old code only
+    // loaded brand-new ids (`fresh = !known && !forgotten`), so a KNOWN trade
+    // stuck at a stale LOCKED/EXPIRED state never re-fetched its
+    // RESOLVE/COMPLETE tail — Refresh couldn't help it (the bug round 3 found:
+    // 15 ids discovered, 0 healed). Now we re-loadEscrow every discovered,
+    // non-forgotten id that isn't SETTLED (see isSettledStatus — COMPLETED /
+    // CANCELLED only; EXPIRED, LOCKED, APPROVED, CLAIMED all re-fetch).
+    // loadEscrow's isPartialReplayDowngrade guard (escrow-client.ts) makes the
+    // re-fetch safe: a partial relay history can't downgrade a good cached
+    // state, and a terminal incoming (COMPLETED) always wins — so a stuck
+    // EXPIRED/LOCKED trade heals to COMPLETED while settled trades skip for
+    // efficiency.
+    const idDiags: HydrateIdDiag[] = [];
+    let knownCount = 0;
+    let forgottenCount = 0;
+    let freshCount = 0;
+    const toHeal: { id: string; wasKnown: boolean }[] = [];
+    for (const id of ids) {
+      const wasKnown = known.has(id);
+      if (forgottenIds.has(id)) {
+        forgottenCount++;
+        idDiags.push({ id, cls: "forgotten", outcome: "(forgotten — skipped)" });
+        continue;
+      }
+      if (wasKnown) knownCount++; else freshCount++;
+      const st = client.getState(id);
+      if (st && isSettledStatus(st.status)) {
+        // Settled — nothing to heal. Skip the fetch.
+        idDiags.push({
+          id, cls: wasKnown ? "known" : "fresh",
+          outcome: `settled:${st.status} (skipped)`, terminal: true,
+        });
+      } else {
+        toHeal.push({ id, wasKnown });
+      }
+    }
+
+    if (toHeal.length === 0) {
+      recordHydrateRun({
+        at: Date.now(), pubkey, discovered: ids.length,
+        knownCount, forgottenCount, freshCount, added: 0, ids: idDiags,
+      });
+      return 0;
+    }
+
+    const capped = toHeal.slice(0, MAX_SAVED_ESCROW_IDS);
+    const overCap = toHeal.slice(MAX_SAVED_ESCROW_IDS);
+    // Persist pointers first (union-only, idempotent via saveEscrowId's dedup)
+    // so a heal that races a slow relay still survives to the next open.
+    for (const { id } of capped) saveEscrowId(id, pubkey);
+    console.log(`[chama] discovery: healing ${capped.length} non-terminal trade(s) (${freshCount} new) of ${ids.length} discovered`);
+
+    // BOUNDED concurrency — NOT an unbounded Promise.all. Field-proven: a
+    // Promise.all flood of ~12 loadEscrow (= ~12 simultaneous #d fetches) trips
+    // the Fedi webview's per-connection subscription limits, so most fetches
+    // come back null/partial (the same trade that returns a full 9-event chain
+    // solo was load-null at 12-at-once). Now that the EOSE-quorum makes each
+    // fetchEscrowEvents ~300ms instead of 8s, a small pool of HEAL_CONCURRENCY
+    // clears a dozen trades in ~1–2s with zero flood. Stragglers that still
+    // land partial self-heal via loadEscrow's completeness retry.
+    const results = await mapPool(capped, HEAL_CONCURRENCY, async ({ id, wasKnown }) => {
+      const cls: HydrateIdDiag["cls"] = wasKnown ? "known" : "fresh";
+      try {
+        const loaded = await client.loadEscrow(id);
+        if (loaded && isExpiredUnfundedEscrow(loaded)) {
+          // Genuinely never-funded + past expiry (status CREATED) — drop it.
+          // A stuck EXPIRED/LOCKED trade is NOT CREATED, so this never eats a
+          // real trade being healed. `done` — nothing to retry.
+          (client as any).states?.delete?.(id);
+          (client as any).rawEvents?.delete?.(id);
+          return {
+            id, wasKnown, done: true,
+            diag: { id, cls, outcome: `discarded:expired-unfunded (was ${loaded.status})`, discarded: true, terminal: isHydrateTerminal(loaded.status) } as HydrateIdDiag,
+          };
+        }
+        if (loaded) {
+          // `done` only when truly settled; a non-settled load may be a
+          // contention-truncated chain → eligible for the sequential tail.
+          return {
+            id, wasKnown, done: isSettledStatus(loaded.status),
+            diag: { id, cls, outcome: `loaded:${loaded.status}`, terminal: isHydrateTerminal(loaded.status) } as HydrateIdDiag,
+          };
+        }
+        return { id, wasKnown, done: false, diag: { id, cls, outcome: "load-null" } as HydrateIdDiag };
+      } catch (e) {
+        console.debug(`[chama] discovery: could not load ${id}:`, e);
+        return {
+          id, wasKnown, done: false,
+          diag: { id, cls, outcome: `load-failed:${((e as any)?.message || String(e)).slice(0, 60)}` } as HydrateIdDiag,
+        };
+      }
+    });
+    // Index each id's diag row so the sequential tail can rewrite a straggler.
+    const diagIndex = new Map<string, number>();
+    for (const r of results) {
+      diagIndex.set(r.id, idDiags.length);
+      idDiags.push(r.diag);
+    }
+
+    // Sequential tail (round 3b step 3): the pool still truncates some #d
+    // fetches under contention. Re-load every trade STILL non-truly-terminal
+    // ONE AT A TIME — by here the pool has drained, so each fetch is fully
+    // uncontended and pulls the complete chain (proven: a solo #d probe returns
+    // the full chain → COMPLETED where the parallel batch dropped it). Each
+    // reload also gets loadEscrow's (now relay-count-independent) completeness
+    // retry. Discards + already-settled trades are `done` and skipped.
+    for (const r of results) {
+      if (r.done) continue;
+      try {
+        const reloaded = await client.loadEscrow(r.id);
+        const cls: HydrateIdDiag["cls"] = r.wasKnown ? "known" : "fresh";
+        const expiredUnfunded = !!reloaded && isExpiredUnfundedEscrow(reloaded);
+        if (expiredUnfunded) {
+          (client as any).states?.delete?.(r.id);
+          (client as any).rawEvents?.delete?.(r.id);
+        }
+        const updated: HydrateIdDiag = !reloaded
+          ? { id: r.id, cls, outcome: "load-null [seq]" }
+          : expiredUnfunded
+            ? { id: r.id, cls, outcome: `discarded:expired-unfunded (was ${reloaded.status}) [seq]`, discarded: true, terminal: isHydrateTerminal(reloaded.status) }
+            : { id: r.id, cls, outcome: `loaded:${reloaded.status} [seq]`, terminal: isHydrateTerminal(reloaded.status) };
+        const idx = diagIndex.get(r.id);
+        if (idx !== undefined) idDiags[idx] = updated;
+      } catch (e) {
+        console.debug(`[chama] discovery: sequential reload failed ${r.id}:`, e);
+      }
+    }
+
+    for (const { id, wasKnown } of overCap) {
+      idDiags.push({ id, cls: wasKnown ? "known" : "fresh", outcome: "(over cap — not attempted)" });
+    }
+    // `added` = genuinely-new (fresh) trades that ended up loaded after BOTH
+    // passes, for the "Found N from relays" toast. Computed from final diags so
+    // a fresh trade that only came in on the sequential tail still counts.
+    added = idDiags.filter(d => d.cls === "fresh" && d.outcome.startsWith("loaded:")).length;
+    recordHydrateRun({
+      at: Date.now(), pubkey, discovered: ids.length,
+      knownCount, forgottenCount, freshCount, added, ids: idDiags,
+    });
+  } catch (e) {
+    console.debug("[chama] discovery failed:", e);
+  }
+  return added;
+}
+
+/** Round 3b fix (a) heal gate: a trade is SETTLED — nothing left to heal —
+ *  only when COMPLETED or CANCELLED. EXPIRED is deliberately NOT settled: a
+ *  trade stuck at EXPIRED whose RESOLVE/COMPLETE tail lived on a relay we
+ *  hadn't fetched must re-load. This is intentionally NARROWER than the
+ *  engine's isTerminalStatus (which counts EXPIRED as terminal) — that breadth
+ *  is exactly what kept these trades from ever re-healing. */
+function isSettledStatus(status: EscrowStatus): boolean {
+  return status === EscrowStatus.COMPLETED || status === EscrowStatus.CANCELLED;
+}
+
+/** Mirror of EscrowClient.isTerminalStatus (COMPLETED / CANCELLED / EXPIRED) —
+ *  used only to set the hydrate diagnostic's `terminal` flag for display. */
+function isHydrateTerminal(status: EscrowStatus): boolean {
+  return status === EscrowStatus.COMPLETED
+    || status === EscrowStatus.CANCELLED
+    || status === EscrowStatus.EXPIRED;
 }
 
 // ── Hook state ────────────────────────────────────────────────────────────
@@ -442,9 +658,22 @@ export interface UseEscrowActions {
   cancel: (escrowId: string, reason?: string) => Promise<EscrowState>;
   /** Load an escrow from relays by ID */
   loadEscrow: (escrowId: string) => Promise<EscrowState | null>;
-  /** Re-broadcast a trade's cached event chain to today's relays — heals a
-   *  "ghost" trade the counterparty can't see. Returns how many events landed. */
+  /** Heal a trade in BOTH directions: pull the latest chain in from relays
+   *  (re-fetch + merge + replay, so a stale local state catches up to a
+   *  counterparty's RESOLVE/COMPLETE), then re-broadcast our cached chain out
+   *  so a counterparty missing our events recovers too. Returns how many of
+   *  our cached events landed. */
   rebroadcastEscrow: (escrowId: string) => Promise<{ published: number; total: number }>;
+  /** Manually re-run active relay discovery for the signed-in npub and hydrate
+   *  any of its trades missing from the local list (the same self-healing path
+   *  that runs at connect). Returns how many trades were added. */
+  refreshMyTrades: () => Promise<number>;
+  /** INSTRUMENT-FIRST (Fedi round 3): pubkey-independent transport control —
+   *  fetch one known escrow by `#d` over the same fetch path discovery uses
+   *  and return the per-relay probe anatomy. Used by the on-device debug card
+   *  to separate a wrong query key (candidate 1) from blocked transport
+   *  (candidate 2) without touching the signer. */
+  probeFetchById: (escrowId: string) => Promise<import("../escrow-engine/discovery-diagnostics.js").FetchLegDiag>;
   /** Forget a trade locally (drop saved pointer + hide from the list). Safe:
    *  money stays in escrow and the trade is re-loadable by ID. */
   forgetEscrow: (escrowId: string) => void;
@@ -724,6 +953,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // dead, while still blocking a real concurrent user Fund tap.
   const fundingInProgressRef = useRef<AbortSignal | null>(null);
   const claimPayoutInProgressRef = useRef(false);
+  // High-water mark of the connected-relay count at the last discovery re-fire
+  // (see the relay-growth effect). Reset on disconnect so a reconnect within
+  // the same hook instance re-discovers from scratch.
+  const lastDiscoveryRelayCountRef = useRef(0);
 
   const [state, setState] = useState<UseEscrowState>({
     connected: false,
@@ -843,6 +1076,22 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
       const pubkey = await signer.getPublicKey();
       signerRef.current = signer;
+      // Stable identity. A fresh signer is built on every connect(), and on the
+      // Fedi/browser path the npub comes straight from window.nostr with no
+      // app-side persistence (shouldPersistNsecInShell() is false there). The
+      // signer already rejects garbage reads (normalizeSignerPubkey); this pins
+      // the last-seen identity so a *valid but different* npub is treated as a
+      // deliberate, CLEAN re-scope rather than a silent blend of two identities'
+      // trades — the "role pill flips between sign-ins" symptom.
+      const { changed: identityChanged, previous: previousIdentity } = reconcileIdentity(pubkey);
+      if (identityChanged) {
+        console.warn(
+          `[chama] active identity changed ${previousIdentity?.slice(0, 8)}… → ${pubkey.slice(0, 8)}… — ` +
+            `re-scoping cleanly. Fedi/browser identity is provided by window.nostr, not app-side ` +
+            `persistence; if this was unexpected, the Fedi runtime isn't deterministically restoring ` +
+            `one stored key (the upstream cause).`,
+        );
+      }
       setLocalStorageUserScope(pubkey);
       // v3.5.1: commit a deferred onboarding community pick to THIS npub's
       // scope now that the signer is known — BEFORE initFedimint resolves
@@ -898,6 +1147,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         connected: true,
         pubkey,
         loading: false,
+        // Clean re-scope on a changed identity: drop the prior npub's escrows
+        // so the role/pill can never be computed against the wrong identity.
+        // The saved-ID reload + active discovery below repopulate for the new
+        // npub. (Same-identity reconnects keep their in-memory map.)
+        ...(identityChanged ? { escrows: new Map() } : {}),
       }));
 
       vibrate([50, 30, 50]); // Connected haptic
@@ -1064,6 +1318,15 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           }
         }
       }
+
+      // ── Active relay discovery (self-healing My Trades) ────────────────
+      // Don't let My Trades depend on a wipeable localStorage ID list:
+      // rebuild it from relays (events this npub authored ∪ events tagging
+      // it). Background/non-blocking — fired after sign-in completes, like
+      // openEscrow's refetch — so it never delays connect. Union-only and
+      // denylist-aware (see discoverAndLoadMyTrades). Runs on every client;
+      // a fresh APK install or any wiped cache benefits identically.
+      void discoverAndLoadMyTrades(client, pubkey, forgottenIdsRef.current);
     } catch (e) {
       setState(prev => ({
         ...prev,
@@ -1086,6 +1349,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     signerRef.current = null;
     fundingInProgressRef.current = null;
     claimPayoutInProgressRef.current = false;
+    lastDiscoveryRelayCountRef.current = 0;
     setLocalStorageUserScope(null);
     clearSeedCache();
     setState({
@@ -1146,6 +1410,28 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       setLocalStorageUserScope(null);
     };
   }, []);
+
+  // ── Re-fire discovery as the connected-relay set grows ──────────────────
+  // On a slow webview the initial discovery + saved-ID reload at connect can
+  // run before all relays are up. Even with the relay-manager's quorum gate,
+  // the connect budget can elapse with a partial set. As more relays come
+  // online, re-run active discovery (union-only, denylist-aware) so a list
+  // built off a partial set heals to the full one. The timer resets on each
+  // growth, so staggered connects coalesce into ONE re-fire after the set
+  // settles; only fires when the connected count actually grew.
+  useEffect(() => {
+    if (!state.connected || !state.pubkey) return;
+    const client = clientRef.current;
+    if (!client) return;
+    if (state.connectedRelays <= lastDiscoveryRelayCountRef.current) return;
+    const pk = state.pubkey;
+    const grewTo = state.connectedRelays;
+    const t = setTimeout(() => {
+      lastDiscoveryRelayCountRef.current = grewTo;
+      void discoverAndLoadMyTrades(client, pk, forgottenIdsRef.current);
+    }, RELAY_GROWTH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [state.connected, state.pubkey, state.connectedRelays]);
 
   // ── Trade actions ───────────────────────────────────────────────────────
 
@@ -1639,7 +1925,42 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
   const rebroadcastEscrow = useCallback(async (escrowId: string) => {
     const client = requireClient();
+    // Heal in BOTH directions. The old behavior only PUSHED the cached chain
+    // out — so a client stuck on a stale state (e.g. Fedi showing LOCKED while
+    // the counterparty already published RESOLVE/COMPLETE) never pulled the
+    // missing tail IN, and the heal silently no-op'd. Pull first (loadEscrow
+    // re-fetches from relays, merges with cache, replays to current), THEN push
+    // our cache out so a counterparty missing OUR events heals too. Converges
+    // whichever side is behind.
+    try {
+      await client.loadEscrow(escrowId);
+    } catch (e) {
+      console.debug(`[chama] heal: pull for ${escrowId} failed; pushing cache anyway`, e);
+    }
     return client.rebroadcastEscrow(escrowId);
+  }, []);
+
+  /** Manually re-run active relay discovery for the signed-in npub and hydrate
+   *  any of its trades missing from the local list. Returns how many were
+   *  added. Same union-only, denylist-aware path that runs at connect — exposed
+   *  for an on-demand "refresh my trades" pull. */
+  const refreshMyTrades = useCallback(async (): Promise<number> => {
+    const client = requireClient();
+    const pk = stateRef.current?.pubkey;
+    if (!pk) return 0;
+    setState(prev => ({ ...prev, loading: true }));
+    try {
+      return await discoverAndLoadMyTrades(client, pk, forgottenIdsRef.current);
+    } finally {
+      setState(prev => ({ ...prev, loading: false }));
+    }
+  }, []);
+
+  /** INSTRUMENT-FIRST (Fedi round 3): run the pubkey-independent `#d`
+   *  transport control. Thin pass-through to the client so the Advanced
+   *  debug card can probe one known escrow id without the signer. */
+  const probeFetchById = useCallback(async (escrowId: string) => {
+    return requireClient().probeFetchById(escrowId);
   }, []);
 
   const purchaseFromListing = useCallback(async (parent: EscrowState, quantity: number) => {
@@ -2890,6 +3211,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     cancel: cancelAction,
     loadEscrow,
     rebroadcastEscrow,
+    refreshMyTrades,
+    probeFetchById,
     forgetEscrow,
     purchaseFromListing,
     fetchNostrProfiles,

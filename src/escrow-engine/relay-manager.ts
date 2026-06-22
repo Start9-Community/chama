@@ -13,6 +13,7 @@
 //   4. Clean shutdown — close all connections gracefully
 
 import { type NostrEvent, EscrowEventKind, TAGS } from "./types.js";
+import { type FetchProbe } from "./discovery-diagnostics.js";
 
 // SECURITY: per-event content size cap. NIP-01 does not enforce a cap, so
 // a malicious relay can craft an EVENT message whose `content` is many
@@ -99,6 +100,14 @@ interface PendingOnceFetch {
   connectedCount: number;
   resolve: (events: NostrEvent[]) => void;
   timer: ReturnType<typeof setTimeout> | null;
+  /** EOSE-quorum grace timer (round 3b step 2): set once a quorum of relays
+   *  have EOSE'd but not all; resolves the fetch after EOSE_GRACE_MS so one
+   *  hung relay can't pin it to the full timeout. */
+  graceTimer?: ReturnType<typeof setTimeout> | null;
+  /** Optional observational diagnostics. Set only by discovery + the `#d`
+   *  transport control; absent for seed-recovery / Browse fetches. Purely
+   *  read — never gates or alters the fetch. */
+  probe?: FetchProbe;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -109,7 +118,31 @@ const MAX_RETRY_MS = 60_000;
 const PUBLISH_TIMEOUT_MS = 8_000;
 const PUBLISH_CONNECT_WAIT_MS = 8_000;
 const PUBLISH_CONNECT_POLL_MS = 250;
-const FETCH_CONNECT_WAIT_MS = 5_000;
+// Webview-safe fetch quorum. A one-shot REQ must not resolve against a single
+// fast relay while the rest are still handshaking — iOS in-app browser / Fedi
+// webview bring sockets up slowly and staggered, so a fetch that fired with
+// 1 relay connected EOSEs partial and misses the resolve/complete tail (the
+// "stuck ESCROW" + oscillating My-Trades symptom). Wait for a QUORUM of relays
+// — or a bounded budget — before issuing REQs. On desktop the quorum is already
+// met when a fetch runs, so waitForRelayQuorum returns immediately (no penalty).
+const FETCH_QUORUM = 3;
+const FETCH_QUORUM_BUDGET_MS = 5_000;
+const FETCH_QUORUM_POLL_MS = 200;
+// EOSE resolution quorum (Fedi round 3b, step 2). A fetch normally resolves
+// only when EVERY connected relay sends EOSE. But a relay that completes the
+// WS handshake then never answers (field: relay.primal.net — conn:Y req:Y
+// eose:n) would otherwise pin the fetch to its FULL timeout (8s discovery /
+// 15s chain), stalling every read and the parallel My-Trades heal. So once a
+// QUORUM of connected relays have EOSE'd, start a short grace for any near-
+// simultaneous straggler, then resolve with what's in. This NEVER fires when
+// all relays answer (the all-EOSE fast path resolves first, cancelling grace),
+// so a healthy fetch pays zero penalty. And a quorum-EOSE resolution is
+// strictly MORE complete than the timeout fallback it replaces (≥quorum relays
+// confirmed exhausted + every event received so far), so it cannot reintroduce
+// the round-2 partial-fetch bug — it only stops waiting on a dead socket. The
+// connection quorum above (wait before REQ) is unchanged.
+const EOSE_RESOLVE_QUORUM = 3;
+const EOSE_GRACE_MS = 1_000;
 
 // ══════════════════════════════════════════════════════════════════════════
 // RELAY MANAGER
@@ -286,9 +319,15 @@ export class RelayManager {
         // otherwise a live Browse/watch subscription can contaminate seed
         // recovery and other queryOnce callers with unrelated events.
         const onceFetch = this._pendingOnceFetches.get(subId);
-        if (onceFetch && !onceFetch.seenIds.has(event.id)) {
-          onceFetch.seenIds.add(event.id);
-          onceFetch.events.push(event);
+        if (onceFetch) {
+          // Count the frame per relay BEFORE dedup so a relay that lost the
+          // dedup race to another still registers as "delivering frames"
+          // (transport works) in the diagnostic.
+          onceFetch.probe?.noteEvent(relayUrl);
+          if (!onceFetch.seenIds.has(event.id)) {
+            onceFetch.seenIds.add(event.id);
+            onceFetch.events.push(event);
+          }
         }
 
         // Route to pending fetch subscriptions FIRST (before global dedup)
@@ -328,14 +367,24 @@ export class RelayManager {
 
         if (this._pendingOnceFetches.has(subId)) {
           const fetchState = this._pendingOnceFetches.get(subId)!;
+          fetchState.probe?.noteEose(relayUrl);
           fetchState.eoseCount++;
+          const quorum = Math.min(fetchState.connectedCount, EOSE_RESOLVE_QUORUM);
           if (fetchState.eoseCount >= fetchState.connectedCount) {
-            if (fetchState.timer) clearTimeout(fetchState.timer);
-            this.unsubscribe(subId);
-            const events = fetchState.events;
-            const resolveFn = fetchState.resolve;
-            this._pendingOnceFetches.delete(subId);
-            resolveFn(events);
+            // Every connected relay said EOSE — fast path, resolve now. If
+            // events is empty here, the relays AFFIRMATIVELY answered "nothing
+            // for this filter" (points at a wrong query key, not blocked
+            // transport).
+            fetchState.probe?.noteResolved("eose");
+            this.finalizeOnceFetch(subId);
+          } else if (fetchState.eoseCount >= quorum && !fetchState.graceTimer) {
+            // A quorum answered but ≥1 relay is still silent — give a short
+            // grace for a near-simultaneous straggler, then resolve so a hung
+            // socket can't pin us to the full timeout.
+            fetchState.graceTimer = setTimeout(() => {
+              fetchState.probe?.noteResolved("eose-quorum");
+              this.finalizeOnceFetch(subId);
+            }, EOSE_GRACE_MS);
           }
         }
 
@@ -343,14 +392,15 @@ export class RelayManager {
         if (this._pendingFetches?.has(subId)) {
           const fetchState = this._pendingFetches.get(subId)!;
           fetchState.eoseCount++;
+          const quorum = Math.min(fetchState.connectedCount, EOSE_RESOLVE_QUORUM);
           if (fetchState.eoseCount >= fetchState.connectedCount) {
             console.debug(`[relay] fetch ${subId}: complete with ${fetchState.events.length} events from ${fetchState.eoseCount} relays`);
-            clearTimeout(fetchState.timer);
-            this.unsubscribe(subId);
-            const events = fetchState.events;
-            const resolveFn = fetchState.resolve;
-            this._pendingFetches.delete(subId);
-            resolveFn(events);
+            this.finalizeEscrowFetch(subId);
+          } else if (fetchState.eoseCount >= quorum && !fetchState.graceTimer) {
+            fetchState.graceTimer = setTimeout(() => {
+              console.debug(`[relay] fetch ${subId}: EOSE quorum (${fetchState.eoseCount}/${fetchState.connectedCount}) + grace — resolving with ${fetchState.events.length} events`);
+              this.finalizeEscrowFetch(subId);
+            }, EOSE_GRACE_MS);
           }
         }
         this.callbacks.onEose?.(subId, relayUrl);
@@ -495,6 +545,47 @@ export class RelayManager {
     return [...this.relays.values()].filter(r => r.status === RelayStatus.CONNECTED);
   }
 
+  /**
+   * Wait until a QUORUM of relays is CONNECTED, or `budgetMs` elapses —
+   * whichever comes first — then return the currently-connected set. Unlike
+   * waitForConnectedRelays (which returns the instant ≥1 is up), this refuses
+   * to proceed on a single fast relay: that single-relay head start is exactly
+   * what made one-shot fetches resolve partial on slow webviews (the resolve/
+   * complete tail lived on a relay that hadn't connected yet). The quorum is
+   * clamped to the relay-set size, so a 2-relay federation waits for 2. Kicks
+   * any non-open relay first, so a throttled/backgrounded webview that dropped
+   * sockets reconnects them before the fetch (webview connection health).
+   */
+  /** Synchronous check: is a quorum of relays CONNECTED right now? Lets the
+   *  fetch paths skip the (async) quorum wait entirely when relays are already
+   *  up — preserving the same-tick REQ dispatch the fast path relies on. */
+  private hasRelayQuorum(quorum: number): boolean {
+    if (this.relays.size === 0) return false;
+    const target = Math.max(1, Math.min(quorum, this.relays.size));
+    const connected = [...this.relays.values()].filter(r => r.status === RelayStatus.CONNECTED).length;
+    return connected >= target;
+  }
+
+  private async waitForRelayQuorum(quorum: number, budgetMs: number): Promise<RelayConnection[]> {
+    if (this.relays.size === 0) return [];
+    const target = Math.max(1, Math.min(quorum, this.relays.size));
+
+    for (const [url, relay] of this.relays) {
+      if (relay.status !== RelayStatus.CONNECTED && relay.status !== RelayStatus.CONNECTING) {
+        this.connectRelay(url);
+      }
+    }
+
+    let waited = 0;
+    while (waited < budgetMs) {
+      const connected = [...this.relays.values()].filter(r => r.status === RelayStatus.CONNECTED);
+      if (connected.length >= target) return connected;
+      await new Promise(resolve => setTimeout(resolve, FETCH_QUORUM_POLL_MS));
+      waited += FETCH_QUORUM_POLL_MS;
+    }
+    return [...this.relays.values()].filter(r => r.status === RelayStatus.CONNECTED);
+  }
+
   /** Pending OK handlers — keyed by "eventId:relayUrl" */
   private pendingOk: Map<string, { resolve: (v: { accepted: boolean; message: string }) => void; timeout: ReturnType<typeof setTimeout> }> = new Map();
 
@@ -621,8 +712,14 @@ export class RelayManager {
    * have sent EOSE (end of stored events).
    */
   async fetchEscrowEvents(escrowId: string, timeoutMs = 15_000): Promise<NostrEvent[]> {
-    if ([...this.relays.values()].every(r => r.status !== RelayStatus.CONNECTED)) {
-      await this.waitForConnectedRelays(FETCH_CONNECT_WAIT_MS);
+    // Quorum-gate before snapshotting the connected set: don't REQ a single
+    // fast relay and EOSE partial (missing the resolve/complete tail). The
+    // late relays that connect during/after this fetch also receive the REQ
+    // (onopen resubscribes), and loadEscrow's completeness retry re-fetches
+    // once if it lands non-terminal with more relays now connected. Skip the
+    // wait entirely (same-tick dispatch) when quorum is already met.
+    if (!this.hasRelayQuorum(FETCH_QUORUM)) {
+      await this.waitForRelayQuorum(FETCH_QUORUM, FETCH_QUORUM_BUDGET_MS);
     }
 
     return new Promise((resolve) => {
@@ -646,16 +743,9 @@ export class RelayManager {
 
       const fetchState = this._pendingFetches.get(subId)!;
 
-      const cleanup = () => {
-        clearTimeout(fetchState.timer);
-        this.unsubscribe(subId);
-        this._pendingFetches.delete(subId);
-      };
-
       fetchState.timer = setTimeout(() => {
         console.debug(`[relay] fetchEscrowEvents ${escrowId}: timeout with ${events.length} events from ${fetchState.eoseCount}/${connectedCount} relays`);
-        cleanup();
-        resolve(events);
+        this.finalizeEscrowFetch(subId);
       }, timeoutMs);
 
       // Subscribe on all relays
@@ -681,11 +771,37 @@ export class RelayManager {
     connectedCount: number;
     resolve: (events: NostrEvent[]) => void;
     timer: any;
+    /** EOSE-quorum grace timer (round 3b step 2) — see PendingOnceFetch. */
+    graceTimer?: any;
     escrowId: string;
   }> = new Map();
 
   /** Pending arbitrary fetchOnce state keyed by subscription ID. */
   private _pendingOnceFetches: Map<string, PendingOnceFetch> = new Map();
+
+  /** Resolve + tear down a pending fetchOnce (all-EOSE, quorum+grace, or
+   *  timeout). Clears both timers, unsubscribes, and resolves with whatever
+   *  events accumulated. Idempotent — a no-op if already finalized. */
+  private finalizeOnceFetch(subId: string): void {
+    const fetchState = this._pendingOnceFetches.get(subId);
+    if (!fetchState) return;
+    if (fetchState.timer) clearTimeout(fetchState.timer);
+    if (fetchState.graceTimer) clearTimeout(fetchState.graceTimer);
+    this._pendingOnceFetches.delete(subId);
+    this.unsubscribe(subId);
+    fetchState.resolve(fetchState.events);
+  }
+
+  /** Resolve + tear down a pending fetchEscrowEvents. See finalizeOnceFetch. */
+  private finalizeEscrowFetch(subId: string): void {
+    const fetchState = this._pendingFetches?.get(subId);
+    if (!fetchState) return;
+    if (fetchState.timer) clearTimeout(fetchState.timer);
+    if (fetchState.graceTimer) clearTimeout(fetchState.graceTimer);
+    this._pendingFetches.delete(subId);
+    this.unsubscribe(subId);
+    fetchState.resolve(fetchState.events);
+  }
 
   // ── One-shot fetch with an arbitrary filter ─────────────────────────────
 
@@ -693,9 +809,18 @@ export class RelayManager {
    * Fetch events matching an arbitrary filter. Resolves when every
    * connected relay has sent EOSE, or after the timeout.
    */
-  async fetchOnce(filter: NostrFilter, timeoutMs = 5_000): Promise<NostrEvent[]> {
-    if ([...this.relays.values()].every(r => r.status !== RelayStatus.CONNECTED)) {
-      await this.waitForConnectedRelays(FETCH_CONNECT_WAIT_MS);
+  async fetchOnce(filter: NostrFilter, timeoutMs = 5_000, probe?: FetchProbe): Promise<NostrEvent[]> {
+    // Quorum-gate (see fetchEscrowEvents) — discovery (authors ∪ #p) must not
+    // resolve against one relay and return a partial trade list, which is what
+    // made My Trades oscillate 2↔3 on slow webviews. The hook also re-fires
+    // discovery as the connected set grows, so a list built early heals. Skip
+    // the wait entirely (same-tick dispatch) when quorum is already met.
+    //
+    // `probe` is an optional observer (discovery + the `#d` transport control)
+    // that records per-relay REQ/EVENT/EOSE and how the fetch resolved. It
+    // never gates or changes the fetch — see discovery-diagnostics.ts.
+    if (!this.hasRelayQuorum(FETCH_QUORUM)) {
+      await this.waitForRelayQuorum(FETCH_QUORUM, FETCH_QUORUM_BUDGET_MS);
     }
 
     return new Promise((resolve) => {
@@ -706,6 +831,7 @@ export class RelayManager {
       ).length;
 
       if (connectedCount === 0) {
+        probe?.noteResolved("no-relays");
         resolve([]);
         return;
       }
@@ -718,25 +844,23 @@ export class RelayManager {
         connectedCount,
         resolve,
         timer: null,
+        probe,
       };
       this._pendingOnceFetches.set(subId, fetchState);
 
-      const cleanup = () => {
-        if (fetchState.timer) clearTimeout(fetchState.timer);
-        this.unsubscribe(subId);
-        this._pendingOnceFetches.delete(subId);
-      };
-
       fetchState.timer = setTimeout(() => {
-        cleanup();
-        resolve(events);
+        // Resolved on the timer — REQs went out but not even a quorum of
+        // connected relays returned EOSE. Empty here points at blocked/
+        // throttled frames (transport), NOT a wrong query key.
+        probe?.noteResolved("timeout");
+        this.finalizeOnceFetch(subId);
       }, timeoutMs);
 
       for (const [, relay] of this.relays) {
         relay.subscriptions.set(subId, filter);
-        if (relay.status === RelayStatus.CONNECTED) {
-          this.sendToRelay(relay, ["REQ", subId, filter]);
-        }
+        const connected = relay.status === RelayStatus.CONNECTED;
+        const reqSent = connected && this.sendToRelay(relay, ["REQ", subId, filter]);
+        probe?.noteDispatch(relay.url, connected, reqSent);
       }
     });
   }

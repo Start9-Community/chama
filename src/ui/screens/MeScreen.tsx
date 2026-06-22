@@ -87,6 +87,7 @@ export function MeScreen({
   allTrades,
   ratings,
   onOpenTrade,
+  onRefreshTrades,
   onSellerEditListing,
   onSellerDeleteListing,
   onOpenSavedHandles,
@@ -120,6 +121,10 @@ export function MeScreen({
   onRateCounterparty?: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
   myGivenRatings?: Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>;
   onOpenTrade: (id: string) => void;
+  /** Manual "refresh my trades" pull — re-runs active relay discovery and
+   *  hydrates any trades missing from the local list. Returns how many were
+   *  added (for a toast). */
+  onRefreshTrades?: () => Promise<number> | void;
   onSellerEditListing?: (id: string) => void;
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
   onOpenSavedHandles: () => void;
@@ -499,6 +504,7 @@ export function MeScreen({
         onFilter={setTradeFilter}
         pubkey={pubkey}
         onOpenTrade={onOpenTrade}
+        onRefreshTrades={onRefreshTrades}
         onRateCounterparty={onRateCounterparty}
         myGivenRatings={myGivenRatings}
       />
@@ -516,6 +522,7 @@ function MeTradeHistory({
   onFilter,
   pubkey,
   onOpenTrade,
+  onRefreshTrades,
   onRateCounterparty,
   myGivenRatings,
 }: {
@@ -526,10 +533,21 @@ function MeTradeHistory({
   onFilter: (filter: MeTradeFilter) => void;
   pubkey: string;
   onOpenTrade: (id: string) => void;
+  onRefreshTrades?: () => Promise<number> | void;
   onRateCounterparty?: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
   myGivenRatings?: Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>;
 }) {
   const activeFilterLabel = ME_TRADE_FILTERS.find((filter) => filter.id === activeFilter)?.label ?? "All";
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = async () => {
+    if (!onRefreshTrades || refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefreshTrades();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   return (
     <section>
@@ -551,11 +569,37 @@ function MeTradeHistory({
             {activeFilterLabel}
           </div>
         </div>
-        <div style={{
-          color: T.muted, fontFamily: T.mono, fontSize: 11,
-          whiteSpace: "nowrap" as const,
-        }}>
-          {trades.length} / {totalCount}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            color: T.muted, fontFamily: T.mono, fontSize: 11,
+            whiteSpace: "nowrap" as const,
+          }}>
+            {trades.length} / {totalCount}
+          </div>
+          {onRefreshTrades && (
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title="Re-check relays for your trades"
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 5,
+                background: "transparent", border: `1px solid ${T.border}`,
+                borderRadius: 8, padding: "4px 8px",
+                color: refreshing ? T.muted : T.text,
+                fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+                cursor: refreshing ? "default" : "pointer",
+                opacity: refreshing ? 0.6 : 1,
+                whiteSpace: "nowrap" as const,
+              }}
+            >
+              <span style={{
+                display: "inline-block",
+                animation: refreshing ? "spin 0.8s linear infinite" : "none",
+              }}>↻</span>
+              {refreshing ? "Syncing…" : "Refresh"}
+            </button>
+          )}
         </div>
       </div>
 

@@ -59,6 +59,11 @@ import { ENCRYPTION_CONFIG } from "./encryption-config.js";
 import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
 import { createEnvelope, decryptFromEnvelope } from "./envelope.js";
 import { RelayManager, type NostrFilter } from "./relay-manager.js";
+import {
+  FetchProbe,
+  recordDiscoveryRun,
+  type FetchLegDiag,
+} from "./discovery-diagnostics.js";
 import { simTagOrNull, shouldDropForSimPolicy } from "../sim/simMode.js";
 import { verifyEvent as verifyNostrEventSignature } from "nostr-tools/pure";
 import { randomId } from "../storage/random-id.js";
@@ -138,6 +143,13 @@ function isTerminalStatus(status: EscrowStatus): boolean {
     || status === EscrowStatus.CANCELLED
     || status === EscrowStatus.EXPIRED;
 }
+
+// Completeness-retry bound (round 3b step 3). A loadEscrow whose replay lands
+// non-truly-terminal (anything but COMPLETED/CANCELLED) re-fetches up to this
+// many times, since a contended/truncated Fedi-webview fetch can drop the
+// resolve/complete tail. Bounded so a genuinely-non-terminal trade (a real
+// LOCKED/EXPIRED) doesn't loop forever.
+const COMPLETENESS_MAX_ATTEMPTS = 2;
 
 function isPartialReplayDowngrade(current: EscrowState | undefined, incoming: EscrowState): boolean {
   if (!current) return false;
@@ -361,6 +373,77 @@ export class EscrowClient {
     return this.relayManager.fetchOnce(filter, timeoutMs);
   }
 
+  /**
+   * Active relay discovery for "My Trades": find every escrow ID this pubkey
+   * took part in, by querying events it AUTHORED (`authors:`) unioned with
+   * events that TAG it (`#p:`). `authors` catches trades you created, joined,
+   * locked, voted, claimed or chatted in; `#p` catches trades where you're a
+   * tagged participant — JOIN always tags the joiner, and (since the additive
+   * v3.x change) LOCK tags buyer/seller/arbiter, so even a passively-seated
+   * arbiter who never authored an event is reachable.
+   *
+   * Two-step by design: this only surfaces the IDs. The caller loadEscrow()s
+   * each to fetch + merge + replay the authoritative full chain — so a single
+   * discovered JOIN/LOCK never renders as partial state. Best-effort: a failed
+   * sub resolves empty rather than throwing, so one bad relay can't blank the
+   * list. This is what makes My Trades self-heal after a localStorage wipe (or
+   * on a fresh install) without depending on the saved-ID cache.
+   */
+  async discoverMyEscrowIds(pubkey: string, timeoutMs = 8_000): Promise<string[]> {
+    const kinds = Object.values(EscrowEventKind).filter(v => typeof v === "number") as number[];
+    const kindsLabel = `${Math.min(...kinds)}-${Math.max(...kinds)}`;
+    const short = pubkey.slice(0, 8);
+    // INSTRUMENT-FIRST (Fedi round 3): attach a read-only probe to each leg so
+    // the on-device debug card can show why a leg came back empty — relays
+    // answered EOSE-empty (wrong query key) vs timed out with no frames
+    // (blocked transport). Observational only; see discovery-diagnostics.ts.
+    const authoredProbe = new FetchProbe("authored", `authors:${short}… kinds:${kindsLabel}`);
+    const taggedProbe = new FetchProbe("tagged", `#p:${short}… kinds:${kindsLabel}`);
+    const [authored, tagged] = await Promise.all([
+      this.relayManager.fetchOnce({ kinds, authors: [pubkey] }, timeoutMs, authoredProbe).catch(() => [] as NostrEvent[]),
+      this.relayManager.fetchOnce({ kinds, "#p": [pubkey] }, timeoutMs, taggedProbe).catch(() => [] as NostrEvent[]),
+    ]);
+    const ids = new Set<string>();
+    for (const ev of [...authored, ...tagged]) {
+      const id = ev.tags.find(t => t[0] === TAGS.ESCROW_ID)?.[1];
+      if (id) ids.add(id);
+    }
+    recordDiscoveryRun({
+      at: Date.now(),
+      queriedPubkey: pubkey,
+      legs: [authoredProbe.snapshot(authored.length), taggedProbe.snapshot(tagged.length)],
+      idsDiscovered: ids.size,
+      eventsFetched: authored.length + tagged.length,
+    });
+    console.debug(
+      `[escrow] discoverMyEscrowIds ${short}…: ${ids.size} ids ` +
+        `(${authored.length} authored + ${tagged.length} tagged events)`,
+    );
+    return [...ids];
+  }
+
+  /**
+   * INSTRUMENT-FIRST (Fedi round 3): pubkey-INDEPENDENT transport control.
+   * Fetch one known escrow's full chain by `#d` — the exact same `fetchOnce`
+   * path discovery uses, but filtered by escrow id instead of pubkey — and
+   * return the probe anatomy (per-relay REQ/EVENT/EOSE + resolvedBy). This
+   * cross-checks the discovery reading WITHOUT touching the signer:
+   *   • events come back  → transport works → an empty discovery is a wrong
+   *                          query key (candidate 1).
+   *   • times out empty   → transport is blocked (candidate 2), confirmed
+   *                          with no dependence on which pubkey we hold.
+   * The fetched events are discarded; only the probe matters.
+   */
+  async probeFetchById(escrowId: string, timeoutMs = 8_000): Promise<FetchLegDiag> {
+    const kinds = Object.values(EscrowEventKind).filter(v => typeof v === "number") as number[];
+    const kindsLabel = `${Math.min(...kinds)}-${Math.max(...kinds)}`;
+    const probe = new FetchProbe(`#d ${escrowId}`, `#d:${escrowId} kinds:${kindsLabel}`);
+    const events = await this.relayManager
+      .fetchOnce({ kinds, "#d": [escrowId] }, timeoutMs, probe)
+      .catch(() => [] as NostrEvent[]);
+    return probe.snapshot(events.length);
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // USER ACTIONS — One method per thing the UI can do
   // ══════════════════════════════════════════════════════════════════════════
@@ -485,6 +568,11 @@ export class EscrowClient {
         // `#parent` tag so Browse can fan out one relay filter to fetch all of
         // a listing's children and derive remaining stock.
         ...(params.parent ? [[TAGS.PARENT, params.parent]] : []),
+        // Discovery (v3.x): a child purchase seats the parent's seller without
+        // the seller authoring this CREATE — tag them `#p` so the trade is
+        // relay-discoverable from the seller's side (discoverMyEscrowIds)
+        // before they ever act on it. Additive; replay ignores this tag.
+        ...(params.sellerPubkey ? [[TAGS.PARTICIPANT, params.sellerPubkey]] : []),
       ],
       content,
     };
@@ -742,6 +830,20 @@ export class EscrowClient {
     // as DEV mode behavior, now correct in PROD mode too.
     const content = JSON.stringify(wirePayload);
 
+    // Additive (v3.x) discovery tags: list every seated participant as a `#p`
+    // so an npub's trades are relay-discoverable (discoverMyEscrowIds) even for
+    // a passively-seated party — most importantly the ARBITER, who otherwise
+    // never authors an event until a dispute and so would be invisible to an
+    // `authors:` query. Consensus-safe: replay reads buyer/seller/arbiter from
+    // the LOCK payload, never from these tags, and old clients ignore them.
+    const lockParticipantTags = [
+      ...new Set(
+        [params.buyerPubkey, state.participants.seller, params.arbiterPubkey].filter(
+          (pk): pk is string => typeof pk === "string" && /^[0-9a-f]{64}$/.test(pk),
+        ),
+      ),
+    ].map(pk => [TAGS.PARTICIPANT, pk]);
+
     const unsigned: UnsignedEvent = {
       kind: EscrowEventKind.LOCK,
       created_at: now,
@@ -749,6 +851,7 @@ export class EscrowClient {
         [TAGS.ESCROW_ID, escrowId],
         [TAGS.PREV_EVENT, lastEventId, "", "reply"],
         [TAGS.TYPE, "escrow:lock"],
+        ...lockParticipantTags,
       ],
       content,
     };
@@ -1309,7 +1412,7 @@ export class EscrowClient {
   }
 
   /** Fetch and reconstruct full escrow state from relays */
-  async loadEscrow(escrowId: string): Promise<EscrowState | null> {
+  async loadEscrow(escrowId: string, opts?: { completenessAttempt?: number }): Promise<EscrowState | null> {
     const current = this.states.get(escrowId);
     const fetchedRawEvents = await this.relayManager.fetchEscrowEvents(escrowId);
     const cachedRawEvents = mergeRawEventsById(
@@ -1388,6 +1491,31 @@ export class EscrowClient {
       return null;
     }
     console.debug(`[escrow] loadEscrow ${escrowId}: replay OK — state is ${result.state.status}`);
+
+    // Completeness retry (webview truncation cure). If a replay lands NON-
+    // truly-terminal (anything but COMPLETED/CANCELLED), the resolve/complete
+    // tail may have been dropped by a truncated/contended fetch — the Fedi
+    // webview's WS subscription cap makes concurrent #d fetches come back
+    // partial. Re-fetch and replay the union. We fire REGARDLESS of relay-count
+    // change: in the webview every relay is already connected, so the old "more
+    // relays online now" gate never held and the cure never ran. Bounded to
+    // COMPLETENESS_MAX_ATTEMPTS re-fetches so a genuinely non-terminal trade
+    // (a real LOCKED/EXPIRED) doesn't loop. Truly-terminal states never retry.
+    const isTrulyTerminal =
+      result.state.status === EscrowStatus.COMPLETED ||
+      result.state.status === EscrowStatus.CANCELLED;
+    const completenessAttempt = opts?.completenessAttempt ?? 0;
+    if (!isTrulyTerminal && completenessAttempt < COMPLETENESS_MAX_ATTEMPTS) {
+      console.debug(
+        `[escrow] loadEscrow ${escrowId}: non-terminal (${result.state.status}) — ` +
+          `completeness retry ${completenessAttempt + 1}/${COMPLETENESS_MAX_ATTEMPTS}`,
+      );
+      // Carry forward what we just fetched so the retry replays the union.
+      const merged = new Map((this.rawEvents.get(escrowId) ?? []).map(e => [e.id, e]));
+      for (const e of rawEvents) merged.set(e.id, e);
+      this.rawEvents.set(escrowId, [...merged.values()]);
+      return this.loadEscrow(escrowId, { completenessAttempt: completenessAttempt + 1 });
+    }
 
     if (isPartialReplayDowngrade(current, result.state)) {
       const known = new Map((this.rawEvents.get(escrowId) ?? []).map(event => [event.id, event]));
