@@ -73,5 +73,21 @@ if [ "$CHAMA_TAURI_BRIDGE_PORT" -gt 65535 ]; then
 fi
 export CHAMA_TAURI_BRIDGE_PORT
 
+# Pre-flight cleanup: free THIS instance's OWN ports if a previous run left them
+# held — a crash (the bridge AddrInUse panic), or closing the window without
+# Cmd+Q. Tauri's `beforeDevCommand` vite child also orphans on a Rust-side panic.
+# We only ever touch this instance's vite + bridge ports, never another
+# instance's, so it's safe to run all three windows in parallel.
+for p in "$PORT" "$CHAMA_TAURI_BRIDGE_PORT"; do
+  pids=$(lsof -ti "tcp:$p" 2>/dev/null || true)
+  if [ -n "$pids" ]; then
+    echo "  ⟲ freeing stale port :$p (was held by pid $pids)"
+    kill $pids 2>/dev/null || true
+    sleep 0.4
+    pids=$(lsof -ti "tcp:$p" 2>/dev/null || true)
+    [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
+  fi
+done
+
 echo "▶ Chama [${LABEL}] → http://localhost:${PORT} · bridge :${CHAMA_TAURI_BRIDGE_PORT} · session '${LABEL}'  (persistent, fixed ports)"
 exec npm run tauri:dev -- --config "${CONFIG}"

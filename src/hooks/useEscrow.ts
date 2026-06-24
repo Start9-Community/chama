@@ -9,6 +9,16 @@ const MAX_SAVED_ESCROW_IDS = 50;
 // A slow webview brings relays up staggered; the timer resets on each new
 // connection, so a burst coalesces into ONE re-discovery once things settle.
 const RELAY_GROWTH_DEBOUNCE_MS = 1_500;
+// Soft-gate readiness wait (relay-connect resilience). A user action that lands
+// during the connect→init handshake window waits this long for ≥1 relay (and a
+// signer) instead of hard-failing with "Not connected"; if it never goes ready
+// the action surfaces a retriable error rather than a dead-end.
+const READY_WAIT_MS = 5_000;
+const READY_POLL_MS = 250;
+// Fund moves sats — a slightly longer in-window wait covers a wallet that is
+// finishing (re)join, but on timeout we STILL fail (fresh tap required); we
+// never queue a deferred payment. One tap = one intent.
+const FUND_READY_WAIT_MS = 6_000;
 const FEDIMINT_WALLET_NOT_READY =
   "Chama wallet disconnected. Tap Reconnect and try again.";
 const FEDI_ECASH_UNAVAILABLE =
@@ -122,6 +132,10 @@ import {
   isTestnetMode,
   resetLocalFedimintWallet,
   drainPendingRedemptions,
+  stashPendingFunding,
+  clearPendingFunding,
+  drainPendingFundings,
+  hashNotes,
   checkAndMaybeRepublishSeed,
   getActiveInvite,
   setActiveInvite,
@@ -131,6 +145,7 @@ import {
   deriveCreateFedTags,
   effectiveCreateFederationId,
   generateFediEcash,
+  receiveFediEcash,
   hasFediInternalEcash,
   hasFediInternalGenerateEcash,
 } from "../fedimint/index.js";
@@ -142,6 +157,7 @@ import {
   recordPayoutSubmitted,
   markPayoutSettled,
   clearPayoutRecord,
+  assertPayoutJournalWritable,
 } from "../payments/payout-journal.js";
 import {
   getUserCommunitySlug,
@@ -167,7 +183,7 @@ import {
   buildArbiterApplicationEvent,
   collectArbiterApplications,
 } from "../arbiters/applications.js";
-import { maybeNotifyTransition } from "../notifications/notify-service.js";
+import { maybeNotifyTransition, maybeNotifyChatMessage } from "../notifications/notify-service.js";
 import {
   RATING_KIND,
   buildRatingEvent,
@@ -565,6 +581,9 @@ export interface UseEscrowActions {
   connect: () => Promise<void>;
   /** Disconnect from relays */
   disconnect: () => void;
+  /** Force-reconnect backed-off/abandoned relays and re-arm My-Trades
+   *  discovery — the recovery lever behind the in-app "Reconnect" control. */
+  recoverRelays: () => void;
   /** Create a new escrow trade */
   createEscrow: (params: {
     description: string;
@@ -1112,6 +1131,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // can't re-add a ghost the user forgot on a prior run.
       forgottenIdsRef.current = new Set(getForgottenEscrowIds(pubkey));
 
+      // When this signed-in session went live. Inbound chat older than this is
+      // backlog (cold-boot / heal replay) and must stay silent; only messages
+      // arriving live buzz — the analogue of the transition core's prev-must-be-
+      // non-null guard, for a stream that has no "prev".
+      const chatNotifyLiveSince = Math.floor(Date.now() / 1000);
+
       const callbacks: EscrowClientCallbacks = {
         onStateUpdate: (id, s) => updateEscrow(id, s),
         onChatMessage: (id, msg) => {
@@ -1119,6 +1144,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           // Force React re-render with the updated chatMessages.
           updateEscrow(id, client.getState(id)!);
           vibrate([20, 30, 20]);
+          // OS-buzz the inbound message per the DM preference (auto = arbiters
+          // only). The pure decision + delivery live in notify-service.
+          const s = client.getState(id);
+          if (s) maybeNotifyChatMessage(s, msg, pubkey, chatNotifyLiveSince);
         },
         onValidationError: (id, error, eventId) => {
           console.debug(`[escrow] Validation error on ${id}: ${error} (event: ${eventId})`);
@@ -1436,11 +1465,99 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // ── Trade actions ───────────────────────────────────────────────────────
 
   const requireClient = (): EscrowClient => {
-    if (!clientRef.current) throw new Error("Not connected — call connect() first");
+    if (!clientRef.current) {
+      // Tag the throw so callers can tell a transient handshake window
+      // (connect() dispatched, sockets still coming up) apart from a genuine
+      // signed-out state, and show "Connecting…/retry" vs a dead-end. The
+      // message is unchanged so existing string-based catches still match.
+      const err: any = new Error("Not connected — call connect() first");
+      err.code = stateRef.current?.loading ? "RELAYS_CONNECTING" : "NOT_CONNECTED";
+      throw err;
+    }
     return clientRef.current;
   };
 
+  // ── Readiness gates (relay-connect resilience) ──────────────────────────
+  // "Ready" = a live client + signer + ≥1 actually-open relay. We read the
+  // client's live relayManager (not React state) to avoid the connected-flips-
+  // -true-synchronously skew the init path documents.
+  const isRelayReady = (): boolean => {
+    const client: any = clientRef.current;
+    if (!client || !signerRef.current) return false;
+    try {
+      const connected = [...client.relayManager.relays.values()]
+        .filter((r: any) => r.status === "connected").length;
+      return connected >= 1;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Resolve once the relay layer is usable, or after `waitMs`. Returns true if
+   * ready. When not ready and a client exists, fires a one-shot forceReconnectAll
+   * to expedite recovery of any backed-off/abandoned relays, then polls. With no
+   * client/signer at all (signed out) it returns false immediately — waiting
+   * can't help. This is the soft-gate behind Create/Join: never a dead-end throw
+   * during the handshake window.
+   */
+  const ensureRelayReady = async (waitMs = READY_WAIT_MS): Promise<boolean> => {
+    if (isRelayReady()) return true;
+    if (!clientRef.current || !signerRef.current) return false;
+    try { clientRef.current.forceReconnectAll(); } catch {}
+    let waited = 0;
+    while (waited < waitMs) {
+      await new Promise(r => setTimeout(r, READY_POLL_MS));
+      waited += READY_POLL_MS;
+      if (isRelayReady()) return true;
+    }
+    return isRelayReady();
+  };
+
+  /**
+   * Wait (bounded) for the Fedimint wallet to be init+joined. Funding can't run
+   * without it; init in turn needs relays, so we nudge the relay layer once.
+   * On timeout the caller STILL fails (no deferred payment) — one tap = one
+   * intent — but if the wallet finished (re)joining inside the window, the
+   * original Fund tap proceeds.
+   */
+  const ensureFedimintReady = async (waitMs = FUND_READY_WAIT_MS): Promise<boolean> => {
+    const ok = () => {
+      const f = fedimintRef.current;
+      return !!(f && f.isInitialized() && f.isJoined());
+    };
+    if (ok()) return true;
+    try { clientRef.current?.forceReconnectAll(); } catch {}
+    let waited = 0;
+    while (waited < waitMs) {
+      await new Promise(r => setTimeout(r, READY_POLL_MS));
+      waited += READY_POLL_MS;
+      if (ok()) return true;
+    }
+    return ok();
+  };
+
+  /**
+   * Explicit recovery lever for the in-app "Reconnect" control. Re-probes every
+   * backed-off/abandoned relay (the per-relay backoff gives up after
+   * MAX_RETRY_COUNT and won't recover on its own), and re-arms My-Trades
+   * discovery (whose growth gate latches a high-water mark) so the resulting
+   * reconnects reload each trade's chain + chat.
+   */
+  const recoverRelays = useCallback(() => {
+    try { clientRef.current?.forceReconnectAll(); } catch {}
+    lastDiscoveryRelayCountRef.current = 0;
+  }, []);
+
   const createEscrow = useCallback(async (params: Parameters<EscrowClient["createEscrow"]>[0]) => {
+    // Soft-gate (relay resilience): if relays are still handshaking, wait briefly
+    // and auto-retry instead of dead-ending with "Not connected". Instant when
+    // already ready. Create moves no sats, so proceeding once ready is safe.
+    if (!(await ensureRelayReady())) {
+      const err: any = new Error("Couldn't reach the network — check your connection and try again.");
+      err.code = clientRef.current ? "RELAYS_CONNECTING" : "NOT_CONNECTED";
+      throw err;
+    }
     const client = requireClient();
 
     // v0.4.4: CREATE no longer probes the federation. Pillar 2.3
@@ -1484,6 +1601,14 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     role: Role,
     opts: { selectedItems?: SelectedMenuItem[]; amountMsats?: number; orderFinalized?: boolean } = {},
   ) => {
+    // Soft-gate (relay resilience): wait briefly for the relay handshake rather
+    // than dead-ending. JOIN itself moves no sats (the fund step does), so
+    // proceeding once ready on the user's tap is safe.
+    if (!(await ensureRelayReady())) {
+      const err: any = new Error("Couldn't reach the network — check your connection and try again.");
+      err.code = clientRef.current ? "RELAYS_CONNECTING" : "NOT_CONNECTED";
+      throw err;
+    }
     const client = requireClient();
 
     // v0.4.4 federation gate (fed-ID equality) ─────────────────────────
@@ -2067,7 +2192,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     options?: { force?: boolean; persistCustom?: boolean },
   ) => {
     if (!clientRef.current || !signerRef.current) {
-      throw new Error("Connect to relays before initializing Fedimint");
+      // Tag so the auto-init re-arm and the UI can distinguish a transient
+      // handshake/session-restore window (retry) from a true signed-out state.
+      const err: any = new Error("Connect to relays before initializing Fedimint");
+      err.code = !clientRef.current
+        ? (stateRef.current?.loading ? "RELAYS_CONNECTING" : "NOT_CONNECTED")
+        : "SIGNER_NOT_READY";
+      throw err;
     }
 
     const force = options?.force === true;
@@ -2356,6 +2487,15 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // throw outside the per-entry try blocks.
       drainPendingRedemptions(fedimint).catch((e) =>
         console.warn("[chama] pending-redemption drain error:", e)
+      );
+
+      // Re-absorb any Fedi funding notes stranded mid-lock (the fund-loss
+      // mirror of the redemption drain): a prior session that spent ecash out
+      // of Fedi but died before the LOCK published left bearer notes in the
+      // funding stash. No-ops outside a Fedi runtime. Fire-and-forget;
+      // onBalanceUpdate reflects Fedi balance as notes land.
+      drainPendingFundings().catch((e) =>
+        console.warn("[chama] pending-funding drain error:", e)
       );
 
       // v0.1.69: Seed health check + staleness republish.
@@ -2744,6 +2884,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       signal?: AbortSignal;
     },
   ): Promise<import("../payments/fund-and-lock.js").FundAndLockTerminal> => {
+    // Fund moves sats, so honor "one tap = one intent": if the wallet isn't
+    // ready yet (e.g. relays/init still settling), wait a bounded window on THIS
+    // tap and proceed if it becomes ready — but never queue a deferred payment.
+    // On timeout we fail safe below (fresh tap required). ensureFedimintReady is
+    // instant when already ready, so the happy path pays no penalty.
+    await ensureFedimintReady();
     const fedimint = fedimintRef.current;
     if (!fedimint || !fedimint.isInitialized() || !fedimint.isJoined()) {
       markFedimintWalletNotReady();
@@ -2794,26 +2940,37 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       : { ...prev, fundingInProgress: true });
     try {
       if (hasFediInternalGenerateEcash()) {
-        opts.onPhase({ kind: "requesting-fedi-ecash" });
-        await requireBridge().preflightLock(escrowId);
-        let notes: string;
-        try {
-          ({ notes } = await generateFediEcash(opts.amountMsats, opts.description));
-        } catch (error) {
-          throw new Error(`Fedi ecash funding failed: ${describeError(error, "Fedi wallet did not return ecash.")}`);
-        }
-        if (opts.signal?.aborted) {
-          opts.onPhase({ kind: "aborted" });
-          return { kind: "aborted" };
-        }
-        opts.onPhase({ kind: "fedi-ecash-created" });
-        opts.onPhase({ kind: "locking" });
-        await lockAndPublishWithEcashAction(escrowId, notes, {
+        // Fedi Mini-App funding is atomic via stash + re-absorb: ecash spent
+        // out of Fedi is committed only once the LOCK publishes with our
+        // notesHash; abort, lock-throw, racing tab, reload, or crash all
+        // refund. See src/payments/fedi-fund-and-lock.ts. (Native is immune —
+        // createEscrowLock spends + SSS-splits atomically inside the SDK.)
+        const { runFediFundAndLock } = await import("../payments/fedi-fund-and-lock.js");
+        return await runFediFundAndLock({
+          escrowId,
+          amountMsats: opts.amountMsats,
+          description: opts.description,
           savedHandleId: opts.savedHandleId,
           selectedItems: opts.selectedItems,
+          onPhase: opts.onPhase,
+          signal: opts.signal,
+          preflight: (id) => requireBridge().preflightLock(id),
+          generateEcash: (amountMsats, memo) => generateFediEcash(amountMsats, memo),
+          // Re-absorb WITHOUT expectedMsats — re-absorbing the exact notes we
+          // generated is exact, and passing it risks a receive-then-throw that
+          // would double-attempt an already-consumed note on the boot drain.
+          receiveEcash: (notes) => receiveFediEcash(notes),
+          stashFunding: stashPendingFunding,
+          clearFunding: clearPendingFunding,
+          hashNotes,
+          // lockAndPublishWithEcashAction keeps the stale-suppression swallow
+          // (returns state, no throw, on "Cannot LOCK"/"TERMINAL"); we surface
+          // the committed notesHash so the orchestrator confirms OUR lock.
+          lockAndPublish: async (id, notes, lockOpts) => {
+            const state = await lockAndPublishWithEcashAction(id, notes, lockOpts);
+            return { lockedNotesHash: state?.lock?.notesHash ?? null };
+          },
         });
-        opts.onPhase({ kind: "locked" });
-        return { kind: "locked" };
       }
 
       if (opts.fundingMethod === "onchain") {
@@ -3144,6 +3301,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         recordPayoutSubmitted,
         markPayoutSettled,
         clearPayoutRecord,
+        assertPayoutJournalWritable,
         awaitPayoutOutcome: (operationId: string) =>
           bridge.awaitPayoutOutcome(operationId),
         payOnchain: async (grossAmountSats: number) => {
@@ -3194,6 +3352,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   const actions: UseEscrowActions = {
     connect,
     disconnect,
+    recoverRelays,
     createEscrow,
     joinEscrow,
     lockAndPublish: lockAndPublishAction,

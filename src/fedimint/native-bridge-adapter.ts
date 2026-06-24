@@ -16,6 +16,11 @@ import type {
 } from "./fedimint-client.js";
 import { hasBolt11Amount } from "../payments/bolt11.js";
 import type { ChamaOperationMeta } from "../payments/sats-trace.js";
+import {
+  LN_PAY_INFLIGHT,
+  LN_PAY_REFUNDED,
+  codedPayError,
+} from "../payments/ln-pay-codes.js";
 
 export const NATIVE_BRIDGE_MODE_KEY = "chama_native_fedimint";
 export const NATIVE_BRIDGE_URL_KEY = "chama_native_fedimint_url";
@@ -25,12 +30,17 @@ export const DEFAULT_NATIVE_BRIDGE_URL = "http://127.0.0.1:8787";
 export const DEFAULT_NATIVE_BRIDGE_COMMUNITY = "us-blf";
 
 const TRUE_SETTING_VALUES = new Set(["1", "true", "yes", "on"]);
-const REQUIRED_NATIVE_BRIDGE_CAPABILITIES = ["reset", "idempotent_join"];
+const REQUIRED_NATIVE_BRIDGE_CAPABILITIES = [
+  "reset",
+  "idempotent_join",
+  "effective_iroh_config",
+];
 const NATIVE_BRIDGE_READY_RETRY_DELAYS_MS = [0, 250, 500, 1000, 1500, 2500];
 const NATIVE_BRIDGE_HEALTH_TIMEOUT_MS = 5_000;
 const NATIVE_BRIDGE_RESET_TIMEOUT_MS = 10_000;
 const NATIVE_BRIDGE_INFO_TIMEOUT_MS = 20_000;
-const NATIVE_BRIDGE_JOIN_TIMEOUT_MS = 50_000;
+const NATIVE_BRIDGE_JOIN_TIMEOUT_MS = 105_000;
+const NATIVE_BRIDGE_JOIN_RETRY_DELAYS_MS = [0, 1500, 4000];
 
 interface NativeBridgeFetchInit extends Omit<RequestInit, "body"> {
   body?: unknown;
@@ -49,6 +59,10 @@ interface NativeHealthResponse {
   joined?: boolean;
   api_version?: number;
   apiVersion?: number;
+  join_timeout_secs?: number;
+  joinTimeoutSecs?: number;
+  iroh?: unknown;
+  discovery?: unknown;
   capabilities?: string[];
 }
 
@@ -96,9 +110,15 @@ interface NativeAwaitInvoiceResponse {
 }
 
 interface NativePayResponse {
+  // #9 Part 3: /pay and /pay-outcome return a discriminated outcome. `settled`
+  // = sats left successfully; `refunded` = sats came back (safe to re-pay);
+  // `inflight` = submitted but unknown (NEVER blindly re-pay — reconcile).
+  status?: "settled" | "refunded" | "inflight";
   operation_id?: string;
   operationId?: string;
   fee_msat?: number;
+  preimage?: string;
+  error?: string;
 }
 
 interface NativeOnchainInfoResponse {
@@ -330,6 +350,45 @@ function nativeBridgeTimeoutError(
   return error;
 }
 
+function isNativeJoinDiscoveryError(error: unknown): boolean {
+  if (
+    hasChamaDiagnostics(error) &&
+    error.chamaDiagnostics.issue === "native_fedimint_bridge_timeout" &&
+    error.chamaDiagnostics.path === "/join"
+  ) {
+    return true;
+  }
+
+  const message = asErrorMessage(error);
+  return (
+    /timed out joining federation|deadline has elapsed|failed to preview federation invite|iroh|pkarr|discovery/i.test(message)
+  );
+}
+
+function nativeBridgeJoinDiscoveryError(
+  baseUrl: string,
+  cause: unknown,
+  attempts: number,
+): Error {
+  const diagnostic = {
+    issue: "native_fedimint_join_discovery_failed",
+    adapter: "native-rust-sidecar",
+    bridgeUrl: baseUrl,
+    path: "/join",
+    attempts,
+    cause: asErrorMessage(cause),
+    interpretation:
+      "The native Rust bridge could not resolve or reach a guardian while joining. " +
+      "Existing wallets may still open; this is the fresh-join discovery path.",
+  };
+  const error = new Error(
+    "Couldn't reach this federation yet. Chama retried the native Fedimint join; tap Reconnect to try again.",
+  );
+  (error as Error & { chamaDiagnostics?: Record<string, unknown> }).chamaDiagnostics =
+    diagnostic;
+  return error;
+}
+
 function hasChamaDiagnostics(
   error: unknown,
 ): error is Error & { chamaDiagnostics: Record<string, unknown> } {
@@ -551,11 +610,42 @@ export class NativeBridgeWallet implements IFedimintWallet {
 
   async joinFederation(inviteCode: string): Promise<void> {
     await assertNativeBridgeCompatible(this.baseUrl);
-    const joined = await this.request<NativeJoinResponse>("/join", {
-      method: "POST",
-      body: { inviteCode },
-      timeoutMs: NATIVE_BRIDGE_JOIN_TIMEOUT_MS,
-    });
+    let joined: NativeJoinResponse | null = null;
+    let lastJoinError: unknown = null;
+
+    for (let attempt = 0; attempt < NATIVE_BRIDGE_JOIN_RETRY_DELAYS_MS.length; attempt++) {
+      const delayMs = NATIVE_BRIDGE_JOIN_RETRY_DELAYS_MS[attempt] ?? 0;
+      if (delayMs > 0) await sleepMs(delayMs);
+
+      try {
+        joined = await this.request<NativeJoinResponse>("/join", {
+          method: "POST",
+          body: { inviteCode },
+          timeoutMs: NATIVE_BRIDGE_JOIN_TIMEOUT_MS,
+        });
+        break;
+      } catch (error) {
+        lastJoinError = error;
+        if (!isNativeJoinDiscoveryError(error)) {
+          throw error;
+        }
+        if (attempt < NATIVE_BRIDGE_JOIN_RETRY_DELAYS_MS.length - 1) {
+          console.warn(
+            `[chama] Couldn't reach native federation yet; retrying join (${attempt + 2}/${NATIVE_BRIDGE_JOIN_RETRY_DELAYS_MS.length})`,
+            error,
+          );
+        }
+      }
+    }
+
+    if (!joined) {
+      throw nativeBridgeJoinDiscoveryError(
+        this.baseUrl,
+        lastJoinError,
+        NATIVE_BRIDGE_JOIN_RETRY_DELAYS_MS.length,
+      );
+    }
+
     this.openState = true;
     this.federationId = joined.federation_id;
     this.rememberInviteCode(joined.joined || inviteCode);
@@ -662,18 +752,87 @@ export class NativeBridgeWallet implements IFedimintWallet {
         ? Math.floor(meta.chama_amount_msats)
         : undefined;
       const shouldSendAmount = !!amountMsats && amountMsats > 0 && !hasBolt11Amount(bolt11);
-      const result = await this.request<NativePayResponse>("/pay", {
-        method: "POST",
-        body: {
-          paymentInfo: bolt11,
-          ...(shouldSendAmount ? { amountMsats } : {}),
-          noWait: false,
-        },
-      });
+      let result: NativePayResponse;
+      try {
+        result = await this.request<NativePayResponse>("/pay", {
+          method: "POST",
+          body: {
+            paymentInfo: bolt11,
+            ...(shouldSendAmount ? { amountMsats } : {}),
+            noWait: false,
+          },
+        });
+      } catch (error) {
+        // #9 Part 3: the bridge commits the outgoing contract BEFORE it returns,
+        // so a LOST /pay response is ambiguous — the payment may already be in
+        // flight. A transport failure (bridge killed/restarted mid-send, socket
+        // dropped) carries chamaDiagnostics and MUST map to INFLIGHT so the claim
+        // guard journals it and refuses to re-pay (no double-send). A bridge that
+        // RESPONDED with an error (non-2xx, no chamaDiagnostics) is always a
+        // pre-send failure here — nothing was committed — so it stays a re-payable
+        // throw. ("kill the await after send" must not double-pay.)
+        if (hasChamaDiagnostics(error)) {
+          throw codedPayError(
+            "Lightning payout was sent to the bridge but the response was lost — it may be in flight. Not retrying to avoid a double payment; it will reconcile.",
+            LN_PAY_INFLIGHT,
+          );
+        }
+        throw error;
+      }
       await this.refreshBalance().catch((error) => {
         console.warn("[chama] native bridge balance refresh after LN pay failed:", error);
       });
-      return { operationId: readOperationId(result) };
+      const operationId = readOperationId(result);
+      // #9 Part 3: discriminate the bridge's outcome so the claim guard can tell
+      // a successful payout from a refund (sats back, safe to re-pay) from an
+      // ambiguous submitted-but-unknown one (NEVER blindly re-pay). A pre-send
+      // failure never reaches here — it throws in `request()` on a non-2xx and is
+      // treated as safe-to-retry. Only a confirmed `settled` resolves.
+      if (result.status === "settled") {
+        return { operationId };
+      }
+      if (result.status === "refunded") {
+        // The outgoing contract was refunded — the sats are back in the wallet,
+        // so a fresh pay is correct (not a double-send).
+        throw codedPayError(
+          result.error || "Lightning payment was refunded — your sats are back in your wallet.",
+          LN_PAY_REFUNDED,
+          operationId,
+        );
+      }
+      // `inflight` (or any unrecognized/legacy status): the payment was submitted
+      // but its outcome is unknown. unknown ⇒ INFLIGHT so the claim guard journals
+      // it `submitted` and re-attaches via `awaitPayOutcome` instead of re-paying.
+      throw codedPayError(
+        "Lightning payment was submitted but hasn't confirmed yet. Your sats are still in your Chama wallet if it refunds.",
+        LN_PAY_INFLIGHT,
+        operationId,
+      );
+    },
+
+    // #9 Part 3 double-pay guard: re-attach to a previously-submitted payout via
+    // the bridge's /pay-outcome reconcile endpoint and report its TRUE terminal
+    // outcome, without ever paying again. "settled" (preimage), "refunded"
+    // (confirmed ⇒ retry-safe), or "unknown" (still in flight / unresolved ⇒ keep
+    // the submitted record, do not re-pay).
+    awaitPayOutcome: async (
+      operationId: string,
+    ): Promise<"settled" | "refunded" | "unknown"> => {
+      await this.ensureBridgeReady();
+      let result: NativePayResponse;
+      try {
+        result = await this.request<NativePayResponse>("/pay-outcome", {
+          method: "POST",
+          body: { operationId },
+        });
+      } catch (error) {
+        // Reconcile failed/unreachable ⇒ unknown (refuse re-pay).
+        console.warn("[chama] native bridge /pay-outcome reconcile failed:", error);
+        return "unknown";
+      }
+      if (result.status === "settled") return "settled";
+      if (result.status === "refunded") return "refunded";
+      return "unknown";
     },
   };
 

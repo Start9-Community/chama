@@ -25,8 +25,8 @@
 // the same terminal with an updated error message. Avoids the confusing
 // "tapped Try again, got same error instantly" UX (Pillar 2.7).
 
-import { useEffect, useRef, useState } from "react";
-import { T } from "../theme.js";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { T, inputStyle } from "../theme.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
@@ -46,6 +46,19 @@ import {
   type ExternalSwapMatch,
   type ExternalSwapProvider,
 } from "../../payments/external-swap-registry.js";
+import {
+  buildTandoLightningAddress,
+  formatKenyanMsisdnDisplay,
+  isKenyaPayoutContext,
+  isTandoLightningAddress,
+  normalizeKenyanMsisdn,
+  tandoMsisdnFromAddress,
+  TANDO_LNADDRESS_DOMAIN,
+} from "../../payments/tando-offramp.js";
+import { resolveLightningAddressToInvoice, LnurlError } from "../../payments/lnurl.js";
+import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
+import { useFiatRates } from "../hooks/useFiatRates.js";
+import { formatEstimatedFiatForMsats } from "../amount-display.js";
 import { humanizeNwcError, resolveNwcConnectionToInvoice } from "../../payments/nwc.js";
 import type {
   ClaimAndPayoutPhase,
@@ -107,15 +120,14 @@ type Stage =
   | { kind: "running"; phase: ClaimAndPayoutPhase }
   | { kind: "terminal"; terminal: ClaimAndPayoutTerminal };
 
-// v1.2.4: the picker dispatches into Lightning (direct payout), Onchain
-// (onchain payout), or an external swap provider drawn from the unified
-// `external-swap-registry.ts`. Banxaas / Chapsmart / Bitika / Tando /
-// Pilot / Bitzed are no longer special-cased — each is one entry in the
-// registry, surfaced as a button in the chooser when the trade context
-// matches.
+// The picker dispatches into Lightning (direct payout), Onchain (onchain
+// payout), Tando (native one-tap M-Pesa offramp — a LUD-16 Lightning
+// Address, NOT a redirect), or an external offramp-redirect provider drawn
+// from `external-swap-registry.ts` (Banxaas / Chapsmart / Bitika / Bitzed).
 type PayoutMethod =
   | { kind: "lightning" }
   | { kind: "onchain" }
+  | { kind: "tando" }
   | { kind: "external"; match: ExternalSwapMatch };
 
 /** Stashed dispatch arguments from the initial picker resolve. Used by
@@ -154,19 +166,30 @@ export function ClaimPayoutModal({
   // Try-again so the retry uses the exact same destination/save
   // semantics as the original attempt.
   const lastDispatchRef = useRef<DispatchArgs | null>(null);
-  // v1.2.4: all external swap providers resolve through the unified
-  // registry. Banxaas / Chapsmart / Bitika / Tando / Pilot / Bitzed
-  // each have one or more entries; the picker surfaces every match
-  // for the current trade context and the user picks which to use.
-  // Hard-gating on post-CLAIM state happens at the dispatching modal's
-  // mount boundary (this modal only opens after a CLAIM is in flight),
-  // so by the time we render here the user already has authority over
-  // the sats and external offramps are safe to offer.
-  const externalSwaps = EXTERNAL_SWAPS_ENABLED ? getExternalSwapsForContext({
-    homeCommunity,
-    tradeCommunity,
-    fiatCurrency,
-  }) : [];
+  // External offramp redirects (Banxaas / Chapsmart / Bitika / Bitzed)
+  // resolve through the registry. Hard-gating on post-CLAIM state happens
+  // at the dispatching modal's mount boundary (this modal only opens after
+  // a CLAIM is in flight), so by the time we render here the user already
+  // has authority over the sats and external offramps are safe to offer.
+  // Dedupe to one card per provider: Bitika is registered for both ke-kes
+  // and ke-kes-bitsacco, so a Kenyan claim can match it twice (e.g. trade
+  // ke-kes + home ke-kes-bitsacco, or the KES currency fallback). The list
+  // is already sorted by reason/recommended, so keep the first match per id.
+  const externalSwaps = (() => {
+    if (!EXTERNAL_SWAPS_ENABLED) return [];
+    const matches = getExternalSwapsForContext({ homeCommunity, tradeCommunity, fiatCurrency });
+    const seen = new Set<string>();
+    return matches.filter((m) => {
+      if (seen.has(m.provider.id)) return false;
+      seen.add(m.provider.id);
+      return true;
+    });
+  })();
+  // Tando is Kenya's lead cash-out: a native one-tap M-Pesa offramp via the
+  // LUD-16 Lightning-Address payout path (`<phone>@bitcoin.co.ke`). It is
+  // NOT a redirect and does NOT gate on EXTERNAL_SWAPS_ENABLED — it rides
+  // the same payInvoice journal/double-pay guard as any other claim.
+  const tandoEligible = isKenyaPayoutContext({ homeCommunity, tradeCommunity, fiatCurrency });
 
   // Common dispatch helper — used by both the picker's first resolve
   // and the terminal retry path. Updates stage transitions and
@@ -321,9 +344,24 @@ export function ClaimPayoutModal({
         <ClaimMethodChooser
           payoutSats={payoutSats}
           externalSwaps={externalSwaps}
+          tandoEligible={tandoEligible}
           savedNwcConnections={savedNwcConnections}
           onSelect={setPayoutMethod}
           onSelectSavedNwc={dispatchSavedNwcClaim}
+          onCancel={() => onClose(undefined)}
+        />
+      );
+    }
+
+    if (payoutMethod.kind === "tando") {
+      return (
+        <TandoMpesaPicker
+          payoutSats={payoutSats}
+          reserveSats={reserveSats}
+          savedDestinations={savedDestinations}
+          onResolve={(bolt11, address) =>
+            resolveDestination(bolt11, { saveAfter: true, addressUsed: address })}
+          onBack={() => setPayoutMethod(null)}
           onCancel={() => onClose(undefined)}
         />
       );
@@ -447,6 +485,7 @@ export function ClaimPayoutModal({
 function ClaimMethodChooser({
   payoutSats,
   externalSwaps,
+  tandoEligible,
   savedNwcConnections,
   onSelect,
   onSelectSavedNwc,
@@ -454,6 +493,9 @@ function ClaimMethodChooser({
 }: {
   payoutSats: number;
   externalSwaps: ExternalSwapMatch[];
+  /** Kenya context — surface the native one-tap Tando M-Pesa offramp as
+   *  the lead cash-out card. Independent of the external-swap registry. */
+  tandoEligible: boolean;
   /** v1.2.5: saved NWC connections, promoted to top-level quick-pick
    *  buttons here just like AtomicFundingModal does on the funding
    *  side. A returning user with a saved wallet can claim straight
@@ -463,11 +505,12 @@ function ClaimMethodChooser({
   onSelectSavedNwc: (connection: SavedNwcConnection) => void;
   onCancel: () => void;
 }) {
-  // Single-column layout once external swaps are surfaced (they have
-  // taller cards with flag + status badge); two-column when only the
+  // Single-column layout once external swaps or Tando are surfaced (they
+  // have taller cards with flag + status badge); two-column when only the
   // built-in Lightning + Onchain methods are available.
-  const methodGridColumns = externalSwaps.length > 0 ? "1fr" : "1fr 1fr";
-  const methodMinHeight = externalSwaps.length > 0 ? 92 : 118;
+  const hasTallCards = externalSwaps.length > 0 || tandoEligible;
+  const methodGridColumns = hasTallCards ? "1fr" : "1fr 1fr";
+  const methodMinHeight = hasTallCards ? 92 : 118;
 
   return (
     <div
@@ -553,22 +596,45 @@ function ClaimMethodChooser({
         )}
 
         <div style={{ display: "grid", gridTemplateColumns: methodGridColumns, gap: 10 }}>
-          <button
-            onClick={() => onSelect({ kind: "lightning" })}
-            style={{
-              minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
-              background: T.accentDim, border: `1px solid ${T.accent}66`,
-              color: T.text, cursor: "pointer", textAlign: "left",
-            }}
-          >
-            <div style={{ fontSize: 20, marginBottom: 8 }}>⚡</div>
-            <div style={{ fontSize: 12, fontWeight: 800, color: T.accent, fontFamily: T.mono, marginBottom: 6 }}>
-              LN · FAST
-            </div>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
-              Best path. Send to a Lightning address, invoice, or NWC.
-            </div>
-          </button>
+          {/* Tando — Kenya's lead cash-out. Native one-tap M-Pesa offramp
+              (LUD-16 Lightning Address `<phone>@bitcoin.co.ke`), not a
+              redirect. Rendered first for Kenyan claims. */}
+          {tandoEligible && (
+            <button
+              onClick={() => onSelect({ kind: "tando" })}
+              style={{
+                minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
+                background: T.greenDim, border: `1px solid ${T.green}66`,
+                color: T.text, cursor: "pointer", textAlign: "left",
+              }}
+            >
+              <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                gap: 10, marginBottom: 8,
+              }}>
+                <span style={{ fontSize: 20 }}>🇰🇪</span>
+                <span style={{
+                  fontSize: 8, fontFamily: T.mono, color: T.green,
+                  border: `1px solid ${T.green}55`, borderRadius: 4,
+                  padding: "2px 6px", textTransform: "uppercase",
+                }}>
+                  one tap
+                </span>
+              </div>
+              <div style={{
+                fontSize: 12, fontWeight: 800, color: T.green,
+                fontFamily: T.mono, marginBottom: 6, textTransform: "uppercase",
+              }}>
+                M-Pesa · KES
+              </div>
+              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+                Cash out to M-Pesa with Tando. Enter your phone — KES lands in seconds.
+              </div>
+            </button>
+          )}
+          {/* External offramp redirects (e.g. Bitika for Kenya) sit above
+              the built-in Lightning/Onchain methods — local cash-out is the
+              headline action for these markets. */}
           {externalSwaps.map((match) => {
             const provider = match.provider;
             const isLive = provider.status === "enabled";
@@ -617,11 +683,27 @@ function ClaimMethodChooser({
                   lineHeight: 1.45,
                 }}>
                   {provider.blurb ||
-                    `Cash out to ${provider.countryName} ${provider.currency} via a Lightning invoice.`}
+                    `Opens ${provider.displayName} — cash out to ${provider.currency}, paste the invoice back.`}
                 </div>
               </button>
             );
           })}
+          <button
+            onClick={() => onSelect({ kind: "lightning" })}
+            style={{
+              minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
+              background: T.accentDim, border: `1px solid ${T.accent}66`,
+              color: T.text, cursor: "pointer", textAlign: "left",
+            }}
+          >
+            <div style={{ fontSize: 20, marginBottom: 8 }}>⚡</div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.accent, fontFamily: T.mono, marginBottom: 6 }}>
+              LN · FAST
+            </div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+              Best path. Send to a Lightning address, invoice, or NWC.
+            </div>
+          </button>
           <button
             onClick={() => onSelect({ kind: "onchain" })}
             style={{
@@ -749,9 +831,9 @@ function ExternalSwapRedirectPicker({
             {isLive
               ? (
                   <>
-                    Open {provider.displayName}, choose Lightning &rarr; {provider.currency} {provider.bidirectional ? "(or the other direction)" : "mobile money"},
+                    Opens {provider.displayName} in your browser — cash out to {provider.currency} mobile money there,
                     make an invoice up to <BitcoinAmount sats={payoutSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />,
-                    then paste it below.
+                    then paste it back below.
                     {reserveSats > 0 && (
                       <>
                         {" "}About <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
@@ -820,6 +902,251 @@ function ExternalSwapRedirectPicker({
             background: T.surface, border: `1px solid ${T.border}`,
             color: T.muted, fontFamily: T.mono, fontSize: 11,
             fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          Back
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Tando native M-Pesa offramp ────────────────────────────────────────────
+//
+// Kenya's lead cash-out. The user types their M-Pesa phone number; Chama
+// forms the LUD-16 Lightning Address `<msisdn>@bitcoin.co.ke` and resolves it
+// to a BOLT11 for the exact claim amount via the SAME path the LN
+// DestinationPicker uses (`resolveLightningAddressToInvoice`). The released
+// escrow sats pay that invoice and Tando deposits KES to the phone in
+// seconds. No redirect, no new fund surface — it rides the existing claim
+// journal / double-pay guard because it returns a plain BOLT11 into the
+// normal `resolveDestination` path. The address is saved as a payout
+// destination (saveAfter: true) so it's one-tap reusable everywhere.
+function formatTandoLnurlError(e: unknown): string {
+  if (e instanceof LnurlError) {
+    switch (e.code) {
+      case "LnurlAmountOutOfRangeError":
+        return `This amount is outside Tando's M-Pesa limits. ${e.message}`;
+      case "LnurlDnsError":
+        return "Couldn't reach Tando (bitcoin.co.ke). Check your connection and try again.";
+      case "LnurlServerError":
+        return "Tando's server is busy right now. Try again in a moment.";
+      case "LnurlMalformedError":
+        return "Tando returned an unexpected response. Try again, or use Lightning.";
+      case "LnurlParseError":
+        return "That number didn't resolve to a valid M-Pesa cash-out address.";
+    }
+  }
+  return (e as { message?: string })?.message || "Couldn't reach Tando. Try again.";
+}
+
+function TandoMpesaPicker({
+  payoutSats,
+  reserveSats,
+  savedDestinations,
+  onResolve,
+  onBack,
+  onCancel,
+}: {
+  payoutSats: number;
+  reserveSats: number;
+  savedDestinations: PayoutDestination[];
+  /** Fired with the resolved BOLT11 and the Tando Lightning Address used,
+   *  so the consumer can save it (saveAfter: true) and dispatch the claim. */
+  onResolve: (bolt11: string, address: string) => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
+  const btcPrice = useBitcoinPrice();
+  const fiatRates = useFiatRates();
+
+  // A saved Tando number is just a saved Lightning Address ending in
+  // @bitcoin.co.ke — pull the most-recent one to pre-fill the phone field.
+  const lastSavedMsisdn = useMemo(() => {
+    const tando = savedDestinations.find((d) => isTandoLightningAddress(d.address));
+    return tando ? tandoMsisdnFromAddress(tando.address) : null;
+  }, [savedDestinations]);
+
+  const [phone, setPhone] = useState(() =>
+    lastSavedMsisdn ? formatKenyanMsisdnDisplay(lastSavedMsisdn) : "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const msisdn = normalizeKenyanMsisdn(phone);
+  const valid = msisdn !== null;
+  const kesEstimate = formatEstimatedFiatForMsats({
+    amountMsats: payoutSats * 1000,
+    currency: "KES",
+    usdPerBtc: btcPrice.usd,
+    usdFiatRates: fiatRates.rates,
+  });
+
+  const submit = async () => {
+    if (!msisdn) {
+      setErr("Enter a valid Kenyan M-Pesa number, e.g. 0712 345 678.");
+      return;
+    }
+    const address = buildTandoLightningAddress(msisdn);
+    if (!address) {
+      setErr("Enter a valid Kenyan M-Pesa number, e.g. 0712 345 678.");
+      return;
+    }
+    setErr(null);
+    setBusy(true);
+    try {
+      // Pre-resolves .well-known/lnurlp/<msisdn> (validating the address +
+      // checking the claim amount against Tando's min/max) then fetches the
+      // BOLT11. Throws LnurlAmountOutOfRangeError if out of bounds.
+      const bolt11 = await resolveLightningAddressToInvoice(address, payoutSats);
+      onResolve(bolt11, address);
+      // Parent moves to the running stage and unmounts this picker; leaving
+      // busy=true keeps the button disabled in the meantime.
+    } catch (e) {
+      setErr(formatTandoLnurlError(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16, animation: "fadeIn 0.2s ease",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: T.card, border: `1px solid ${T.borderHi}`,
+          borderRadius: T.r, padding: 24, maxWidth: 420, width: "100%",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
+              M-PESA CLAIM · TANDO
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
+              <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
+            </div>
+          </div>
+          <button onClick={onCancel} style={{
+            background: "none", border: "none", color: T.muted,
+            fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
+          }}>×</button>
+        </div>
+
+        <div style={{
+          padding: "12px", borderRadius: T.r,
+          background: T.greenDim, border: `1px solid ${T.green}44`,
+          color: T.text, marginBottom: 12,
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 10, marginBottom: 8,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <span style={{ fontSize: 20 }}>🇰🇪</span>
+              <span style={{
+                color: T.green, fontFamily: T.mono, fontSize: 11,
+                fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}>
+                Cash out to M-Pesa
+              </span>
+            </div>
+            <span style={{
+              flexShrink: 0, color: T.green, background: T.greenDim,
+              border: `1px solid ${T.green}55`, borderRadius: 4, padding: "2px 6px",
+              fontFamily: T.mono, fontSize: 8, fontWeight: 900,
+              textTransform: "uppercase",
+            }}>
+              one tap
+            </span>
+          </div>
+          <div style={{
+            color: T.muted, fontFamily: T.mono, fontSize: 10,
+            lineHeight: 1.5,
+          }}>
+            Enter your M-Pesa number. Chama pays it straight from your claim and
+            Tando deposits KES in seconds — no redirect, no pasting invoices.
+            {reserveSats > 0 && (
+              <>
+                {" "}About <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+              </>
+            )}
+          </div>
+        </div>
+
+        <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
+          M-PESA PHONE NUMBER
+        </div>
+        <input
+          type="tel"
+          inputMode="tel"
+          autoComplete="tel"
+          autoCorrect="off"
+          spellCheck={false}
+          value={phone}
+          onChange={(e) => { setPhone(e.target.value); setErr(null); }}
+          onKeyDown={(e) => { if (e.key === "Enter" && valid && !busy) { e.preventDefault(); void submit(); } }}
+          placeholder="0712 345 678"
+          disabled={busy}
+          style={{ ...inputStyle, marginBottom: 8 }}
+        />
+
+        <div style={{
+          fontSize: 10, color: T.muted, fontFamily: T.mono,
+          lineHeight: 1.5, marginBottom: 12, minHeight: 14,
+        }}>
+          {valid ? (
+            <>
+              Paying <span style={{ color: T.green }}>{msisdn}@{TANDO_LNADDRESS_DOMAIN}</span>
+              {kesEstimate && <> · ≈ {kesEstimate}</>}
+            </>
+          ) : phone.trim().length > 0 ? (
+            "Kenyan mobile numbers look like 0712 345 678 or 254712345678."
+          ) : (
+            kesEstimate ? <>You'll receive ≈ {kesEstimate} to M-Pesa.</> : "Safaricom M-Pesa, Kenya."
+          )}
+        </div>
+
+        <button
+          onClick={() => void submit()}
+          disabled={!valid || busy}
+          style={{
+            width: "100%", padding: "12px 16px", borderRadius: T.rs,
+            background: valid && !busy ? T.green : T.surface,
+            border: `1px solid ${valid && !busy ? T.green : T.border}`,
+            color: valid && !busy ? T.bg : T.muted,
+            fontFamily: T.mono, fontSize: 12, fontWeight: 900,
+            cursor: valid && !busy ? "pointer" : "default",
+            marginBottom: 8,
+          }}
+        >
+          {busy ? "Reaching Tando…" : "Cash out to M-Pesa"}
+        </button>
+
+        {err && (
+          <div style={{
+            marginBottom: 8, padding: 10, borderRadius: T.rs,
+            background: T.redDim, border: `1px solid ${T.red}44`,
+            color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
+          }}>
+            {err}
+          </div>
+        )}
+
+        <button
+          onClick={onBack}
+          disabled={busy}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, fontSize: 11,
+            fontWeight: 700, cursor: busy ? "not-allowed" : "pointer",
           }}
         >
           Back
@@ -931,9 +1258,10 @@ function OnchainPayoutPicker({
 // v1.2.4: the inline ChapsmartPayoutOption (phone + name form that
 // POSTed to the now-dead nwc.chapsmart.com endpoint) was deleted.
 // Chapsmart now lives in external-swap-registry.ts as a guided
-// redirect alongside Banxaas / Bitika / Tando / Minmo / Bitzed, and
-// surfaces through the shared ExternalSwapRedirectPicker. The
-// per-user profile helpers (phone + name) remain in
+// redirect alongside Banxaas / Bitika / Bitzed, and surfaces through
+// the shared ExternalSwapRedirectPicker. (Tando is the exception — a
+// native LUD-16 M-Pesa offramp via TandoMpesaPicker, not a redirect.)
+// The per-user profile helpers (phone + name) remain in
 // chapsmart-payout.ts for any future on-Chapsmart pre-fill but no
 // longer hit the network from Chama itself.
 
@@ -963,7 +1291,9 @@ function RunningPanel({
     phase.kind === "confirming" ? "Confirming with the federation…" :
     phase.kind === "paying-onchain" ? "Broadcasting onchain payout…" :
     phase.kind === "payout-confirming" ? "Confirming your payout…" :
-    phase.kind === "paying-invoice" && payoutMethod?.kind === "external"
+    phase.kind === "paying-invoice" && payoutMethod?.kind === "tando"
+      ? "Sending to M-Pesa (Tando)…"
+      : phase.kind === "paying-invoice" && payoutMethod?.kind === "external"
       ? `Sending to ${payoutMethod.match.provider.displayName}…`
       : phase.kind === "paying-invoice" ? "Sending to your wallet…" :
     "Working…";
@@ -1039,9 +1369,11 @@ function TerminalPanel({
       }}>
         <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
         <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
-          {payoutMethod?.kind === "external"
-            ? `Sent to ${payoutMethod.match.provider.displayName}`
-            : "Sent to your wallet"}
+          {payoutMethod?.kind === "tando"
+            ? "Sent to M-Pesa"
+            : payoutMethod?.kind === "external"
+              ? `Sent to ${payoutMethod.match.provider.displayName}`
+              : "Sent to your wallet"}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
           Closing…

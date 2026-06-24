@@ -3,6 +3,12 @@ import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 
 import { useEscrow } from "../hooks/useEscrow.js";
+import {
+  registerNotificationTapHandlers,
+  consumePendingTradeDeepLink,
+  onTradeDeepLink,
+  LATEST_ACTIONABLE,
+} from "../notifications/deep-link.js";
 import type { AggregateRatings, RatingThumb } from "../reputation/ratings.js";
 import {
   type EscrowState,
@@ -422,6 +428,13 @@ export default function App() {
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<PendingDestroyConfirm | null>(null);
   const [autoInitDone, setAutoInitDone] = useState(false);
+  // Relay-resilience re-arm. The auto-init effect latches autoInitDone on
+  // dispatch so it fires once and never hot-loops — but that left a failed/empty
+  // first attempt stuck until a manual Reconnect. These re-open the latch when
+  // the relay pool actually grows. autoInitHardStopRef suppresses the re-arm for
+  // a deliberate stop (reconcile-refused, which is awaiting the user's modal).
+  const autoInitHardStopRef = useRef(false);
+  const prevConnectedRelaysRef = useRef(0);
   // Reputation (kind:38123): my own aggregate (feeds seller graduation + the Me
   // dashboard) and the (trade, ratee) slots I've already rated (drives the
   // one-tap capture's "rated" state). Both null/empty until connected — exactly
@@ -502,9 +515,10 @@ export default function App() {
     ctaLabel: string;
     savedHandleId?: string;
     selectedItems?: SelectedMenuItem[];
-    // v1.2.4: trade context for the pre-LOCK bidirectional swap CTA
-    // (Banxaas today). Mirrors the same fields ClaimPayoutModal
-    // already threads through for the post-CLAIM swap picker.
+    // Trade context fields, kept on the funding modal as informational
+    // metadata. The pre-LOCK external-swap CTA was removed in the
+    // 2026-06-24 fiat-ramps pass (all swaps are offramp-only, post-CLAIM),
+    // so only ClaimPayoutModal actually reads these now.
     tradeCommunity?: string | null;
     fiatCurrency?: string | null;
     resolve: () => void;
@@ -803,12 +817,22 @@ export default function App() {
           : "your previous community";
     actions.initFedimint(target.invite).catch((e: any) => {
       if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
+        // Deliberate fund-safety stop — don't re-arm into a modal loop.
+        autoInitHardStopRef.current = true;
         queueDestroyConfirm({
           invite: e.desiredInvite,
           label: failureLabel,
           balanceMsats: e.balanceMsats || 0,
           activeInvite: e.previousActiveInvite,
         });
+      } else if (
+        e?.code === "RELAYS_CONNECTING" ||
+        e?.code === "NOT_CONNECTED" ||
+        e?.code === "SIGNER_NOT_READY"
+      ) {
+        // Transient: relays/signer still settling. Stay quiet — the re-arm
+        // effect retries when the pool grows, instead of dead-ending the user.
+        console.debug("[chama] auto-init deferred (not ready):", e.code);
       } else {
         setToast({
           message: e?.message || "Couldn't reconnect. Try again?",
@@ -817,6 +841,30 @@ export default function App() {
       }
     });
   }, [connected, connectedRelays, autoInitDone, fedimint.joined, fedimint.busy, fedimint.initialized, actions]);
+
+  // Re-arm auto-init when the relay pool grows after a failed/empty first
+  // attempt. The auto-init effect above latches autoInitDone on dispatch (fires
+  // once, no hot-loop); this re-opens that latch only when connectedRelays
+  // actually increases AND we still haven't initialized — closing the "fired
+  // into a not-ready pool, now stuck until manual Reconnect" dead-end. A
+  // deliberate stop (reconcile-refused) is suppressed via autoInitHardStopRef;
+  // a successful init clears it.
+  useEffect(() => {
+    const prev = prevConnectedRelaysRef.current;
+    prevConnectedRelaysRef.current = connectedRelays;
+    if (fedimint.initialized || fedimint.joined) {
+      autoInitHardStopRef.current = false;
+      return;
+    }
+    if (
+      connectedRelays > prev &&
+      autoInitDone &&
+      !fedimint.busy &&
+      !autoInitHardStopRef.current
+    ) {
+      setAutoInitDone(false);
+    }
+  }, [connectedRelays, autoInitDone, fedimint.initialized, fedimint.joined, fedimint.busy]);
 
   const now = Math.floor(Date.now() / 1000);
   const HIDE_AFTER = 7 * 86400;
@@ -1087,6 +1135,9 @@ export default function App() {
   const queueDestroyConfirm = (request: PendingDestroyConfirm | null) => {
     if (!request) {
       setPendingDestroyConfirm(null);
+      // Modal resolved/dismissed — clear the deliberate stop so a later relay
+      // recovery can re-arm auto-init normally.
+      autoInitHardStopRef.current = false;
       return;
     }
 
@@ -1293,6 +1344,29 @@ export default function App() {
       setToast({ message: e?.message || `Couldn't load trade ${id}.`, type: "error" });
     });
   }, [connected, actions]);
+
+  // ── Notification deep-links: a tapped trade notification opens that trade ───
+  // Register native tap handlers once at mount. Web taps wire themselves in
+  // notify-service via Notification.onclick. Both feed the same pending-deeplink
+  // buffer drained below.
+  useEffect(() => registerNotificationTapHandlers(), []);
+
+  // Drain tap targets once connected — a cold-launch tap can land before the
+  // client is up, so we buffer and replay here. openEscrow is the same warm-
+  // cache / cold-loadEscrow route the trade list uses, so the user lands on a
+  // hydrating TradeDetail, never the list. A no-payload desktop tap resolves to
+  // the current active trade.
+  useEffect(() => {
+    if (!connected) return;
+    const route = () => {
+      const target = consumePendingTradeDeepLink();
+      if (!target) return;
+      const id = target === LATEST_ACTIONABLE ? activeTrade?.id : target;
+      if (id) openEscrow(id);
+    };
+    route();
+    return onTradeDeepLink(route);
+  }, [connected, activeTrade]);
 
   const handleCreate = async (params: any) => {
     try {
@@ -1528,7 +1602,7 @@ export default function App() {
                 {/* Local/test builds carry an amber "dev <build time>" stamp so a
                     Tauri/ASDK refresh visibly confirms it picked up the new
                     bundle. ship.sh exports CHAMA_RELEASE=1 → clean version. */}
-                v{__APP_VERSION__}{__BUILD_STAMP__ ? ` · dev ${__BUILD_STAMP__}` : ""}{sessionBadge ? ` · ${sessionBadge}` : ""}
+                v{__APP_VERSION__}{__BUILD_STAMP__ ? ` · dev ${__BUILD_STAMP__}` : ""}{__BUILD_STAMP__ && sessionBadge ? ` · ${sessionBadge}` : ""}
               </div>
             </div>
           </div>
@@ -1590,9 +1664,17 @@ export default function App() {
               traceContext: recoveryTraceContext,
             })}
             showReconnect={getUserCommunitySlugRaw() !== null || !!(storedActiveInvite || liveActiveInvite)}
-            onInit={() => actions.initFedimint().catch(
-              (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
-            )}
+            onInit={() => {
+              // Reconnect does two jobs: re-probe backed-off/abandoned relays
+              // (the per-relay backoff gives up after MAX_RETRY_COUNT and won't
+              // recover on its own), AND re-init/re-probe the federation. The
+              // relay re-probe runs first so init has a live pool to publish the
+              // seed round-trip into.
+              actions.recoverRelays();
+              actions.initFedimint().catch(
+                (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
+              );
+            }}
           />
         </>
       )}
@@ -1922,15 +2004,17 @@ export default function App() {
           gap: 14,
         }}>
           <div style={{
-            width: 36, height: 36, borderRadius: "50%",
-            border: `2px solid ${T.accent}`,
+            width: 42, height: 42, borderRadius: "50%",
+            border: `3px solid ${T.accent}`,
             borderTopColor: "transparent",
             animation: "spin 0.8s linear infinite",
           }} />
-          <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans }}>
-            Switching to <strong>{switchingToCommunity.displayName}</strong>…
+          {/* Readable-first fed-switch banner: big bold DM Sans so it reads at a
+              glance, with a calm reassurance line beneath. */}
+          <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.sans, textAlign: "center", padding: "0 24px", lineHeight: 1.3 }}>
+            Switching to <span style={{ color: T.accent }}>{switchingToCommunity.displayName}</span>…
           </div>
-          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.muted, fontFamily: T.sans }}>
             no sats move while switching
           </div>
         </div>
@@ -1938,7 +2022,15 @@ export default function App() {
 
       {/* Content — routed by view */}
       {view === "detail" && selected ? (
-        <div style={{ animation: "fadeIn 0.3s ease" }}>
+        <div style={{
+          animation: "fadeIn 0.3s ease",
+          // Fill the viewport so the trade screen is ONE window — fixed top,
+          // a chat pager that flexes to take the leftover room, and the timeline
+          // glued to the bottom. It scrolls only when a tall phase truly needs
+          // it. Subtract the top chrome (safe-area / sim pill) the shell pads for.
+          height: `calc(100dvh - ${typeof shellPaddingTop === "number" ? `${shellPaddingTop}px` : shellPaddingTop} - env(safe-area-inset-bottom, 0px))`,
+          display: "flex", flexDirection: "column", minHeight: 0,
+        }}>
           <TradeDetail
             state={selected}
             pubkey={pubkey!}
@@ -2629,7 +2721,10 @@ export default function App() {
 // a module-scope capture would go stale when the palette swaps (#50). Called
 // per render so it always reflects the active theme.
 const globalCss = () => `
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800;900&display=swap');
+  /* Fonts are self-hosted via /fonts/fonts.css (linked in index.html, loaded
+     before the bundle) — DM Sans + JetBrains Mono, offline/native-safe. The old
+     Google Fonts @import lived here but was a render-blocking CDN call that
+     failed on native (Tauri offline) → the system-font fallback this pass fixes. */
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
   @keyframes spin{to{transform:rotate(360deg)}}
@@ -2645,9 +2740,17 @@ const globalCss = () => `
      rightward. Under reduced-motion the beam parks mid-wire and the glow goes static. */
   @keyframes spine-beam{0%{transform:translateX(-120%)}100%{transform:translateX(280%)}}
   @keyframes spine-pulse{0%{box-shadow:0 0 0 0 var(--spine-glow,transparent)}100%{box-shadow:0 0 0 7px transparent}}
+  /* TradeView pager: gentle ‹ › nudge teaching the horizontal swipe gesture. */
+  @keyframes pagerNudgeL{0%,100%{transform:translateX(0);opacity:.3}50%{transform:translateX(-3px);opacity:.65}}
+  @keyframes pagerNudgeR{0%,100%{transform:translateX(0);opacity:.3}50%{transform:translateX(3px);opacity:.65}}
+  /* TradeView gated money buttons: one tap ARMS (amber, pulsing) before the
+     confirming second tap. */
+  @keyframes armPulse{0%,100%{box-shadow:0 0 0 0 ${T.amber}00}50%{box-shadow:0 0 0 4px ${T.amber}22}}
   @media (prefers-reduced-motion: reduce){
     .spine-node-live{animation:none!important}
     .spine-beam{animation:none!important;transform:translateX(80%)!important}
+    .td-pager-nudge{animation:none!important}
+    .td-armed{animation:none!important}
   }
   *{box-sizing:border-box;margin:0;padding:0}
   /* v2.5 polish: kill the browser's default tap-highlight (the blue/grey
@@ -2680,6 +2783,18 @@ const globalCss = () => `
     .trade-detail-shell{max-width:1120px}
     .trade-detail-layout{grid-template-columns:minmax(0,480px) minmax(460px,1fr)}
   }
+  /* TradeView UX pass: the redesigned trade screen is a single phone-width
+     column at EVERY breakpoint (the approved mockups are phone-shaped). These
+     trailing rules retire the old ≥980px two-column split + sticky room card —
+     they come last so they win over the media rules above at equal specificity. */
+  .trade-detail-shell{width:100%;max-width:480px;padding:14px 14px 18px;margin:0 auto;flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;overflow-x:hidden;overflow-y:auto}
+  .trade-detail-layout{display:block!important}
+  .trade-room-card{position:static!important}
+  /* TradeView pager + anchored timeline. */
+  .td-pager::-webkit-scrollbar,.td-pane::-webkit-scrollbar{display:none}
+  .td-timeline summary{list-style:none}
+  .td-timeline summary::-webkit-details-marker{display:none}
+  .td-timeline[open] .td-tl-chev{transform:rotate(90deg);border-color:${T.accent};color:${T.accent}}
 `;
 
 function LoginSuccessSplash() {

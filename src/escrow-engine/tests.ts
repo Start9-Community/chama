@@ -176,7 +176,9 @@ import {
   drainPendingRedemptions,
   markPoisoned,
   markUnresolvedCredit,
+  resolveUnresolvedCredit,
   listStrandedRedemptions,
+  partitionStrandedClaims,
   MAX_DRAIN_ATTEMPTS,
   PENDING_REDEMPTIONS_KEY,
 } from "../fedimint/pending-redemptions.js";
@@ -200,6 +202,16 @@ import {
   defaultFulfillmentFor,
   categoryAllowsFulfillmentChoice,
 } from "../labels/vote-labels.js";
+import {
+  funderRole,
+  performerRole,
+  markDoneVerb,
+  markDoneChatMessage,
+  isStructuredMarkDoneMessage,
+  refundReasons,
+  eventToSystemBubble,
+  type LivingChatCtx,
+} from "../labels/trade-progress.js";
 
 // PR 3 imports
 import {
@@ -265,8 +277,17 @@ import {
 import {
   EXTERNAL_SWAP_PROVIDERS,
   getExternalSwapsForContext,
-  getBidirectionalSwapsForContext,
 } from "../payments/external-swap-registry.js";
+import {
+  TANDO_LNADDRESS_DOMAIN,
+  normalizeKenyanMsisdn,
+  isValidKenyanMsisdn,
+  buildTandoLightningAddress,
+  formatKenyanMsisdnDisplay,
+  isTandoLightningAddress,
+  tandoMsisdnFromAddress,
+  isKenyaPayoutContext,
+} from "../payments/tando-offramp.js";
 
 // v0.3.0 Phase 1 — LNURL + DestinationPicker logic
 import {
@@ -306,6 +327,7 @@ import {
 import { DEFAULT_RELAYS } from "./default-relays.js";
 import {
   BLF_OFFICIAL_ARBITERS,
+  BLF_CABINET_NPUBS,
   getTrustedArbiterPool,
   normalizeTrustedArbiterInput,
   classifyArbiterProvenance,
@@ -467,7 +489,25 @@ import {
   parseArbiterApplicationEvent,
   collectArbiterApplications,
 } from "../arbiters/applications.js";
-import { notificationForTransition } from "../notifications/trade-notifications.js";
+import {
+  ARBITER_BOND_KIND,
+  buildArbiterBondEvent,
+  parseArbiterBondEvent,
+  selectLatestBond,
+} from "../arbiters/bonds.js";
+import {
+  UNBONDED_FLOOR_MSATS,
+  BONDS_ENFORCED,
+  getArbiterBond,
+  getOpenBondedTrades,
+  liveCapacity,
+  classifyArbiterCapacity,
+  canAssignArbiter,
+  exposureTier,
+  selectOverCapacityArbiters,
+  assignablePool,
+} from "../arbiters/exposure.js";
+import { notificationForTransition, chatNotificationFor } from "../notifications/trade-notifications.js";
 import {
   RATING_KIND,
   buildRatingEvent,
@@ -3564,8 +3604,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     normalizeTrustedArbiterInput(` ${ARBITER_PK},${ARBITER_PK.toUpperCase()} invalid ${ARBITER2_PK} `).length === 2,
     "Trusted arbiter input normalizes, dedupes, and ignores invalid entries"
   );
-  assert(BLF_OFFICIAL_ARBITERS.length === 2,
-    "BLF official arbiter pool has two baked arbiters");
+  assert(BLF_OFFICIAL_ARBITERS.length === 3,
+    "BLF official arbiter pool is the n=3 cabinet (maintainer + Chapsmart + Graysatoshi)");
   assert(getTrustedArbiterPool({ community: "us-blf" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
     "us-blf/BLF listings carry the official BLF arbiters");
   assert(getTrustedArbiterPool({ community: "sn-cfa" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
@@ -3581,8 +3621,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getTrustedArbiterPool({
     community: "us-blf",
     excludePubkeys: [BLF_OFFICIAL_ARBITERS[0]!],
-  }).join(",") === BLF_OFFICIAL_ARBITERS[1]!,
-    "Official arbiter pool respects participant exclusion");
+  }).join(",") === [BLF_OFFICIAL_ARBITERS[1]!, BLF_OFFICIAL_ARBITERS[2]!].join(","),
+    "Official arbiter pool respects participant exclusion (trio minus the excluded one)");
   assert(getTrustedArbiterPool({ community: "ke-kes" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
     "Kenya KES/Afribit carries the bootstrap official arbiter pool");
   assert(getTrustedArbiterPool({ community: "ke-kes-bitsacco" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
@@ -7273,6 +7313,215 @@ console.log("\n── Fedi Mini-App ecash funding path ──");
     else (globalThis as any).window = originalWindow;
   }
 
+  // ── 29f. Fedi fund-and-lock recovery (fund-loss guard) ──────────────────
+//
+// The Fedi funding path spends ecash OUT of Fedi, then locks it — two steps
+// with the bearer notes living only in a JS variable between them (native is
+// immune; createEscrowLock spends + SSS-splits atomically). These tests prove
+// the spend is committed ONLY on a confirmed LOCK-with-our-notesHash, and is
+// re-absorbed back into Fedi on every other exit: abort, amount mismatch,
+// publish failure, a racing tab's foreign LOCK, and a reload/crash (boot
+// drain). This is the launch-blocker fund-loss Jetty hit on a 105-sat trade.
+console.log("\n── Fedi fund-and-lock recovery (fund-loss guard) ──");
+{
+  const { runFediFundAndLock } = await import("../payments/fedi-fund-and-lock.js");
+  const {
+    stashPendingFunding,
+    listPendingFundings,
+    drainPendingFundings,
+    clearAllPendingFundings,
+  } = await import("../fedimint/pending-fundings.js");
+
+  const NOTES = "oob-fund-notes";
+  const AMOUNT = 105_000; // 105 sats — Jetty's live trade
+  const HASH = `sha256(${NOTES})`; // what hashNotes(NOTES) returns below
+
+  function makeTracked(over: Record<string, any> = {}) {
+    const calls = {
+      preflight: 0, generate: 0,
+      stash: [] as any[], clear: [] as string[], receive: [] as string[], lock: 0,
+    };
+    const phases: string[] = [];
+    const deps: any = {
+      escrowId: "trade_fed",
+      amountMsats: AMOUNT,
+      description: "fund test",
+      onPhase: (p: any) => phases.push(p.kind),
+      preflight: async () => { calls.preflight++; },
+      generateEcash: async () => { calls.generate++; return { notes: NOTES }; },
+      receiveEcash: async (n: string) => { calls.receive.push(n); },
+      stashFunding: (i: any) => { calls.stash.push(i); },
+      clearFunding: (id: string) => { calls.clear.push(id); },
+      hashNotes: async (n: string) => `sha256(${n})`,
+      lockAndPublish: async () => { calls.lock++; return { lockedNotesHash: HASH }; },
+      ...over,
+    };
+    return { deps, calls, phases };
+  }
+
+  // 1. Happy path: generate → LOCK commits our notes → stash cleared, no re-absorb.
+  {
+    const t = makeTracked();
+    const r = await runFediFundAndLock(t.deps);
+    assert(r.kind === "locked", "fedi-fund happy path resolves locked");
+    assert(t.calls.stash.length === 1 && t.calls.stash[0].oobNotes === NOTES,
+      "fedi-fund happy path stashes the spent notes BEFORE locking");
+    assert(t.calls.lock === 1, "fedi-fund happy path publishes exactly one LOCK");
+    assert(t.calls.receive.length === 0,
+      "fedi-fund happy path never re-absorbs — the LOCK committed our notes");
+    assert(t.calls.clear.length === 1 && t.calls.clear[0] === "trade_fed",
+      "fedi-fund happy path clears the stash after a confirmed LOCK");
+    assert(t.phases[t.phases.length - 1] === "locked",
+      "fedi-fund happy path ends on the locked phase");
+  }
+
+  // 2. Abort fires AFTER the spend (EXIT A) → re-absorb, no LOCK, stash cleared.
+  {
+    const ac = new AbortController();
+    const t = makeTracked({
+      signal: ac.signal,
+      // abort mid-flight: the spend has happened, the lock has not.
+      generateEcash: async () => { ac.abort(); return { notes: NOTES }; },
+    });
+    const r = await runFediFundAndLock(t.deps);
+    assert(r.kind === "aborted", "fedi-fund abort-after-spend resolves aborted");
+    assert(t.calls.stash.length === 1, "fedi-fund abort-after-spend stashed the notes first");
+    assert(t.calls.lock === 0, "fedi-fund abort-after-spend never reaches LOCK");
+    assert(t.calls.receive.length === 1 && t.calls.receive[0] === NOTES,
+      "fedi-fund abort-after-spend re-absorbs the spent notes back into Fedi");
+    assert(t.calls.clear.length === 1, "fedi-fund abort-after-spend clears the stash once re-absorbed");
+  }
+
+  // 3. LOCK throws amount-mismatch ("No LOCK was published", EXIT B) → re-absorb.
+  {
+    const t = makeTracked({
+      lockAndPublish: async () => {
+        throw new Error(
+          "Fedi wallet generated 100000 msats, but this trade requires 105000 msats. No LOCK was published.",
+        );
+      },
+    });
+    const r = await runFediFundAndLock(t.deps);
+    assert(r.kind === "lock-failed", "fedi-fund amount-mismatch resolves lock-failed");
+    assert(t.calls.receive.length === 1 && t.calls.receive[0] === NOTES,
+      "fedi-fund amount-mismatch re-absorbs the spent notes");
+    assert(t.calls.clear.length === 1, "fedi-fund amount-mismatch clears the stash after re-absorb");
+    assert(r.kind === "lock-failed" && r.error.includes("returned to your Fedi wallet"),
+      "fedi-fund amount-mismatch tells the user the sats came back");
+  }
+
+  // 4. Publish throws → re-absorb.
+  {
+    const t = makeTracked({
+      lockAndPublish: async () => { throw new Error("relay publish failed"); },
+    });
+    const r = await runFediFundAndLock(t.deps);
+    assert(r.kind === "lock-failed", "fedi-fund publish-failure resolves lock-failed");
+    assert(t.calls.receive.length === 1, "fedi-fund publish-failure re-absorbs the spent notes");
+    assert(t.calls.clear.length === 1, "fedi-fund publish-failure clears the stash after re-absorb");
+  }
+
+  // 5. Positive-confirmation gate. A racing tab's LOCK commits DIFFERENT notes
+  //    (the lock action's stale-suppression swallow resolves WITHOUT throwing).
+  //    Our notes were not committed → re-absorb OURS, never assume committed.
+  {
+    const t = makeTracked({
+      lockAndPublish: async () => ({ lockedNotesHash: "sha256(someone-elses-notes)" }),
+    });
+    const r = await runFediFundAndLock(t.deps);
+    assert(r.kind === "lock-failed", "fedi-fund foreign-LOCK resolves lock-failed (our notes not committed)");
+    assert(t.calls.receive.length === 1 && t.calls.receive[0] === NOTES,
+      "fedi-fund foreign-LOCK re-absorbs OUR notes — the LOCK committed different notes");
+    assert(t.calls.clear.length === 1, "fedi-fund foreign-LOCK clears the stash after re-absorb");
+  }
+
+  // 5b. Stale-suppression on a terminal trade: lock resolves with a null hash
+  //     (no LOCK applied) → re-absorb.
+  {
+    const t = makeTracked({ lockAndPublish: async () => ({ lockedNotesHash: null }) });
+    const r = await runFediFundAndLock(t.deps);
+    assert(r.kind === "lock-failed", "fedi-fund suppressed-LOCK (null hash) resolves lock-failed");
+    assert(t.calls.receive.length === 1, "fedi-fund suppressed-LOCK re-absorbs the spent notes");
+  }
+
+  // 6. Re-absorb itself fails → stash RETAINED (boot drain owns it), honest copy.
+  {
+    const t = makeTracked({
+      lockAndPublish: async () => { throw new Error("publish failed"); },
+      receiveEcash: async () => { throw new Error("Fedi receive unavailable"); },
+    });
+    const r = await runFediFundAndLock(t.deps);
+    assert(r.kind === "lock-failed", "fedi-fund re-absorb-failure resolves lock-failed");
+    assert(t.calls.clear.length === 0,
+      "fedi-fund re-absorb-failure KEEPS the stash — boot drain owns recovery");
+    assert(r.kind === "lock-failed" && r.error.includes("next time you open it"),
+      "fedi-fund re-absorb-failure tells the user the sats are saved for retry");
+  }
+
+  // 7. Item 1 as copy, not a gate: generate throws insufficient-funds → friendly
+  //    message, NO stash, NO spend to recover (clean pre-spend exit).
+  {
+    const t = makeTracked({
+      generateEcash: async () => { throw new Error("insufficient balance in wallet"); },
+    });
+    const r = await runFediFundAndLock(t.deps);
+    assert(r.kind === "lock-failed", "fedi-fund insufficient-funds resolves lock-failed");
+    assert(r.kind === "lock-failed" && r.error.includes("Not enough in your Fedi wallet"),
+      "fedi-fund insufficient-funds shows the friendly top-up copy");
+    assert(t.calls.stash.length === 0,
+      "fedi-fund insufficient-funds never stashes — generate threw before any spend");
+    assert(t.calls.receive.length === 0,
+      "fedi-fund insufficient-funds has nothing to re-absorb");
+  }
+
+  // 8. Boot drain: a funding stash with no published LOCK → re-absorbed on init.
+  {
+    clearAllPendingFundings();
+    const originalWindow = (globalThis as any).window;
+    try {
+      const received: string[] = [];
+      (globalThis as any).window = {
+        fediInternal: {
+          async generateEcash() { return { notes: "x" }; },
+          async receiveEcash(ecash: string) { received.push(ecash); return { msats: AMOUNT }; },
+        },
+      };
+      stashPendingFunding({ escrowId: "stranded_fund", oobNotes: "stranded-oob", amountMsats: AMOUNT });
+      assert(listPendingFundings().length === 1,
+        "fedi-fund boot-drain: a stranded funding entry exists pre-drain");
+      const summary = await drainPendingFundings();
+      assert(received.length === 1 && received[0] === "stranded-oob",
+        "fedi-fund boot-drain re-absorbs the stranded notes into Fedi");
+      assert(summary.reabsorbed === 1, "fedi-fund boot-drain reports one re-absorbed entry");
+      assert(listPendingFundings().length === 0,
+        "fedi-fund boot-drain clears the entry after re-absorb");
+    } finally {
+      if (originalWindow === undefined) delete (globalThis as any).window;
+      else (globalThis as any).window = originalWindow;
+      clearAllPendingFundings();
+    }
+  }
+
+  // 9. Boot drain outside a Fedi runtime: no receive primitive → entry untouched.
+  {
+    clearAllPendingFundings();
+    const originalWindow = (globalThis as any).window;
+    try {
+      (globalThis as any).window = {}; // no fediInternal
+      stashPendingFunding({ escrowId: "stranded_no_fedi", oobNotes: "oob", amountMsats: AMOUNT });
+      const summary = await drainPendingFundings();
+      assert(summary.attempted === 0 && summary.reabsorbed === 0,
+        "fedi-fund boot-drain no-ops without a Fedi receive primitive");
+      assert(listPendingFundings().length === 1,
+        "fedi-fund boot-drain keeps the entry for the next Fedi boot");
+    } finally {
+      if (originalWindow === undefined) delete (globalThis as any).window;
+      else (globalThis as any).window = originalWindow;
+      clearAllPendingFundings();
+    }
+  }
+}
+
   {
     const originalWindow = (globalThis as any).window;
     try {
@@ -9348,7 +9597,12 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       body: init?.body ? JSON.parse(String(init.body)) : null,
     });
     if (path.endsWith("/pay")) {
-      return new Response(JSON.stringify({ operation_id: "op_pay" }), { status: 200 });
+      // #9 Part 3: the bridge returns a discriminated outcome; `settled` is the
+      // success case that resolves payInvoice (the body assertions are the point).
+      return new Response(
+        JSON.stringify({ status: "settled", operation_id: "op_pay", preimage: "deadbeef" }),
+        { status: 200 },
+      );
     }
     if (path.endsWith("/info")) {
       return new Response(JSON.stringify({
@@ -9383,6 +9637,145 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       "Native bridge still sends explicit amount for amountless BOLT11 invoices");
   } finally {
     (globalThis as any).fetch = originalFetch;
+  }
+
+  // ── #9 Part 3: native /pay discriminated outcome (double-pay guard) ───────
+  // The bridge now returns settled / refunded / inflight so the claim guard can
+  // tell a real payout from a refund (sats back ⇒ re-pay safe) from a
+  // submitted-but-unknown one (⇒ NEVER blindly re-pay). RETRY CLAIM safety on
+  // native depends on payInvoice throwing the right coded error for each.
+  {
+    const originalFetch = (globalThis as any).fetch;
+    const mockPay = (payBody: any, payStatus = 200) => {
+      (globalThis as any).fetch = async (url: unknown) => {
+        const path = String(url);
+        if (path.endsWith("/pay")) {
+          return new Response(JSON.stringify(payBody), { status: payStatus });
+        }
+        if (path.endsWith("/info")) {
+          return new Response(JSON.stringify({
+            federation_id: "fed_native_test", network: "bitcoin", total_amount_msat: 0, meta: {},
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "unexpected path" }), { status: 404 });
+      };
+    };
+    try {
+      // settled ⇒ resolves with the operation id (claim guard marks it settled).
+      mockPay({ status: "settled", operation_id: "op_settled", preimage: "beef" });
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        const res = await wallet.lightning.payInvoice("lnbc100n1payout");
+        assert(res.operationId === "op_settled",
+          "Native payInvoice resolves a settled payout with its operation id");
+      }
+
+      // refunded ⇒ throws LN_PAY_REFUNDED — the sats came back, so re-pay is safe.
+      mockPay({ status: "refunded", operation_id: "op_refunded", error: "no route" });
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        let code = "";
+        try { await wallet.lightning.payInvoice("lnbc100n1payout"); }
+        catch (e: any) { code = e?.code; }
+        assert(code === "LN_PAY_REFUNDED",
+          "Native payInvoice throws LN_PAY_REFUNDED for a refunded payout (retry-safe)");
+      }
+
+      // inflight ⇒ throws LN_PAY_INFLIGHT + operationId so the guard records the
+      // payout submitted and reconciles via /pay-outcome instead of re-paying.
+      mockPay({ status: "inflight", operation_id: "op_inflight" });
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        let code = ""; let opId = "";
+        try { await wallet.lightning.payInvoice("lnbc100n1payout"); }
+        catch (e: any) { code = e?.code; opId = e?.operationId; }
+        assert(code === "LN_PAY_INFLIGHT",
+          "Native payInvoice throws LN_PAY_INFLIGHT for a submitted-but-unknown payout");
+        assert(opId === "op_inflight",
+          "Native INFLIGHT throw carries the operationId for journal + reconcile");
+      }
+
+      // unrecognized/legacy /pay shape (no status) ⇒ default to INFLIGHT. unknown
+      // ⇒ refuse to re-pay (the safe direction — never a double-send).
+      mockPay({ operation_id: "op_legacy" });
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        let code = "";
+        try { await wallet.lightning.payInvoice("lnbc100n1payout"); }
+        catch (e: any) { code = e?.code; }
+        assert(code === "LN_PAY_INFLIGHT",
+          "Native payInvoice defaults an unrecognized /pay outcome to INFLIGHT (refuse re-pay)");
+      }
+
+      // pre-send failure (non-2xx) ⇒ a plain, UNCODED throw — no payment started,
+      // so the guard clears the record and a fresh retry is correct (no sats moved).
+      mockPay({ error: "Couldn't find a reachable federation Lightning gateway" }, 500);
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        let code: any = "unset"; let threw = false;
+        try { await wallet.lightning.payInvoice("lnbc100n1payout"); }
+        catch (e: any) { threw = true; code = e?.code; }
+        assert(threw, "Native payInvoice throws on a pre-send /pay failure");
+        assert(code === undefined,
+          "Native pre-send /pay failure is uncoded (safe-to-retry, not INFLIGHT)");
+      }
+
+      // LOST RESPONSE (transport failure) after the bridge may have committed ⇒
+      // INFLIGHT, never a re-payable throw. "kill the await after send" must not
+      // double-pay. A thrown fetch (bridge killed/socket dropped) → request()
+      // raises nativeBridgeUnavailableError (chamaDiagnostics) → LN_PAY_INFLIGHT.
+      (globalThis as any).fetch = async () => { throw new TypeError("Failed to fetch"); };
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        let code: any = "unset"; let threw = false;
+        try { await wallet.lightning.payInvoice("lnbc100n1payout"); }
+        catch (e: any) { threw = true; code = e?.code; }
+        assert(threw, "Native payInvoice throws when the /pay response is lost in transport");
+        assert(code === "LN_PAY_INFLIGHT",
+          "Native lost-/pay-response maps to LN_PAY_INFLIGHT (ambiguous ⇒ never re-pay)");
+      }
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  }
+
+  // #9 Part 3: awaitPayOutcome reconciles a submitted payout via /pay-outcome
+  // without ever re-paying; unknown ⇒ keep the submitted record (refuse re-pay).
+  {
+    const originalFetch = (globalThis as any).fetch;
+    const mockOutcome = (body: any, status = 200) => {
+      (globalThis as any).fetch = async (url: unknown) => {
+        const path = String(url);
+        if (path.endsWith("/pay-outcome")) {
+          return new Response(JSON.stringify(body), { status });
+        }
+        return new Response(JSON.stringify({ error: "unexpected path" }), { status: 404 });
+      };
+    };
+    try {
+      const wallet = new NativeBridgeWallet("http://bridge.test");
+      const awaitOutcome = wallet.lightning.awaitPayOutcome!;
+      assert(typeof awaitOutcome === "function",
+        "Native lightning adapter exposes awaitPayOutcome (so the guard can re-attach)");
+
+      mockOutcome({ status: "settled", operation_id: "op1", preimage: "beef" });
+      assert((await awaitOutcome("op1")) === "settled",
+        "awaitPayOutcome maps a settled /pay-outcome to settled");
+
+      mockOutcome({ status: "refunded", operation_id: "op1", error: "refunded" });
+      assert((await awaitOutcome("op1")) === "refunded",
+        "awaitPayOutcome maps a refunded /pay-outcome to refunded");
+
+      mockOutcome({ status: "inflight", operation_id: "op1" });
+      assert((await awaitOutcome("op1")) === "unknown",
+        "awaitPayOutcome maps an inflight /pay-outcome to unknown (keep submitted)");
+
+      mockOutcome({ error: "boom" }, 500);
+      assert((await awaitOutcome("op1")) === "unknown",
+        "awaitPayOutcome maps a failed /pay-outcome reconcile to unknown (refuse re-pay)");
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
   }
 
   {
@@ -9440,6 +9833,62 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       assert(Array.isArray(diagnostics?.requiredCapabilities) &&
         diagnostics.requiredCapabilities.includes("idempotent_join"),
         "Native bridge stale-sidecar diagnostics require idempotent join capability");
+      assert(Array.isArray(diagnostics?.requiredCapabilities) &&
+        diagnostics.requiredCapabilities.includes("effective_iroh_config"),
+        "Native bridge stale-sidecar diagnostics require effective iroh config reporting");
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  }
+
+  {
+    const originalFetch = (globalThis as any).fetch;
+    const calls: Array<{ url: string; body: any }> = [];
+    (globalThis as any).fetch = async (url: unknown, init?: { body?: unknown }) => {
+      const path = String(url);
+      calls.push({
+        url: path,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (path.endsWith("/health")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          joined: false,
+          api_version: 2,
+          capabilities: ["reset", "idempotent_join", "effective_iroh_config"],
+          join_timeout_secs: 90,
+          iroh: { dht: true, next: true, resolver: "n0-pkarr-https+dns", resolver_url: "https://dns.iroh.link/pkarr" },
+          discovery: { status: "reachable", target: "dns.iroh.link:443", detail: null },
+        }), { status: 200 });
+      }
+      if (path.endsWith("/join")) {
+        return new Response(JSON.stringify({
+          error: "open failed before join attempt: Client database not initialized: timed out joining federation: deadline has elapsed",
+        }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ error: "unexpected path" }), { status: 404 });
+    };
+    try {
+      const wallet = new NativeBridgeWallet("http://127.0.0.1:8788");
+      let message = "";
+      let diagnostics: any = null;
+      try {
+        await wallet.joinFederation("fed1nativejoinretry");
+      } catch (e) {
+        message = (e as Error).message;
+        diagnostics = (e as any).chamaDiagnostics;
+      }
+      const joinCalls = calls.filter((call) => call.url.endsWith("/join"));
+      assert(joinCalls.length === 3,
+        "Native bridge join retries discovery timeout failures twice after the first attempt");
+      assert(/Couldn't reach this federation yet/i.test(message),
+        "Native bridge join surfaces friendly reconnect copy after retry exhaustion");
+      assert(!/Native Fedimint bridge \/join failed \(500\)/.test(message),
+        "Native bridge join does not surface the raw bridge 500 popup text");
+      assert(diagnostics?.issue === "native_fedimint_join_discovery_failed",
+        "Native bridge join retry exhaustion carries a distinct discovery diagnostic issue");
+      assert(diagnostics?.attempts === 3,
+        "Native bridge join diagnostic records the total attempt count");
     } finally {
       (globalThis as any).fetch = originalFetch;
     }
@@ -9515,7 +9964,7 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
           ok: true,
           joined: true,
           api_version: 2,
-          capabilities: ["reset", "idempotent_join"],
+          capabilities: ["reset", "idempotent_join", "effective_iroh_config"],
         }), { status: 200 });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -9534,6 +9983,55 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       (globalThis as any).fetch = originalFetch;
       (globalThis as any).localStorage?.removeItem?.(NATIVE_BRIDGE_MODE_KEY);
     }
+  }
+
+  {
+    const tauriSrc = readFileSync("src-tauri/src/main.rs", "utf8");
+    const androidSrc = readFileSync(
+      "android/app/src/main/java/app/chama/market/MainActivity.java",
+      "utf8",
+    );
+    const tauriArgs = tauriSrc.match(/\.args\(\[\s*([\s\S]*?)\s*\]\)/)?.[1] ?? "";
+    assert(/"--data-dir"[\s\S]*data_dir_arg\.as_str\(\)[\s\S]*"serve"[\s\S]*"--bind"[\s\S]*bind_arg\.as_str\(\)/.test(tauriArgs),
+      "Tauri launches the native bridge with --data-dir, serve, and --bind in the expected order");
+    assert(/command\.add\("--data-dir"\)[\s\S]*command\.add\(dataDir\.getAbsolutePath\(\)\)[\s\S]*command\.add\("serve"\)[\s\S]*command\.add\("--bind"\)[\s\S]*command\.add\(FEDIMINT_BRIDGE_BIND\)/.test(androidSrc),
+      "Android launches the native bridge with --data-dir, serve, and --bind in the expected order");
+
+    const tauriDiscoveryWiring = /--iroh-dns|CHAMA_FEDIMINT_IROH_DNS/.test(tauriSrc);
+    const androidDiscoveryWiring = /--iroh-dns|CHAMA_FEDIMINT_IROH_DNS/.test(androidSrc);
+    assert(tauriDiscoveryWiring === androidDiscoveryWiring,
+      "Native bridge discovery policy wiring must stay in parity across Tauri and Android launchers");
+  }
+
+  {
+    const cargoLock = readFileSync("native/fedimint-bridge/Cargo.lock", "utf8");
+    const packageJson = readFileSync("package.json", "utf8");
+    const relayVersions = Array.from(
+      cargoLock.matchAll(/\[\[package\]\]\s+name = "iroh-relay"\s+version = "([^"]+)"/g),
+      (match) => match[1],
+    );
+    assert(relayVersions.includes("0.90.0"),
+      "Native bridge lockfile keeps the next-gen iroh-relay 0.90.0 version visible");
+    assert(relayVersions.includes("0.35.0"),
+      "Native bridge lockfile keeps the Fedimint stable iroh-relay 0.35.0 version visible");
+    assert(packageJson.includes('"@fedimint/transport-web": "0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031"'),
+      "Browser Fedimint transport stays on the known iroh-relay-0.90 canary until native/browser transport is intentionally re-aligned");
+  }
+
+  {
+    const bridgeSrc = readFileSync("native/fedimint-bridge/src/main.rs", "utf8");
+    // Launch-blocker fix: native discovery must default to n0's HTTPS PKARR
+    // relay so a fresh join resolves guardians the same reliable way the browser
+    // does — DNS(:53)+DHT(UDP) alone hang on mobile/CGNAT. This is the lever that
+    // turns the fresh-join hang into a working join, so guard it from regressing.
+    assert(/const DEFAULT_IROH_PKARR_RELAY: &str = "https:\/\/dns\.iroh\.link\/pkarr";/.test(bridgeSrc),
+      "Native bridge pins the default PKARR resolver to n0's production HTTPS relay (dns.iroh.link/pkarr)");
+    assert(/None\s*=>\s*\(\s*Some\(\s*SafeUrl::from_str\(DEFAULT_IROH_PKARR_RELAY\)/.test(bridgeSrc),
+      "Native bridge falls back to the n0 PKARR relay when no --iroh-dns override is given");
+    assert(/builder\s*=\s*builder\.set_iroh_dns\(iroh_dns\.clone\(\)\)/.test(bridgeSrc),
+      "Native bridge applies the resolver via set_iroh_dns — additive over DNS+DHT (non-replacing, verified in fedimint-connectors)");
+    assert(!/"status":\s*"unprobed"/.test(bridgeSrc),
+      "Native bridge /health reports a real boot discovery probe, not the old 'unprobed' stub");
   }
 }
 
@@ -12055,6 +12553,149 @@ console.log("\n── PAYOUT DOUBLE-PAY GUARD (3.5.1) ──");
     assert(journal.current?.operationId === "op_happy",
       "settled record carries the success operationId");
   }
+
+  // ── v4.0.0 FAIL-CLOSED: journal can't persist PRE-SEND → refuse to start,
+  //    payInvoice NEVER called, nothing sent (no later re-tap can double-pay) ─
+  {
+    const journal = makeJournal();
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_dp_unwritable",
+      bolt11: "lnbc100n1pdpunwritable",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: balances([0, 100_000, 100_000]),
+      claimAndRedeem: async () => ({}),
+      completeClaim: async () => {},
+      payInvoice: async () => { payCalls++; return "op_should_not_send"; },
+      getPayoutRecord: journal.getPayoutRecord,
+      recordPayoutSubmitted: journal.recordPayoutSubmitted,
+      markPayoutSettled: journal.markPayoutSettled,
+      clearPayoutRecord: journal.clearPayoutRecord,
+      assertPayoutJournalWritable: () => { throw new Error("QuotaExceededError"); },
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async () => {},
+      now: () => 0,
+      confirmTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+    });
+    assert(terminal.kind === "payout-failed",
+      "unwritable journal pre-send → payout-failed (refuse to start)");
+    assert(payCalls === 0,
+      "unwritable journal pre-send → payInvoice is NEVER called (no payment sent)");
+    assert(journal.current === null,
+      "unwritable journal pre-send → no payout record written");
+  }
+
+  // ── v4.0.0: SETTLED-guard persist fails AFTER a sent payout → payout-confirming
+  //    (never `done` with no guard, never a re-payable terminal) ────────────
+  {
+    const journal = makeJournal();
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_dp_settle_persist_fail",
+      bolt11: "lnbc100n1pdppersist",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: balances([0, 100_000, 100_000]),
+      claimAndRedeem: async () => ({}),
+      completeClaim: async () => {},
+      payInvoice: async () => { payCalls++; return "op_sent"; },
+      getPayoutRecord: journal.getPayoutRecord,
+      recordPayoutSubmitted: journal.recordPayoutSubmitted,
+      markPayoutSettled: () => { throw new Error("QuotaExceededError"); },
+      clearPayoutRecord: journal.clearPayoutRecord,
+      assertPayoutJournalWritable: () => {}, // probe passes; the real write fails
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async () => {},
+      now: () => 0,
+      confirmTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+    });
+    assert(terminal.kind === "payout-confirming",
+      "settled-persist failure after a sent payout → payout-confirming (NOT done, NOT re-payable)");
+    assert(payCalls === 1,
+      "settled-persist failure: payInvoice still attempted exactly once");
+  }
+
+  // ── v4.0.0: in-flight payout whose SUBMITTED-guard persist fails → still
+  //    payout-confirming, never the re-payable terminal ─────────────────────
+  {
+    const journal = makeJournal();
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      escrowId: "esc_dp_inflight_persist_fail",
+      bolt11: "lnbc100n1pdpinflightpf",
+      expectedDeltaMsats: 100_000,
+      saveAfter: false,
+      getBalance: balances([0, 100_000, 100_000]),
+      claimAndRedeem: async () => ({}),
+      completeClaim: async () => {},
+      payInvoice: async () => { payCalls++; throw inflightErr(); },
+      getPayoutRecord: journal.getPayoutRecord,
+      recordPayoutSubmitted: () => { throw new Error("QuotaExceededError"); },
+      markPayoutSettled: journal.markPayoutSettled,
+      clearPayoutRecord: journal.clearPayoutRecord,
+      assertPayoutJournalWritable: () => {},
+      addOrTouchLightningHandle: () => {},
+      onPhase: () => {},
+      sleep: async () => {},
+      now: () => 0,
+      confirmTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+    });
+    assert(terminal.kind === "payout-confirming",
+      "in-flight + submitted-persist failure → payout-confirming (never re-payable)");
+    assert(payCalls === 1,
+      "in-flight + submitted-persist failure: payInvoice attempted exactly once");
+  }
+}
+
+// ── PAYOUT JOURNAL FAIL-CLOSED (v4.0.0) ──────────────────────────────────
+// saveJournal must FAIL LOUD on a storage write error (quota / private mode /
+// disabled) so the orchestrator never proceeds with an unpersisted guard; a
+// failed CLEAR stays silent (keeping the record only blocks re-pay = safe).
+console.log("\n── PAYOUT JOURNAL FAIL-CLOSED ──");
+{
+  const journalMod = await import("../payments/payout-journal.js");
+  const KEY = "chama_payout_journal_v1";
+  const original = (globalThis as any).localStorage;
+  // Storage whose WRITES throw (reads work), simulating quota/private-mode.
+  const store: Record<string, string> = {
+    [KEY]: JSON.stringify({ e_keep: { escrowId: "e_keep", status: "submitted", createdAt: 0 } }),
+  };
+  (globalThis as any).localStorage = {
+    getItem: (k: string) => (k in store ? store[k] : null),
+    setItem: () => { throw new Error("QuotaExceededError"); },
+    removeItem: (k: string) => { delete store[k]; },
+  };
+  try {
+    let threw = false;
+    try { journalMod.assertPayoutJournalWritable(); } catch { threw = true; }
+    assert(threw,
+      "assertPayoutJournalWritable throws when storage writes fail (pre-send guard refuses)");
+
+    threw = false;
+    try { journalMod.recordPayoutSubmitted({ escrowId: "e_new", operationId: "op_new" }); }
+    catch { threw = true; }
+    assert(threw,
+      "recordPayoutSubmitted re-throws when the guard can't persist (fail-closed, not swallowed)");
+
+    threw = false;
+    try { journalMod.markPayoutSettled("e_new", "op_new"); } catch { threw = true; }
+    assert(threw,
+      "markPayoutSettled re-throws when the guard can't persist (fail-closed)");
+
+    // A failed CLEAR must NOT throw: keeping the record only blocks re-pay (safe).
+    let clearThrew = false;
+    try { journalMod.clearPayoutRecord("e_keep"); } catch { clearThrew = true; }
+    assert(!clearThrew,
+      "clearPayoutRecord does NOT throw on a write failure (failed clear keeps the guard — fund-safe)");
+  } finally {
+    (globalThis as any).localStorage = original;
+  }
 }
 
 // ── 41. RUN RECOVERY PAYOUT (v0.3.0 Phase 4) ─────────────────────────────
@@ -12281,6 +12922,31 @@ console.log("\n── RUN RECOVERY PAYOUT ──");
         "recovery in-flight: payInvoice attempted exactly once");
       assert(journal.current?.status === "submitted" && journal.current?.operationId === "op_rec",
         "recovery in-flight journaled submitted with operationId");
+    }
+
+    // v4.0.0 FAIL-CLOSED: journal unwritable pre-send (with an escrowId) →
+    // refuse to send; the shared recovery payout must not leave a re-payable
+    // window either.
+    {
+      const journal = makeJournal();
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_unwritable",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; return "op_should_not_send"; },
+        traceContext: { escrowId: "rec_dp_unwritable", amountMsats: 96_000 },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+        assertPayoutJournalWritable: () => { throw new Error("QuotaExceededError"); },
+      });
+      assert(terminal.kind === "payout-failed",
+        "recovery unwritable journal pre-send → payout-failed (refuse to start)");
+      assert(payCalls === 0,
+        "recovery unwritable journal pre-send → payInvoice is NEVER called");
     }
 
     // Prior settled → done, never re-pays
@@ -13710,31 +14376,31 @@ console.log("\n── BANXAAS PAYOUT HANDOFF ──");
     "Banxaas payout hidden outside supported countries");
 }
 
-// ── EXTERNAL SWAP REGISTRY (v1.2.4 unified providers) ────────────────────
+// ── EXTERNAL SWAP REGISTRY (offramp-only redirects) ──────────────────────
 //
-// The v1.2.4 unified registry hosts Banxaas, Chapsmart, Bitika, Tando,
-// Pilot, and Bitzed as guided-redirect providers. Banxaas is the only
-// bidirectional entry (single URL handles onramp + offramp) and is the
-// only one safe to surface pre-LOCK. Everyone else is offramp-only and
-// must stay claim-modal-only with a post-CLAIMED gate enforced by the
-// caller. This block verifies the registry's resolution + sort
-// behaviour. The picker component is dumb — these guarantees are what
-// it relies on.
-console.log("\n── EXTERNAL SWAP REGISTRY (v1.2.4) ──");
+// Day-1 fiat-ramps decision (2026-06-24): the registry hosts Banxaas,
+// Chapsmart, Bitika, and Bitzed as OFFRAMP-only guided-redirect providers,
+// surfaced POST-CLAIM only. There is no `bidirectional` field and no
+// pre-LOCK call site any more. Minmo was removed (too much friction) and
+// Tando was promoted out of the registry into a native LUD-16 M-Pesa
+// offramp (see tando-offramp.ts). This block verifies the registry's
+// resolution + sort behaviour; the picker component relies on it.
+console.log("\n── EXTERNAL SWAP REGISTRY (offramp-only) ──");
 {
-  // Registry coverage — every provider promised in the v1.2.4 brief.
+  // Registry coverage — every offramp-redirect provider.
   const providerIds = new Set(EXTERNAL_SWAP_PROVIDERS.map((p) => p.id));
-  for (const expectedId of ["banxaas", "chapsmart", "bitika", "tando", "minmo", "bitzed"]) {
+  for (const expectedId of ["banxaas", "chapsmart", "bitika", "bitzed"]) {
     assert(providerIds.has(expectedId as any),
       `Registry covers ${expectedId}`);
   }
+  // Minmo removed entirely; Tando is now native (not a redirect entry).
+  assert(!providerIds.has("minmo" as any),
+    "Minmo is removed from the registry");
+  assert(!providerIds.has("tando" as any),
+    "Tando is no longer a registry redirect (native LUD-16 offramp instead)");
 
-  // Banxaas is the only bidirectional + recommended entry. If a future
-  // provider gets promoted to that lane, this assertion catches the
-  // change so we revisit the pre-LOCK CTA placement.
-  const bidirectional = EXTERNAL_SWAP_PROVIDERS.filter((p) => p.bidirectional === true);
-  assert(bidirectional.every((p) => p.id === "banxaas"),
-    "Only Banxaas is marked bidirectional today");
+  // Banxaas keeps the recommended highlight so it tops its market; nothing
+  // is bidirectional any more (offramp-only, post-CLAIM).
   const recommended = EXTERNAL_SWAP_PROVIDERS.filter((p) => p.recommended === true);
   assert(recommended.every((p) => p.id === "banxaas"),
     "Only Banxaas is marked recommended today");
@@ -13758,22 +14424,14 @@ console.log("\n── EXTERNAL SWAP REGISTRY (v1.2.4) ──");
   assert(zm.length === 1 && zm[0].provider.id === "bitzed",
     "Zambia trade resolves to Bitzed");
 
-  // Kenya has three providers and all three should surface together
-  // in registry order (Bitika → Tando → Pilot), with no provider
-  // floating to the top because none of them are recommended or
-  // bidirectional.
+  // Kenya's only registry redirect is Bitika (Tando is the native offramp,
+  // surfaced separately by ClaimPayoutModal; Minmo is gone).
   const ke = getExternalSwapsForContext({ tradeCommunity: "ke-kes" });
-  assert(ke.length === 3,
-    "Kenya trade surfaces all three KES providers");
-  assert(
-    ke[0].provider.id === "bitika" &&
-    ke[1].provider.id === "tando" &&
-    ke[2].provider.id === "minmo",
-    "Kenya providers preserve registry order: Bitika → Tando → Minmo",
-  );
+  assert(ke.length === 1 && ke[0].provider.id === "bitika",
+    "Kenya trade resolves to Bitika (only registry redirect; Tando is native)");
   const keBitsacco = getExternalSwapsForContext({ tradeCommunity: "ke-kes-bitsacco" });
-  assert(keBitsacco.length === 3,
-    "Kenya Bitsacco route surfaces the same three KES providers");
+  assert(keBitsacco.length === 1 && keBitsacco[0].provider.id === "bitika",
+    "Kenya Bitsacco route resolves to Bitika");
 
   // Trade-community wins over home-community (most precise context).
   const tradeBeatsHome = getExternalSwapsForContext({
@@ -13789,8 +14447,8 @@ console.log("\n── EXTERNAL SWAP REGISTRY (v1.2.4) ──");
   assert(xofOnly.some((m) => m.provider.id === "banxaas" && m.reason === "fiat-currency"),
     "Currency-only XOF surfaces Banxaas as fiat-currency reason");
   const kesOnly = getExternalSwapsForContext({ fiatCurrency: "KES" });
-  assert(kesOnly.length === 6 && kesOnly.every((m) => m.reason === "fiat-currency"),
-    "Currency-only KES surfaces both ke-kes and ke-kes-bitsacco entries (3 + 3)");
+  assert(kesOnly.length === 2 && kesOnly.every((m) => m.provider.id === "bitika" && m.reason === "fiat-currency"),
+    "Currency-only KES surfaces the two Bitika entries (ke-kes + ke-kes-bitsacco)");
 
   // No matches for unsupported markets — picker should render nothing.
   const usd = getExternalSwapsForContext({ fiatCurrency: "USD" });
@@ -13813,26 +14471,13 @@ console.log("\n── EXTERNAL SWAP REGISTRY (v1.2.4) ──");
   assert(mixed[0].provider.id === "chapsmart" && mixed[0].reason === "home-community",
     "Home-community match beats fiat-currency match even when the latter is the recommended provider");
 
-  // Recommended floats WITHIN a tier — when two providers tie on
-  // reason, the recommended one comes first. fiat-currency KES ties
-  // three providers (none recommended), so registry order wins; if a
-  // recommended provider ever joins KES, this is where it'd float up.
+  // Recommended floats WITHIN a tier. fiat-currency KES has only Bitika
+  // entries (none recommended), so registry order wins.
   const kesTie = getExternalSwapsForContext({ fiatCurrency: "KES" });
   assert(kesTie.every((m) => m.reason === "fiat-currency"),
     "KES fiat-currency matches all share the same reason tier");
   assert(kesTie[0].provider.id === "bitika",
     "Within a tie, registry order is preserved");
-
-  // Bidirectional-only filter — the pre-LOCK CTA driver.
-  const bidiSn = getBidirectionalSwapsForContext({ tradeCommunity: "sn-cfa" });
-  assert(bidiSn.length === 1 && bidiSn[0].provider.id === "banxaas",
-    "Bidirectional filter surfaces Banxaas pre-LOCK for Senegal");
-  const bidiKe = getBidirectionalSwapsForContext({ tradeCommunity: "ke-kes" });
-  assert(bidiKe.length === 0,
-    "Bidirectional filter hides offramp-only providers pre-LOCK (Kenya: 0)");
-  const bidiTz = getBidirectionalSwapsForContext({ tradeCommunity: "tz-tzs" });
-  assert(bidiTz.length === 0,
-    "Bidirectional filter hides Chapsmart pre-LOCK (offramp-only)");
 
   // Each registry entry has the fields the picker reads. Cheap shape
   // assertion to catch future entries that forget a flag.
@@ -13853,6 +14498,88 @@ console.log("\n── EXTERNAL SWAP REGISTRY (v1.2.4) ──");
   const sgViaShim = getBanxaasPayoutAvailability({ homeCommunity: "sn-cfa" });
   assert(sgViaShim?.country.countryCode === "SN" && sgViaShim.status === "enabled",
     "Banxaas back-compat shim still resolves Senegal after registry migration");
+}
+
+// ── TANDO NATIVE M-PESA OFFRAMP (LUD-16) ─────────────────────────────────
+//
+// Tando is Kenya's lead cash-out: `<phone>@bitcoin.co.ke` is a real
+// Lightning Address, so the claim flow pays it through the existing LUD-16
+// payout path. These tests cover the pure phone↔address layer (tando-
+// offramp.ts) that the ClaimPayoutModal Tando picker depends on.
+console.log("\n── TANDO NATIVE M-PESA OFFRAMP ──");
+{
+  // Domain is bitcoin.co.ke (Tando's live LUD-16 host), NOT use.tando.me.
+  assert(TANDO_LNADDRESS_DOMAIN === "bitcoin.co.ke",
+    "Tando Lightning-Address host is bitcoin.co.ke");
+
+  // MSISDN normalization accepts the common Kenyan input shapes and
+  // canonicalizes to 254 + 9 national digits.
+  assert(normalizeKenyanMsisdn("0712345678") === "254712345678",
+    "Local 07… form normalizes to 2547…");
+  assert(normalizeKenyanMsisdn("254712345678") === "254712345678",
+    "Full MSISDN passes through");
+  assert(normalizeKenyanMsisdn("+254 712 345 678") === "254712345678",
+    "Leading + and spaces are stripped");
+  assert(normalizeKenyanMsisdn("712345678") === "254712345678",
+    "Bare national significant number is accepted");
+  assert(normalizeKenyanMsisdn("0712-345-678") === "254712345678",
+    "Dashes are stripped");
+  assert(normalizeKenyanMsisdn("0112345678") === "254112345678",
+    "Newer 01… (national 1…) range is accepted");
+
+  // Rejects non-Kenyan / malformed input.
+  assert(normalizeKenyanMsisdn("0612345678") === null,
+    "National numbers must start with 7 or 1 (06… rejected)");
+  assert(normalizeKenyanMsisdn("071234567") === null,
+    "Too-short numbers are rejected");
+  assert(normalizeKenyanMsisdn("07123456789") === null,
+    "Too-long numbers are rejected");
+  assert(normalizeKenyanMsisdn("0712 34A 678") === null,
+    "Non-digit characters are rejected");
+  assert(normalizeKenyanMsisdn("") === null && normalizeKenyanMsisdn("   ") === null,
+    "Empty / whitespace is rejected");
+  assert(isValidKenyanMsisdn("0712345678") && !isValidKenyanMsisdn("nope"),
+    "isValidKenyanMsisdn mirrors normalize");
+
+  // Address building + round-trip.
+  assert(buildTandoLightningAddress("0712345678") === "254712345678@bitcoin.co.ke",
+    "buildTandoLightningAddress forms <msisdn>@bitcoin.co.ke");
+  assert(buildTandoLightningAddress("not a phone") === null,
+    "buildTandoLightningAddress returns null for invalid input");
+  assert(isTandoLightningAddress("254712345678@bitcoin.co.ke"),
+    "isTandoLightningAddress recognizes Tando addresses");
+  assert(isTandoLightningAddress("254712345678@BITCOIN.CO.KE"),
+    "isTandoLightningAddress is case-insensitive");
+  assert(!isTandoLightningAddress("alice@getchama.app"),
+    "isTandoLightningAddress rejects non-Tando addresses");
+  assert(tandoMsisdnFromAddress("254712345678@bitcoin.co.ke") === "254712345678",
+    "tandoMsisdnFromAddress recovers the MSISDN");
+  assert(tandoMsisdnFromAddress("alice@getchama.app") === null,
+    "tandoMsisdnFromAddress returns null for non-Tando addresses");
+
+  // Display format is the familiar local 0XXX XXX XXX form.
+  assert(formatKenyanMsisdnDisplay("254712345678") === "0712 345 678",
+    "formatKenyanMsisdnDisplay renders the local 0XXX XXX XXX form");
+
+  // The Tando address must survive the payout-destinations normalizer
+  // (lowercased) so dedupe-by-number works and isTandoLightningAddress
+  // still matches the stored value.
+  const tandoAddr = buildTandoLightningAddress("0712345678")!;
+  assert(tandoAddr === tandoAddr.toLowerCase() && isTandoLightningAddress(tandoAddr),
+    "Tando address is already lowercase and stays recognizable when stored");
+
+  // Kenya context detection — gates the native Tando option (independent
+  // of EXTERNAL_SWAPS_ENABLED).
+  assert(isKenyaPayoutContext({ tradeCommunity: "ke-kes" }),
+    "ke-kes trade community is a Kenya payout context");
+  assert(isKenyaPayoutContext({ homeCommunity: "ke-kes-bitsacco" }),
+    "ke-kes-bitsacco home community is a Kenya payout context");
+  assert(isKenyaPayoutContext({ fiatCurrency: "kes" }),
+    "KES fiat currency (any case) is a Kenya payout context");
+  assert(!isKenyaPayoutContext({ tradeCommunity: "tz-tzs", fiatCurrency: "TZS" }),
+    "Non-Kenya context is not eligible for Tando");
+  assert(!isKenyaPayoutContext({}),
+    "Empty context is not eligible for Tando");
 }
 
 // ── SIM WALLET — balance subscription end-to-end ─────────────────────────
@@ -15120,6 +15847,91 @@ console.log("\n── RELAY MANAGER — one-shot fetch isolation ──");
   assert(!retryTimer, "Disconnect suppresses the socket-close reconnect timer");
 }
 
+// ── RELAY MANAGER — reconnect resilience ───────────────────────────────────
+//
+// The pool degraded in the field because: a WebSocket `error` doesn't always
+// emit a following `close`, so an errored relay stalled forever (only onclose
+// scheduled a reconnect); the per-relay backoff gives up permanently at
+// MAX_RETRY_COUNT (retryCount only resets on a successful open), so a relay down
+// through the backoff window was abandoned for the session; and the fixed
+// quorum=3 stalled small/degraded pools. These pin the fixes.
+console.log("\n── RELAY MANAGER — reconnect resilience ──");
+{
+  class FakeWS {
+    static instances: FakeWS[] = [];
+    sent: string[] = [];
+    closed = false;
+    onopen: ((e: Event) => void) | null = null;
+    onmessage: ((e: MessageEvent) => void) | null = null;
+    onerror: ((e: Event) => void) | null = null;
+    onclose: ((e: CloseEvent) => void) | null = null;
+    constructor(public url: string) { FakeWS.instances.push(this); }
+    send(m: string) { this.sent.push(m); }
+    close() { this.closed = true; }
+  }
+  const WS = FakeWS as unknown as typeof WebSocket;
+  const relayOf = (rm: RelayManager, url: string) => (rm as any).relays.get(url);
+
+  // (1) onerror alone (no following onclose) must still schedule a reconnect.
+  FakeWS.instances = [];
+  const rmErr = new RelayManager(["wss://err.test"], {}, WS);
+  rmErr.connect();
+  FakeWS.instances[0]!.onerror?.({} as Event);
+  const rErr = relayOf(rmErr, "wss://err.test");
+  assert(!!rErr.retryTimer && rErr.retryCount === 1,
+    "onerror without onclose still schedules a backoff reconnect");
+  rmErr.disconnect();
+
+  // (2) A single failure that fires BOTH onerror and onclose arms exactly one
+  // reconnect — the backoff must not double-increment.
+  FakeWS.instances = [];
+  const rmFlap = new RelayManager(["wss://flap.test"], {}, WS);
+  rmFlap.connect();
+  const sFlap = FakeWS.instances[0]!;
+  sFlap.onerror?.({} as Event);
+  sFlap.onclose?.({} as CloseEvent);
+  assert(relayOf(rmFlap, "wss://flap.test").retryCount === 1,
+    "onerror+onclose for one failure arm a single reconnect (backoff not double-incremented)");
+  rmFlap.disconnect();
+
+  // (3) The backoff gives up at the cap; forceReconnectAll recovers it.
+  FakeWS.instances = [];
+  const rmGave = new RelayManager(["wss://gaveup.test"], {}, WS);
+  rmGave.connect();
+  const rGave = relayOf(rmGave, "wss://gaveup.test");
+  rGave.retryCount = 99;                       // simulate an abandoned relay
+  rGave.status = RelayStatus.DISCONNECTED;
+  (rmGave as any).scheduleReconnect("wss://gaveup.test");
+  assert(!rGave.retryTimer,
+    "scheduleReconnect gives up once retryCount passes the cap (no auto-retry)");
+  const beforeProbe = FakeWS.instances.length;
+  rmGave.forceReconnectAll();
+  assert(rGave.retryCount === 0 && FakeWS.instances.length === beforeProbe + 1,
+    "forceReconnectAll clears the give-up state and immediately re-probes the abandoned relay");
+  rmGave.disconnect();
+
+  // (3b) forceReconnectAll is a no-op after disconnect (respects `stopped`).
+  FakeWS.instances = [];
+  const rmStopped = new RelayManager(["wss://stopped.test"], {}, WS);
+  rmStopped.connect();
+  rmStopped.disconnect();
+  const afterStop = FakeWS.instances.length;
+  rmStopped.forceReconnectAll();
+  assert(FakeWS.instances.length === afterStop,
+    "forceReconnectAll is a no-op after disconnect (stopped pool stays down)");
+
+  // (4) The fetch quorum adapts to the configured pool size: min(3, count-1),
+  // so a small/degraded pool resolves instead of stalling, while a healthy
+  // 5-7 relay pool keeps the original quorum of 3.
+  const quorumOf = (urls: string[]) => (new RelayManager(urls) as any).effectiveQuorum();
+  assert(quorumOf(["a"]) === 1, "effectiveQuorum: single-relay pool needs 1 (never 0)");
+  assert(quorumOf(["a", "b"]) === 1, "effectiveQuorum: 2-relay pool needs 1");
+  assert(quorumOf(["a", "b", "c"]) === 2, "effectiveQuorum: 3-relay pool needs 2");
+  assert(quorumOf(["a", "b", "c", "d", "e"]) === 3, "effectiveQuorum: 5-relay pool keeps 3");
+  assert(quorumOf(["a", "b", "c", "d", "e", "f", "g"]) === 3,
+    "effectiveQuorum: 7-relay pool stays at 3 (margin without a wall of red)");
+}
+
 // ── FIRST-ACK PUBLISH (field fix: slow Create→Publish) ─────────────────
 //
 // publish() sends the EVENT frame to every connected relay immediately,
@@ -15486,6 +16298,78 @@ console.log("\n── Trade notifications (notificationForTransition) ──");
     votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND } });
   assert(notificationForTransition(locked, disputedSub, subArb)?.tag === "sm_notif_demo_0001:dispute",
     "A backup pool arbiter is summoned to a dispute too");
+}
+
+// ── DM / trade-chat notifications (chatNotificationFor) ──
+console.log("\n── DM / trade-chat notifications (chatNotificationFor) ──");
+{
+  const BUYER = "11".repeat(32);
+  const SELLER = "22".repeat(32);
+  const ARB = "33".repeat(32);
+  const STRANGER = "44".repeat(32);
+  const CHAT_ID = "sm_notif_chat_0001";
+  const LIVE = 1_700_000_000; // session went live at this second
+
+  const stateL = ({
+    id: CHAT_ID,
+    category: "p2p-trade",
+    status: EscrowStatus.LOCKED,
+    participants: { [Role.BUYER]: BUYER, [Role.SELLER]: SELLER, [Role.ARBITER]: ARB },
+    votes: {},
+    resolvedOutcome: null,
+    communityArbiters: [ARB],
+  }) as EscrowState;
+
+  const mkChat = (sender: string, senderRole: Role, ts: number, evId: string) => ({
+    raw: { id: evId, pubkey: sender, created_at: ts, kind: 38108, tags: [] as string[][], content: "", sig: "" },
+    payload: { type: "escrow:chat" as const, message: "see you at noon", senderRole, sentAt: ts },
+    escrowId: CHAT_ID,
+    prevEventId: null,
+    kind: EscrowEventKind.CHAT,
+    pubkey: sender,
+    timestamp: ts,
+  }) as ParsedEscrowEvent<ChatPayload>;
+
+  // auto: the arbiter is the responder → buzzed on an inbound counterparty chat.
+  const toArb = chatNotificationFor(stateL, mkChat(BUYER, Role.BUYER, LIVE + 10, "c1"), ARB, "auto", LIVE);
+  assert(toArb?.tag === "sm_notif_chat_0001:chat:c1",
+    "auto: the arbiter is buzzed for an inbound chat (they're the responder)");
+  assert(toArb?.title === "💬 New message" && /buyer/.test(toArb?.body ?? ""),
+    "chat notification names the sender's role and carries the trade");
+  assert(toArb?.escrowId === CHAT_ID,
+    "chat notification carries escrowId so the tap deep-links to the trade");
+
+  // auto: buyers/sellers stay quiet by default — the role-on-trade default.
+  assert(chatNotificationFor(stateL, mkChat(SELLER, Role.SELLER, LIVE + 10, "c2"), BUYER, "auto", LIVE) === null,
+    "auto: a buyer is NOT buzzed (role default keeps the parties quiet)");
+  assert(chatNotificationFor(stateL, mkChat(BUYER, Role.BUYER, LIVE + 10, "c3"), SELLER, "auto", LIVE) === null,
+    "auto: a seller is NOT buzzed by default");
+
+  // on / off: explicit global overrides win over the role default.
+  assert(chatNotificationFor(stateL, mkChat(SELLER, Role.SELLER, LIVE + 10, "c4"), BUYER, "on", LIVE)?.escrowId === CHAT_ID,
+    "on: the explicit override buzzes a buyer for an inbound chat");
+  assert(chatNotificationFor(stateL, mkChat(BUYER, Role.BUYER, LIVE + 10, "c5"), ARB, "off", LIVE) === null,
+    "off: nothing buzzes, even for the arbiter");
+
+  // Own echo never buzzes — not even under an explicit 'on'.
+  assert(chatNotificationFor(stateL, mkChat(ARB, Role.ARBITER, LIVE + 10, "c6"), ARB, "on", LIVE) === null,
+    "a participant's own echoed message never buzzes");
+
+  // Backlog guard: a message older than live-since stays silent (no cold-boot storm).
+  assert(chatNotificationFor(stateL, mkChat(BUYER, Role.BUYER, LIVE - 10, "c7"), ARB, "auto", LIVE) === null,
+    "backlog (older than live-since) never buzzes — the analogue of prev-must-be-non-null");
+
+  // A non-participant is never buzzed, even under 'on'.
+  assert(chatNotificationFor(stateL, mkChat(BUYER, Role.BUYER, LIVE + 10, "c8"), STRANGER, "on", LIVE) === null,
+    "a non-participant viewer is never buzzed");
+  // No viewer pubkey → no buzz.
+  assert(chatNotificationFor(stateL, mkChat(BUYER, Role.BUYER, LIVE + 10, "c9"), null, "on", LIVE) === null,
+    "no viewer pubkey → no buzz");
+
+  // Sender role is resolved from participants (by pubkey), not the spoofable payload.
+  const spoof = chatNotificationFor(stateL, mkChat(BUYER, Role.SELLER, LIVE + 10, "c10"), ARB, "auto", LIVE);
+  assert(/buyer/.test(spoof?.body ?? "") && !/seller/.test(spoof?.body ?? ""),
+    "sender role comes from participants (pubkey), not the self-declared payload role");
 }
 
 // ── Ratings primitive (kind:38123) — the reputation keystone ──
@@ -16118,6 +17002,54 @@ function makeFundSafetyWallet(overrides: {
   clearAllPendingRedemptions();
 }
 
+// ── v4.0.0 · unresolved-credit reconciled against the wallet balance ───────
+{
+  clearAllPendingRedemptions();
+  // One unresolved-credit (6,170 sats) + one poisoned (live-money) entry.
+  stashPendingRedemption({ escrowId: "uc", oobNotes: "oob_uc", notesHash: "h_uc", amountMsats: 6_170_000 });
+  stashPendingRedemption({ escrowId: "poison", oobNotes: "oob_p", notesHash: "h_p", amountMsats: 6_170_000 });
+  markUnresolvedCredit("uc", "already spent, credit unconfirmed");
+  markPoisoned("poison", "malformed notes");
+  const stranded = listStrandedRedemptions();
+
+  // Balance COVERS the unconfirmed amount → reconcile silently; poisoned stays loud.
+  const covered = partitionStrandedClaims(stranded, 8_000_000);
+  assert(covered.reconciledIds.length === 1 && covered.reconciledIds[0] === "uc",
+    "reconcile: balance ≥ unresolved amount → the unresolved-credit entry is reconciled silently");
+  assert(covered.calm.length === 0,
+    "reconcile: a balance-covered unresolved-credit raises NO calm nudge (clean end, not red)");
+  assert(covered.loud.length === 1 && covered.loud[0].escrowId === "poison",
+    "reconcile: poisoned (possibly-live) note is NEVER balance-downgraded — stays loud");
+
+  // Balance SHORT → calm, dismissible nudge; nothing auto-reconciled.
+  const short = partitionStrandedClaims(stranded, 100_000);
+  assert(short.reconciledIds.length === 0 && short.calm.length === 1 && short.calm[0].escrowId === "uc",
+    "reconcile: balance < unresolved amount → calm nudge (user is visibly short), not auto-resolved");
+  assert(short.loud.length === 1 && short.loud[0].escrowId === "poison",
+    "reconcile: short balance still keeps the poisoned note loud");
+
+  // SUM guard: two unresolved (6.17M each) and a balance that covers ONE but
+  // not BOTH must reconcile NEITHER (same balance can't cover both).
+  stashPendingRedemption({ escrowId: "uc2", oobNotes: "oob_uc2", notesHash: "h_uc2", amountMsats: 6_170_000 });
+  markUnresolvedCredit("uc2", "already spent, credit unconfirmed");
+  const two = partitionStrandedClaims(listStrandedRedemptions(), 7_000_000);
+  assert(two.reconciledIds.length === 0 && two.calm.length === 2,
+    "reconcile: balance covers one but not the summed two → neither is silently reconciled");
+
+  // resolveUnresolvedCredit archives (keeps the note) and drops it off the alarm list.
+  resolveUnresolvedCredit("uc", "balance-reconciled");
+  assert(!listStrandedRedemptions().some(s => s.escrowId === "uc"),
+    "reconcile: a resolved unresolved-credit leaves the stranded/alarm list");
+  assert(listPendingRedemptions().some(p => p.escrowId === "uc" && p.resolution === "balance-reconciled"),
+    "reconcile: the resolved entry is ARCHIVED, not deleted (bearer note kept for forensics/recovery)");
+
+  // GUARDRAIL: resolveUnresolvedCredit refuses to silence a poisoned note.
+  resolveUnresolvedCredit("poison", "user-dismissed");
+  assert(listStrandedRedemptions().some(s => s.escrowId === "poison"),
+    "reconcile: resolveUnresolvedCredit can NEVER archive a poisoned (possibly-live) note");
+  clearAllPendingRedemptions();
+}
+
 // ── C14 · invariant_no-wipe__unknown_balance_refuses ──────────────────────
 {
   // Thrown/uncertain peek: NEVER wipe. Unscoped (or already-scoped file)
@@ -16227,6 +17159,326 @@ function makeFundSafetyWallet(overrides: {
   });
   assert(refundView.length === 1 && refundView[0]?.ciphertext === "ct_2",
     "invariant_claim__tries_all_envelopes: outcome binding is exact — only envelopes bound to the resolved outcome qualify");
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// BOND PHASE 0 + 1 — cabinet seating, the 38130 declaration, the §8 exposure
+// ledger, and the DORMANT consent-layer capacity gate
+// ══════════════════════════════════════════════════════════════════════════
+console.log("\n── BOND PHASE 0: BLF custody cabinet (n=3) ──");
+{
+  const MAINTAINER = "22f7161f76e075b9e0a250a447884ac09b04b636effd7c703a92394ed3fb39e8";
+  const CHAPSMART  = "17a96aa412d9189c3299a797dd8720eae6980d7adafc76ec550c0b3c8a1694f0";
+  const GRAY       = "59f0660b34dd48f9dfac5d973b77774a75af057ea3a261214ac5cdccd5d24440";
+
+  const cabinetHex = BLF_CABINET_NPUBS.map((np) => nip19.decode(np).data as string);
+  assert(cabinetHex.length === 3, "cabinet: the trio has exactly three seats");
+  assert(cabinetHex[0] === MAINTAINER,
+    "cabinet seat 0 = maintainer (22f716…), the pinned BLF roster steward");
+  assert(cabinetHex[1] === CHAPSMART, "cabinet seat 1 = Chapsmart (17a96aa4…)");
+  assert(cabinetHex[2] === GRAY,
+    "cabinet seat 2 = Graysatoshi (59f0660b…4440), seated this phase");
+
+  assert(BLF_OFFICIAL_ARBITERS.includes(GRAY),
+    "Graysatoshi is now an assignable BLF arbiter (BLF_OFFICIAL_ARBITERS)");
+  assert(BLF_OFFICIAL_ARBITERS.length === 3 &&
+    BLF_OFFICIAL_ARBITERS.every((pk) => cabinetHex.includes(pk)),
+    "BLF_OFFICIAL_ARBITERS is exactly the cabinet trio (seeded from it)");
+  assert(getTrustedArbiterPool({ community: "us-blf" }).includes(GRAY),
+    "Gray is reachable as a BLF assignable arbiter via getTrustedArbiterPool");
+}
+
+console.log("\n── BOND 38130: declaration event (UNBACKED Phase 1) ──");
+{
+  const NOW = 1_900_000_000;
+  const arbSk = generateSecretKey();
+  const arbPk = getPublicKey(arbSk);
+  const otherSk = generateSecretKey();
+
+  const bondKind: number = ARBITER_BOND_KIND;
+  assert(bondKind === 38130, "bond kind is 38130");
+  assert(bondKind !== Number(EscrowEventKind.RESOLVE) &&
+    bondKind !== 38120 && bondKind !== 38121 && bondKind !== 38123,
+    "38130 stays clear of escrow/roster/application/ratings kinds");
+
+  // Build → sign → parse round-trip.
+  const signed = finalizeEvent(buildArbiterBondEvent({
+    pubkey: arbPk, bondMsats: 500_000_000, termStart: NOW - 100, termEnd: NOW + 100_000, createdAt: NOW,
+  }), arbSk) as unknown as NostrEvent;
+  const parsed = parseArbiterBondEvent(signed);
+  assert(!!parsed && parsed.npub === arbPk && parsed.bondMsats === 500_000_000,
+    "signed bond parses + verifies; the signer is the bonding arbiter");
+
+  // Tamper the amount → verification must fail. Build the tampered event by
+  // copying data fields EXPLICITLY (not spreading): nostr-tools stamps a
+  // per-object "verified" symbol on finalizeEvent, and a spread would copy it
+  // and short-circuit the re-check, masking the tamper.
+  const tampered = {
+    kind: signed.kind, created_at: signed.created_at, tags: signed.tags,
+    pubkey: signed.pubkey, id: signed.id, sig: signed.sig,
+    content: signed.content.replace("500000000", "999000000"),
+  } as unknown as NostrEvent;
+  assert(parseArbiterBondEvent(tampered) === null,
+    "tampered bond content fails verification (event id no longer matches the content hash)");
+
+  // Spoof guard: payload npub ≠ signer is rejected (no declaring for others).
+  const spoof = finalizeEvent(buildArbiterBondEvent({
+    pubkey: arbPk, bondMsats: 1_000, termStart: NOW - 100, termEnd: NOW + 100_000, createdAt: NOW,
+  }), otherSk) as unknown as NostrEvent;
+  assert(parseArbiterBondEvent(spoof) === null,
+    "a bond whose payload npub disagrees with the signer is rejected");
+
+  // selectLatestBond: newest in-term wins; out-of-term + wrong-arbiter ignored.
+  const older = finalizeEvent(buildArbiterBondEvent({
+    pubkey: arbPk, bondMsats: 100_000_000, termStart: NOW - 100, termEnd: NOW + 100_000, createdAt: NOW,
+  }), arbSk) as unknown as NostrEvent;
+  const newer = finalizeEvent(buildArbiterBondEvent({
+    pubkey: arbPk, bondMsats: 300_000_000, termStart: NOW - 100, termEnd: NOW + 100_000, createdAt: NOW + 50,
+  }), arbSk) as unknown as NostrEvent;
+  const expired = finalizeEvent(buildArbiterBondEvent({
+    pubkey: arbPk, bondMsats: 900_000_000, termStart: NOW - 1000, termEnd: NOW - 1, createdAt: NOW + 100,
+  }), arbSk) as unknown as NostrEvent;
+  assert(selectLatestBond(arbPk, [older, newer], NOW)?.bondMsats === 300_000_000,
+    "newest in-term bond wins (replaceable semantics)");
+  assert(selectLatestBond(arbPk, [expired], NOW) === null, "a bond past its term is not valid now (term-gated)");
+  assert(selectLatestBond(arbPk, [older, newer, expired], NOW)?.bondMsats === 300_000_000,
+    "the out-of-term bond is skipped even though it's the newest event");
+  assert(selectLatestBond(getPublicKey(otherSk), [older, newer], NOW) === null,
+    "selectLatestBond returns only the queried arbiter's bond");
+  assert(getArbiterBond(arbPk, [older, newer], NOW)?.bondMsats === 300_000_000,
+    "getArbiterBond resolves the current in-term bond");
+}
+
+console.log("\n── EXPOSURE LEDGER (§8): floor, caps, tiers, consent gate ──");
+{
+  const ARB = ARBITER_PK; // "cc"*32 — a 64-hex test key
+  const NOW = 1_900_000_000;
+  const bond = (msats: number) =>
+    ({ npub: ARB, bondMsats: msats, termStart: NOW - 1, termEnd: NOW + 1, createdAt: NOW, eventId: "b-" + msats });
+  const mkTrade = (
+    id: string, amountMsats: number, status: EscrowStatus, arbiter = ARB, community: string | null = null,
+  ) => ({
+    id, amountMsats, status, community,
+    participants: { [Role.BUYER]: null, [Role.SELLER]: null, [Role.ARBITER]: arbiter },
+  } as unknown as EscrowState);
+
+  // Floor (§K): a sub-10k-sat trade needs NO bond; AT the floor a bond is required.
+  assert(UNBONDED_FLOOR_MSATS === 10_000_000, "unbonded floor is 10,000 sats (10,000,000 msats)");
+  assert(classifyArbiterCapacity({ arbiter: ARB, tradeMsats: UNBONDED_FLOOR_MSATS - 1, bond: null, openTrades: [] }).tier === "unbonded",
+    "a trade below the floor is 'unbonded' even with no bond");
+  assert(canAssignArbiter({ npub: ARB, tradeMsats: UNBONDED_FLOOR_MSATS - 1, bond: null, openTrades: [] }) === true,
+    "sub-floor trade assigns with NO bond (permissionless entry, §K)");
+  assert(canAssignArbiter({ npub: ARB, tradeMsats: UNBONDED_FLOOR_MSATS, bond: null, openTrades: [] }) === false,
+    "AT the floor a bond is required (no bond ⇒ over-capacity)");
+
+  // Per-trade cap (≤, the brief boundary).
+  assert(classifyArbiterCapacity({ tradeMsats: 200_000_000, bond: bond(150_000_000), openTrades: [] }).tier === "over-capacity",
+    "per-trade cap: a single trade larger than the bond is over-capacity");
+  assert(classifyArbiterCapacity({ tradeMsats: 150_000_000, bond: bond(150_000_000), openTrades: [] }).tier === "covered",
+    "per-trade cap: a trade EQUAL to the bond is covered (≤)");
+
+  // Aggregate cap across MULTIPLE chamas.
+  const openA = mkTrade("t-A", 60_000_000, EscrowStatus.LOCKED, ARB, "ke-kes");
+  const openB = mkTrade("t-B", 60_000_000, EscrowStatus.CREATED, ARB, "sn-cfa");
+  assert(classifyArbiterCapacity({ tradeMsats: 40_000_000, bond: bond(150_000_000), openTrades: [openA, openB] }).tier === "over-capacity",
+    "aggregate cap: Σ(open across chamas) + new > bond ⇒ over-capacity");
+  assert(classifyArbiterCapacity({ tradeMsats: 30_000_000, bond: bond(150_000_000), openTrades: [openA, openB] }).tier === "covered",
+    "aggregate cap: Σ(open) + new EQUAL to the bond is covered (≤)");
+
+  // getOpenBondedTrades: global, ≥floor, seated-only, settled excluded, EXPIRED counts.
+  const settled = mkTrade("t-done", 80_000_000, EscrowStatus.COMPLETED, ARB);
+  const cancelled = mkTrade("t-x", 80_000_000, EscrowStatus.CANCELLED, ARB);
+  const expiredTrade = mkTrade("t-exp", 80_000_000, EscrowStatus.EXPIRED, ARB);
+  const tiny = mkTrade("t-tiny", UNBONDED_FLOOR_MSATS - 1, EscrowStatus.LOCKED, ARB);
+  const otherArb = mkTrade("t-other", 80_000_000, EscrowStatus.LOCKED, ARBITER2_PK);
+  const all = [openA, openB, settled, cancelled, expiredTrade, tiny, otherArb];
+  const open = getOpenBondedTrades(ARB, all);
+  assert(open.map((t) => t.id).sort().join(",") === ["t-A", "t-B", "t-exp"].sort().join(","),
+    "getOpenBondedTrades: keeps open ≥floor seated-by-ARB (incl EXPIRED), drops settled/sub-floor/other-arbiter");
+  assert(open.some((t) => t.id === "t-exp"),
+    "EXPIRED still exposes the arbiter (funds at stake) — it counts against capacity");
+  assert(!open.some((t) => t.id === "t-done" || t.id === "t-x"),
+    "settled (COMPLETED/CANCELLED) trades do not count against capacity");
+  const openExcl = getOpenBondedTrades(ARB, all, { excludeId: "t-A" });
+  assert(!openExcl.some((t) => t.id === "t-A") && openExcl.length === open.length - 1,
+    "excludeId removes the subject trade from the open set");
+
+  // liveCapacity = bond − Σ(open bonded).
+  assert(liveCapacity(bond(150_000_000), [openA, openB]) === 30_000_000,
+    "liveCapacity = bond − Σ(open) = 150M − 120M = 30M");
+  assert(liveCapacity(null, [openA]) === -60_000_000, "liveCapacity with no bond is negative by the open exposure");
+
+  // Tier bands (§L) — Gold ≥ 1M sats pinned.
+  assert(exposureTier(99_999_999) === "Bronze", "tier: < 100k sats is Bronze");
+  assert(exposureTier(100_000_000) === "Silver", "tier: 100k sats is Silver");
+  assert(exposureTier(999_999_999) === "Silver", "tier: < 1M sats is Silver");
+  assert(exposureTier(1_000_000_000) === "Gold", "tier: ≥ 1M sats is Gold (pinned)");
+
+  // Consent layer: the reducer ACCEPTS an over-capacity LOCK (no strand); the
+  // classifier merely FLAGS it.
+  const { state } = buildToLocked();
+  const seated = state.participants[Role.ARBITER] as string;
+  assert(state.status === EscrowStatus.LOCKED,
+    "reducer LOCKED the trade — capacity is NEVER a reducer gate (no strand)");
+  const overCap = classifyArbiterCapacity({
+    arbiter: seated, tradeMsats: state.amountMsats,
+    bond: { npub: seated, bondMsats: 1_000, termStart: NOW - 1, termEnd: NOW + 1, createdAt: NOW, eventId: "b" },
+    openTrades: [],
+  });
+  assert(overCap.tier === "over-capacity",
+    "classifier flags the seated arbiter as over-capacity — but the LOCK already stood (consent-layer, never a strand)");
+
+  // ── Assignment seam (pure logic; the dormant switch lives in pool.ts) ──
+  const wSk = generateSecretKey(); const wPk = getPublicKey(wSk); // holds a bond
+  const nPk = getPublicKey(generateSecretKey());                  // no bond
+  const wBond = finalizeEvent(buildArbiterBondEvent({
+    pubkey: wPk, bondMsats: 100_000_000, termStart: NOW - 1, termEnd: NOW + 100_000, createdAt: NOW,
+  }), wSk) as unknown as NostrEvent;
+  const seamCtx = { tradeMsats: 50_000_000, bondEvents: [wBond], allTrades: [] as EscrowState[], now: NOW };
+  assert(selectOverCapacityArbiters([wPk, nPk], seamCtx).join(",") === nPk,
+    "selectOverCapacityArbiters: the un-bonded arbiter is over-capacity for a ≥floor trade; the bonded one passes");
+  assert(assignablePool([wPk, nPk], seamCtx).join(",") === wPk,
+    "assignablePool drops the over-capacity arbiter, keeps the covered one");
+
+  // Never-empty fallback: when EVERY candidate is over-capacity, return the full pool.
+  const allOverCtx = { tradeMsats: 50_000_000, bondEvents: [] as NostrEvent[], allTrades: [] as EscrowState[], now: NOW };
+  assert(selectOverCapacityArbiters([wPk, nPk], allOverCtx).length === 2,
+    "with no bonds, all candidates for a ≥floor trade are over-capacity");
+  assert(assignablePool([wPk, nPk], allOverCtx).join(",") === [wPk, nPk].join(","),
+    "never-empty fallback: an all-over-capacity pool returns the FULL pool (no strand)");
+
+  // DORMANT in Phase 1: the getTrustedArbiterPool seam ignores capacity entirely.
+  assert(BONDS_ENFORCED === false, "Phase 1 ships BONDS_ENFORCED = false (dormant)");
+  assert(getTrustedArbiterPool({ community: "us-blf", capacity: { ...allOverCtx } }).join(",") ===
+    BLF_OFFICIAL_ARBITERS.join(","),
+    "Phase-1 dormancy: getTrustedArbiterPool ignores the capacity context (pool unchanged)");
+}
+
+// ── TRADEVIEW UX: roles · mark-done verbs · living-chat bubbles ───────────
+// Pure display helpers behind the TradeView UX pass (src/labels/trade-progress).
+// No reducer involvement — these turn (category, fulfillment, event chain) into
+// the words + bubbles the redesigned screen shows.
+console.log("\n── TRADEVIEW UX: trade-progress display helpers ──");
+{
+  // funder = locker; performer = paid-on-release (the non-locker). Mirrors the
+  // engine's locker convention — NOT the v4 mockup's illustrative bill-pay roles.
+  assert(funderRole("marketplace") === Role.BUYER && performerRole("marketplace") === Role.SELLER,
+    "marketplace: buyer funds (locks), seller performs");
+  assert(funderRole("p2p-trade") === Role.SELLER && performerRole("p2p-trade") === Role.BUYER,
+    "p2p-trade: seller funds, buyer performs");
+  assert(funderRole("lending") === Role.SELLER && performerRole("lending") === Role.BUYER,
+    "lending: lender (seller) funds, borrower (buyer) performs");
+  assert(funderRole("bill-pay") === Role.SELLER && performerRole("bill-pay") === Role.BUYER,
+    "bill-pay: bill owner (seller) funds, volunteer (buyer) performs — engine wins over mockup");
+
+  // Mark-done verb per (category × fulfillment), and lending phase-awareness.
+  assert(markDoneVerb("marketplace", "physical").label === "Mark delivered"
+    && markDoneVerb("marketplace", "physical").icon === "📦",
+    "mark-done marketplace/physical = 📦 Mark delivered");
+  assert(markDoneVerb("marketplace", "service").label === "Mark completed",
+    "mark-done marketplace/service = Mark completed");
+  assert(markDoneVerb("marketplace", "digital").label === "Mark sent",
+    "mark-done marketplace/digital = Mark sent");
+  assert(markDoneVerb("p2p-trade", "service").label === "Mark sent"
+    && markDoneVerb("p2p-trade", "service").icon === "💸",
+    "mark-done p2p = 💸 Mark sent");
+  assert(markDoneVerb("bill-pay", "service").label === "Mark paid"
+    && markDoneVerb("bill-pay", "service").icon === "✓",
+    "mark-done bill-pay = ✓ Mark paid");
+  assert(markDoneVerb("lending", "service").label === "Mark received"
+    && markDoneVerb("lending", "service").icon === "📥",
+    "mark-done lending/disbursement (default) = 📥 Mark received");
+  assert(markDoneVerb("lending", "service", { lendingPhase: "repayment" }).label === "Mark repaid"
+    && markDoneVerb("lending", "service", { lendingPhase: "repayment" }).icon === "↩",
+    "mark-done lending/repayment = ↩ Mark repaid (phase-aware)");
+
+  // Refund reasons offered in the double-gate — funder (complaint) vs performer
+  // (return), flavoured per vertical. Sent as the party's own chat message.
+  assert(refundReasons("marketplace", "physical", Role.BUYER).includes("It didn't arrive"),
+    "marketplace funder (buyer) refund reasons include 'It didn't arrive'");
+  assert(refundReasons("marketplace", "digital", Role.BUYER).includes("File never arrived"),
+    "marketplace/digital funder refund reasons key off fulfillment");
+  assert(refundReasons("marketplace", "physical", Role.SELLER).includes("Out of stock"),
+    "marketplace performer (seller) refund reasons include 'Out of stock'");
+  assert(refundReasons("p2p-trade", "service", Role.SELLER).includes("Fiat never arrived"),
+    "p2p funder (seller) refund reasons include 'Fiat never arrived'");
+  assert(refundReasons("bill-pay", "service", Role.SELLER).includes("Bill wasn't paid"),
+    "bill-pay funder (owner) refund reasons include 'Bill wasn't paid'");
+  assert(refundReasons("p2p-trade", "service", Role.BUYER).includes("Couldn't send the fiat"),
+    "p2p performer (buyer) refund reasons include 'Couldn't send the fiat'");
+
+  // Structured chat note + detection (the living feed lifts these to bubbles).
+  assert(markDoneChatMessage("marketplace", "physical") === "📦 Marked as delivered — on its way.",
+    "marketplace-physical keeps its exact legacy mark-done wording");
+  assert(markDoneChatMessage("p2p-trade", "service") === "💸 Marked as sent.",
+    "p2p mark-done note = '💸 Marked as sent.'");
+  assert(markDoneChatMessage("lending", "service", { lendingPhase: "repayment" }) === "↩ Marked as repaid.",
+    "lending repayment note = '↩ Marked as repaid.'");
+  assert(isStructuredMarkDoneMessage("📦 Marked as delivered — on its way.") === true,
+    "detects the legacy marketplace mark-done note");
+  assert(isStructuredMarkDoneMessage("✓ Marked as paid.") === true,
+    "detects a CBP mark-done note");
+  assert(isStructuredMarkDoneMessage("Did you get it? Marked as urgent") === false,
+    "an ordinary message mentioning 'Marked as' is NOT a structured note");
+  assert(isStructuredMarkDoneMessage("hi") === false && isStructuredMarkDoneMessage("") === false,
+    "plain / empty messages are not mark-done notes");
+
+  // Living chat: event chain → centered system bubble.
+  const mkEvent = (type: string, extra: Record<string, unknown> = {}, id = "evt_" + type, created = 1000) =>
+    ({ raw: { id, created_at: created }, payload: { type, ...extra } } as unknown as ParsedEscrowEvent);
+  const NAMES: Record<string, string> = { buyer: "Bea", seller: "Sam", arbiter: "Ada" };
+  const ctxMkt: LivingChatCtx = {
+    category: "marketplace", shortId: "sm_abc…9a", amountLabel: "1,723 sats",
+    resolvedOutcome: Outcome.RELEASE, nameFor: (r) => NAMES[r] ?? "?",
+  };
+  const created = eventToSystemBubble(mkEvent("escrow:create"), ctxMkt)!;
+  assert(created.icon === "📋" && created.tone === "teal" && created.text.includes("sm_abc…9a"),
+    "create → 📋 teal 'Trade reserved · {shortId}'");
+  const locked = eventToSystemBubble(mkEvent("escrow:lock", { notesHash: "h" }), ctxMkt)!;
+  assert(locked.icon === "⚡" && locked.tone === "lock" && locked.text.includes("1,723 sats"),
+    "lock → ⚡ purple 'Sats locked in escrow · {amount}'");
+  // Buyer is the FUNDER in marketplace → their release reads "released → pays {seller}".
+  const voteRel = eventToSystemBubble(mkEvent("escrow:vote", { outcome: Outcome.RELEASE, role: Role.BUYER }), ctxMkt)!;
+  assert(voteRel.icon === "🗳️" && voteRel.tone === "vote" && voteRel.text === "Bea released → pays Sam",
+    "marketplace funder (buyer) release → '{voter} released → pays {performer}'");
+  // Seller is the PERFORMER in marketplace → their release IS the mark-done.
+  const voteRelPerf = eventToSystemBubble(mkEvent("escrow:vote", { outcome: Outcome.RELEASE, role: Role.SELLER }), ctxMkt)!;
+  assert(voteRelPerf.icon === "📦" && voteRelPerf.tone === "green" && voteRelPerf.text === "Sam marked it delivered",
+    "marketplace performer (seller) release → '📦 {name} marked it delivered' (mark-done bubble)");
+  // Seller is the PERFORMER → their refund returns the sats (good faith).
+  const voteRefPerf = eventToSystemBubble(mkEvent("escrow:vote", { outcome: Outcome.REFUND, role: Role.SELLER }), ctxMkt)!;
+  assert(voteRefPerf.icon === "↩" && voteRefPerf.text === "Sam refunded Bea",
+    "marketplace performer (seller) refund → '{name} refunded {funder}' (good-faith return)");
+  // Buyer is the FUNDER → their refund is a request for their sats back.
+  const voteRefFunder = eventToSystemBubble(mkEvent("escrow:vote", { outcome: Outcome.REFUND, role: Role.BUYER }), ctxMkt)!;
+  assert(voteRefFunder.icon === "↩" && voteRefFunder.text === "Bea asked for a refund",
+    "marketplace funder (buyer) refund → '{name} asked for a refund'");
+  const ctxP2p: LivingChatCtx = { ...ctxMkt, category: "p2p-trade", resolvedOutcome: Outcome.RELEASE };
+  // p2p: seller confirms "Fiat received" (release) → sats pay the buyer (performer).
+  const voteP2p = eventToSystemBubble(mkEvent("escrow:vote", { outcome: Outcome.RELEASE, role: Role.SELLER }), ctxP2p)!;
+  assert(voteP2p.text === "Sam released → pays Bea",
+    "p2p funder (seller confirms) release → pays the performer (buyer)");
+  // Buyer is the PERFORMER in p2p → their release IS "marked it sent".
+  const voteP2pPerf = eventToSystemBubble(mkEvent("escrow:vote", { outcome: Outcome.RELEASE, role: Role.BUYER }), ctxP2p)!;
+  assert(voteP2pPerf.icon === "💸" && voteP2pPerf.tone === "green" && voteP2pPerf.text === "Bea marked it sent",
+    "p2p performer (buyer) release → '💸 {name} marked it sent' (mark-done bubble)");
+  const claimP2pRefund = eventToSystemBubble(
+    mkEvent("escrow:claim", { notesHashVerification: "v" }),
+    { ...ctxP2p, resolvedOutcome: Outcome.REFUND },
+  )!;
+  assert(claimP2pRefund.text === "Settled — 1,723 sats to Sam",
+    "p2p refund settles back to the funder (seller)");
+  assert(eventToSystemBubble(mkEvent("escrow:resolve", { outcome: Outcome.RELEASE }), ctxMkt)!.text === "Released — ready to claim",
+    "resolve release → '✅ Released — ready to claim'");
+  assert(eventToSystemBubble(mkEvent("escrow:resolve", { outcome: Outcome.REFUND }), ctxMkt)!.text === "Refund approved — ready to claim",
+    "resolve refund → '✅ Refund approved — ready to claim'");
+  const claim = eventToSystemBubble(mkEvent("escrow:claim", { notesHashVerification: "v" }), ctxMkt)!;
+  assert(claim.icon === "🎉" && claim.tone === "win" && claim.text === "Settled — 1,723 sats to Sam",
+    "claim (resolved RELEASE, marketplace) → '🎉 Settled — {amount} to {seller}'");
+  assert(eventToSystemBubble(mkEvent("escrow:cancel"), ctxMkt)!.text === "Trade cancelled",
+    "cancel → '✖ Trade cancelled'");
+  assert(eventToSystemBubble(mkEvent("escrow:join", { role: Role.BUYER }), ctxMkt) === null,
+    "join is not surfaced in the living feed (timeline only)");
 }
 
 // ══════════════════════════════════════════════════════════════════════════

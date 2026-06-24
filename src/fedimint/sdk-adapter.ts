@@ -36,6 +36,13 @@ import type { ChamaOperationMeta } from "../payments/sats-trace.js";
 import { randomId } from "../storage/random-id.js";
 import { setMintLockScope } from "./mint-mutex.js";
 import { decideOrphanWipe, NO_CLIENT_OPEN_ERROR_RE, type OrphanPeek } from "./orphan-wipe-policy.js";
+import {
+  LN_PAY_INFLIGHT,
+  LN_PAY_REFUNDED,
+  LN_PAY_SUBMIT_FAILED,
+  codedPayError,
+  type CodedPayError,
+} from "../payments/ln-pay-codes.js";
 
 // ── Minimal structural types for the real SDK ────────────────────────────
 // We define these locally so that a consumer without @fedimint/core
@@ -403,25 +410,11 @@ function formatPayState(state: RealLnPayState): string {
 //
 // Bias: unknown ⇒ INFLIGHT. Only a CONFIRMED refund/cancel — the sats
 // demonstrably came back — is classified REFUNDED (retry-safe).
-export const LN_PAY_INFLIGHT = "LN_PAY_INFLIGHT";
-export const LN_PAY_REFUNDED = "LN_PAY_REFUNDED";
-export const LN_PAY_SUBMIT_FAILED = "LN_PAY_SUBMIT_FAILED";
-
-export interface CodedPayError extends Error {
-  code?: string;
-  operationId?: string;
-}
-
-function codedPayError(
-  message: string,
-  code: string,
-  operationId?: string,
-): CodedPayError {
-  const err: CodedPayError = new Error(message);
-  err.code = code;
-  if (operationId) err.operationId = operationId;
-  return err;
-}
+// The LN-pay outcome codes + `codedPayError`/`CodedPayError` now live in the
+// dependency-free `../payments/ln-pay-codes.js` so the native bridge adapter can
+// reuse the exact same contract. Re-exported here for existing importers.
+export { LN_PAY_INFLIGHT, LN_PAY_REFUNDED, LN_PAY_SUBMIT_FAILED, codedPayError };
+export type { CodedPayError };
 
 /** Classify a terminal LN-pay state into a coded error, or null when the
  *  state is non-terminal (keep watching). CONFIRMED refunded/canceled ⇒

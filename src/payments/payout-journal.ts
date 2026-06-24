@@ -94,15 +94,30 @@ function loadJournal(): Journal {
 }
 
 function saveJournal(journal: Journal): void {
+  // FAIL-CLOSED (v4.0.0): a write failure (quota / private mode / disabled
+  // storage — common on mobile WebViews) means the double-pay guard did NOT
+  // persist. We MUST surface it rather than swallow: the claim orchestrator
+  // refuses to end in a re-payable state when the guard can't be saved, so a
+  // payout is never dispatched (or left retry-able) without a working guard.
+  // Swallowing here silently re-opened the double-pay window.
+  setScopedStorageItem(PAYOUT_JOURNAL_KEY, JSON.stringify(journal));
+}
+
+/**
+ * Probe that the payout journal can actually be PERSISTED right now. Throws if
+ * storage is unavailable (quota exceeded, private mode, disabled). The claim
+ * orchestrator calls this BEFORE sending a payout and refuses to send when it
+ * throws — so a payout is never dispatched without a working anti-double-pay
+ * guard. Uses a tiny sentinel write+remove so it never disturbs the real
+ * journal, and exercises the same storage path the guard relies on.
+ */
+export function assertPayoutJournalWritable(): void {
+  const probeKey = `${PAYOUT_JOURNAL_KEY}_probe`;
+  setScopedStorageItem(probeKey, "1");
   try {
-    setScopedStorageItem(PAYOUT_JOURNAL_KEY, JSON.stringify(journal));
-  } catch (e) {
-    // QuotaExceededError is the main concern. Surface loudly — failing to
-    // persist the guard re-opens the double-pay window.
-    console.error(
-      "[chama] payout-journal: saveJournal failed — double-pay guard may be lost:",
-      e,
-    );
+    removeScopedStorageItem(probeKey);
+  } catch {
+    // Cleanup is best-effort; the write above is the load-bearing probe.
   }
 }
 
@@ -173,7 +188,18 @@ export function clearPayoutRecord(escrowId: string): void {
   const journal = loadJournal();
   if (journal[escrowId]) {
     delete journal[escrowId];
-    saveJournal(journal);
+    try {
+      saveJournal(journal);
+    } catch (e) {
+      // A failed CLEAR leaves the record in place, which only ever BLOCKS a
+      // re-pay — fund-safe. (Unlike a failed submit/settle write, which must
+      // fail loudly because it would re-open the double-pay window.)
+      console.warn(
+        "[chama] payout-journal: clearPayoutRecord persist failed (record kept; fund-safe):",
+        e,
+      );
+      return;
+    }
     console.info(`[claim-trace] payout-clear escrowId=${escrowId}`);
   }
 }

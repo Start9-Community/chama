@@ -11,17 +11,41 @@ import { nip19 } from "nostr-tools";
 import { getCommunityBySlug } from "../communities/registry.js";
 import { BLF_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
 import { readVerifiedRoster, resolveRosterAuthority } from "./roster.js";
+import { BONDS_ENFORCED, assignablePool } from "./exposure.js";
+import type { PoolCapacityContext } from "./exposure.js";
 
 export const TRUSTED_ARBITERS_STORAGE_KEY = "chama_trusted_arbiters";
 export const TRUSTED_ARBITERS_ENV_KEY = "VITE_CHAMA_TRUSTED_ARBITERS";
-export const BLF_OFFICIAL_ARBITER_NPUBS = [
-  "npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6",
-  "npub1z75k4fqjmyvfcv5e57tampeqatnfsrt6mt78dmz4ps9nezskjncqqtvwsz",
+
+/** BLF custody cabinet — DESIGN-arbiter-economy §2: the n=3 standing trio that
+ *  holds each member's bond as an SSS split (owner 1 share, cabinet the rest)
+ *  and casts the REFUND-only return heal (§3). Seeded at the trio; the
+ *  assignable pool widens with more bonded Level-A anchors while the cabinet
+ *  stays three. The maintainer key (22f716…) is the BLF roster steward pinned
+ *  in the registry; the trio matches §2 ("the maintainer + Chapsmart +
+ *  Graysatoshi"). NOTE: on the live BLF (a Fedi G-Bot fed) a custom
+ *  `chama:arbiters` meta proposal cannot reach threshold, so THIS registry pin
+ *  is the real seating — the meta JSON is for an optional self-hosted /
+ *  Level-A path only (DESIGN-arbiter-federation-proof §0/§4). */
+export const BLF_CABINET_NPUBS = [
+  "npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6", // maintainer (Bitcrazy)
+  "npub1z75k4fqjmyvfcv5e57tampeqatnfsrt6mt78dmz4ps9nezskjncqqtvwsz", // Chapsmart
+  "npub1t8cxvze5m4y0nhavtktnkamhff667pt75w3xzg22chxue4wjg3qqufsqc6", // Graysatoshi
 ];
+
+// Assignable BLF arbiter pool — seeded from the cabinet; widens with more
+// bonded Level-A anchors over time (the cabinet itself stays the trio).
+export const BLF_OFFICIAL_ARBITER_NPUBS = [...BLF_CABINET_NPUBS];
 
 export interface TrustedArbiterPoolOptions {
   community?: string | null;
   excludePubkeys?: Array<string | null | undefined>;
+  /** Bond Phase-1 capacity seam (DORMANT until exposure.BONDS_ENFORCED).
+   *  When enforcement is live AND this is supplied, over-capacity arbiters for
+   *  the trade are skipped — but the pool is NEVER emptied (a live trade must
+   *  not freeze on capacity drift; consent-layer, never a strand). No-op in
+   *  Phase 1: ships BONDS_ENFORCED=false and no prod caller passes it yet. */
+  capacity?: PoolCapacityContext | null;
 }
 
 function normalizePubkey(value: string): string | null {
@@ -115,11 +139,20 @@ export function getTrustedArbiterPool(options: TrustedArbiterPoolOptions = {}): 
   );
 
   const sources = getTrustedArbiterPoolSources(options);
-  return unique([
+  const pool = unique([
     ...sources.rosterArbiters,
     ...sources.deviceTrusted,
   ])
     .filter((pk) => !excluded.has(pk));
+
+  // Bond Phase-1 capacity seam (DORMANT). While BONDS_ENFORCED is false the
+  // capacity context is ignored entirely, so assignment is unchanged; Phase 2
+  // flips the switch and feeds a context from fetched bonds + escrows. Even
+  // when live, assignablePool keeps a never-empty fallback (never a strand).
+  if (BONDS_ENFORCED && options.capacity) {
+    return assignablePool(pool, options.capacity);
+  }
+  return pool;
 }
 
 /** The trusted pool split by WHERE the trust comes from. v3.5 (C7): the green

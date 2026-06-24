@@ -14,12 +14,17 @@ export function RatingTap({
   ratee,
   ratedThumb,
   onRate,
+  leading = false,
 }: {
   tradeId: string;
   ratee: string;
   /** The thumb already on chain for this (trade, ratee), if any. */
   ratedThumb?: RatingThumb;
   onRate: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
+  /** True when this is the FIRST element of its container (the TradeView Parties
+   *  pane on a settled trade) — drops the top divider so it doesn't read as a
+   *  doubled rule against the adjacent deal-slot card's own border. */
+  leading?: boolean;
 }) {
   const [tapped, setTapped] = useState<RatingThumb | undefined>(undefined);
   const [pending, setPending] = useState<RatingThumb | null>(null);
@@ -50,9 +55,9 @@ export function RatingTap({
     alignItems: "center",
     justifyContent: "center",
     gap: 10,
-    paddingTop: 14,
+    paddingTop: leading ? 2 : 14,
     marginBottom: 16,
-    borderTop: `1px solid ${T.border}`,
+    ...(leading ? {} : { borderTop: `1px solid ${T.border}` }),
   };
 
   if (shown) {

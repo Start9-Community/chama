@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chama · Living chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,600;9..40,700;9..40,800&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#0a0a0f;--surface:#111118;--card:#16161f;--border:#1e1e2e;--text:#e8e6e0;--muted:#6b6980;
+    --accent:#f7931a;--green:#22c55e;--purple:#a78bfa;--teal:#2dd4bf;--amber:#fbbf24;--buyer:#BF5AF2;
+    --mono:'JetBrains Mono',monospace;--sans:'DM Sans',-apple-system,sans-serif;}
+  *{box-sizing:border-box} body{margin:0;background:#050507;color:var(--text);font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;padding:24px 12px;display:flex;flex-direction:column;align-items:center;gap:14px}
+  .phone{width:392px;max-width:100%;background:var(--bg);border:1px solid var(--border);border-radius:28px;padding:16px 14px;box-shadow:0 30px 80px -30px #000}
+  .pills{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:14px}
+  .seg{display:inline-flex;background:var(--surface);border:1px solid var(--border);border-radius:22px;padding:3px}
+  .seg span{font-size:12px;font-weight:700;color:var(--muted);padding:7px 15px;border-radius:18px}
+  .seg span.on{background:var(--card);color:var(--text);box-shadow:0 1px 0 #0006}
+  .seg span.on.c{color:var(--buyer)}
+  .chat{display:flex;flex-direction:column;gap:11px}
+  .row{display:flex;flex-direction:column}
+  .bub{max-width:80%;padding:11px 13px;border-radius:14px;font-size:14px;line-height:1.4}
+  .them{background:var(--card);border:1px solid var(--border);align-self:flex-start;border-bottom-left-radius:4px}
+  .you{background:#BF5AF21f;border:1px solid #BF5AF244;align-self:flex-end;border-bottom-right-radius:4px}
+  .who{font-size:10.5px;font-family:var(--mono);color:var(--muted);margin-bottom:3px}
+  /* system event bubbles — the "living" part */
+  .sys{align-self:center;display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;border-radius:20px;padding:7px 14px;border:1px solid}
+  .sys.teal{background:#2dd4bf14;border-color:#2dd4bf3a;color:var(--teal)}
+  .sys.lock{background:#a78bfa14;border-color:#a78bfa3a;color:var(--purple)}
+  .sys.green{background:#22c55e14;border-color:#22c55e3a;color:var(--green)}
+  .sys.vote{background:#f7931a14;border-color:#f7931a3a;color:var(--accent)}
+  .sys.win{background:#22c55e1c;border-color:#22c55e55;color:var(--green);font-weight:800}
+  .ts{align-self:center;font-size:9.5px;font-family:var(--mono);color:#44425a;margin:1px 0}
+  .cap{width:392px;max-width:100%;font-size:12px;color:var(--muted);line-height:1.6}.cap b{color:var(--text)}
+</style></head><body>
+
+  <div class="phone">
+    <div class="pills"><span class="seg"><span class="on c">Chat</span><span>Details</span><span>Parties</span></span></div>
+    <div class="chat">
+      <div class="ts">9:24am</div>
+      <div class="sys teal">📋 Trade reserved · sm_mqp8zpm…</div>
+      <div class="sys lock">⚡ Sats locked in escrow · 1,723 sats</div>
+
+      <div class="row"><div class="bub them"><div class="who">Mama Njeri</div>Habari! Packing your kikoi now 🧵</div></div>
+      <div class="row"><div class="bub you">Asante! No rush 🙏</div></div>
+
+      <div class="ts">9:31am</div>
+      <div class="sys green">📦 Mama Njeri marked it delivered</div>
+
+      <div class="row"><div class="bub you">Just arrived — it's beautiful! 😍</div></div>
+
+      <div class="ts">9:40am</div>
+      <div class="sys vote">🗳️ You released the escrow → pays Mama Njeri</div>
+      <div class="sys win">🎉 Settled — 1,723 sats moved to Mama Njeri</div>
+    </div>
+  </div>
+
+  <div class="cap"><b>One living feed.</b> Human messages and trade events share the same thread, woven by time — reserved, locked, delivered, your release vote, settled. Each event bubble is <b>derived from the existing event chain</b> (and reuses your notification copy), so the chat narrates the whole trade without a single new wire event. The dead chat becomes the heartbeat of the trade.</div>
+
+  <div class="cap" style="opacity:.85"><b>Event → bubble map:</b> reserved · locked · delivered/completed/sent/repaid/paid · vote cast · ready to claim · disputed · settled · timed out. Colour follows meaning — purple for lock, green for done, orange for a vote, amber for a dispute.</div>
+
+</body></html>

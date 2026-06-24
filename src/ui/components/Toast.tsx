@@ -16,18 +16,22 @@ export function Toast({ message, type, onDone }: {
   return (
     <div style={{
       position: "fixed", top: topOffset, left: "50%", transform: "translateX(-50%)",
-      padding: "11px 20px", borderRadius: 999,
+      padding: "14px 24px", borderRadius: 999,
       // OPAQUE surface so the toast never blends into whatever's behind it — a
       // toast is allowed to hide the page for its few seconds. The type colour
       // lives in the border, icon, and text; a soft shadow lifts it off.
-      background: T.card, border: `1px solid ${colors[type]}88`,
-      boxShadow: `0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px ${T.bg}`,
-      color: colors[type], fontFamily: T.mono, fontSize: 12, fontWeight: 700,
+      background: T.card, border: `1.5px solid ${colors[type]}99`,
+      boxShadow: `0 10px 28px rgba(0,0,0,0.45), 0 0 0 1px ${T.bg}`,
+      // Readable-first: bold DM Sans (NOT mono) at a size anyone can catch at a
+      // glance — this is a human notification, not a crypto string. "Be bold on
+      // important stuff" (fed switches, reconnects, vote confirmations).
+      color: colors[type], fontFamily: T.sans, fontSize: 15.5, fontWeight: 800,
+      lineHeight: 1.35, letterSpacing: 0.1,
       zIndex: 9999, animation: "fadeIn 0.3s ease",
-      maxWidth: "90vw", textAlign: "center", wordBreak: "break-word",
+      maxWidth: "92vw", textAlign: "center", wordBreak: "break-word",
     }}>
-      <span style={{ display: "inline-flex", alignItems: "baseline", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
-        <span>{type === "success" ? "✓" : type === "error" ? "✗" : "⚡"}</span>
+      <span style={{ display: "inline-flex", alignItems: "baseline", justifyContent: "center", gap: 8, flexWrap: "wrap" }}>
+        <span aria-hidden="true" style={{ fontSize: 17, lineHeight: 1 }}>{type === "success" ? "✓" : type === "error" ? "✗" : "⚡"}</span>
         <span>{message}</span>
       </span>
     </div>

@@ -17,7 +17,11 @@
 // at most once — including ones discovered when the app reopens after being
 // closed (prev = cached state, next = newer relay state).
 
-import { EscrowStatus, Role, Outcome, type EscrowState } from "../escrow-engine/types.js";
+import {
+  EscrowStatus, Role, Outcome,
+  getEffectiveParticipantsAt,
+  type EscrowState, type ChatPayload, type ParsedEscrowEvent,
+} from "../escrow-engine/types.js";
 import { payoutRecipientFor } from "../escrow-engine/recipients.js";
 
 export interface TradeNotification {
@@ -132,4 +136,71 @@ export function notificationForTransition(
   }
 
   return null;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// DM / trade-chat notifications — the pure "should this message buzz?" core
+// ══════════════════════════════════════════════════════════════════════════
+//
+// Companion to notificationForTransition for inbound trade chat. The dispatch
+// keeps three things pure here: (1) a tri-state preference — `auto` defaults the
+// buzz to your ROLE ON THAT TRADE (arbiters are the responders, so they hear
+// pings; buyers/sellers stay quiet) while `on`/`off` are explicit global
+// overrides; (2) never buzz for your OWN echoed message; (3) never buzz for chat
+// that predates this live session — backlog replayed on cold-boot/heal must stay
+// silent (the analogue of notificationForTransition's prev-must-be-non-null
+// guard). Chat recurs, so unlike the transition core this is deliberately NOT
+// paired with the fire-once-ever dedup: every fresh inbound message may buzz.
+
+/** DM-notification preference. `auto` = follow your per-trade role (arbiter ⇒ on,
+ *  buyer/seller ⇒ off). `on`/`off` = explicit global override. */
+export type DmNotifyPref = "auto" | "on" | "off";
+
+/** The viewer's COMMITTED role on this trade, from the effective participants
+ *  (timed JOIN holds resolved). Deliberately the assigned arbiter only — a mere
+ *  pool member who never took the seat can't decrypt the chat anyway, so "am I
+ *  the arbiter" here means the responder, not the roster. */
+function participantRoleAt(state: EscrowState, pubkey: string, atSec: number): Role | null {
+  const p = getEffectiveParticipantsAt(state, atSec);
+  if (samePubkey(p[Role.BUYER], pubkey)) return Role.BUYER;
+  if (samePubkey(p[Role.SELLER], pubkey)) return Role.SELLER;
+  if (samePubkey(p[Role.ARBITER], pubkey)) return Role.ARBITER;
+  return null;
+}
+
+/**
+ * The notification (if any) to fire for one inbound chat `message` on `state`,
+ * from the perspective of `userPubkey`, given the tri-state `pref`. Pure; null
+ * when nothing should buzz. `liveSinceSec` is when this client session went
+ * live — messages older than it are backlog and stay silent.
+ */
+export function chatNotificationFor(
+  state: EscrowState,
+  message: ParsedEscrowEvent<ChatPayload>,
+  userPubkey: string | null | undefined,
+  pref: DmNotifyPref,
+  liveSinceSec: number,
+): TradeNotification | null {
+  if (!userPubkey) return null;
+  if (pref === "off") return null;
+  if (samePubkey(message.pubkey, userPubkey)) return null;  // my own echo
+  if (message.timestamp < liveSinceSec) return null;        // backlog, not live
+
+  const myRole = participantRoleAt(state, userPubkey, message.timestamp);
+  if (!myRole) return null;                                 // not a party to this trade
+  if (pref === "auto" && myRole !== Role.ARBITER) return null; // role default: arbiters only
+
+  const id = state.id;
+  const label = shortId(id);
+  const senderRole = participantRoleAt(state, message.pubkey, message.timestamp)
+    ?? message.payload.senderRole;
+  const who = senderRole ? `The ${senderRole}` : "Someone";
+  return {
+    escrowId: id,
+    title: "💬 New message",
+    // Content stays OUT of the OS buzz — escrow chat can carry payment handles;
+    // the notification says who + which trade, the tap opens it to read.
+    body: `${who} messaged you on trade ${label}.`,
+    tag: `${id}:chat:${message.raw.id}`,
+  };
 }

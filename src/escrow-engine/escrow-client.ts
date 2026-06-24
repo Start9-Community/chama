@@ -58,7 +58,7 @@ import { EscrowNotifier } from "./notifier.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
 import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
 import { createEnvelope, decryptFromEnvelope } from "./envelope.js";
-import { RelayManager, type NostrFilter } from "./relay-manager.js";
+import { RelayManager, RelayStatus, type NostrFilter } from "./relay-manager.js";
 import {
   FetchProbe,
   recordDiscoveryRun,
@@ -151,6 +151,13 @@ function isTerminalStatus(status: EscrowStatus): boolean {
 // LOCKED/EXPIRED) doesn't loop forever.
 const COMPLETENESS_MAX_ATTEMPTS = 2;
 
+// Part 6 relay-recovery backfill timings. Debounce collapses the burst of
+// CONNECTED events that fire as a pool comes up (or recovers) into one pass;
+// the throttle caps how often the backfill can run so a flapping pool can't
+// storm re-fetches.
+const RECOVERY_BACKFILL_DEBOUNCE_MS = 2_000;
+const RECOVERY_BACKFILL_THROTTLE_MS = 8_000;
+
 function isPartialReplayDowngrade(current: EscrowState | undefined, incoming: EscrowState): boolean {
   if (!current) return false;
   if (isTerminalStatus(incoming.status)) return false;
@@ -241,6 +248,17 @@ export class EscrowClient {
   /** Our pubkey (cached after first call) */
   private _pubkey: string | null = null;
 
+  // ── Part 6: relay-recovery chat/chain backfill ──────────────────────────
+  /** True once any relay has reached CONNECTED, so the first connect wave
+   *  doesn't trigger a redundant backfill (the normal load path covers it). */
+  private sawFirstRelayConnect = false;
+  /** Debounce timer collapsing a burst of CONNECTED transitions into one
+   *  backfill pass. */
+  private recoveryBackfillTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Wall-clock of the last backfill, so it runs at most once per throttle
+   *  window even across separate recovery bursts. */
+  private lastRecoveryBackfillAt = 0;
+
   /** Buffered events waiting for their predecessors — escrowId → events[] */
   private eventBuffer: Map<string, { event: NostrEvent; relay: string; attempts: number }[]> = new Map();
 
@@ -261,7 +279,20 @@ export class EscrowClient {
       config.relays,
       {
         onEvent: (event, relay) => this.handleIncomingEvent(event, relay),
-        onStatusChange: (relay, status) => this.callbacks.onRelayStatus?.(relay, status),
+        onStatusChange: (relay, status) => {
+          this.callbacks.onRelayStatus?.(relay, status);
+          // Part 6 (chat-wipe close): when a relay (re)connects, schedule a
+          // debounced backfill of watched trades. The first ever CONNECTED is
+          // skipped (the initial connect wave is already covered by the normal
+          // load path); every CONNECTED after that — the rest of the opening
+          // wave, plus any later recovery of a dropped/abandoned relay —
+          // triggers a re-fetch so partial rehydration heals. loadEscrow merges
+          // + never shrinks chat, so this is safe to over-fire; it is throttled.
+          if (status === RelayStatus.CONNECTED) {
+            if (this.sawFirstRelayConnect) this.scheduleRecoveryBackfill();
+            this.sawFirstRelayConnect = true;
+          }
+        },
         onError: (err, relay) => console.warn(`[relay] ${relay}: ${err.message}`),
         // v0.4.2 sim mode (hotfix round 2): wire the chokepoint drop so
         // sim-tagged events never enter prod state via fetch-based paths
@@ -291,8 +322,67 @@ export class EscrowClient {
 
   disconnect(): void {
     this.relayManager.disconnect();
+    if (this.recoveryBackfillTimer) {
+      clearTimeout(this.recoveryBackfillTimer);
+      this.recoveryBackfillTimer = null;
+    }
     this.states.clear();
     this.rawEvents.clear();
+  }
+
+  /**
+   * Force an immediate re-probe of every non-connected relay (clears the
+   * exponential-backoff give-up state). Surfaced for the in-app "Reconnect"
+   * control: the per-relay backoff abandons a relay after MAX_RETRY_COUNT and
+   * never recovers it on its own, so a degraded pool stays degraded until this
+   * is called (or the whole client is rebuilt). No-op after disconnect().
+   */
+  forceReconnectAll(): void {
+    this.relayManager.forceReconnectAll();
+  }
+
+  // ── Part 6: relay-recovery chat/chain backfill ──────────────────────────
+
+  /** Collapse a burst of relay (re)connections into a single debounced
+   *  backfill pass. */
+  private scheduleRecoveryBackfill(): void {
+    if (this.recoveryBackfillTimer) return;
+    this.recoveryBackfillTimer = setTimeout(() => {
+      this.recoveryBackfillTimer = null;
+      void this.backfillWatchedEscrows();
+    }, RECOVERY_BACKFILL_DEBOUNCE_MS);
+  }
+
+  /**
+   * Re-fetch the full chain for each actively-watched, non-terminal trade after
+   * relays recover. A partial relay pool (or a relay that came back only after
+   * the initial load) leaves rehydration incomplete — most visibly chat, which
+   * isn't part of the replayed event chain (the chat-wipe-on-restart symptom).
+   * loadEscrow merges fetched + cached events (dedup by id) and re-seeds any
+   * in-memory chat the fetch missed, so it can only ADD — never shrink — state.
+   * Bounded to non-terminal trades and throttled, so it can't storm during a
+   * flapping pool. Best-effort: a per-trade failure is swallowed.
+   */
+  private async backfillWatchedEscrows(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastRecoveryBackfillAt < RECOVERY_BACKFILL_THROTTLE_MS) return;
+    this.lastRecoveryBackfillAt = now;
+
+    const ids: string[] = [];
+    for (const label of this.subscriptions.keys()) {
+      if (label.startsWith("escrow:")) ids.push(label.slice("escrow:".length));
+    }
+    for (const id of ids) {
+      // Terminal chains (COMPLETED/CANCELLED) won't gain new chat or events —
+      // skip them so the backfill stays bounded to live trades.
+      const st = this.states.get(id);
+      if (st && isTerminalStatus(st.status)) continue;
+      try {
+        await this.loadEscrow(id);
+      } catch (e) {
+        console.debug(`[escrow] recovery backfill ${id} failed:`, (e as Error)?.message || e);
+      }
+    }
   }
 
   async getPubkey(): Promise<string> {

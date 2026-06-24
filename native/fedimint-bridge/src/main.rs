@@ -28,7 +28,8 @@ use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::util::SafeUrl;
 use fedimint_ln_client::common::LightningGateway;
 use fedimint_ln_client::{
-    LightningClientInit, LightningClientModule, LnReceiveState, OutgoingLightningPayment,
+    InternalPayState, LightningClientInit, LightningClientModule, LnPayState, LnReceiveState,
+    OutgoingLightningPayment, PayType,
 };
 use fedimint_meta_client::MetaClientInit;
 use fedimint_mint_client::{
@@ -46,9 +47,43 @@ use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
 const FEDERATION_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
-const FEDERATION_JOIN_TIMEOUT: Duration = Duration::from_secs(45);
+const FEDERATION_JOIN_TIMEOUT: Duration = Duration::from_secs(90);
 const GATEWAY_CACHE_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 const GATEWAY_SELECT_TIMEOUT: Duration = Duration::from_secs(12);
+/// Bounded wait for an outgoing payment to reach a terminal state before the
+/// `/pay` (and reconcile) handler returns. A timeout here is NOT a failure — the
+/// HTLC may still settle — so it maps to an `inflight` outcome (the caller
+/// journals the payout `submitted` and reconciles), never to a re-payable error.
+/// Matches the browser SDK's 60s pay-watch window so native behaves the same.
+const PAY_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Short per-gateway reachability probe used when auto-selecting a receive
+/// gateway. Kept well under `GATEWAY_SELECT_TIMEOUT` so several gateways can be
+/// tried in turn within the same budget — a single dead (e.g. `iroh://`)
+/// gateway is dropped after this instead of stalling the whole selection. See
+/// board #9: Fedimint's blind `select_available_gateway(None)` `join_all`s over
+/// every gateway and waits for the slowest, so one unreachable gateway burns
+/// the entire `GATEWAY_SELECT_TIMEOUT` before the reachable ones are reached.
+const GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// n0's public PKARR relay, resolved over HTTPS. Native (non-wasm) Fedimint
+/// clients otherwise discover guardians only via DNS queries (:53) and the
+/// mainline DHT (UDP) — both of which mobile/CGNAT networks routinely throttle
+/// or block, which is why a fresh join hangs on real phones while the browser
+/// (whose wasm `PkarrResolver::n0_dns()` resolves these same guardians over this
+/// exact HTTPS relay) succeeds. Passing this through `set_iroh_dns` ADDS an
+/// HTTPS PkarrResolver on top of the existing DNS + DHT discovery — it does not
+/// replace them (verified in fedimint-connectors-0.11.1/src/iroh.rs) — so every
+/// federation whose guardians publish to the default n0 relay resolves and
+/// federation switching stays intact. Override via --iroh-dns /
+/// CHAMA_FEDIMINT_IROH_DNS to point at Chama-owned discovery infra later.
+const DEFAULT_IROH_PKARR_RELAY: &str = "https://dns.iroh.link/pkarr";
+
+/// How long the boot-time discovery readiness probe waits for a TCP connection
+/// to the configured PKARR resolver. Short on purpose: it only sanity-checks
+/// that the device's network can reach the HTTPS discovery relay at all
+/// (DNS + :443), surfacing "degraded" in /health before a fresh join silently
+/// times out — it is not a full guardian round-trip.
+const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Parser)]
 #[command(name = "chama-fedimint-bridge")]
@@ -67,7 +102,10 @@ struct Cli {
     #[arg(long, default_value_t = true)]
     iroh_enable_next: bool,
 
-    /// Optional iROH DNS/PKARR resolver URL for Chama-owned discovery infra.
+    /// iROH PKARR resolver URL, resolved over HTTPS. When unset, defaults to
+    /// n0's public relay (DEFAULT_IROH_PKARR_RELAY) so native clients get the
+    /// same HTTPS guardian discovery the browser uses; pass a URL to point at
+    /// Chama-owned discovery infra instead.
     #[arg(long, env = "CHAMA_FEDIMINT_IROH_DNS")]
     iroh_dns: Option<SafeUrl>,
 
@@ -113,6 +151,10 @@ enum Command {
 
     /// Wait for a previously-created incoming invoice to settle.
     AwaitInvoice { operation_id: OperationId },
+
+    /// Reconcile a previously-submitted outgoing payment by operation id
+    /// (settled / refunded / inflight) without re-sending it.
+    PayOutcome { operation_id: OperationId },
 
     /// Pay a BOLT11 invoice or LNURL through a gateway.
     Pay {
@@ -213,7 +255,55 @@ struct Bridge {
     data_dir: PathBuf,
     iroh_enable_dht: bool,
     iroh_enable_next: bool,
+    /// Effective PKARR-over-HTTPS resolver (n0 default unless overridden).
     iroh_dns: Option<SafeUrl>,
+    /// True when `iroh_dns` is the built-in n0 default rather than an override.
+    iroh_dns_is_default: bool,
+    /// Last gateway that passed a receive-invoice reachability probe, cached so
+    /// funding doesn't re-probe every gateway on each `/invoice`. Shared across
+    /// `Bridge`/`AppState` clones via `Arc`; re-probed (and replaced on miss)
+    /// each time it's used, so a gateway that has since gone offline can't pin
+    /// funding to a dead endpoint.
+    last_good_gateway: Arc<Mutex<Option<LightningGateway>>>,
+}
+
+#[derive(Debug, Serialize)]
+struct IrohConfigDiagnostics {
+    dht: bool,
+    next: bool,
+    resolver: String,
+    resolver_url: Option<String>,
+}
+
+/// Result of the boot-time discovery readiness probe, surfaced verbatim in
+/// /health so the app (and ops) can see "discovery degraded" before a fresh
+/// join silently hangs.
+#[derive(Debug, Clone, Serialize)]
+struct DiscoveryProbe {
+    /// "probing" | "reachable" | "degraded" | "skipped"
+    status: String,
+    /// host:port that was probed, or "none"
+    target: String,
+    /// failure detail when degraded, or the skip reason
+    detail: Option<String>,
+}
+
+impl DiscoveryProbe {
+    fn probing(target: &str) -> Self {
+        Self {
+            status: "probing".to_owned(),
+            target: target.to_owned(),
+            detail: None,
+        }
+    }
+
+    fn skipped(reason: &str) -> Self {
+        Self {
+            status: "skipped".to_owned(),
+            target: "none".to_owned(),
+            detail: Some(reason.to_owned()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -245,10 +335,147 @@ struct GatewayProbe {
     error: Option<String>,
 }
 
+/// Discriminated outcome of an outgoing Lightning payment (board #9 Part 3).
+/// The native claim guard keys re-pay safety on this `status`: only `settled`
+/// resolves the claim, `refunded` means the sats came back (safe to re-pay), and
+/// `inflight` means submitted-but-unknown (NEVER blindly re-pay — reconcile via
+/// `/pay-outcome`). The pre-send failures (parse / gateway-select / submit
+/// rejected) never produce this — they surface as an HTTP error, which the
+/// frontend treats as safe-to-retry.
 #[derive(Debug, Serialize)]
-struct PayStartedOutput {
+#[serde(tag = "status", rename_all = "snake_case")]
+enum PayOutcomeOutput {
+    /// Preimage received — sats left the wallet successfully.
+    Settled {
+        operation_id: OperationId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fee_msat: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        preimage: Option<String>,
+    },
+    /// The outgoing contract was CONFIRMED refunded/canceled — sats are back in
+    /// the wallet. Safe to re-pay with a fresh invoice.
+    Refunded {
+        operation_id: OperationId,
+        error: String,
+    },
+    /// Submitted (outgoing contract funded, operation id minted) but the outcome
+    /// is not yet known — the watch timed out / errored, hit a non-terminal
+    /// ambiguous state, or `no_wait`. MUST NOT be blindly re-paid; reconcile via
+    /// `/pay-outcome`.
+    Inflight {
+        operation_id: OperationId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fee_msat: Option<u64>,
+    },
+}
+
+/// A terminal, FUND-SAFE classification of an outgoing payment. `None` from the
+/// watcher means "no safe terminal reached" ⇒ the caller reports `inflight`.
+enum PayTerminal {
+    /// Preimage in hand — the recipient was paid.
+    Settled { preimage: Option<String> },
+    /// A CONFIRMED refund/cancel — the sats demonstrably came back.
+    Refunded { error: String },
+}
+
+/// Watch an outgoing payment to a fund-safe terminal state, classifying the
+/// pay-state stream directly rather than via `await_outgoing_payment` — that
+/// upstream call collapses a CONFIRMED `Refunded` AND an ambiguous
+/// `UnexpectedError` into the same `Failure`, and crucially fedimint yields
+/// `UnexpectedError` when a payment that ALREADY SETTLED (preimage obtained)
+/// fails to reclaim its change (`fedimint-ln-client` lib.rs ~1624). Mapping that
+/// to "refunded" would tell the claim guard to re-pay an already-settled
+/// payout — a double-pay (board #9 Part 3). So: only `Success` ⇒ settled, only a
+/// confirmed `Refunded`/`Canceled` ⇒ refunded, and EVERYTHING ambiguous (incl.
+/// `UnexpectedError`, stream end, timeout) ⇒ `None` ⇒ inflight (never re-pay).
+/// Mirrors the browser SDK's `payStateCodedError`.
+async fn watch_outgoing_pay(
+    ln: &LightningClientModule,
+    is_internal: bool,
     operation_id: OperationId,
-    fee_msat: u64,
+) -> Option<PayTerminal> {
+    let watch = async {
+        if is_internal {
+            let mut stream = ln.subscribe_internal_pay(operation_id).await.ok()?.into_stream();
+            while let Some(state) = stream.next().await {
+                match state {
+                    InternalPayState::Preimage(_) => {
+                        return Some(PayTerminal::Settled { preimage: None });
+                    }
+                    InternalPayState::RefundSuccess { error, .. } => {
+                        return Some(PayTerminal::Refunded {
+                            error: format!("internal payment refunded: {error:?}"),
+                        });
+                    }
+                    // Refund/funding errors are NOT a confirmed sats-back, and an
+                    // unexpected error is ambiguous ⇒ inflight (never re-pay).
+                    InternalPayState::RefundError { .. }
+                    | InternalPayState::FundingFailed { .. }
+                    | InternalPayState::UnexpectedError(_) => return None,
+                    InternalPayState::Funding => {}
+                }
+            }
+            None
+        } else {
+            let mut stream = ln.subscribe_ln_pay(operation_id).await.ok()?.into_stream();
+            while let Some(state) = stream.next().await {
+                match state {
+                    LnPayState::Success { preimage } => {
+                        return Some(PayTerminal::Settled {
+                            preimage: Some(preimage),
+                        });
+                    }
+                    LnPayState::Refunded { gateway_error } => {
+                        return Some(PayTerminal::Refunded {
+                            error: format!("payment refunded by gateway: {gateway_error:?}"),
+                        });
+                    }
+                    LnPayState::Canceled => {
+                        return Some(PayTerminal::Refunded {
+                            error: "payment canceled before send".to_string(),
+                        });
+                    }
+                    // `UnexpectedError` is the ambiguous case — it also fires when
+                    // a SETTLED payment's change reclaim failed — so never treat
+                    // it as refunded. Non-terminal states keep waiting.
+                    LnPayState::UnexpectedError { .. } => return None,
+                    LnPayState::Created
+                    | LnPayState::Funded { .. }
+                    | LnPayState::WaitingForRefund { .. }
+                    | LnPayState::AwaitingChange => {}
+                }
+            }
+            None
+        }
+    };
+    match tokio::time::timeout(PAY_AWAIT_TIMEOUT, watch).await {
+        Ok(terminal) => terminal,
+        Err(_) => None,
+    }
+}
+
+/// Build the wire outcome from a watcher result, defaulting to `inflight`.
+fn pay_outcome_output(
+    terminal: Option<PayTerminal>,
+    operation_id: OperationId,
+    fee_msat: Option<u64>,
+) -> PayOutcomeOutput {
+    match terminal {
+        Some(PayTerminal::Settled { preimage }) => PayOutcomeOutput::Settled {
+            operation_id,
+            fee_msat,
+            preimage,
+        },
+        Some(PayTerminal::Refunded { error }) => PayOutcomeOutput::Refunded {
+            operation_id,
+            error,
+        },
+        None => PayOutcomeOutput::Inflight {
+            operation_id,
+            fee_msat,
+        },
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -319,12 +546,29 @@ async fn main() -> Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
+    // Default native discovery to n0's HTTPS PKARR relay so a fresh join over
+    // mobile/CGNAT resolves guardians the same reliable way the browser does,
+    // instead of relying only on DNS(:53) + DHT(UDP). Additive, not a swap.
+    let (iroh_dns, iroh_dns_is_default) = match cli.iroh_dns {
+        Some(url) => (Some(url), false),
+        None => (
+            Some(
+                SafeUrl::from_str(DEFAULT_IROH_PKARR_RELAY)
+                    .expect("DEFAULT_IROH_PKARR_RELAY is a valid URL"),
+            ),
+            true,
+        ),
+    };
     let bridge = Bridge {
         data_dir: cli.data_dir,
         iroh_enable_dht: cli.iroh_enable_dht,
         iroh_enable_next: cli.iroh_enable_next,
-        iroh_dns: cli.iroh_dns,
+        iroh_dns,
+        iroh_dns_is_default,
+        last_good_gateway: Arc::new(Mutex::new(None)),
     };
+
+    bridge.log_effective_config();
 
     match cli.command {
         Command::Join { invite_code } => {
@@ -377,6 +621,11 @@ async fn main() -> Result<()> {
         Command::AwaitInvoice { operation_id } => {
             let client = bridge.open().await?;
             let value = bridge.await_invoice(&client, operation_id).await?;
+            print_json(&value)?;
+        }
+        Command::PayOutcome { operation_id } => {
+            let client = bridge.open().await?;
+            let value = bridge.pay_outcome(&client, operation_id).await?;
             print_json(&value)?;
         }
         Command::Pay {
@@ -496,6 +745,39 @@ async fn main() -> Result<()> {
 }
 
 impl Bridge {
+    fn iroh_config_diagnostics(&self) -> IrohConfigDiagnostics {
+        IrohConfigDiagnostics {
+            dht: self.iroh_enable_dht,
+            next: self.iroh_enable_next,
+            resolver: match (&self.iroh_dns, self.iroh_dns_is_default) {
+                (Some(_), true) => "n0-pkarr-https+dns".to_owned(),
+                (Some(_), false) => "custom-pkarr-https+dns".to_owned(),
+                (None, _) => "dns-only".to_owned(),
+            },
+            resolver_url: self.iroh_dns.as_ref().map(ToString::to_string),
+        }
+    }
+
+    fn log_effective_config(&self) {
+        let diagnostics = self.iroh_config_diagnostics();
+        eprintln!(
+            "chama-fedimint-bridge effective iroh config: dht={}, next={}, resolver={}, resolver_url={}",
+            diagnostics.dht,
+            diagnostics.next,
+            diagnostics.resolver,
+            diagnostics.resolver_url.as_deref().unwrap_or("none"),
+        );
+    }
+
+    /// host:port of the configured PKARR resolver for the boot readiness probe.
+    /// Defaults the port to 443 (HTTPS) when the URL omits it.
+    fn discovery_probe_target(&self) -> Option<String> {
+        let url = self.iroh_dns.as_ref()?;
+        let host = url.host_str()?;
+        let port = url.port_or_known_default().unwrap_or(443);
+        Some(format!("{host}:{port}"))
+    }
+
     async fn join(&self, invite_code: &str) -> Result<ClientHandleArc> {
         let invite_code =
             InviteCode::from_str(invite_code).context("invalid federation invite code")?;
@@ -746,6 +1028,37 @@ impl Bridge {
                 );
         }
 
+        // Auto-select a reachable gateway one at a time rather than via the
+        // blind `ln.select_available_gateway(None, None)`, which `join_all`s
+        // over EVERY gateway and waits for the slowest — so a single dead
+        // `iroh://` gateway burns the whole `GATEWAY_SELECT_TIMEOUT` before the
+        // reachable HTTPS gateways are reached (board #9). `pick_reachable_gateway`
+        // refreshes the cache, then probes candidates in preference order under a
+        // short per-gateway timeout.
+        self.pick_reachable_gateway(ln, "create a receive invoice").await
+    }
+
+    /// Pick a reachable Lightning gateway without letting one dead gateway stall
+    /// the whole selection (board #9). Refreshes the gateway cache, orders
+    /// candidates clearnet-before-iroh (native can't reliably reach `iroh://`
+    /// gateways — same transport limit as the fresh-join path), then
+    /// vetted-before-unvetted, then cheapest; tries the last-known-good gateway
+    /// first; and probes each candidate with a short per-gateway timeout,
+    /// returning (and caching) the first that answers. Shared by the receive
+    /// (`/invoice`) and send (`/pay`) auto paths — it is pure pre-send gateway
+    /// selection (it never starts a payment), so a caller can use it once and
+    /// then send exactly once with no double-spend risk. Fails safe — returns no
+    /// gateway, so the caller moves no sats — only when every listed gateway is
+    /// unreachable. `action` only shapes the human-readable failure text (e.g.
+    /// "create a receive invoice" / "send this Lightning payment").
+    async fn pick_reachable_gateway(
+        &self,
+        ln: &LightningClientModule,
+        action: &str,
+    ) -> Result<Option<LightningGateway>> {
+        // Best-effort cache refresh: retry transient guardian hiccups, but don't
+        // fail on a cold cache — the per-gateway reachability probe below is the
+        // real gate. Keep the last refresh error for diagnostics only.
         let mut refresh_error: Option<String> = None;
         for attempt in 1..=3 {
             match tokio::time::timeout(GATEWAY_CACHE_REFRESH_TIMEOUT, ln.update_gateway_cache())
@@ -759,7 +1072,7 @@ impl Bridge {
                     refresh_error = Some(format!("{error:#}"));
                     if attempt < 3 {
                         eprintln!(
-                            "invoice: gateway cache refresh retry {attempt} after a transient failure: {error:#}"
+                            "gateway: cache refresh retry {attempt} after a transient failure: {error:#}"
                         );
                         tokio::time::sleep(Duration::from_millis(1200)).await;
                     }
@@ -770,54 +1083,109 @@ impl Bridge {
                         GATEWAY_CACHE_REFRESH_TIMEOUT
                     ));
                     if attempt < 3 {
-                        eprintln!("invoice: gateway cache refresh retry {attempt} after timeout");
+                        eprintln!("gateway: cache refresh retry {attempt} after timeout");
                         tokio::time::sleep(Duration::from_millis(1200)).await;
                     }
                 }
             }
         }
 
-        match tokio::time::timeout(
-            GATEWAY_SELECT_TIMEOUT,
-            ln.select_available_gateway(None, None),
-        )
-        .await
-        {
-            Ok(Ok(gateway)) => {
-                let gateway_id = gateway.gateway_id;
-                eprintln!("invoice: selected reachable cached gateway {gateway_id}");
-                Ok(Some(gateway))
-            }
-            Ok(Err(select_error)) => {
-                if let Some(refresh_error) = refresh_error {
-                    bail!(
-                        "Couldn't reach the federation's Lightning gateway to create a receive invoice - \
-                         no invoice was created and no sats moved. Gateway cache refresh failed: {refresh_error}; \
-                         cached gateway selection also failed: {select_error:#}"
-                    );
-                }
-
-                Err(select_error).context(
-                    "Couldn't find a reachable federation Lightning gateway to create a receive invoice - \
-                     no invoice was created and no sats moved.",
-                )
-            }
-            Err(_) => {
-                if let Some(refresh_error) = refresh_error {
-                    bail!(
-                        "Couldn't reach the federation's Lightning gateway to create a receive invoice - \
-                         no invoice was created and no sats moved. Gateway cache refresh failed: {refresh_error}; \
-                         cached gateway selection timed out after {:?}",
-                        GATEWAY_SELECT_TIMEOUT
-                    );
-                }
-
+        let announcements = ln.list_gateways().await;
+        if announcements.is_empty() {
+            if let Some(refresh_error) = refresh_error {
                 bail!(
-                    "Couldn't find a reachable federation Lightning gateway to create a receive invoice - \
-                     no invoice was created and no sats moved. Gateway selection timed out after {:?}",
-                    GATEWAY_SELECT_TIMEOUT
-                )
+                    "Couldn't reach the federation's Lightning gateway to {action} - no sats \
+                     moved. Gateway cache refresh failed: {refresh_error}; the gateway list is empty."
+                );
             }
+            bail!(
+                "Couldn't find a reachable federation Lightning gateway to {action} - no sats \
+                 moved. This federation has no registered Lightning gateways."
+            );
+        }
+
+        // Preference order: clearnet before iroh, then vetted, then lowest fee.
+        // `vetted` lives on the announcement, not the gateway, so carry it
+        // alongside the gateway for the sort key.
+        let mut ordered: Vec<(LightningGateway, bool)> = announcements
+            .into_iter()
+            .map(|ann| (ann.info, ann.vetted))
+            .collect();
+        ordered.sort_by_key(|(gw, vetted)| {
+            (
+                gateway_scheme_rank(gw),
+                u8::from(!*vetted),
+                u64::from(gw.fees.base_msat),
+                u64::from(gw.fees.proportional_millionths),
+            )
+        });
+
+        // Try the last-known-good gateway first (still freshly probed below, so
+        // a since-offline cached gateway can't pin funding to a dead endpoint).
+        let cached_id = self
+            .last_good_gateway
+            .lock()
+            .await
+            .as_ref()
+            .map(|gw| gw.gateway_id);
+        if let Some(cached_id) = cached_id {
+            if let Some(pos) = ordered.iter().position(|(gw, _)| gw.gateway_id == cached_id) {
+                let cached = ordered.remove(pos);
+                ordered.insert(0, cached);
+            }
+        }
+
+        let mut last_error: Option<String> = None;
+        for (gateway, _vetted) in ordered {
+            let gateway_id = gateway.gateway_id;
+            let scheme = gateway.api.scheme().to_owned();
+            match tokio::time::timeout(
+                GATEWAY_PROBE_TIMEOUT,
+                ln.select_available_gateway(Some(gateway.clone()), None),
+            )
+            .await
+            {
+                Ok(Ok(selected)) => {
+                    eprintln!(
+                        "gateway: selected reachable gateway {gateway_id} ({scheme}) to {action}"
+                    );
+                    *self.last_good_gateway.lock().await = Some(selected.clone());
+                    return Ok(Some(selected));
+                }
+                Ok(Err(error)) => {
+                    eprintln!("gateway: {gateway_id} ({scheme}) not reachable: {error:#}");
+                    last_error = Some(format!("{error:#}"));
+                }
+                Err(_) => {
+                    eprintln!(
+                        "gateway: {gateway_id} ({scheme}) probe timed out after {:?}",
+                        GATEWAY_PROBE_TIMEOUT
+                    );
+                    last_error = Some(format!("probe timed out after {:?}", GATEWAY_PROBE_TIMEOUT));
+                }
+            }
+        }
+
+        // Every listed gateway was unreachable — fail safe (no sats moved).
+        // last_good_gateway is left untouched here, so the next attempt still
+        // tries whatever last actually worked.
+        match (refresh_error, last_error) {
+            (Some(refresh_error), Some(last_error)) => bail!(
+                "Couldn't reach the federation's Lightning gateway to {action} - no sats moved. \
+                 Gateway cache refresh failed: {refresh_error}; no listed gateway was reachable \
+                 (last error: {last_error})."
+            ),
+            (Some(refresh_error), None) => bail!(
+                "Couldn't reach the federation's Lightning gateway to {action} - no sats moved. \
+                 Gateway cache refresh failed: {refresh_error}."
+            ),
+            (None, Some(last_error)) => bail!(
+                "Couldn't find a reachable federation Lightning gateway to {action} - no sats \
+                 moved. No listed gateway was reachable (last error: {last_error})."
+            ),
+            (None, None) => bail!(
+                "Couldn't find a reachable federation Lightning gateway to {action} - no sats moved."
+            ),
         }
     }
 
@@ -896,11 +1264,29 @@ impl Bridge {
         )
         .await
         .context("failed to parse BOLT11/LNURL payment info")?;
-        let gateway = ln
-            .get_gateway(gateway_id, force_internal)
-            .await
-            .context("failed to select gateway")?;
+        let gateway = if gateway_id.is_some() || force_internal {
+            // Explicit gateway or internal-swap: honor the caller verbatim.
+            ln.get_gateway(gateway_id, force_internal)
+                .await
+                .context("failed to select gateway")?
+        } else {
+            // Auto path: same dead-`iroh://` hazard as the receive path (board #9
+            // Part 2). Blind `get_gateway(None)` picks a RANDOM gateway with no
+            // reachability filter, so it can hand back the dead Banco Bitcoin
+            // `iroh://` gateway and `pay_bolt11_invoice` then fails with "Failed
+            // to connect to gateway" — blocking CLAIM payouts. Select a reachable
+            // gateway instead (clearnet-first, skip dead iroh, last-good cache).
+            // This is pure pre-send selection: `pay_bolt11_invoice` is still
+            // called exactly once below, so there is no double-pay risk.
+            self.pick_reachable_gateway(&ln, "send this Lightning payment")
+                .await?
+        };
 
+        // SEND. `Ok` ⇒ the outgoing contract was funded and an operation id was
+        // minted — the payment is now SUBMITTED. `Err` ⇒ the transaction was not
+        // accepted (gateway connect / funding rejected before any sats were
+        // committed) ⇒ a pre-send failure that is safe to re-pay, so we let it
+        // propagate as an HTTP error.
         let OutgoingLightningPayment {
             payment_type,
             contract_id: _,
@@ -910,19 +1296,63 @@ impl Bridge {
             .await
             .context("failed to start outgoing LN payment")?;
         let operation_id = payment_type.operation_id();
+        let is_internal = matches!(payment_type, PayType::Internal(_));
+        let fee_msat = Some(fee.msats);
 
         if no_wait {
-            return Ok(serde_json::to_value(PayStartedOutput {
+            // Submitted; the caller reconciles via /pay-outcome. Report inflight,
+            // never settled.
+            return Ok(serde_json::to_value(PayOutcomeOutput::Inflight {
                 operation_id,
-                fee_msat: fee.msats,
+                fee_msat,
             })?);
         }
 
-        let outcome = ln
-            .await_outgoing_payment(operation_id)
-            .await
-            .context("outgoing LN payment failed")?;
-        Ok(serde_json::to_value(outcome)?)
+        // Bounded wait for a FUND-SAFE terminal state. Anything ambiguous (a
+        // timeout, a watch error, or fedimint's `UnexpectedError` — which also
+        // fires when an ALREADY-SETTLED payment's change reclaim fails) maps to
+        // `inflight`, never to a re-payable error: the caller journals the payout
+        // `submitted` and reconciles. Only a confirmed preimage ⇒ settled, only a
+        // confirmed refund/cancel ⇒ refunded.
+        let terminal = watch_outgoing_pay(&ln, is_internal, operation_id).await;
+        if terminal.is_none() {
+            eprintln!(
+                "pay: outgoing payment {operation_id:?} reached no fund-safe terminal state within \
+                 {:?}, reporting inflight (reconcile via /pay-outcome)",
+                PAY_AWAIT_TIMEOUT
+            );
+        }
+        Ok(serde_json::to_value(pay_outcome_output(
+            terminal,
+            operation_id,
+            fee_msat,
+        ))?)
+    }
+
+    /// Reconcile a previously-submitted outgoing payment by operation id, without
+    /// ever re-sending it (board #9 Part 3). Re-attaches to the payment and waits
+    /// (bounded) for its terminal state: `settled` (preimage), `refunded` (sats
+    /// returned), or `inflight` when it is still pending / unresolvable — biased
+    /// to `inflight` so an unknown outcome never invites a re-pay.
+    async fn pay_outcome(
+        &self,
+        client: &ClientHandleArc,
+        operation_id: OperationId,
+    ) -> Result<serde_json::Value> {
+        let ln = client.get_first_module::<LightningClientModule>()?;
+        // Claim payouts are EXTERNAL Lightning sends (the seller pays an external
+        // NWC/LNURL invoice), so reconcile via the external pay-state stream. An
+        // internal op (or any subscribe error) reaches no terminal here ⇒
+        // `inflight` (fail-safe: keep the submitted record, never re-pay).
+        let terminal = watch_outgoing_pay(&ln, false, operation_id).await;
+        if terminal.is_none() {
+            eprintln!("pay-outcome: {operation_id:?} not yet at a fund-safe terminal (inflight)");
+        }
+        Ok(serde_json::to_value(pay_outcome_output(
+            terminal,
+            operation_id,
+            None,
+        ))?)
     }
 
     async fn spend_notes(
@@ -1195,10 +1625,23 @@ impl Bridge {
 struct AppState {
     bridge: Bridge,
     client: Arc<Mutex<Option<ClientHandleArc>>>,
+    discovery: Arc<Mutex<DiscoveryProbe>>,
 }
 
 fn amount_to_floor_sats(amount: Amount) -> u64 {
     amount.msats / 1000
+}
+
+/// Rank a gateway's API transport for native receive-gateway preference.
+/// Clearnet (`http`/`https`) is reachable everywhere; `iroh://` gateways often
+/// aren't on mobile/CGNAT (the same transport limit that makes a fresh join
+/// finicky on phones), so they sort last. Unknown schemes sit in between.
+fn gateway_scheme_rank(gateway: &LightningGateway) -> u8 {
+    match gateway.api.scheme() {
+        "https" | "http" => 0,
+        "iroh" => 2,
+        _ => 1,
+    }
 }
 
 #[derive(Debug)]
@@ -1241,6 +1684,12 @@ struct InvoiceRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AwaitInvoiceRequest {
+    operation_id: OperationId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PayOutcomeRequest {
     operation_id: OperationId,
 }
 
@@ -1299,10 +1748,29 @@ struct OnchainWithdrawRequest {
 }
 
 async fn serve_bridge(bridge: Bridge, bind: SocketAddr, invite_code: Option<String>) -> Result<()> {
+    let probe_target = bridge.discovery_probe_target();
+    let initial_probe = match &probe_target {
+        Some(addr) => DiscoveryProbe::probing(addr),
+        None => DiscoveryProbe::skipped("no PKARR resolver configured"),
+    };
     let state = AppState {
         bridge,
         client: Arc::new(Mutex::new(None)),
+        discovery: Arc::new(Mutex::new(initial_probe)),
     };
+
+    // Boot-time readiness probe: confirm the device can actually reach the
+    // configured HTTPS PKARR relay (DNS + :443). Runs off the hot path so it
+    // never delays serving; /health reports the cached outcome so the app can
+    // show "discovery degraded" instead of letting a fresh join silently
+    // time out.
+    {
+        let discovery = state.discovery.clone();
+        tokio::spawn(async move {
+            let outcome = run_discovery_probe(probe_target).await;
+            *discovery.lock().await = outcome;
+        });
+    }
 
     if let Some(invite_code) = invite_code {
         let client = state.bridge.open_or_join(&invite_code).await?;
@@ -1323,6 +1791,7 @@ async fn serve_bridge(bridge: Bridge, bind: SocketAddr, invite_code: Option<Stri
         .route("/invoice", post(api_invoice))
         .route("/await-invoice", post(api_await_invoice))
         .route("/pay", post(api_pay))
+        .route("/pay-outcome", post(api_pay_outcome))
         .route("/spend-notes", post(api_spend_notes))
         .route("/reissue-notes", post(api_reissue_notes))
         .route("/parse-notes", post(api_parse_notes))
@@ -1370,16 +1839,70 @@ impl AppState {
     }
 }
 
+/// Boot-time discovery readiness probe. A successful TCP connect to the PKARR
+/// resolver's host:443 confirms the device can both resolve DNS and reach the
+/// HTTPS discovery relay — the exact dependency a fresh native join leans on.
+/// It is deliberately lightweight (no TLS, no guardian round-trip): it catches
+/// the common launch failures (no network, captive portal, blocked :443) cheaply
+/// so /health can flag "degraded" up front.
+async fn run_discovery_probe(target: Option<String>) -> DiscoveryProbe {
+    let Some(addr) = target else {
+        return DiscoveryProbe::skipped("no PKARR resolver configured");
+    };
+    match tokio::time::timeout(
+        DISCOVERY_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => DiscoveryProbe {
+            status: "reachable".to_owned(),
+            target: addr,
+            detail: None,
+        },
+        Ok(Err(err)) => DiscoveryProbe {
+            status: "degraded".to_owned(),
+            target: addr,
+            detail: Some(truncate_detail(&err.to_string())),
+        },
+        Err(_) => DiscoveryProbe {
+            status: "degraded".to_owned(),
+            target: addr,
+            detail: Some(format!(
+                "no TCP connect within {}s",
+                DISCOVERY_PROBE_TIMEOUT.as_secs()
+            )),
+        },
+    }
+}
+
+fn truncate_detail(message: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    if message.chars().count() <= MAX_CHARS {
+        message.to_owned()
+    } else {
+        let mut out: String = message.chars().take(MAX_CHARS).collect();
+        out.push('…');
+        out
+    }
+}
+
 async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let joined =
         state.client.lock().await.is_some() || state.bridge.local_client_db_present().await;
+    let discovery = state.discovery.lock().await.clone();
     Json(json!({
         "ok": true,
         "joined": joined,
         "api_version": 2,
+        "join_timeout_secs": FEDERATION_JOIN_TIMEOUT.as_secs(),
+        "iroh": state.bridge.iroh_config_diagnostics(),
+        "discovery": discovery,
         "capabilities": [
             "reset",
             "idempotent_join",
+            "effective_iroh_config",
+            "discovery_probe",
         ],
     }))
 }
@@ -1485,6 +2008,19 @@ async fn api_pay(
                 req.force_internal.unwrap_or(false),
                 req.no_wait.unwrap_or(false),
             )
+            .await?,
+    ))
+}
+
+async fn api_pay_outcome(
+    State(state): State<AppState>,
+    Json(req): Json<PayOutcomeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let client = state.client().await?;
+    Ok(Json(
+        state
+            .bridge
+            .pay_outcome(&client, req.operation_id)
             .await?,
     ))
 }

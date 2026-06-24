@@ -1,7 +1,62 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties } from "react";
 import { type ChatImageAttachment, type EscrowState, Role } from "../../escrow-engine/types.js";
 import { T } from "../theme.js";
 import { randomId } from "../../storage/random-id.js";
+import {
+  type SystemBubble,
+  type SystemBubbleTone,
+  isStructuredMarkDoneMessage,
+} from "../../labels/trade-progress.js";
+
+type ChatMessage = EscrowState["chatMessages"][number];
+
+// One entry in the living feed: a human message bubble, or a centered system
+// bubble (a lifecycle event from the chain, or a structured mark-done note that
+// rode the chat). Woven together and sorted by time.
+type FeedItem =
+  | { kind: "msg"; at: number; key: string; chat: ChatMessage }
+  | { kind: "sys"; at: number; key: string; bubble: SystemBubble };
+
+/** Merge human chat messages with derived system bubbles into one time-sorted
+ *  feed. Structured mark-done notes (any vertical) are lifted out of the speech
+ *  stream into green system bubbles so the deed reads as a trade event, not a
+ *  message. Pure + display-only — publishes nothing. */
+function weaveFeed(messages: ChatMessage[], systemBubbles: SystemBubble[]): FeedItem[] {
+  const items: FeedItem[] = [];
+  messages.forEach((chat, i) => {
+    const p = chat.payload as { sentAt?: number; message?: string };
+    const at = p.sentAt ?? chat.raw.created_at ?? 0;
+    const key = chat.raw.id || `m${i}`;
+    if (isStructuredMarkDoneMessage(p.message)) {
+      items.push({ kind: "sys", at, key, bubble: { key, at, icon: "", text: p.message!, tone: "green" } });
+    } else {
+      items.push({ kind: "msg", at, key, chat });
+    }
+  });
+  for (const b of systemBubbles) items.push({ kind: "sys", at: b.at, key: b.key, bubble: b });
+  // Stable sort by time (Array.prototype.sort is stable in modern engines), so
+  // bubbles sharing a second keep their natural create→lock→vote order.
+  return items.sort((a, b) => a.at - b.at);
+}
+
+// System-bubble palette — colour follows meaning (living-chat mockup).
+function sysToneStyle(tone: SystemBubbleTone): CSSProperties {
+  const map: Record<SystemBubbleTone, { bg: string; bd: string; c: string; w?: number }> = {
+    teal:  { bg: `${T.teal}14`,   bd: `${T.teal}3a`,   c: T.teal },
+    lock:  { bg: `${T.purple}14`, bd: `${T.purple}3a`, c: T.purple },
+    green: { bg: `${T.green}14`,  bd: `${T.green}3a`,  c: T.green },
+    vote:  { bg: `${T.accent}14`, bd: `${T.accent}3a`, c: T.accent },
+    amber: { bg: `${T.amber}14`,  bd: `${T.amber}3a`,  c: T.amber },
+    win:   { bg: `${T.green}1c`,  bd: `${T.green}55`,  c: T.green, w: 800 },
+  };
+  const s = map[tone] ?? map.green;
+  return {
+    alignSelf: "center", display: "inline-flex", alignItems: "center", gap: 6,
+    maxWidth: "90%", textAlign: "center", padding: "7px 14px", borderRadius: 20,
+    fontSize: 12, fontWeight: s.w ?? 700, lineHeight: 1.35,
+    background: s.bg, border: `1px solid ${s.bd}`, color: s.c, fontFamily: T.sans,
+  };
+}
 
 // The chat body (message + image) is NIP-44-encrypted SEPARATELY to all THREE
 // participants in the bodyEnvelope, so the published event is roughly
@@ -159,7 +214,7 @@ async function prepareChatImage(file: File): Promise<ChatImageAttachment> {
   throw new Error("That image is too large for encrypted chat. Try a tighter screenshot.");
 }
 
-export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader = false }: {
+export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader = false, fill = false, systemBubbles = [] }: {
   state: EscrowState;
   myRole: Role | null;
   onSend: (message: SendChatInput) => void;
@@ -167,6 +222,12 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
   /** v3.1: suppress the internal "CHAT" header when the panel sits inside a
    *  disclosure row that already supplies the label (avoids a doubled header). */
   hideHeader?: boolean;
+  /** TradeView pass: fill the parent's height (flex column) so the message feed
+   *  scrolls and the composer pins to the bottom of the pager pane. */
+  fill?: boolean;
+  /** TradeView pass: lifecycle event bubbles derived from the event chain
+   *  (display-only), woven into the message feed by time. */
+  systemBubbles?: SystemBubble[];
 }) {
   const [msg, setMsg] = useState("");
   const [attachment, setAttachment] = useState<ChatImageAttachment | null>(null);
@@ -222,6 +283,8 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
 
   const canSend = (!!msg.trim() || !!attachment) && !sending && !imageBusy;
 
+  const feed = weaveFeed(state.chatMessages, systemBubbles);
+
   return (
     <div style={{
       background: embedded ? "transparent" : T.card,
@@ -229,6 +292,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
       borderRadius: embedded ? 0 : T.r,
       marginBottom: embedded ? 0 : 16,
       overflow: "hidden",
+      ...(fill ? { height: "100%", display: "flex", flexDirection: "column", minHeight: 0 } : {}),
     }}>
       {/* Header */}
       {!hideHeader && (
@@ -248,14 +312,14 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
       </div>
       )}
 
-      {/* Messages */}
+      {/* Messages — the living feed: human bubbles + system event bubbles. */}
       <div style={{
-        maxHeight: embedded ? 340 : 280,
+        ...(fill ? { flex: 1, minHeight: 0 } : { maxHeight: embedded ? 340 : 280 }),
         overflowY: "auto",
         padding: embedded ? "14px 0" : "12px 16px",
         display: "flex", flexDirection: "column", gap: 10,
       }}>
-        {state.chatMessages.length === 0 ? (
+        {feed.length === 0 ? (
           <div style={{
             textAlign: "center", padding: "20px 0",
             color: T.muted, fontFamily: T.mono, fontSize: 11,
@@ -263,7 +327,16 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
             No messages yet.
           </div>
         ) : (
-          state.chatMessages.map((chat, i) => {
+          feed.map((item) => {
+            if (item.kind === "sys") {
+              return (
+                <div key={item.key} style={sysToneStyle(item.bubble.tone)}>
+                  {item.bubble.icon ? <span aria-hidden="true">{item.bubble.icon}</span> : null}
+                  <span>{item.bubble.text}</span>
+                </div>
+              );
+            }
+            const chat = item.chat;
             const payload = chat.payload as any;
             const attachments: ChatImageAttachment[] = Array.isArray(payload.attachments)
               ? payload.attachments.filter((a: any): a is ChatImageAttachment => a?.kind === "image")
@@ -271,7 +344,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
             const isMe = myRole === payload.senderRole;
             const color = roleColor(payload.senderRole);
             return (
-              <div key={chat.raw.id || i} style={{
+              <div key={item.key} style={{
                 display: "flex", flexDirection: "column",
                 alignItems: isMe ? "flex-end" : "flex-start",
               }}>
@@ -282,10 +355,12 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
                   {isMe ? "You" : roleName(payload.senderRole)}
                 </div>
                 <div style={{
-                  padding: attachments.length > 0 ? 6 : "8px 12px",
-                  borderRadius: 12,
-                  background: isMe ? `${color}22` : T.surface,
-                  border: `1px solid ${isMe ? color + "33" : T.border}`,
+                  padding: attachments.length > 0 ? 6 : "9px 13px",
+                  borderRadius: 14,
+                  borderBottomRightRadius: isMe ? 4 : 14,
+                  borderBottomLeftRadius: isMe ? 14 : 4,
+                  background: isMe ? `${color}1f` : T.card,
+                  border: `1px solid ${isMe ? color + "44" : T.border}`,
                   maxWidth: "84%",
                 }}>
                   {attachments.map((image) => (

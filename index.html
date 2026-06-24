@@ -43,6 +43,15 @@
         } catch (e) {}
       })();
     </script>
+    <!-- Self-hosted webfonts: DM Sans + JetBrains Mono (theme.ts declares them
+         but they were never loaded → system fallback). Vendored woff2 under
+         /fonts so the app renders with its real type offline/native (Tauri),
+         no Google Fonts CDN. Preload the primary weights to avoid a swap flash
+         on first paint; the rest load via the stylesheet. -->
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/dmsans-400-latin.woff2" crossorigin>
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/dmsans-700-latin.woff2" crossorigin>
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/jbmono-400-latin.woff2" crossorigin>
+    <link rel="stylesheet" href="/fonts/fonts.css">
     <!-- Woven Trust mark favicon suite. -->
     <link rel="icon" type="image/png" sizes="96x96" href="/icons/favicon-96x96.png?v=0.9.4">
     <link rel="icon" type="image/png" sizes="48x48" href="/icons/favicon-48x48.png?v=0.9.4">
@@ -60,16 +69,16 @@
     <!-- Open Graph -->
     <meta property="og:title" content="Chama — Bitcoin commerce for communities.">
     <meta property="og:description" content="Non-custodial. Nostr-native. 2-of-3 Shamir escrow. Community trust, rendered in cryptography.">
-    <meta property="og:image" content="https://getchama.app/icons/og-banner.png">
-    <meta property="og:image:width" content="1280">
-    <meta property="og:image:height" content="640">
+    <meta property="og:image" content="https://getchama.app/icons/getchama-social-exchange-v1.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://getchama.app">
     <!-- Twitter/X -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="Chama — Bitcoin commerce for communities.">
     <meta name="twitter:description" content="Non-custodial. Nostr-native. 2-of-3 Shamir escrow.">
-    <meta name="twitter:image" content="https://getchama.app/icons/og-banner.png">
+    <meta name="twitter:image" content="https://getchama.app/icons/getchama-social-exchange-v1.png">
   </head>
   <body>
     <div id="root"></div>

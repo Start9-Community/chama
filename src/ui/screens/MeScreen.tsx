@@ -56,12 +56,15 @@ import {
   type SatsTraceEntry,
 } from "../../payments/sats-trace.js";
 import { getEcashExport } from "../../payments/ecash-exports.js";
-import { listStrandedRedemptions, type StrandedRedemption } from "../../fedimint/pending-redemptions.js";
+import { listStrandedRedemptions, partitionStrandedClaims, resolveUnresolvedCredit, type StrandedRedemption } from "../../fedimint/pending-redemptions.js";
 import { T, ROLE_COLOR, type ThemeMode } from "../theme.js";
 import {
   notificationsEnabled,
   setNotificationsEnabled,
   ensureNotificationPermission,
+  dmNotifyPref,
+  setDmNotifyPref,
+  type DmNotifyPref,
 } from "../../notifications/notify-service.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
@@ -177,7 +180,25 @@ export function MeScreen({
   // These sit in clearable localStorage while the chain reads COMPLETED;
   // without a loud surface, a data-clear or federation switch destroys
   // the only copy of the money. Rendered as the topmost alarm card.
+  // v4.0.0: bump to force a re-read after a dismiss mutates the stash.
+  const [, bumpStrandedTick] = useState(0);
   const strandedClaims = listStrandedRedemptions();
+  // Reconcile the "unresolved-credit" sliver against the wallet balance the
+  // copy already invokes — covered → resolve silently; short → calm nudge;
+  // poisoned / retries-exhausted stay loud (may be live money). See
+  // partitionStrandedClaims.
+  const { loud: loudClaims, calm: calmClaims, reconciledIds } =
+    partitionStrandedClaims(strandedClaims, balanceMsats);
+  const reconciledKey = reconciledIds.join(",");
+  useEffect(() => {
+    if (!reconciledKey) return;
+    for (const id of reconciledKey.split(",")) resolveUnresolvedCredit(id, "balance-reconciled");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reconciledKey]);
+  const dismissClaim = (escrowId: string) => {
+    resolveUnresolvedCredit(escrowId, "user-dismissed");
+    bumpStrandedTick((t) => t + 1);
+  };
   const isClaimPayoutRecovery = !isSmallLeftover && Boolean(satsTrace?.escrowId);
   const traceCopy = describeSatsTrace(satsTrace ?? null);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -236,7 +257,10 @@ export function MeScreen({
           a bearer note the drain gave up on gets a persistent, actionable
           alarm — not a console line. Tap → EcashExportModal (preset mode)
           with QR + copy, so the user can move the money to safety. */}
-      {onExportStrandedClaim && strandedClaims.map((entry) => (
+      {/* LOUD: poisoned / retries-exhausted — the bearer note is (or may be)
+          LIVE money the drain couldn't redeem. Stays a red, tap-to-export alarm;
+          never balance-downgraded. */}
+      {onExportStrandedClaim && loudClaims.map((entry) => (
         <div
           key={entry.escrowId}
           onClick={() => onExportStrandedClaim(entry)}
@@ -250,28 +274,68 @@ export function MeScreen({
             fontSize: 11, fontWeight: 600, color: T.red,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
           }}>
-            {entry.stranded === "unresolved-credit"
-              ? "CLAIM NEEDS ATTENTION"
-              : "STRANDED CLAIM — ACTION NEEDED"}
+            STRANDED CLAIM — ACTION NEEDED
           </div>
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.5 }}>
-            {entry.stranded === "unresolved-credit" ? (
-              <>
-                Chama couldn't confirm{" "}
-                <BitcoinAmount sats={Math.floor(entry.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
-                {" "}from a settled trade arrived in your wallet. Your balance may
-                already include them — or the note was claimed elsewhere. Tap to
-                view and save the note, then check your balance.
-              </>
-            ) : (
-              <>
-                <BitcoinAmount sats={Math.floor(entry.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
-                {" "}from a settled trade couldn't land in your wallet automatically.
-                The bearer note — the money itself — is saved only in this browser.
-                Tap to export it now, before clearing data or switching federations
-                can destroy the only copy.
-              </>
+            <BitcoinAmount sats={Math.floor(entry.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
+            {" "}from a settled trade couldn't land in your wallet automatically.
+            The bearer note — the money itself — is saved only in this browser.
+            Tap to export it now, before clearing data or switching federations
+            can destroy the only copy.
+          </div>
+        </div>
+      ))}
+
+      {/* CALM: unresolved-credit whose amount the wallet balance does NOT cover.
+          The note was reported already-redeemed (so it's not live money to
+          rescue) but this wallet is short — likely claimed on another device.
+          Honest, dismissible nudge; the note is archived (kept) on dismiss. The
+          balance-covered case never reaches here — it auto-reconciles silently. */}
+      {calmClaims.map((entry) => (
+        <div
+          key={entry.escrowId}
+          style={{
+            background: T.card, border: `1px solid ${T.amber}55`,
+            borderRadius: T.r, padding: 18, marginBottom: 16,
+          }}
+        >
+          <div style={{
+            fontSize: 11, fontWeight: 600, color: T.amber,
+            fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
+          }}>
+            CHECK YOUR OTHER DEVICE
+          </div>
+          <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.5, marginBottom: 12 }}>
+            <BitcoinAmount sats={Math.floor(entry.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
+            {" "}from a settled trade was reported already claimed, but your balance
+            here is short by that much — it most likely landed on another device.
+            The note is saved as a backup if you need it.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {onExportStrandedClaim && (
+              <button
+                onClick={() => onExportStrandedClaim(entry)}
+                style={{
+                  flex: 1, minHeight: 40, borderRadius: T.rs,
+                  background: "none", border: `1px solid ${T.border}`,
+                  color: T.text, fontFamily: T.sans, fontSize: 13, fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                View note
+              </button>
             )}
+            <button
+              onClick={() => dismissClaim(entry.escrowId)}
+              style={{
+                flex: 1, minHeight: 40, borderRadius: T.rs,
+                background: T.amberDim, border: `1px solid ${T.amber}66`,
+                color: T.amber, fontFamily: T.sans, fontSize: 13, fontWeight: 800,
+                cursor: "pointer",
+              }}
+            >
+              Dismiss
+            </button>
           </div>
         </div>
       ))}
@@ -489,6 +553,7 @@ export function MeScreen({
           </div>
         )}
         <NotificationsRow />
+        <DmNotificationsRow />
         <NostrNamesRow on={kind0On} onToggle={() => setKind0On(!kind0On)} />
         <SettingsRow label="Payment methods" hint="Phone, mobile money, bank, and app IDs" onClick={onOpenSavedHandles} />
         <SettingsRow label="Lightning Addresses" hint="Saved addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
@@ -664,6 +729,8 @@ function MeTradeHistory({
             return (
               <div key={s.id} style={{ animation: `fadeIn 0.4s ease ${i * 0.05}s both` }}>
                 <TradeCard state={s} pubkey={pubkey} onSelect={() => onOpenTrade(s.id)} />
+                {/* Safety net Jetty asked for: rate the counterparty straight from
+                    history (👍/👎) if you forgot or backed out of the trade. */}
                 {ratee && !alreadyRated && onRateCounterparty && (
                   <RatingTap tradeId={s.id} ratee={ratee} onRate={onRateCounterparty} />
                 )}
@@ -675,6 +742,7 @@ function MeTradeHistory({
     </section>
   );
 }
+
 
 type MeDashboardModel = {
   needsYou: EscrowState[];
@@ -2140,6 +2208,63 @@ function NotificationsRow() {
           background: on ? T.green : T.muted, transition: "left 0.15s",
         }} />
       </button>
+    </div>
+  );
+}
+
+// DM / trade-chat notifications. Tri-state, mirroring the Appearance control:
+// Auto follows your role ON EACH TRADE (arbiters are the responders, so they
+// buzz; buyers/sellers stay quiet), On/Off are explicit global overrides.
+// Self-contained — reads/writes the pref directly. Auto or On proactively asks
+// OS permission (the real gate).
+function DmNotificationsRow() {
+  const [pref, setPref] = useState<DmNotifyPref>(() => dmNotifyPref());
+  const pick = (next: DmNotifyPref) => {
+    setPref(next);
+    setDmNotifyPref(next);
+    if (next !== "off") void ensureNotificationPermission();
+  };
+  const sublabel =
+    pref === "auto" ? "Auto — buzzes when you're the arbiter"
+    : pref === "on" ? "On — buzzes on every trade"
+    : "Off — chat stays silent";
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      gap: 10, padding: "14px 16px", borderBottom: `1px solid ${T.border}`,
+    }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+          DM notifications
+        </div>
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+          {sublabel}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+        {(["auto", "on", "off"] as DmNotifyPref[]).map(opt => {
+          const active = pref === opt;
+          const label = opt === "auto" ? "Auto" : opt === "on" ? "On" : "Off";
+          return (
+            <button
+              key={opt}
+              onClick={() => pick(opt)}
+              role="radio"
+              aria-checked={active}
+              style={{
+                padding: "6px 10px", borderRadius: 999,
+                border: `1px solid ${active ? T.accent + "66" : T.border}`,
+                background: active ? T.accentDim : T.surface,
+                color: active ? T.accent : T.muted,
+                fontFamily: T.mono, fontSize: 10, fontWeight: 800,
+                cursor: "pointer",
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

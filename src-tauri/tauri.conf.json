@@ -32,10 +32,12 @@
       "binaries/chama-fedimint-bridge"
     ],
     "icon": [
-      "../public/icons/favicon-32x32.png",
-      "../public/icons/favicon-128x128.png",
-      "../public/icons/favicon-256x256.png",
+      "icons/icon.icns",
+      "icons/icon.png",
       "../public/icons/favicon-512x512.png",
+      "../public/icons/favicon-256x256.png",
+      "../public/icons/favicon-128x128.png",
+      "../public/icons/favicon-32x32.png",
       "../public/icons/favicon.ico"
     ],
     "macOS": {

@@ -70,6 +70,9 @@ export interface RunRecoveryPayoutOpts {
   recordPayoutSubmitted?: (input: { escrowId: string; operationId?: string; amountMsats?: number }) => void;
   markPayoutSettled?: (escrowId: string, operationId?: string) => void;
   clearPayoutRecord?: (escrowId: string) => void;
+  /** v4.0.0 fail-closed: throws if the journal can't be persisted (so we never
+   *  dispatch an unguarded payout). No-op when unset. */
+  assertPayoutJournalWritable?: () => void;
   awaitPayoutOutcome?: (operationId: string) => Promise<"settled" | "refunded" | "unknown">;
 }
 
@@ -117,7 +120,10 @@ export async function runRecoveryPayout(
         catch { outcome = "unknown"; }
       }
       if (outcome === "settled") {
-        opts.markPayoutSettled?.(escrowId, prior.operationId);
+        // Submitted record (which got us here) persists and already blocks
+        // re-pay; a failed settled-upgrade is fund-safe. Proceed to done.
+        try { opts.markPayoutSettled?.(escrowId, prior.operationId); }
+        catch (e) { console.warn("[chama] recovery: re-attach markPayoutSettled persist failed (submitted record still guards):", e); }
         emit({ kind: "done" });
         return { kind: "done" };
       }
@@ -130,12 +136,37 @@ export async function runRecoveryPayout(
     }
   }
 
+  // v4.0.0 FAIL-CLOSED (guard only active with an escrowId): refuse to SEND if
+  // the journal can't be persisted, so a later re-tap can't double-pay. Nothing
+  // is sent here, so a retry once storage recovers is safe.
+  if (escrowId && opts.assertPayoutJournalWritable) {
+    try {
+      opts.assertPayoutJournalWritable();
+    } catch (e) {
+      const error = errorMessage(
+        e,
+        "Can't recover safely right now — this device's storage is full or unavailable, so the anti-double-pay guard can't be saved. No payment was sent; free up space and try again.",
+      );
+      emit({ kind: "payout-failed", error });
+      return { kind: "payout-failed", error };
+    }
+  }
+
   emit({ kind: "paying-invoice" });
   try {
     const res = await opts.payInvoice(opts.bolt11);
     // payInvoice only resolves on success — journal it settled so a retry is
-    // a no-op, never a second send.
-    if (escrowId) opts.markPayoutSettled?.(escrowId, typeof res === "string" ? res : undefined);
+    // a no-op, never a second send. If that write fails after a SENT payout, do
+    // not surface a re-payable failure — force payout-confirming.
+    if (escrowId) {
+      try {
+        opts.markPayoutSettled?.(escrowId, typeof res === "string" ? res : undefined);
+      } catch (persistErr) {
+        console.error("[chama] recovery: markPayoutSettled persist failed after a sent payout; forcing payout-confirming:", persistErr);
+        emit({ kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY });
+        return { kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY };
+      }
+    }
   } catch (e: any) {
     const code = (e as { code?: string })?.code;
     const opId = (e as { operationId?: string })?.operationId;
@@ -143,7 +174,13 @@ export async function runRecoveryPayout(
     // re-payable failure. Journal it and surface payout-confirming.
     if (code === "LN_PAY_INFLIGHT") {
       if (escrowId) {
-        opts.recordPayoutSubmitted?.({ escrowId, operationId: opId, amountMsats: opts.traceContext?.amountMsats });
+        // Even if the submitted guard can't persist, force payout-confirming —
+        // never fall through to the re-payable terminal for an in-flight payout.
+        try {
+          opts.recordPayoutSubmitted?.({ escrowId, operationId: opId, amountMsats: opts.traceContext?.amountMsats });
+        } catch (persistErr) {
+          console.error("[chama] recovery: recordPayoutSubmitted persist failed for an in-flight payout; forcing payout-confirming anyway:", persistErr);
+        }
       }
       emit({ kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY });
       return { kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY };

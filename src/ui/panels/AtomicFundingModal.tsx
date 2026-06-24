@@ -25,12 +25,6 @@ import {
   listSavedNwcConnections,
   type SavedNwcConnection,
 } from "../../payments/nwc-connections.js";
-import {
-  EXTERNAL_SWAPS_ENABLED,
-  getBidirectionalSwapsForContext,
-  openExternalSwap,
-  type ExternalSwapMatch,
-} from "../../payments/external-swap-registry.js";
 import type {
   FundAndLockPhase,
   FundAndLockTerminal,
@@ -51,14 +45,14 @@ export interface AtomicFundingModalProps {
   savedHandleId?: string;
   /** Optional menu basket snapshot to attach to LOCK. */
   selectedItems?: SelectedMenuItem[];
-  /** User's home community (e.g. "sn-cfa"). Used to surface the
-   *  bidirectional swap CTA (Banxaas) pre-LOCK when the user is in a
-   *  supported market and could on-ramp fiat -> sats before funding. */
+  /** User's home community (e.g. "sn-cfa"). Trade-context metadata kept
+   *  on the funding modal; the pre-LOCK external-swap CTA was removed in
+   *  the 2026-06-24 fiat-ramps pass (all swaps are offramp-only, post-
+   *  CLAIM), so these are presently informational only. */
   homeCommunity?: string | null;
   /** Active trade community (most specific context). */
   tradeCommunity?: string | null;
-  /** Active trade fiat currency. Legacy fallback for trades without
-   *  a community slug. */
+  /** Active trade fiat currency. */
   fiatCurrency?: string | null;
   /** Bound to actions.fundAndLock from useEscrow. */
   fundAndLock: (
@@ -449,11 +443,6 @@ export function AtomicFundingModal({
             onRememberNwcChange={setRememberNwc}
             onSelectNwc={handleSelectNwc}
             disableNwc={disableNwc}
-            bidirectionalSwaps={EXTERNAL_SWAPS_ENABLED ? getBidirectionalSwapsForContext({
-              homeCommunity,
-              tradeCommunity,
-              fiatCurrency,
-            }) : []}
           />
         )}
 
@@ -579,7 +568,6 @@ function FundingMethodChooser({
   onRememberNwcChange,
   onSelectNwc,
   disableNwc,
-  bidirectionalSwaps,
 }: {
   amountSats: number;
   onchainInfoState:
@@ -594,14 +582,6 @@ function FundingMethodChooser({
   onRememberNwcChange: (value: boolean) => void;
   onSelectNwc: (connectionString: string, remember: boolean) => void;
   disableNwc?: boolean;
-  /** v1.2.4: bidirectional external-swap providers (currently Banxaas
-   *  only) that apply to this trade's context. Surfaced as an
-   *  on/offramp CTA above the regular funding methods because the
-   *  same link handles fiat -> sats AND sats -> fiat — users without
-   *  sats yet can on-ramp before funding, returning users can offramp
-   *  after claiming. Empty array = no provider available for this
-   *  market; CTA is hidden. */
-  bidirectionalSwaps: ExternalSwapMatch[];
 }) {
   const onchainGate = (() => {
     if (onchainInfoState.kind === "loading") {
@@ -700,60 +680,10 @@ function FundingMethodChooser({
         credited ecash into SSS automatically after funding lands.
       </div>
 
-      {/* v1.2.4: pre-LOCK bidirectional on/offramp CTA. When a swap
-          provider like Banxaas serves this trade's country and
-          handles both onramp and offramp from the same URL, surface
-          it ABOVE the funding methods. Users who don't have sats yet
-          can on-ramp fiat into sats on the partner's site, then come
-          back and use Lightning (or any other method) to fund. We
-          don't redirect-and-replace the funding flow because the
-          handoff is asynchronous — the user pays at Banxaas, sats
-          arrive in their wallet, then they return to Chama. */}
-      {bidirectionalSwaps.length > 0 && (
-        <div style={{
-          marginBottom: 12, padding: 12, borderRadius: T.r,
-          background: T.tealDim, border: `1px solid ${T.teal}66`,
-        }}>
-          <div style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            gap: 10, marginBottom: 6,
-          }}>
-            <div style={{
-              fontSize: 9, color: T.teal, fontFamily: T.mono,
-              letterSpacing: 1, fontWeight: 800,
-            }}>
-              {bidirectionalSwaps[0].provider.flagEmoji} NEED SATS? · {bidirectionalSwaps[0].provider.displayName.toUpperCase()} ON/OFFRAMP
-            </div>
-            <span style={{
-              fontSize: 8, fontFamily: T.mono, color: T.teal,
-              border: `1px solid ${T.teal}55`, borderRadius: 4,
-              padding: "2px 6px", textTransform: "uppercase",
-            }}>
-              {bidirectionalSwaps[0].provider.status === "enabled" ? "live" : "soon"}
-            </span>
-          </div>
-          <div style={{
-            fontSize: 10, color: T.muted, fontFamily: T.mono,
-            lineHeight: 1.5, marginBottom: 10,
-          }}>
-            {bidirectionalSwaps[0].provider.blurb ||
-              "Bring sats in or cash out — same link, both ways."} Open
-            {" "}{bidirectionalSwaps[0].provider.displayName}, get sats to your
-            Lightning wallet, then come back and fund the trade.
-          </div>
-          <button
-            onClick={() => openExternalSwap(bidirectionalSwaps[0].provider)}
-            style={{
-              width: "100%", padding: "10px 12px", borderRadius: T.rs,
-              background: T.teal, border: `1px solid ${T.teal}`,
-              color: T.bg, fontFamily: T.mono, fontSize: 11,
-              fontWeight: 900, cursor: "pointer",
-            }}
-          >
-            Open {bidirectionalSwaps[0].provider.displayName} swap
-          </button>
-        </div>
-      )}
+      {/* The 2026-06-24 fiat-ramps pass removed the pre-LOCK external-swap
+          CTA: nobody onramps in-app, so funding surfaces no provider.
+          External swaps are offramp-only and live post-CLAIM in
+          ClaimPayoutModal. */}
 
       {/* v1.2.4: saved NWC connections promoted out of the "More
           options" disclosure to top-level quick-pick buttons. The

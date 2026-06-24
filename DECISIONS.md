@@ -1773,3 +1773,198 @@ stash, or a submitted payout) — only terminally-resolved trades hide, and
 resolved trades still render in Me → Done, so nothing is buried.
 
 **Status:** Active.
+
+---
+
+## 2026-06-23 — Native fresh-join: default Iroh discovery to n0 pkarr (HTTPS)
+
+**Context:** Fresh installs hung on first federation join ("timed out joining federation:
+deadline has elapsed") on real mobile/CGNAT (APK + Tauri), while the browser reached the
+same guardians fine. Root cause (verified against fedimint-connectors 0.11.1 + iroh source):
+the native client resolves guardian node addresses via DNS (:53) + mainline DHT (UDP) — both
+routinely throttled/blocked on mobile/CGNAT — while the browser (WASM) resolves via a
+PkarrResolver over HTTPS (n0's `dns.iroh.link/pkarr`), which sails through. The v3.6.0
+`--iroh-dns` / `CHAMA_FEDIMINT_IROH_DNS` lever existed but was never passed by either launcher,
+and no Chama resolver was ever stood up.
+
+**Options considered:**
+- (a) Stand up a Chama-owned PKARR resolver and point native at it. New infra; unnecessary — the guardians already publish to n0.
+- (b) Guardian-side: make each guardian publish to the default resolver. We don't control all guardians; doesn't generalize.
+- (c) Default the bridge's `iroh_dns` to n0's pkarr relay, applied via `set_iroh_dns` — **additive** (stacks on DNS+DHT, verified), overridable via the existing flag/env, inherited by both launchers with zero arg edits.
+
+**Decision:** (c). `DEFAULT_IROH_PKARR_RELAY` in `native/fedimint-bridge/src/main.rs`; native now
+resolves guardians the same reliable HTTPS way the browser does, on top of (not replacing)
+DNS+DHT. Also: join timeout 45s→90s; frontend 105s wait + 2 backoff retries (discovery errors
+only) + friendly Reconnect copy; `/health` exposes the effective iroh config + a boot-time
+discovery readiness probe (`reachable|degraded`); a launcher arg-parity test guards the original
+"lever never wired" regression.
+
+**Rationale:** The browser already resolving these guardians over n0 pkarr proves the records are
+there — native just wasn't querying pkarr. No new infra, fed-switch-safe (additive), not pinned to
+Chama infra.
+
+**Implications:**
+- Reproduces ONLY on real mobile/CGNAT — localhost CANNOT validate it (see `native/fedimint-bridge/FRESH-JOIN-SMOKE.md`). Real-mobile smoke is the release gate.
+- Pkarr fixes *resolution*, not *connectivity*. The native connector runs `RelayMode::Disabled` (no relay fallback) on both the 0.35 and 0.90 stacks, and the builder exposes no relay setter — so if pkarr resolves but the connect still fails on CGNAT, the lever is `FM_IROH_CONNECT_OVERRIDES` / an upstream fedimint change, NOT a Chama toggle.
+
+**Status:** Implemented, uncommitted for v4.0.0; needs real-mobile smoke before release. (board #17)
+
+---
+
+## 2026-06-23 — Funding gateway selection: pick a reachable gateway, never blind-select
+
+**Context:** Native funding failed at both ends. LOCK: `/invoice` "Couldn't find a reachable
+federation Lightning gateway… timed out after 12s." CLAIM: `/pay` "failed to start outgoing LN
+payment: Connection failed: Failed to connect to gateway." Live probe (buyer bridge :18002):
+the federation has 3 LN gateways — 2 reachable clearnet HTTPS (Fedi us-east-1, Henwen) and 1 dead
+`iroh://` (Banco Bitcoin, times out). The receive path used fedimint's blind
+`select_available_gateway(None)` (a `join_all` that waits for the slowest → the dead iroh gateway
+burns the 12s budget); the send path used `get_gateway(None)` (`.choose(&mut OsRng)` — a *random*
+gateway, dead iroh ~⅓ of the time). Guardians were reachable in both cases (cache refresh
+succeeded) — so this is gateway *selection*, NOT the join/discovery bug.
+
+**Options considered:**
+- (a) Raise the 12s select timeout. The dead gateway never answers — doesn't help.
+- (b) Frontend passes an explicit gatewayId from `/probe-gateways`. Works but per-platform and leaks selection into the UI.
+- (c) Bridge-side reachable-gateway selection shared by both paths.
+
+**Decision:** (c). New `pick_reachable_gateway` (`native/fedimint-bridge/src/main.rs`): lists
+gateways, orders clearnet before `iroh://`, then vetted, then lowest fee; probes each individually
+under a short 4s timeout and takes the first that answers; caches last-known-good (always
+re-probed). Wired into BOTH `select_receive_gateway` (Part 1, `/invoice`) and `pay()`'s auto path
+(Part 2, `/pay`). Explicit-gatewayId and `force_internal` paths unchanged; `pay_bolt11_invoice` is
+still called exactly once (fall-through lives purely in selection → no double-pay from the picker).
+
+**Rationale:** The federation's funding was never down — 2 gateways were reachable; blind/random
+selection just kept landing on the one dead `iroh://` endpoint. Fails safe (no sats moved on
+failure). Verified: blind `/invoice` 12.1s→1.29s; `/pay` auto path deterministically selects the
+clearnet gateway across runs, 0 sats moved (expired-invoice probe); predeploy green.
+
+**Implications:**
+- A federation whose gateways are ALL `iroh://` (possibly BLF) still has no reachable native gateway → that fed's funding stays gated on the native-iroh-connectivity work (see the fresh-join entry). Per-fed go/no-go: `/gateways` + `/probe-gateways` must show ≥1 reachable clearnet gateway.
+- Part 2 makes native `/pay` actually *send* for the first time — see the double-pay entry below; ship them together.
+
+**Status:** Implemented, uncommitted for v4.0.0 (Parts 1 & 2 verified). (board #9)
+
+---
+
+## 2026-06-23 — Native payout double-pay guard (corrects the 2026-06-17 browser journal guard's native assumption)
+
+**Context:** The reachable-gateway fix (Part 2 above) makes native `/pay` actually *send* for the
+first time — before, native claims always failed at gateway-connect, so nothing was sent and there
+was no ambiguity. That exposed a latent double-pay. An adversarial audit + raw-code verification
+found the **2026-06-17 escrow-keyed journal guard is browser/WASM-only and DORMANT on native** —
+the exact platform funding targets. That earlier entry's implication ("mock/native return
+'unknown' ⇒ they keep the submitted record, never re-pay") was **wrong**: native never *creates*
+the submitted record in the first place.
+
+**Why (verified):** `runClaimAndPayout` records a payout `submitted` (→ reconcile, never re-pay)
+ONLY when the thrown error has `code === "LN_PAY_INFLIGHT"` (`claim-and-payout.ts:763`); any other
+throw → `clearPayoutRecord` → re-payable (`:780`). `LN_PAY_INFLIGHT` is produced ONLY in
+`sdk-adapter.ts` (browser). Native `/pay` throws a plain `Error` (no code) and has no
+`awaitPayOutcome` (`fedimint-client.ts:960` returns "unknown"). ⇒ a native ambiguous payout (HTLC
+settles at the gateway, but `await_outgoing_payment` / local watch errors on a slow link → bridge
+500) is misclassified as a clean failure → seller retries → fresh invoice → **pays twice.**
+Secondary: a refund/failure returned as `200 {"Failure":…}` is read as success by `readOperationId`
+(`native-bridge-adapter.ts:262`) → false-settled (claim shown done, seller unpaid).
+
+**Decision:** Give native the same submitted→reconcile protection the browser has. Bridge: `/pay`
+returns discriminated outcomes (pre-send failure = safe re-pay; post-send ambiguous = operationId +
+inflight/unknown, not a bare 500; settled; refunded/failed explicit) + a reconcile endpoint that
+awaits an outgoing payment's outcome by operationId. Native adapter: emit
+`{code:"LN_PAY_INFLIGHT", operationId}` on ambiguity; implement `awaitPayOutcome`; never resolve a
+refund/`{"Failure"}` as settled. (Briefed in `design/mockups/chama-funding-gateway-fix-brief.md`
+Part 3; in progress at write time.)
+
+**Rationale:** Bearer-cash safety — a second send is unrecoverable (the counterparty has the sats).
+Same "unknown ⇒ refuse, not retry" stance as the browser guard and the OPFS-wipe /
+ALREADY_SPENT_UNCONFIRMED guards; it just hadn't reached native. This IS the core of board #9
+("Funding fund-*loss* fix") — the gateway selection was the visible symptom.
+
+**Implications:**
+- HARD SHIP RULE: Part 2 + Part 3 ship in the SAME release; native `/pay` reachable-selection must never go out without the native double-pay guard.
+- Corrects the native-safety claim in the 2026-06-17 entry (that entry's *browser* guard stands; its *native* assumption is fixed here).
+
+**Status:** Implemented + adversarially verified (stream-based classifier — only `Success`→settled, confirmed `Refunded`/`Canceled`→refunded, `UnexpectedError`/timeout→inflight; transport-failure→`LN_PAY_INFLIGHT`), uncommitted, bundled for v4.0.0. (board #9)
+
+---
+
+## 2026-06-23 — Payout-journal double-pay residuals: V8 fixed now, V7 + V6 deferred
+
+**Context:** The Part 2+3 adversarial sweep — after closing all #9-related double-pays (native now at
+browser parity, incl. a classifier bug that *would have shipped*: `await_outgoing_payment`'s `Failure`
+collapses a settled-but-change-reclaim-failed payment, so mapping `Failure → refunded` re-pays a
+settled payout; fixed by classifying the pay-state stream directly) — surfaced TWO pre-existing,
+cross-platform gaps in the shared v3.5.1 escrow-keyed payout journal. They affect the browser
+identically and are not introduced by #9, but #9 (native now actually pays) newly exposes them on native:
+- **V8 — journal write fails:** `saveJournal` (`payout-journal.ts:96-107`) swallows a localStorage
+  write error (quota / private mode / disabled) with only `console.error` — its own comment admits this
+  "re-opens the double-pay window." **No app-death needed**; reachable on storage-restricted mobile WebViews.
+- **V7 — app dies mid-pay:** all journal writes happen AFTER the `/pay` call
+  (`claim-and-payout.ts:749→754`; submitted record in the catch `:764`), so a crash / Cmd+Q / OS-kill
+  between bridge-commit and the JS write leaves an empty journal → retry double-pays.
+- (related) **V6 — stuck "payout-confirming":** an inflight payout can stay confirming forever if the
+  operationId is lost or the pay-watch never re-emits.
+
+**Options considered:**
+- (a) Ship Part 2+3, defer both. Leaves a no-conditions double-pay (V8) open in a release whose theme is closing double-pays.
+- (b) Fix V8 now; brief V7 + V6 for the next leg.
+- (c) Fix V7 + V8 now (full hardening incl. pre-send journaling + reconcile-by-escrow). Largest scope; shared path + new bridge endpoint, into an already-huge release.
+
+**Decision:** (b). **V8 fixed in v4.0.0** — fail-closed: `saveJournal` re-throws; the claim
+orchestrator refuses to proceed pre-send / forces `payout-confirming` post-send when the submitted
+guard can't persist (never a re-payable failure). **V7 + V6 deferred** to the immediate next leg,
+briefed in `design/mockups/chama-payout-journal-hardening-brief.md` (pre-send journaling +
+reconcile-by-escrow; the reconcile endpoint also closes V6).
+
+**Rationale:** V8 is a double-pay with no extra conditions, reachable on the exact mobile-WebView
+audience of the Nairobi launch, and the fix is small — it cannot ship open in a release about
+eliminating double-pays (it would contradict the "never double-sent / unknown ⇒ confirm" promise just
+added to PHILOSOPHY 2.1). V7 is narrower (needs a crash in a tight window), pre-existing on browser,
+and its fix is a larger shared-path change (write-reordering + a new bridge endpoint + `escrowId` on
+`/pay`) that also closes V6 — it deserves its own adversarial verification, not a rush into an already
+enormous release (scope-creep test, PHILOSOPHY §7).
+
+**Implications:**
+- v4.0.0 payout-safety scope = Part 2 (reachable-gateway send) + Part 3 (native submitted→reconcile) + V8 (journal fail-closed). All native double-pays with no/low extra conditions are closed.
+- Until V7 (+V6) lands, an app-death in the narrow mid-pay window remains a pre-existing, cross-platform double-pay risk — same as the browser today.
+- The V8 fix touches the shared browser claim path → its own predeploy + adversarial check before v4.0.0.
+
+**Status:** V8 — implemented + adversarially verified, uncommitted (v4.0.0): fail-closed `saveJournal` re-throw + pre-send writability probe (refuses before `payInvoice`) + post-send persist-fail → `payout-confirming`, on both claim and recovery paths; ~30 fund-safety tests, predeploy green (2696). V7 + V6 — briefed, scheduled next leg.
+
+---
+
+## 2026-06-24 — Claim "credit unconfirmed" (ALREADY_SPENT_UNCONFIRMED): balance-reconcile, don't over-alarm
+
+**Context:** A *successful* claim was ending in a loud red "CLAIM NEEDS ATTENTION" banner
+(`MeScreen.tsx:256`) for both parties. `markUnresolvedCredit` fires whenever the mint reports the
+released note `ALREADY_SPENT_UNCONFIRMED` (`escrow-bridge.ts:677`): the note is **confirmed consumed**,
+but Chama has no signal that *this* wallet was credited. The `unresolved-credit` stranded variant
+(`pending-redemptions.ts:115`) got the SAME loud "save the bearer note" treatment as a genuinely-live
+un-redeemed note — over-alarming a benign, common outcome (especially on native, which lacks a
+credit-confirm signal) and training users to ignore a real fund-safety alert.
+
+**Verified:** the note is mint-confirmed spent → **no double-spend possible** (re-present fails),
+nothing live to "save." Fund-SAFE; a UX bug, not a money bug. (Trigger gating + variant skip semantics
+cross-checked in source.)
+
+**Options considered:**
+- (a) Leave as-is. Successful trades keep ending in a red alarm; cry-wolf erodes the real alert.
+- (b) Blanket-calm every `unresolved-credit` (dismissible). Better, but still shows an alert on the common benign case and leans on the user to "check your balance."
+- (c) **Balance-reconcile + split:** auto-resolve silently when balance confirms the credit; calm dismissible alert only when it can't; keep loud red for genuinely-live notes.
+
+**Decision:** (c). Scope strictly to `stranded === "unresolved-credit"`; `retries-exhausted` /
+`poisoned` keep the loud "save the bearer note" red (may be live money). **Archive (not delete)** on
+resolve/dismiss — bearer string stays exportable. Brief:
+`design/mockups/chama-claim-credit-reconcile-brief.md`.
+
+**Rationale:** Separates "definitely fine" (balance confirms → silent) from the genuinely-ambiguous
+"claimed on another device / not credited here" sliver (→ calm alert) — honors "unknown ⇒ verify"
+without crying wolf. Same doctrine as the payout/relay guards: the safety net is correct; it just
+over-fired on the common case.
+
+**Implications:**
+- Pre-launch UX fix (not fund-safety) — but launch-relevant: a successful Nairobi trade shouldn't end in red.
+- Fund-SAFE: spent notes can't double-spend; archive-not-delete preserves the recovery path.
+
+**Status:** Briefed, in progress (uncommitted), pre-launch.

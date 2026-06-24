@@ -141,7 +141,9 @@ const FETCH_QUORUM_POLL_MS = 200;
 // confirmed exhausted + every event received so far), so it cannot reintroduce
 // the round-2 partial-fetch bug — it only stops waiting on a dead socket. The
 // connection quorum above (wait before REQ) is unchanged.
-const EOSE_RESOLVE_QUORUM = 3;
+//
+// The quorum itself is now adaptive (see effectiveQuorum()): min(FETCH_QUORUM,
+// relayCount-1), so a small/degraded pool still resolves instead of stalling.
 const EOSE_GRACE_MS = 1_000;
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -223,6 +225,12 @@ export class RelayManager {
         relay.status = RelayStatus.ERROR;
         this.callbacks.onError?.(new Error(`WebSocket error on ${url}`), url);
         this.callbacks.onStatusChange?.(url, RelayStatus.ERROR);
+        // A WebSocket `error` does NOT guarantee a following `close` in every
+        // runtime, so relying on onclose alone (below) can leave an errored
+        // relay stuck in ERROR forever — it never re-enters the backoff loop.
+        // Schedule the reconnect here too; scheduleReconnect dedupes against an
+        // already-pending retryTimer, so an error+close pair won't double-arm.
+        if (!this.stopped) this.scheduleReconnect(url);
       };
 
       ws.onclose = () => {
@@ -245,6 +253,11 @@ export class RelayManager {
     if (this.stopped) return;
     const relay = this.relays.get(url);
     if (!relay || relay.retryCount >= MAX_RETRY_COUNT) return;
+    // Idempotent: a single failure can fire both onerror and onclose, and both
+    // call here. With a retry already pending, a second call would double-
+    // increment retryCount (skewing the backoff) and leak a timer. At most one
+    // retry is ever in flight, so bail if one is already armed.
+    if (relay.retryTimer) return;
 
     const delay = Math.min(BASE_RETRY_MS * Math.pow(2, relay.retryCount), MAX_RETRY_MS);
     relay.retryCount++;
@@ -253,6 +266,30 @@ export class RelayManager {
       relay.retryTimer = null;
       this.connectRelay(url);
     }, delay);
+  }
+
+  /**
+   * Force an immediate re-probe of every non-connected relay, clearing the
+   * exponential-backoff give-up state. The per-relay backoff caps out at
+   * MAX_RETRY_COUNT and then abandons a relay for the rest of the session
+   * (retryCount only resets on a successful onopen) — so a relay that was down
+   * through ~MAX_RETRY_COUNT cycles never comes back on its own, even once it
+   * recovers. This is the explicit recovery lever behind the in-app
+   * "Reconnect" control: reset retryCount + cancel any pending timer and
+   * reconnect now. No-op after disconnect() (respects `stopped`). Connected
+   * relays are left untouched.
+   */
+  forceReconnectAll(): void {
+    if (this.stopped) return;
+    for (const [url, relay] of this.relays) {
+      if (relay.status === RelayStatus.CONNECTED) continue;
+      if (relay.retryTimer) {
+        clearTimeout(relay.retryTimer);
+        relay.retryTimer = null;
+      }
+      relay.retryCount = 0;
+      this.connectRelay(url);
+    }
   }
 
   // ── Handle incoming relay messages ──────────────────────────────────────
@@ -369,7 +406,7 @@ export class RelayManager {
           const fetchState = this._pendingOnceFetches.get(subId)!;
           fetchState.probe?.noteEose(relayUrl);
           fetchState.eoseCount++;
-          const quorum = Math.min(fetchState.connectedCount, EOSE_RESOLVE_QUORUM);
+          const quorum = Math.min(fetchState.connectedCount, this.effectiveQuorum());
           if (fetchState.eoseCount >= fetchState.connectedCount) {
             // Every connected relay said EOSE — fast path, resolve now. If
             // events is empty here, the relays AFFIRMATIVELY answered "nothing
@@ -392,7 +429,7 @@ export class RelayManager {
         if (this._pendingFetches?.has(subId)) {
           const fetchState = this._pendingFetches.get(subId)!;
           fetchState.eoseCount++;
-          const quorum = Math.min(fetchState.connectedCount, EOSE_RESOLVE_QUORUM);
+          const quorum = Math.min(fetchState.connectedCount, this.effectiveQuorum());
           if (fetchState.eoseCount >= fetchState.connectedCount) {
             console.debug(`[relay] fetch ${subId}: complete with ${fetchState.events.length} events from ${fetchState.eoseCount} relays`);
             this.finalizeEscrowFetch(subId);
@@ -566,6 +603,21 @@ export class RelayManager {
     return connected >= target;
   }
 
+  /**
+   * The quorum to actually require for one-shot fetches, adapted to the
+   * configured pool size: min(FETCH_QUORUM, relayCount - 1). The fixed
+   * FETCH_QUORUM=3 assumed a 5-relay pool; a deliberately small pool (a 2- or
+   * 3-relay federation, or a degraded set) could never reach 3 and would burn
+   * the full FETCH_QUORUM_BUDGET_MS / fetch timeout on every read. Keying off
+   * the CONFIGURED size (not the live-connected count) keeps this safe: it only
+   * relaxes when the pool itself is small, never below the healthy count
+   * mid-handshake (which is what caused the round-2 partial-fetch bug). For a
+   * healthy 5-7 relay pool this returns 3 — identical to the old behavior.
+   */
+  private effectiveQuorum(): number {
+    return Math.max(1, Math.min(FETCH_QUORUM, this.relays.size - 1));
+  }
+
   private async waitForRelayQuorum(quorum: number, budgetMs: number): Promise<RelayConnection[]> {
     if (this.relays.size === 0) return [];
     const target = Math.max(1, Math.min(quorum, this.relays.size));
@@ -718,8 +770,8 @@ export class RelayManager {
     // (onopen resubscribes), and loadEscrow's completeness retry re-fetches
     // once if it lands non-terminal with more relays now connected. Skip the
     // wait entirely (same-tick dispatch) when quorum is already met.
-    if (!this.hasRelayQuorum(FETCH_QUORUM)) {
-      await this.waitForRelayQuorum(FETCH_QUORUM, FETCH_QUORUM_BUDGET_MS);
+    if (!this.hasRelayQuorum(this.effectiveQuorum())) {
+      await this.waitForRelayQuorum(this.effectiveQuorum(), FETCH_QUORUM_BUDGET_MS);
     }
 
     return new Promise((resolve) => {
@@ -819,8 +871,8 @@ export class RelayManager {
     // `probe` is an optional observer (discovery + the `#d` transport control)
     // that records per-relay REQ/EVENT/EOSE and how the fetch resolved. It
     // never gates or changes the fetch — see discovery-diagnostics.ts.
-    if (!this.hasRelayQuorum(FETCH_QUORUM)) {
-      await this.waitForRelayQuorum(FETCH_QUORUM, FETCH_QUORUM_BUDGET_MS);
+    if (!this.hasRelayQuorum(this.effectiveQuorum())) {
+      await this.waitForRelayQuorum(this.effectiveQuorum(), FETCH_QUORUM_BUDGET_MS);
     }
 
     return new Promise((resolve) => {

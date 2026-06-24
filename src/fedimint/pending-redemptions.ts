@@ -96,6 +96,15 @@ export interface PendingRedemption {
    *  — or a credit that landed in an earlier session. Either way the
    *  user must look (C13 surface); retrying can't resolve it. */
   unresolvedCredit?: boolean;
+  /** v4.0.0: an unresolved-credit entry that has been RECONCILED — either
+   *  the wallet balance was found to cover the amount (the credit plausibly
+   *  landed) or the user explicitly acknowledged it. The bearer string is
+   *  kept (archive, not delete: forensics + recovery path) but it drops out
+   *  of the alarm list. Only ever set on `unresolvedCredit` entries — a
+   *  poisoned / retries-exhausted note may still be LIVE money and must
+   *  never be silently archived. */
+  resolvedAt?: number;
+  resolution?: "balance-reconciled" | "user-dismissed";
 }
 
 export interface DrainSummary {
@@ -242,6 +251,30 @@ export function markUnresolvedCredit(escrowId: string, reason: string): void {
 }
 
 /**
+ * v4.0.0: archive an unresolved-credit entry out of the alarm list — the
+ * note string is KEPT (forensics + recovery), it just stops crying wolf.
+ * Two resolutions: "balance-reconciled" (the wallet balance covers the
+ * amount, so the credit plausibly landed) or "user-dismissed" (the user
+ * acknowledged a balance-short / claimed-elsewhere entry).
+ *
+ * GUARDRAIL: only ever archives an entry that is actually `unresolvedCredit`.
+ * A poisoned / retries-exhausted note may still be LIVE money, so this can
+ * never be used to silence one — they keep their loud surface.
+ */
+export function resolveUnresolvedCredit(
+  escrowId: string,
+  resolution: "balance-reconciled" | "user-dismissed",
+): void {
+  const stash = loadStash();
+  const entry = stash[escrowId];
+  if (!entry || !entry.unresolvedCredit) return;
+  entry.resolvedAt = entry.resolvedAt ?? Date.now();
+  entry.resolution = resolution;
+  saveStash(stash);
+  console.info(`[claim-trace] unresolved-credit reconciled escrowId=${escrowId} via=${resolution}`);
+}
+
+/**
  * C13 (v3.4.0): the entries automatic retry can no longer help, in the
  * order the UI should show them. INVARIANT(stranded-notes-surfaced):
  * every entry that is poisoned, unresolved-credit, or out of drain
@@ -252,6 +285,9 @@ export function markUnresolvedCredit(escrowId: string, reason: string): void {
 export function listStrandedRedemptions(): StrandedRedemption[] {
   const stranded: StrandedRedemption[] = [];
   for (const entry of Object.values(loadStash())) {
+    // Archived (balance-reconciled / user-dismissed) entries are kept in the
+    // stash for forensics but drop out of the alarm list.
+    if (entry.resolvedAt) continue;
     if (entry.unresolvedCredit) {
       stranded.push({ ...entry, stranded: "unresolved-credit" });
     } else if (entry.lastError && entry.poisonedAt) {
@@ -261,6 +297,44 @@ export function listStrandedRedemptions(): StrandedRedemption[] {
     }
   }
   return stranded.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/**
+ * v4.0.0: split the stranded list into how the UI should treat each entry,
+ * reconciling the "unresolved-credit" sliver against the wallet balance
+ * instead of asking the user to. The banner copy already invokes the balance
+ * ("your balance may already include them") — so check it:
+ *
+ *   • unresolved-credit, balance covers the unconfirmed total → reconciledIds
+ *     (resolve silently; a successful trade should end clean, not in red).
+ *   • unresolved-credit, balance is SHORT → `calm` (a real, dismissible nudge:
+ *     the user is visibly missing that amount — likely claimed on another
+ *     device — and the note is saved as backup).
+ *   • poisoned / retries-exhausted → `loud` ALWAYS. Those notes may still be
+ *     LIVE money; the balance downgrade must never leak onto them.
+ *
+ * Pure (no storage writes) so it's render-safe and testable; the caller
+ * persists `reconciledIds` via resolveUnresolvedCredit in an effect. The SUM
+ * (not per-entry) guards against two entries each being "covered" by the same
+ * balance, and an unloaded/zero balance simply yields no reconciliation.
+ */
+export function partitionStrandedClaims(
+  entries: StrandedRedemption[],
+  balanceMsats: number,
+): { loud: StrandedRedemption[]; calm: StrandedRedemption[]; reconciledIds: string[] } {
+  const loud: StrandedRedemption[] = [];
+  const unresolved: StrandedRedemption[] = [];
+  for (const e of entries) {
+    if (e.stranded === "unresolved-credit") unresolved.push(e);
+    else loud.push(e);
+  }
+  const totalUnresolved = unresolved.reduce((sum, e) => sum + e.amountMsats, 0);
+  const covered = totalUnresolved > 0 && balanceMsats >= totalUnresolved;
+  return {
+    loud,
+    calm: covered ? [] : unresolved,
+    reconciledIds: covered ? unresolved.map((e) => e.escrowId) : [],
+  };
 }
 
 /**

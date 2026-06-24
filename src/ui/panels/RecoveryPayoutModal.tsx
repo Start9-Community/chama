@@ -36,6 +36,7 @@ import {
   recordPayoutSubmitted,
   markPayoutSettled,
   clearPayoutRecord,
+  assertPayoutJournalWritable,
 } from "../../payments/payout-journal.js";
 
 export interface RecoveryPayoutModalProps {
@@ -139,6 +140,7 @@ export function RecoveryPayoutModal({
             recordPayoutSubmitted,
             markPayoutSettled,
             clearPayoutRecord,
+            assertPayoutJournalWritable,
             awaitPayoutOutcome,
           });
           setStage({ kind: "terminal", terminal });

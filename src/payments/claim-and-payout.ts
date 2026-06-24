@@ -402,6 +402,11 @@ export interface RunClaimAndPayoutDeps {
   markPayoutSettled?: (escrowId: string, operationId?: string) => void;
   /** Drop the payout record — ONLY on a CONFIRMED refund (retry becomes safe). */
   clearPayoutRecord?: (escrowId: string) => void;
+  /** Probe (v4.0.0 fail-closed): throws if the payout journal can't be
+   *  persisted right now (quota / private mode / disabled storage). Called
+   *  pre-send so the orchestrator refuses to dispatch a payout it can't guard
+   *  against a re-pay. No-op when unset (older callers/tests). */
+  assertPayoutJournalWritable?: () => void;
   /** Re-attach to a submitted payout and report its terminal outcome
    *  without paying again. "unknown" ⇒ keep the record, refuse to re-pay. */
   awaitPayoutOutcome?: (operationId: string) => Promise<"settled" | "refunded" | "unknown">;
@@ -511,7 +516,16 @@ export async function runClaimAndPayout(
       }
       claimTrace("orchestrator-payout-reattach", { escrowId: opts.escrowId, outcome });
       if (outcome === "settled") {
-        opts.markPayoutSettled?.(opts.escrowId, prior.operationId);
+        try {
+          opts.markPayoutSettled?.(opts.escrowId, prior.operationId);
+        } catch (persistErr) {
+          // Couldn't upgrade submitted→settled, but the SUBMITTED record (which
+          // got here) still persists and blocks re-pay — fund-safe. Proceed.
+          console.warn(
+            "[chama] claim: re-attach markPayoutSettled persist failed (submitted record still guards):",
+            persistErr,
+          );
+        }
         await publishCompleteBestEffort("reattach-settled");
         emit({ kind: "done" });
         return { kind: "done" };
@@ -746,12 +760,40 @@ export async function runClaimAndPayout(
       if (!opts.payOnchain) throw new Error("Onchain payout is not available");
       await opts.payOnchain(Math.floor(opts.expectedDeltaMsats / 1000));
     } else {
+      // v4.0.0 FAIL-CLOSED: never SEND a payout we can't guard against a re-pay.
+      // If the device can't persist the journal (quota / private mode / disabled
+      // storage), refuse to start — nothing is sent, so retrying later (once
+      // storage recovers) is safe. Without this, a swallowed journal write would
+      // let a later re-tap double-pay.
+      try {
+        opts.assertPayoutJournalWritable?.();
+      } catch (e) {
+        const error = errorMessage(
+          e,
+          "Can't pay out safely right now — this device's storage is full or unavailable, so the anti-double-pay guard can't be saved. No payment was sent; free up space (or leave private browsing) and try again.",
+        );
+        claimTrace("orchestrator-payout-journal-unwritable", { escrowId: opts.escrowId });
+        emit({ kind: "payout-failed", error, claimCompleted: false });
+        return { kind: "payout-failed", error, claimCompleted: false };
+      }
       const res = await opts.payInvoice(opts.bolt11);
       // payInvoice only RESOLVES on `success{preimage}`. Journal it settled
       // BEFORE COMPLETE so that even a COMPLETE-publish failure + retry is a
-      // no-op (the top guard short-circuits), never a second send.
+      // no-op (the top guard short-circuits), never a second send. If THAT write
+      // fails (the rare quota-between-probe-and-write case), do NOT advance to
+      // `done` with no guard — force payout-confirming (no retry button) so a
+      // re-tap can't re-pay an already-sent payout.
       const operationId = typeof res === "string" ? res : undefined;
-      opts.markPayoutSettled?.(opts.escrowId, operationId);
+      try {
+        opts.markPayoutSettled?.(opts.escrowId, operationId);
+      } catch (persistErr) {
+        console.error(
+          "[chama] claim: markPayoutSettled persist failed after a sent payout; forcing payout-confirming:",
+          persistErr,
+        );
+        emit({ kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY });
+        return { kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY };
+      }
     }
   } catch (e: any) {
     const code = (e as { code?: string })?.code;
@@ -761,11 +803,21 @@ export async function runClaimAndPayout(
     // failure — that is the exact double-send. Journal it `submitted` and
     // surface payout-confirming; the next attempt re-attaches to operationId.
     if (payoutKind === "lightning" && code === "LN_PAY_INFLIGHT") {
-      opts.recordPayoutSubmitted?.({
-        escrowId: opts.escrowId,
-        operationId: opId,
-        amountMsats: opts.expectedDeltaMsats,
-      });
+      try {
+        opts.recordPayoutSubmitted?.({
+          escrowId: opts.escrowId,
+          operationId: opId,
+          amountMsats: opts.expectedDeltaMsats,
+        });
+      } catch (persistErr) {
+        // The payment is IN FLIGHT but the submitted guard couldn't persist.
+        // Still force payout-confirming below — NEVER fall through to the
+        // re-payable terminal. (The pre-send writability probe makes this rare.)
+        console.error(
+          "[chama] claim: recordPayoutSubmitted persist failed for an in-flight payout; forcing payout-confirming anyway:",
+          persistErr,
+        );
+      }
       moneyLog("CLAIM-PAY-OUT", { escrowId: opts.escrowId, result: "inflight" });
       claimTrace("orchestrator-pay-inflight", {
         escrowId: opts.escrowId,

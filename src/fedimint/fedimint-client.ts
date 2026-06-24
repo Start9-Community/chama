@@ -1672,7 +1672,7 @@ export class FedimintClient {
  * ever missed, hashNotes would silently return garbage. Now throws
  * explicitly — unreachable in practice, but fails loud if wrong.
  */
-async function hashNotes(oobNotes: string): Promise<string> {
+export async function hashNotes(oobNotes: string): Promise<string> {
   const data = new TextEncoder().encode(oobNotes);
 
   if (typeof crypto === "undefined" || !crypto.subtle) {

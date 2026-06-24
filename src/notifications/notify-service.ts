@@ -9,10 +9,17 @@
 // plugin on desktop, the Web Notification API in a browser. Every path is
 // wrapped so a notification failure can NEVER break the trade flow.
 
-import { notificationForTransition, type TradeNotification } from "./trade-notifications.js";
-import type { EscrowState } from "../escrow-engine/types.js";
+import {
+  notificationForTransition, chatNotificationFor,
+  type TradeNotification, type DmNotifyPref,
+} from "./trade-notifications.js";
+import { setPendingTradeDeepLink } from "./deep-link.js";
+import type { EscrowState, ChatPayload, ParsedEscrowEvent } from "../escrow-engine/types.js";
+
+export type { DmNotifyPref };
 
 const ENABLED_KEY = "chama_notifications_enabled";
+const DM_PREF_KEY = "chama_dm_notifications";
 const FIRED_KEY = "chama_notifications_fired_v1";
 /** Cap the persisted fired-tag set so it can't grow unbounded over a lifetime. */
 const MAX_FIRED_TAGS = 500;
@@ -46,6 +53,25 @@ export function notificationsEnabled(): boolean {
 export function setNotificationsEnabled(on: boolean): void {
   try {
     globalThis.localStorage?.setItem(ENABLED_KEY, on ? "1" : "0");
+  } catch {
+    /* cosmetic preference; ignore storage failure */
+  }
+}
+
+// ── DM / trade-chat preference (tri-state, default "auto" = role-on-trade) ────
+
+export function dmNotifyPref(): DmNotifyPref {
+  try {
+    const v = globalThis.localStorage?.getItem(DM_PREF_KEY);
+    return v === "on" || v === "off" ? v : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+export function setDmNotifyPref(pref: DmNotifyPref): void {
+  try {
+    globalThis.localStorage?.setItem(DM_PREF_KEY, pref);
   } catch {
     /* cosmetic preference; ignore storage failure */
   }
@@ -124,12 +150,21 @@ async function deliver(n: TradeNotification): Promise<void> {
     }
     if (isTauriNative()) {
       const mod = await import("@tauri-apps/plugin-notification");
-      mod.sendNotification({ title: n.title, body: n.body });
+      // `extra` rides the notification so onAction (deep-link.ts) can route the
+      // tap to this trade on desktop — the Nairobi demo surface.
+      mod.sendNotification({ title: n.title, body: n.body, extra: { escrowId: n.escrowId } });
       return;
     }
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       // tag de-dupes within the OS notification center too.
-      new Notification(n.title, { body: n.body, tag: n.tag });
+      const notif = new Notification(n.title, { body: n.body, tag: n.tag });
+      // Tap → focus the tab and open this trade. escrowId rides the closure (the
+      // web Notification API carries no custom payload).
+      notif.onclick = () => {
+        try { globalThis.focus?.(); } catch { /* ignore */ }
+        setPendingTradeDeepLink(n.escrowId);
+        try { notif.close(); } catch { /* ignore */ }
+      };
     }
   } catch {
     /* a failed buzz must never surface to the user mid-trade */
@@ -162,6 +197,30 @@ export function maybeNotifyTransition(
   // Reserve the tag synchronously so a burst of replays can't double-fire while
   // the async permission/delivery is in flight.
   recordFiredTag(n.tag);
+  void (async () => {
+    const allowed = await ensureNotificationPermission();
+    if (allowed) await deliver(n);
+  })();
+}
+
+/**
+ * Fire an OS notification for an inbound trade-chat `message`, honoring the
+ * master toggle and the tri-state DM preference. The pure decision (own-echo,
+ * role default, backlog guard, copy) lives in chatNotificationFor; this owns
+ * only the side effects — master gate, contextual permission, delivery.
+ * Deliberately NOT wired to the fire-once-ever dedup: chat recurs, so each fresh
+ * message may buzz. `liveSinceSec` is when this session went live (backlog
+ * guard). Fully fire-and-forget; never throws.
+ */
+export function maybeNotifyChatMessage(
+  state: EscrowState,
+  message: ParsedEscrowEvent<ChatPayload>,
+  userPubkey: string | null | undefined,
+  liveSinceSec: number,
+): void {
+  if (!notificationsEnabled()) return; // the master mute silences DMs too
+  const n = chatNotificationFor(state, message, userPubkey, dmNotifyPref(), liveSinceSec);
+  if (!n) return;
   void (async () => {
     const allowed = await ensureNotificationPermission();
     if (allowed) await deliver(n);
