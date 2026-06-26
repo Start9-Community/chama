@@ -46,6 +46,8 @@ import {
 import { isPerformanceContest } from "../../escrow-engine/arbiter-substitution.js";
 import { counterpartyToRate, type RatingThumb, type AggregateRatings } from "../../reputation/ratings.js";
 import { RatingTap } from "../components/RatingTap.js";
+import { markChatRead, getLastReadChatAt, countUnreadChat } from "../../chat/unread.js";
+import { billTypeDisplay } from "../../communities/bill-types.js";
 import {
   hasStateBExplained,
   markStateBExplained,
@@ -762,6 +764,24 @@ export function TradeDetail({
     ? `≈ ${formatFiatAmount(viewerEstimate.amount, viewerEstimate.currency)}`
     : null;
   const premiumCheckoutLine = detailPremiumCheckoutLine(state, heroFiat);
+  // v4.1 lifecycle-aware pane + checkout headline: the party that owes fiat (the
+  // buyer in a sats↔fiat exchange, the volunteer/payer in CBP) needs who-to-pay +
+  // how-much front and centre. Nobody owes fiat in marketplace/lending here, so
+  // the headline + Details-first focus only apply to these two verticals.
+  const fiatPayerRole: Role | null =
+    state.category === "p2p-trade" || state.category === "bill-pay" ? Role.BUYER : null;
+  // The FINAL fiat the payer actually transfers: p2p-trade folds the premium into
+  // the fiat; CBP takes the premium in sats, so its fiat due is the base amount.
+  const checkoutFiatDue = heroFiat && heroFiat.amount > 0
+    ? {
+        amount: heroFiat.amount * (state.category === "p2p-trade" && state.premiumBps ? 1 + state.premiumBps / 10_000 : 1),
+        currency: heroFiat.currency,
+      }
+    : null;
+  const checkoutFiatLabel = checkoutFiatDue && Number.isFinite(checkoutFiatDue.amount) && checkoutFiatDue.amount > 0
+    ? formatFiatAmount(checkoutFiatDue.amount, checkoutFiatDue.currency)
+    : null;
+  const billTypeChip = state.category === "bill-pay" ? billTypeDisplay(state.billType) : null;
   const showHeroFiat = amountDisplayMode === "fiat" && !!heroFiatLabel;
   const shortTradeId = state.id.length > 18 ? `${state.id.slice(0, 10)}…${state.id.slice(-6)}` : state.id;
   const releaseVoteCount = Object.values(state.votes).filter(v => v === Outcome.RELEASE).length;
@@ -862,49 +882,95 @@ export function TradeDetail({
   // from existing state. The reducer / event chain is never written.
   const PAGER_TABS = ["Chat", "Details", "Parties"];
   const pagerRef = useRef<HTMLDivElement | null>(null);
-  // Leading pane: Chat once the trade is live (the work surface); Details
-  // pre-lock (the cart/funding task at hand — Jetty's Q2 call).
-  const defaultPane = state.status === EscrowStatus.CREATED ? 1 : 0;
+  // v4.1: "a manual swipe wins forever" — lifecycle auto-focus must never yank a
+  // user who has moved themselves. programmaticTargetRef lets onPagerScroll tell our
+  // own smooth-scrolls apart from a real finger swipe (the pager only scrolls on the
+  // X axis, so its onScroll firing == a pane move).
+  const userMovedPaneRef = useRef(false);
+  const programmaticTargetRef = useRef<number | null>(null);
+  // Leading pane (0=Chat · 1=Details · 2=Parties), lifecycle- AND role-aware: open
+  // to the pane that matches the viewer's NEXT obligation. Pre-lock everyone reads
+  // the terms (Details). Once LOCKED, the party who owes fiat lands on Details (who
+  // to pay + the "You owe" headline); the receiver waits in Chat for the "sent" ping.
+  // From the vote/claim/settle phase on, it's all coordination → Chat.
+  const defaultPane =
+    state.status === EscrowStatus.CREATED ? 1
+    : state.status === EscrowStatus.LOCKED && !titleDisputed && myRole != null && myRole === fiatPayerRole ? 1
+    : 0;
   const [activePane, setActivePane] = useState(defaultPane);
   // Snap to the leading pane on trade change only (not every status tick), so a
   // manual swipe within a trade isn't yanked back.
   useEffect(() => {
     setActivePane(defaultPane);
+    // Fresh trade → re-enable auto-focus, and mark the mount scroll as programmatic
+    // so onPagerScroll doesn't mistake it for a user swipe.
+    userMovedPaneRef.current = false;
+    programmaticTargetRef.current = defaultPane;
     const el = pagerRef.current;
     if (el) el.scrollLeft = defaultPane * el.clientWidth;
   }, [state.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const goPane = (i: number) => {
     const clamped = Math.max(0, Math.min(PAGER_TABS.length - 1, i));
+    programmaticTargetRef.current = clamped;
     const el = pagerRef.current;
-    if (el) el.scrollTo({ left: clamped * el.clientWidth, behavior: "smooth" });
+    if (el) {
+      // #19: a programmatic jump of more than one pane scrolls INSTANTLY — a smooth
+      // animation would be trapped at an intermediate pane by scroll-snap-stop:always.
+      const current = Math.round(el.scrollLeft / Math.max(1, el.clientWidth));
+      el.scrollTo({ left: clamped * el.clientWidth, behavior: Math.abs(clamped - current) > 1 ? "auto" : "smooth" });
+    }
     setActivePane(clamped);
   };
+  // A pane move the USER initiated (pill tap / pills drag) — disables auto-focus.
+  const userGoPane = (i: number) => { userMovedPaneRef.current = true; goPane(i); };
   const onPagerScroll = () => {
     const el = pagerRef.current;
     if (!el) return;
     const i = Math.round(el.scrollLeft / Math.max(1, el.clientWidth));
     setActivePane(prev => (prev === i ? prev : i));
+    // Tell our own smooth-scroll apart from a finger swipe: while a programmatic
+    // target is pending, ignore; the moment it settles, clear it. A horizontal
+    // scroll with NO pending target is the user swiping → they've taken control.
+    if (programmaticTargetRef.current !== null) {
+      if (i === programmaticTargetRef.current) programmaticTargetRef.current = null;
+      return;
+    }
+    userMovedPaneRef.current = true;
   };
-  // Cohesive voting: land BOTH buyer and seller on the Chat pane the moment the
-  // trade goes LIVE (LOCKED) — the action card's vote buttons sit right on top of
-  // the chat, so voting is unmissable for both no matter which pane they were on.
-  // The arbiter is pulled in only when a dispute actually summons them (votePrompt
-  // buttons). Ref-guarded so it fires once per transition and never yanks someone
-  // who has since swiped away. NOTE: decideVotePrompt returns "buttons" for only
-  // the FIRST voter at a time, so buyer/seller key off LOCKED directly (to land
-  // together), not off the prompt — the responder's buttons just appear in the
+  // v4.1 lifecycle landing: when a trade goes LIVE (LOCKED), send the fiat payer to
+  // Details (who to pay + the "You owe" headline) and the receiver to Chat (to catch
+  // the "sent" ping + proof). When a vote is actually summoned (dispute), send that
+  // voter to Chat, where the evidence + the action-card vote buttons live. Fires once
+  // per transition, and NEVER once the user has taken control with a manual swipe.
+  // NOTE: decideVotePrompt returns "buttons" for only the FIRST voter at a time, so
+  // buyer/seller key off LOCKED directly; the responder's buttons just appear in the
   // already-on-top action card when their turn unlocks.
-  const voteLandingKey = (state.status === EscrowStatus.LOCKED && (myRole === Role.BUYER || myRole === Role.SELLER))
-    ? `${state.id}:locked`
-    : votePrompt.kind === "buttons"
-      ? `${state.id}:vote:${votePrompt.role}`
-      : null;
-  const lastVoteLandingRef = useRef<string | null>(null);
+  const landing: { key: string; pane: number } | null =
+    (state.status === EscrowStatus.LOCKED && (myRole === Role.BUYER || myRole === Role.SELLER))
+      ? { key: `${state.id}:locked`, pane: (!titleDisputed && myRole === fiatPayerRole) ? 1 : 0 }
+      : votePrompt.kind === "buttons"
+        ? { key: `${state.id}:vote:${votePrompt.role}`, pane: 0 }
+        : null;
+  const lastLandingRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!voteLandingKey || lastVoteLandingRef.current === voteLandingKey) return;
-    lastVoteLandingRef.current = voteLandingKey;
-    goPane(0);
-  }, [voteLandingKey]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!landing || lastLandingRef.current === landing.key) return;
+    lastLandingRef.current = landing.key;
+    if (userMovedPaneRef.current) return; // the user moved themselves — never yank
+    goPane(landing.pane);
+  }, [landing?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // v4.1 (#15) chat unread badge: the Chat pane is "read" whenever it's the live
+  // pane (and stays read as new messages land while it's open). When the viewer is
+  // on Details/Parties, the Chat pill carries a badge counting messages from the
+  // other party since they last looked. Read state is device-local (localStorage),
+  // never on EscrowState.
+  const [chatReadAt, setChatReadAt] = useState(() => getLastReadChatAt(state.id));
+  useEffect(() => { setChatReadAt(getLastReadChatAt(state.id)); }, [state.id]);
+  useEffect(() => {
+    if (activePane === 0) setChatReadAt(markChatRead(state.id));
+  }, [activePane, state.chatMessages.length, state.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const chatUnread = activePane === 0 ? 0 : countUnreadChat(state.chatMessages, myRole, chatReadAt);
+  const pagerBadges = [chatUnread, 0, 0];
   // The pager scrolls natively; this pages when the drag starts on the PILLS
   // row (not itself a scroll container). Touch + pointer so it's real on device.
   const pillsDrag = useRef<{ x: number; y: number } | null>(null);
@@ -913,7 +979,7 @@ export function TradeDetail({
     const s = pillsDrag.current; pillsDrag.current = null;
     if (!s) return;
     const dx = x - s.x, dy = y - s.y;
-    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) goPane(activePane + (dx < 0 ? 1 : -1));
+    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) userGoPane(activePane + (dx < 0 ? 1 : -1));
   };
   const onPillsPointerDown = (e: React.PointerEvent) => { if (e.pointerType !== "touch") pillsDown(e.clientX, e.clientY); };
   const onPillsPointerUp = (e: React.PointerEvent) => { if (e.pointerType !== "touch") pillsUp(e.clientX, e.clientY); };
@@ -964,6 +1030,21 @@ export function TradeDetail({
     }
     return bubbles;
   }, [state.eventChain, state.resolvedOutcome, state.status, titleDisputed, myRole, dealBuyerName, dealSellerName, shortTradeId, state.amountMsats, state.category, state.fulfillment, nowSec]);
+
+  // v4.1 ratings-in-chat: the SAME RatingTap (kind:38123), surfaced at the end of
+  // the Chat feed at settlement — that's where the user is when the trade closes,
+  // not on the Parties pane. Mirrors the Parties + Me-history wiring verbatim; all
+  // three read myGivenRatings, so a tap in any one collapses the rest.
+  const chatRatingCta = state.status === EscrowStatus.COMPLETED && onRateCounterparty
+    ? (() => {
+        const ratee = counterpartyToRate(state, pubkey);
+        if (!ratee) return null;
+        const ratedThumb = (myGivenRatings ?? []).find(
+          r => r.tradeId === state.id && r.ratee === ratee.toLowerCase(),
+        )?.thumb;
+        return { tradeId: state.id, ratee, ratedThumb, onRate: onRateCounterparty };
+      })()
+    : null;
 
   return (
     <div className="trade-detail-shell">
@@ -1136,7 +1217,11 @@ export function TradeDetail({
 
       {/* Zone A — the one action card (situation + what you do), driven by
           detailNextStep + the real vote / fund / claim / mark-done buttons.
-          Role-tinted to the viewer; never scrolls with the pager below. */}
+          Role-tinted to the viewer. v4.1 fixed-rectangle: the action card lives in
+          an internal scroll zone (flex 0 1 auto) so a tall lock/claim phase scrolls
+          HERE, not the shell — the outer frame stays a fixed rectangle and the
+          timeline footer is never pushed off-screen. */}
+        <div className="td-action-scroll" style={{ flex: "0 1 auto", minHeight: 0, overflowY: "auto", overflowX: "hidden" }}>
         <div style={{
           padding: 14,
           borderRadius: T.rs,
@@ -2134,17 +2219,19 @@ export function TradeDetail({
             </button>
           )}
         </div>
+        </div>{/* end .td-action-scroll — the internal-scroll top zone */}
 
       {/* Zone B — swipe middle: a horizontal pager of three full-width panes
           (Chat · Details · Parties). The pager scrolls natively (touch); the
           pills row also drags to page (pointer + touch), so the whole region
           from the pills down is one swipe surface. */}
-      {/* min-height stays AUTO (not 0): if it could collapse below its content,
-          the pager (which has its own min-height floor) would overflow td-lower
-          and render over the anchored timeline, with the shell not scrolling to
-          reveal it. Auto keeps td-lower ≥ its content, so a tall action-card phase
-          scrolls the shell gracefully instead of obstructing the timeline. */}
-      <div className="td-lower" style={{ marginTop: 2, flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+      {/* v4.1 fixed-rectangle: td-lower (the chat pager) keeps a min-height FLOOR so
+          chat never vanishes, and flex:1 so it claims every bit of height the action
+          card above isn't using. When the action card is tall it scrolls INSIDE its
+          own .td-action-scroll zone; td-lower stays ≥ floor, the shell never scrolls,
+          and the timeline footer below stays anchored. The outer frame is fixed; only
+          the internal top-vs-chat divide flexes (Jetty's dynamic split, 2026-06-25). */}
+      <div className="td-lower" style={{ marginTop: 2, flex: "1 1 0", minHeight: "clamp(140px, 22dvh, 340px)", minWidth: 0, display: "flex", flexDirection: "column" }}>
         <div
           onPointerDown={onPillsPointerDown}
           onPointerUp={onPillsPointerUp}
@@ -2152,7 +2239,7 @@ export function TradeDetail({
           onTouchEnd={onPillsTouchEnd}
           style={{ flex: "0 0 auto", cursor: "grab", touchAction: "pan-y", userSelect: "none" }}
         >
-          <PagerPills tabs={PAGER_TABS} active={activePane} onSelect={goPane} />
+          <PagerPills tabs={PAGER_TABS} active={activePane} onSelect={userGoPane} badges={pagerBadges} />
         </div>
         <div
           className="td-pager"
@@ -2161,13 +2248,13 @@ export function TradeDetail({
           style={{
             display: "flex", overflowX: "auto", overflowY: "hidden",
             scrollSnapType: "x mandatory",
-            flex: 1, minWidth: 0, minHeight: "clamp(150px, 22dvh, 380px)", scrollbarWidth: "none",
+            flex: 1, minWidth: 0, minHeight: 0, scrollbarWidth: "none",
           }}
         >
           {/* pane 0 — Chat (living feed: messages + system event bubbles) */}
           <div className="td-pane" style={TD_PANE_STYLE}>
             {myRole ? (
-              <ChatPanel state={state} myRole={myRole} onSend={onSendChat} embedded hideHeader fill systemBubbles={livingChatBubbles} />
+              <ChatPanel state={state} myRole={myRole} onSend={onSendChat} embedded hideHeader fill systemBubbles={livingChatBubbles} ratingCta={chatRatingCta} />
             ) : (
               <div style={TD_PANE_PLACEHOLDER}>
                 Chat opens for the buyer, seller, and arbiter once the trade is live.
@@ -2179,6 +2266,45 @@ export function TradeDetail({
             <div style={{ fontFamily: T.mono, fontSize: 10.5, letterSpacing: 1, color: T.accent, fontWeight: 700, margin: "2px 2px 13px" }}>
               DETAILS <span style={{ color: T.muted }}>· {verticalKicker}</span>
             </div>
+            {billTypeChip && (
+              <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+                <span style={{
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  padding: "5px 11px", borderRadius: 999,
+                  background: T.surface, border: `1px solid ${T.border}`,
+                  color: T.text, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+                }}>
+                  <span aria-hidden="true">{billTypeChip.icon}</span>
+                  {billTypeChip.label}
+                </span>
+              </div>
+            )}
+            {/* v4.1 checkout headline: at the pay moment (LOCKED), promote the FINAL
+                fiat to the single biggest element on Details, phrased as the viewer's
+                obligation. Both parties see the SAME number — the verb (owe/receive)
+                carries the direction, so there's zero ambiguity. */}
+            {state.status === EscrowStatus.LOCKED && checkoutFiatLabel && fiatPayerRole && (
+              <div style={{
+                background: myRole === fiatPayerRole ? `${ROLE_COLOR.buyer}14` : T.card,
+                border: `1px solid ${myRole === fiatPayerRole ? ROLE_COLOR.buyer + "55" : T.border}`,
+                borderRadius: T.r,
+                padding: "13px 14px",
+                marginBottom: 12,
+                textAlign: "center" as const,
+              }}>
+                <div style={{ fontFamily: T.mono, fontSize: 9.5, fontWeight: 800, letterSpacing: 1.2, color: T.muted, marginBottom: 5 }}>
+                  {myRole === fiatPayerRole ? "YOU OWE" : myRole === Role.SELLER ? "YOU'LL RECEIVE" : "FIAT DUE"}
+                </div>
+                <div style={{ fontFamily: T.sans, fontSize: 30, fontWeight: 900, color: T.text, lineHeight: 1.05 }}>
+                  {checkoutFiatLabel}
+                </div>
+                {premiumCheckoutLine && (
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.muted, marginTop: 6, lineHeight: 1.4 }}>
+                    {premiumCheckoutLine}
+                  </div>
+                )}
+              </div>
+            )}
           <div className="trade-detail-hero" style={{
             padding: "0 0 10px",
             marginBottom: 4,
@@ -2333,8 +2459,11 @@ export function TradeDetail({
           <div style={{
             display: "flex",
             flexDirection: "column",
-            gap: 8,
-            maxHeight: canSelectMenu ? 260 : 170,
+            gap: 7,
+            // v4.1 pre-lock menu compaction: a tighter window so the storefront
+            // menu doesn't dominate the Details pane before lock (it scrolls
+            // internally past the cap). Rows + thumbnails are denser too.
+            maxHeight: canSelectMenu ? 224 : 150,
             overflowY: "auto",
             paddingRight: 2,
           }}>
@@ -2386,7 +2515,7 @@ export function TradeDetail({
                   display: "flex",
                   alignItems: "center",
                   gap: 10,
-                  padding: "10px 12px",
+                  padding: "8px 10px",
                   background: T.surface,
                   border: `1px solid ${T.border}`,
                   borderRadius: T.rs,
@@ -2396,8 +2525,8 @@ export function TradeDetail({
                       src={item.imageDataUrl}
                       alt=""
                       style={{
-                        width: 54,
-                        height: 44,
+                        width: 46,
+                        height: 38,
                         objectFit: "cover",
                         borderRadius: 8,
                         border: `1px solid ${T.border}`,
@@ -3408,6 +3537,7 @@ export function TradeDetail({
       </div>
       {/* Event chain */}
       <details className="td-timeline" style={{
+        flex: "0 0 auto",
         background: T.card,
         border: `1px solid ${T.border}`,
         borderRadius: T.r,
@@ -3743,7 +3873,10 @@ function ArbiterProvenanceBanner({ state, prov, assignment, selfRostered }: {
 // TradeView pager pane styling — each pane owns the full phone width, snaps,
 // and scrolls its own overflow vertically.
 const TD_PANE_STYLE: React.CSSProperties = {
-  flex: "0 0 100%", scrollSnapAlign: "start",
+  // v4.1 #19 hard-snap: `scroll-snap-stop: always` makes a swipe land on exactly ONE
+  // pane — a fast fling can't skip Chat↔Parties straight past Details. Programmatic
+  // multi-pane jumps (goPane) sidestep this by scrolling instantly (see goPane).
+  flex: "0 0 100%", scrollSnapAlign: "start", scrollSnapStop: "always",
   overflowY: "auto", overflowX: "hidden", minWidth: 0,
   padding: "2px 3px 12px",
 };

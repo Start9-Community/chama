@@ -9,6 +9,7 @@ import {
   onTradeDeepLink,
   LATEST_ACTIONABLE,
 } from "../notifications/deep-link.js";
+import { notifySelfTest } from "../notifications/notify-service.js";
 import type { AggregateRatings, RatingThumb } from "../reputation/ratings.js";
 import {
   type EscrowState,
@@ -84,6 +85,7 @@ import { TradeDetail } from "./screens/TradeDetail.js";
 import { CreateForm } from "./screens/CreateForm.js";
 import { MeScreen } from "./screens/MeScreen.js";
 import { SettingsAdvanced } from "./screens/SettingsAdvanced.js";
+import { HelpScreen } from "./screens/HelpScreen.js";
 
 import { WalletBar } from "./panels/WalletBar.js";
 import { ChamaBar } from "./panels/ChamaBar.js";
@@ -143,7 +145,8 @@ type View =
   | "me"
   | "saved-handles"
   | "payout-destinations"
-  | "advanced";
+  | "advanced"
+  | "help";
 
 type PendingDestroyConfirm = {
   invite: string;
@@ -169,6 +172,7 @@ const TAB_FOR_VIEW: Record<View, Tab> = {
   "saved-handles": "me",
   "payout-destinations": "me",
   advanced: "me",
+  help: "me",
 };
 
 type GivenRatingSlot = {
@@ -1349,7 +1353,14 @@ export default function App() {
   // Register native tap handlers once at mount. Web taps wire themselves in
   // notify-service via Notification.onclick. Both feed the same pending-deeplink
   // buffer drained below.
-  useEffect(() => registerNotificationTapHandlers(), []);
+  useEffect(() => {
+    const unregister = registerNotificationTapHandlers();
+    // Opt-in delivery probe (localStorage chama_notify_selftest=1) — fires one
+    // known-good notification so an on-device tester can confirm the OS layer
+    // delivers at all, independent of any trade transition. No-op otherwise.
+    void notifySelfTest();
+    return unregister;
+  }, []);
 
   // Drain tap targets once connected — a cold-launch tap can land before the
   // client is up, so we buffer and replay here. openEscrow is the same warm-
@@ -2511,6 +2522,7 @@ export default function App() {
             onOpenSavedHandles={() => setView("saved-handles")}
             onOpenPayoutDestinations={() => setView("payout-destinations")}
             onOpenAdvanced={() => { setAdvancedFocusNwc(false); setView("advanced"); }}
+            onOpenHelp={() => setView("help")}
             onSignOut={handleSignOut}
             onWithdrawEcash={() => setShowEcashExport(true)}
             onExportStrandedClaim={(entry) => setStrandedClaimExport(entry)}
@@ -2546,6 +2558,10 @@ export default function App() {
           <PayoutDestinationsPanel
             onClose={() => setView("me")}
           />
+        </div>
+      ) : view === "help" ? (
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          <HelpScreen onBack={() => setView("me")} />
         </div>
       ) : view === "advanced" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
@@ -2787,7 +2803,7 @@ const globalCss = () => `
      column at EVERY breakpoint (the approved mockups are phone-shaped). These
      trailing rules retire the old ≥980px two-column split + sticky room card —
      they come last so they win over the media rules above at equal specificity. */
-  .trade-detail-shell{width:100%;max-width:480px;padding:14px 14px 18px;margin:0 auto;flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;overflow-x:hidden;overflow-y:auto}
+  .trade-detail-shell{width:100%;max-width:480px;padding:14px 14px 18px;margin:0 auto;flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
   .trade-detail-layout{display:block!important}
   .trade-room-card{position:static!important}
   /* TradeView pager + anchored timeline. */

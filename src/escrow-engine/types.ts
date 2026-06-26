@@ -237,6 +237,10 @@ export interface CreatePayload {
    *  devices (where getCommunityBySlug returns null). Display-only — additive,
    *  never hashed (notesHash is LOCK-only) or replay/consensus-bound. */
   country?: string;
+  /** v4.1 (#12): optional Community-Bill-Pay bill-type id (e.g. "electricity-kplc").
+   *  Informational metadata only — listing legibility + future Browse filtering,
+   *  never escrow logic. Additive + display-only; same posture as `country`. */
+  billType?: string;
   /** Fedimint federation invite code */
   mintUrl: string;
   /** Platform fee in basis points */
@@ -717,6 +721,9 @@ export interface EscrowState {
    *  fallback when the community slug isn't resolvable on this device. Display
    *  only — additive. */
   country?: string | null;
+  /** v4.1 (#12): CBP bill-type id, carried for the card/detail display. Optional,
+   *  display-only. */
+  billType?: string | null;
   /** Fedimint mint URL / invite code */
   mintUrl: string;
 

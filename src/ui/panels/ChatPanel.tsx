@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties } from "react";
-import { type ChatImageAttachment, type EscrowState, Role } from "../../escrow-engine/types.js";
+import { type ChatImageAttachment, type EscrowState, EscrowStatus, Role } from "../../escrow-engine/types.js";
 import { T } from "../theme.js";
+import { RatingTap } from "../components/RatingTap.js";
+import type { RatingThumb } from "../../reputation/ratings.js";
 import { randomId } from "../../storage/random-id.js";
 import {
   type SystemBubble,
@@ -214,11 +216,21 @@ async function prepareChatImage(file: File): Promise<ChatImageAttachment> {
   throw new Error("That image is too large for encrypted chat. Try a tighter screenshot.");
 }
 
-export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader = false, fill = false, systemBubbles = [] }: {
+export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader = false, fill = false, systemBubbles = [], ratingCta = null }: {
   state: EscrowState;
   myRole: Role | null;
   onSend: (message: SendChatInput) => void;
   embedded?: boolean;
+  /** v4.1 ratings-in-chat: the SAME one-tap counterparty RatingTap, surfaced at the
+   *  END of the chat feed at settlement (where the user actually is). Null = hide;
+   *  it shares myGivenRatings with the Parties + Me copies, so a tap anywhere
+   *  collapses all three to the "you rated" state. */
+  ratingCta?: {
+    tradeId: string;
+    ratee: string;
+    ratedThumb?: RatingThumb;
+    onRate: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
+  } | null;
   /** v3.1: suppress the internal "CHAT" header when the panel sits inside a
    *  disclosure row that already supplies the label (avoids a doubled header). */
   hideHeader?: boolean;
@@ -284,6 +296,9 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
   const canSend = (!!msg.trim() || !!attachment) && !sending && !imageBusy;
 
   const feed = weaveFeed(state.chatMessages, systemBubbles);
+  // #17: a settled trade closes its chat — the composer mutes (post-settlement
+  // messages would vanish into the void) and the rating CTA becomes the closing act.
+  const chatClosed = state.status === EscrowStatus.COMPLETED;
 
   return (
     <div style={{
@@ -403,11 +418,45 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
             );
           })
         )}
+        {ratingCta && (
+          // #17: glow the closing rating CTA so it reads as the next action now that
+          // the chat is settled, not a buried trailing card.
+          <div style={{
+            margin: "6px 2px 2px",
+            padding: "4px 10px 2px",
+            borderRadius: T.r,
+            background: `${T.green}10`,
+            border: `1px solid ${T.green}44`,
+            boxShadow: `0 0 0 3px ${T.green}14`,
+          }}>
+            <RatingTap
+              tradeId={ratingCta.tradeId}
+              ratee={ratingCta.ratee}
+              ratedThumb={ratingCta.ratedThumb}
+              onRate={ratingCta.onRate}
+              leading
+            />
+          </div>
+        )}
         <div ref={chatEndRef} />
       </div>
 
+      {/* #17: once the trade is settled the chat closes — the composer is muted (a
+          post-settlement message would vanish into the void) and a gentle line points
+          back to the rating CTA above. */}
+      {myRole && chatClosed && (
+        <div style={{
+          padding: embedded ? "12px 0 2px" : "12px 16px",
+          borderTop: `1px solid ${T.border}`,
+          textAlign: "center" as const,
+        }}>
+          <span style={{ fontFamily: T.mono, fontSize: 10.5, color: T.muted, letterSpacing: 0.3 }}>
+            💬 Chat is closed — this trade is settled.
+          </span>
+        </div>
+      )}
       {/* Input bar */}
-      {myRole && (
+      {myRole && !chatClosed && (
         <div style={{
           padding: embedded ? "10px 0 0" : "10px 12px",
           borderTop: `1px solid ${T.border}`,

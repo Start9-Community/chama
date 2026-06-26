@@ -40,7 +40,8 @@ description: |
 
   - 2-of-3 escrow with community arbiters — disputes settled by people, not policies
   - Lightning-fast settlement via client-side Fedimint ecash
-  - Get paid your way — Strike, Cash App, Zelle, bank transfer and local rails, surfaced for your community
+  - **Cash out to M-Pesa in one tap (Kenya)** — your sats become mobile-money shillings in seconds, no app or account for the recipient; more local rails rolling out
+  - Get paid your way — mobile money, bank transfer, and the local rails that matter where you live (Strike, Cash App, Zelle and more where they apply)
   - Bring your own Lightning wallet over Nostr Wallet Connect (NWC)
   - Join community "Chamas" — from Bitcoin Life to Global USD — each with its own arbiters and payment rails
   - Runs in your browser, on Android, and on desktop — same keys everywhere

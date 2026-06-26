@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { T, ROLE_COLOR } from "../theme.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
+import { HelpTip } from "./HelpTip.js";
 
 // v3.1.1: the arbiter application form, extracted from MeScreen so it can live
 // inline inside the Browse floating-menu "Become an arbiter" toast — the single
@@ -57,6 +58,10 @@ export function ArbiterApplyForm({
           <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 800, color: ROLE_COLOR.arbiter, letterSpacing: 0.5 }}>
             BECOME A COMMUNITY ARBITER
           </span>
+          <HelpTip title="What is an arbiter?" label="What is a community arbiter?">
+            An arbiter is a trusted community member who can <strong>break a tie in a dispute</strong> — and only then. You step in only when the buyer and seller disagree, never on a normal trade. You can <strong>never take anyone's money</strong>: escrow is 2-of-3, so you only release the sats to the side telling the truth. Arbiters build a public reputation over time.
+            {/* TODO(bond 2A): add "post a bond to raise your exposure cap" line here once BONDS_ENFORCED ships. */}
+          </HelpTip>
         </span>
         {onClose && (
           <button
@@ -90,8 +95,13 @@ export function ArbiterApplyForm({
         marginBottom: 8, padding: "10px 12px", borderRadius: T.rs,
         background: `${ROLE_COLOR.arbiter}0f`, border: `1px solid ${ROLE_COLOR.arbiter}33`,
       }}>
-        <div style={{ fontSize: 11, fontWeight: 800, color: ROLE_COLOR.arbiter, fontFamily: T.mono, marginBottom: 4, letterSpacing: 0.5 }}>
-          🏰 RUN YOUR OWN FEDERATION?
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+          <span style={{ fontSize: 11, fontWeight: 800, color: ROLE_COLOR.arbiter, fontFamily: T.mono, letterSpacing: 0.5 }}>
+            🏰 RUN YOUR OWN FEDERATION?
+          </span>
+          <HelpTip title="Federation operator" label="What is the federation-operator field?">
+            Optional. If you run the Fedimint federation behind a community, pasting your invite + steward key is the strongest proof you're real — it lets the steward fast-track your application.
+          </HelpTip>
         </div>
         <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.sans, lineHeight: 1.45, marginBottom: 8 }}>
           Federation operators are the strongest anchors — the premier proof-of-work path. Paste your invite + steward key and the steward can fast-track you.

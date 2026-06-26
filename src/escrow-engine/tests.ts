@@ -508,6 +508,7 @@ import {
   assignablePool,
 } from "../arbiters/exposure.js";
 import { notificationForTransition, chatNotificationFor } from "../notifications/trade-notifications.js";
+import { catchUpPrev, readSeenStatus, recordSeenStatus } from "../notifications/notify-service.js";
 import {
   RATING_KIND,
   buildRatingEvent,
@@ -16298,6 +16299,70 @@ console.log("\n── Trade notifications (notificationForTransition) ──");
     votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND } });
   assert(notificationForTransition(locked, disputedSub, subArb)?.tag === "sm_notif_demo_0001:dispute",
     "A backup pool arbiter is summoned to a dispute too");
+}
+
+// ── Cold-start catch-up (catchUpPrev + persisted last-seen status) ──
+// Bug 2: a KILLED app re-observes trades with prev=undefined. catchUpPrev feeds
+// the persisted last-seen status back as a synthesized prev so a transition that
+// advanced while the app was dead still fires once — without re-buzzing every
+// historical trade on a fresh install.
+console.log("\n── Cold-start catch-up (catchUpPrev + last-seen store) ──");
+{
+  const BUYER = "11".repeat(32);
+  const SELLER = "22".repeat(32);
+  const ARB = "33".repeat(32);
+  const mk = (over: Partial<EscrowState>): EscrowState => ({
+    id: "sm_notif_catchup_01",
+    category: "p2p-trade",
+    status: EscrowStatus.CREATED,
+    participants: { [Role.BUYER]: BUYER, [Role.SELLER]: SELLER, [Role.ARBITER]: ARB },
+    votes: {},
+    resolvedOutcome: null,
+    communityArbiters: [ARB],
+    ...over,
+  }) as EscrowState;
+
+  const locked = mk({ status: EscrowStatus.LOCKED });
+  const completed = mk({ status: EscrowStatus.COMPLETED });
+
+  // A live in-memory prev always wins — catch-up never overrides a real prev.
+  const created = mk({ status: EscrowStatus.CREATED });
+  assert(catchUpPrev(created, locked, EscrowStatus.CREATED) === created,
+    "catchUpPrev returns the live prev unchanged when one exists");
+
+  // Fresh install / never seen → no synthesis → still suppressed (no spam).
+  assert(catchUpPrev(undefined, locked, null) === undefined,
+    "catchUpPrev returns undefined with no prior record — fresh installs stay quiet");
+  assert(notificationForTransition(catchUpPrev(undefined, locked, null), locked, BUYER) === null,
+    "Cold first-observation with no record never buzzes (cold-replay guard intact)");
+
+  // Seen at the same status → nothing changed → no synthesis.
+  assert(catchUpPrev(undefined, locked, EscrowStatus.LOCKED) === undefined,
+    "catchUpPrev returns undefined when last-seen equals the current status");
+
+  // Seen EARLIER (CREATED) + now LOCKED → synthesize prev@CREATED → buzz once.
+  const synthLocked = catchUpPrev(undefined, locked, EscrowStatus.CREATED);
+  assert(synthLocked?.status === EscrowStatus.CREATED,
+    "catchUpPrev synthesizes a prev pinned at the last-seen status");
+  assert(notificationForTransition(synthLocked, locked, BUYER)?.tag === "sm_notif_catchup_01:locked",
+    "A LOCK missed while the app was dead fires once on cold start (non-locker buyer)");
+
+  // Multi-status jump while dead (seen LOCKED, now COMPLETED) → the terminal
+  // moment fires, not a stale intermediate one.
+  const synthDone = catchUpPrev(undefined, completed, EscrowStatus.LOCKED);
+  assert(notificationForTransition(synthDone, completed, BUYER)?.tag === "sm_notif_catchup_01:completed",
+    "A multi-status jump while dead fires the terminal (completed) moment on cold start");
+
+  // Persisted last-seen store: round-trip, no-op-on-unchanged, overwrite, isolation.
+  const ID = "sm_seen_store_01";
+  assert(readSeenStatus(ID) === null, "Unknown trade has no last-seen status");
+  recordSeenStatus(ID, EscrowStatus.LOCKED);
+  assert(readSeenStatus(ID) === EscrowStatus.LOCKED, "recordSeenStatus persists the status");
+  recordSeenStatus(ID, EscrowStatus.LOCKED); // unchanged — no-op, value stays
+  assert(readSeenStatus(ID) === EscrowStatus.LOCKED, "Recording the same status is a no-op");
+  recordSeenStatus(ID, EscrowStatus.COMPLETED);
+  assert(readSeenStatus(ID) === EscrowStatus.COMPLETED, "recordSeenStatus overwrites with the newer status");
+  assert(readSeenStatus("sm_seen_store_other") === null, "Last-seen is per-trade (no cross-trade bleed)");
 }
 
 // ── DM / trade-chat notifications (chatNotificationFor) ──

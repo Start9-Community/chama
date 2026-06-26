@@ -557,6 +557,8 @@ export class EscrowClient {
      *  CREATE so a device that can't resolve the community slug still renders a
      *  flag + currency. Display-only; never hashed / replay/consensus-bound. */
     country?: string;
+    /** v4.1 (#12): optional CBP bill-type id (informational metadata only). */
+    billType?: string;
     mintUrl: string;
     paymentMethods?: string[];
     items?: CreatePayload["items"];
@@ -612,6 +614,8 @@ export class EscrowClient {
       // v3.1 B3: carry the ISO country so receivers who don't know this
       // community can still self-describe (flag + currency) from the wire.
       country: params.country,
+      // v4.1 (#12): carry the CBP bill type so the card/detail can show it.
+      billType: params.billType,
       mintUrl: params.mintUrl,
       platformFeeBps: this.config.defaultPlatformFeeBps!,
       platformFeePubkey: this.config.platformFeePubkey || pubkey,

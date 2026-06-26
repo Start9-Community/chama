@@ -103,16 +103,15 @@ export interface Community {
   hiddenFromPicker: boolean;
 }
 
-/** Shared notes string. v0.5.0 reality: the Fedimint canary SDK
- *  (0.0.0-canary-cf43f9193627f8081b7144f7c057a7a112989031) bumped
- *  iroh-relay to 0.90, which clears the 400 Bad Request that gated
- *  browser WebSocket transport across the federations we actively route
- *  through (BP, BLF, etc.). End-to-end browser flows — join,
- *  mint, claim — verified working. The flag stays in the schema so
- *  individual entries can flip back to false if a specific federation
- *  ever regresses. */
-const IROH_LIMITATION_NOTE =
-  "Browser Fedimint reliable via canary iroh bump.";
+/** Shared notes string. 2026-06-25: the G-Bot federations (GBF, BLF, OCA,
+ *  LatNet) are the same Fedi-hosted class and were verified NATIVE end-to-end
+ *  by Jetty — Afghanistan(BLF), Benin/Tanzania(OCA), Mexico(LatNet), US(GBF) —
+ *  lock/claim flawless on the native Rust sidecar (post #17 pkarr discovery +
+ *  #9 gateway-picker). Browser/WASM is de-emphasized for now (not promoted);
+ *  revive it when the WASM fedimint-core SDK firms up. The `browserReliable`
+ *  flag stays in the schema, unchanged, for that future. */
+const NATIVE_VERIFIED_NOTE =
+  "Native Fedimint sidecar verified end-to-end.";
 
 export const EAST_AFRICA_COUNTRY_CODES = [
   "BI", "KM", "DJ", "ER", "ET", "KE", "MG", "MW", "MU",
@@ -198,7 +197,7 @@ export function defaultCountryChama(seed: CountryChamaSeed): Community {
     flagEmoji: flagEmojiForCountry(seed.country),
     country: seed.country,
     browserReliable: true,
-    notes: `${IROH_LIMITATION_NOTE} Default route: ${fed.name}.`,
+    notes: `${NATIVE_VERIFIED_NOTE} Default route: ${fed.name}.`,
     disambiguator: null,
     hiddenFromPicker: false,
   };
@@ -229,7 +228,7 @@ const KENYA_BITSACCO_CHAMA: Community = {
   flagEmoji: "🇰🇪",
   country: "KE",
   browserReliable: true,
-  notes: `${IROH_LIMITATION_NOTE} Kenya route backed by Bitsacco.`,
+  notes: `${NATIVE_VERIFIED_NOTE} Kenya route backed by Bitsacco.`,
   disambiguator: "Bitsacco",
   hiddenFromPicker: false,
 };
@@ -245,7 +244,7 @@ function publicFediWalletServiceChama(route: PublicFediFederation): Community {
     flagEmoji: route.flagEmoji,
     country: route.country,
     browserReliable: true,
-    notes: `${IROH_LIMITATION_NOTE} Public Fedi-approved wallet service.`,
+    notes: `${NATIVE_VERIFIED_NOTE} Public Fedi-approved wallet service.`,
     disambiguator: null,
     hiddenFromPicker: false,
   };
@@ -334,7 +333,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     pickerLabel: "Bitcoin Life Federation",
     chipAccent: "#6366f1", // indigo — distinct from arbiter cyan + buyer magenta
     browserReliable: true,
-    notes: IROH_LIMITATION_NOTE,
+    notes: NATIVE_VERIFIED_NOTE,
     disambiguator: "BLF",
     // v3.1 A1: BLF is the Level-3 backup fed that silently backs every not-yet-
     // served country — not a place you pick. Hidden from the picker but still
@@ -373,7 +372,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     flagEmoji: "🇸🇳",
     country: "SN",
     browserReliable: true,
-    notes: IROH_LIMITATION_NOTE,
+    notes: NATIVE_VERIFIED_NOTE,
     disambiguator: null,
     hiddenFromPicker: false,
   },
@@ -393,7 +392,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     flagEmoji: "🌎",
     country: null,
     browserReliable: true,
-    notes: IROH_LIMITATION_NOTE,
+    notes: NATIVE_VERIFIED_NOTE,
     disambiguator: null,
     hiddenFromPicker: true,
   },
@@ -410,7 +409,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     flagEmoji: "🇹🇿",
     country: "TZ",
     browserReliable: true,
-    notes: IROH_LIMITATION_NOTE,
+    notes: NATIVE_VERIFIED_NOTE,
     disambiguator: null,
     hiddenFromPicker: false,
   },
@@ -427,7 +426,7 @@ export const COMMUNITY_REGISTRY: Community[] = [
     flagEmoji: "🇸🇻",
     country: "SV",
     browserReliable: true,
-    notes: IROH_LIMITATION_NOTE,
+    notes: NATIVE_VERIFIED_NOTE,
     disambiguator: null,
     hiddenFromPicker: true,
   },

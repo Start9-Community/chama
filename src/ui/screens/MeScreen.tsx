@@ -96,6 +96,7 @@ export function MeScreen({
   onOpenSavedHandles,
   onOpenPayoutDestinations,
   onOpenAdvanced,
+  onOpenHelp,
   balanceMsats,
   hasActiveCommitment,
   satsTrace,
@@ -133,6 +134,7 @@ export function MeScreen({
   onOpenSavedHandles: () => void;
   onOpenPayoutDestinations: () => void;
   onOpenAdvanced: () => void;
+  onOpenHelp: () => void;
   balanceMsats: number;
   hasActiveCommitment: boolean;
   satsTrace?: SatsTraceEntry | null;
@@ -558,6 +560,7 @@ export function MeScreen({
         <SettingsRow label="Payment methods" hint="Phone, mobile money, bank, and app IDs" onClick={onOpenSavedHandles} />
         <SettingsRow label="Lightning Addresses" hint="Saved addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
         <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
+        <SettingsRow label="Help & FAQ" hint="Trading basics, getting paid, arbiter duties, recovery" onClick={onOpenHelp} />
         <SettingsRow label="Sign out" hint={null} onClick={onSignOut} danger />
       </div>
 

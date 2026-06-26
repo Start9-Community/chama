@@ -11,11 +11,14 @@
 
 import { T } from "../../theme.js";
 
-export function PagerPills({ tabs, active, onSelect }: {
+export function PagerPills({ tabs, active, onSelect, badges }: {
   tabs: string[];
   /** Index of the live pane (driven by the pager's scroll position). */
   active: number;
   onSelect: (index: number) => void;
+  /** v4.1 (#15): optional unread count per tab index — a small accent badge sits
+   *  on the pill when its count > 0 (e.g. unread chat while you're on Details). */
+  badges?: (number | null | undefined)[];
 }) {
   const n = Math.max(1, tabs.length);
   const clamped = Math.min(Math.max(0, active), n - 1);
@@ -62,6 +65,7 @@ export function PagerPills({ tabs, active, onSelect }: {
         }} />
         {tabs.map((label, i) => {
           const on = i === clamped;
+          const badge = badges?.[i] ?? 0;
           return (
             <button
               key={label}
@@ -81,6 +85,17 @@ export function PagerPills({ tabs, active, onSelect }: {
               }}
             >
               {label}
+              {badge > 0 && (
+                <span aria-label={`${badge} unread`} style={{
+                  position: "absolute", top: 0, right: 2,
+                  minWidth: 14, height: 14, padding: "0 3px", boxSizing: "border-box",
+                  borderRadius: 999, background: T.accent, color: "#fff",
+                  fontFamily: T.mono, fontSize: 8.5, fontWeight: 800,
+                  lineHeight: "14px", textAlign: "center",
+                }}>
+                  {badge > 9 ? "9+" : badge}
+                </span>
+              )}
             </button>
           );
         })}

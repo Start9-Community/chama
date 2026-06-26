@@ -37,6 +37,7 @@ import { type MenuItem } from "../../escrow-engine/types.js";
 import { randomId } from "../../storage/random-id.js";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
 import { getCommunityBySlug, communityForInvite, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
+import { billTypesForCountry } from "../../communities/bill-types.js";
 import {
   getUserCommunitySlug,
   getUserCommunitySlugRaw,
@@ -93,6 +94,8 @@ interface FormState {
   fiat: string;
   cur: string;
   premium: string;
+  /** v4.1 (#12): optional Community-Bill-Pay bill-type id (single listing). */
+  billType?: string;
   fulfillment: Fulfillment;
   isSubscription: boolean;
   periods: string;
@@ -292,6 +295,7 @@ function normalizeFormState(raw: any, currency = "USD"): FormState {
     listingMode,
     cur: fallback.cur,
     premium: typeof raw.premium === "string" || typeof raw.premium === "number" ? String(raw.premium) : fallback.premium,
+    billType: typeof raw.billType === "string" ? raw.billType : "",
     paymentMethods: Array.isArray(raw.paymentMethods)
       ? raw.paymentMethods
           .map((method: unknown) => typeof method === "string" ? method.trim() : "")
@@ -921,6 +925,7 @@ export function emptyCreateFormState(currency = "USD"): FormState {
     intervalDays: "30",
     paymentMethods: [],
     menuItems: [],
+    billType: "",
   };
 }
 
@@ -1087,6 +1092,8 @@ export function CreateForm({
         // v3.1 (B3): stamp the community's ISO country so the listing self-describes
         // its flag + currency on devices that don't know this (custom) community.
         country: getCommunityBySlug(effectiveCommunity)?.country ?? undefined,
+        // v4.1 (#12): CBP bill type (single listing) — informational metadata only.
+        billType: vertical === "bill-pay" && form.billType ? form.billType : undefined,
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
         communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,
@@ -1934,6 +1941,41 @@ function Step2({
           placeholder={descriptionPlaceholder(vertical, usingMenu)}
           style={inputStyle} />
       </div>
+      )}
+
+      {/* v4.1 (#12) CBP bill-type picker — optional, country-driven, informational
+          metadata only (never gates posting, never touches escrow logic). */}
+      {vertical === "bill-pay" && !usingMenu && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
+            BILL TYPE <span style={{ opacity: 0.6 }}>· optional</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+            {billTypesForCountry(homeCommunity?.country).map(bt => {
+              const on = form.billType === bt.id;
+              return (
+                <button
+                  key={bt.id}
+                  type="button"
+                  onClick={() => set("billType", on ? "" : bt.id)}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                    padding: "7px 11px", borderRadius: 999, cursor: "pointer",
+                    background: on ? `${T.accent}1f` : T.surface,
+                    border: `1px solid ${on ? T.accent : T.border}`,
+                    color: on ? T.accent : T.text,
+                    fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+                  }}
+                >
+                  <span aria-hidden="true">{bt.icon}</span>{bt.label}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.sans, marginTop: 6, lineHeight: 1.4 }}>
+            Helps a volunteer see what they're paying. Optional — tap again to clear.
+          </div>
+        </div>
       )}
 
       {!usingMenu ? (

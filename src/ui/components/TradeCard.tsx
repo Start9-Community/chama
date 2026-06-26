@@ -11,6 +11,8 @@ import { getCommunityBySlug, flagEmojiForCountry } from "../../communities/regis
 import { pickArbiterFromPool } from "../../arbiters/pool.js";
 import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER, fmtSats } from "../theme.js";
 import { listingPremiumLine } from "../listing-metrics.js";
+import { unreadChatForTrade } from "../../chat/unread.js";
+import { billTypeDisplay } from "../../communities/bill-types.js";
 import { payoutRecipientFor } from "../../escrow-engine/recipients.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
@@ -93,6 +95,18 @@ export function TradeCard({
     ? `Seller · ${sellerName ?? shortPubkey(sellerPubkey)}`
     : null;
   const status = STATUS[state.status] ?? STATUS.CREATED;
+  // v4.1 (#15) unread badge: count messages from the other party since this device
+  // last opened the trade's Chat pane. Covers all three seats (incl. arbiter, who
+  // is intentionally excluded from viewerRole's display logic above); non-
+  // participants get 0, so the badge only ever shows on the owner's own trades.
+  const myRoleForUnread: Role | null =
+    pubkey === state.participants[Role.SELLER] ? Role.SELLER
+    : pubkey === state.participants[Role.BUYER] ? Role.BUYER
+    : pubkey === state.participants[Role.ARBITER] ? Role.ARBITER
+    : null;
+  const chatUnread = unreadChatForTrade(state, myRoleForUnread);
+  // v4.1 (#12): CBP bill type, resolved for display (icon + label). Null elsewhere.
+  const billTypeChip = state.category === "bill-pay" ? billTypeDisplay(state.billType) : null;
   const timeLine = compactJoinHoldRemaining(state, nowSec) ?? compactTimeRemaining(state, nowSec);
   const fiatLine = state.fiatAmount != null && state.fiatCurrency
     ? formatFiatAmount(state.fiatAmount, state.fiatCurrency)
@@ -164,6 +178,17 @@ export function TradeCard({
       overflow: "hidden",
       position: "relative", isolation: "isolate",
     }}>
+      {chatUnread > 0 && (
+        <span aria-label={`${chatUnread} unread message${chatUnread === 1 ? "" : "s"}`} style={{
+          position: "absolute", top: 8, right: 8, zIndex: 2,
+          display: "inline-flex", alignItems: "center", gap: 3,
+          minWidth: 18, height: 18, padding: "0 5px", boxSizing: "border-box",
+          borderRadius: 999, background: T.accent, color: "#fff",
+          fontFamily: T.mono, fontSize: 9.5, fontWeight: 800, lineHeight: "18px",
+        }}>
+          💬 {chatUnread > 9 ? "9+" : chatUnread}
+        </span>
+      )}
       {/* Storefront media stays on own-route Store/Exchange-menu tiles. External
           amber cards remain compact so route context stays the strongest signal. */}
       {isStorefrontTile && (
@@ -228,6 +253,18 @@ export function TradeCard({
               <span style={{ fontSize: 11, lineHeight: 1 }}>{CAT_ICON[state.category] || "📦"}</span>
               {shortCategoryLabel(state.category)}
             </span>
+            {billTypeChip && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 4,
+                fontSize: 10, padding: "3px 8px", borderRadius: 999,
+                background: T.surface, color: T.text,
+                border: `1px solid ${T.border}`,
+                fontFamily: T.mono, fontWeight: 700, lineHeight: 1.2,
+              }}>
+                <span style={{ fontSize: 11, lineHeight: 1 }}>{billTypeChip.icon}</span>
+                {billTypeChip.label}
+              </span>
+            )}
             {state.subscription && (
               <span style={{
                 fontSize: 10, padding: "3px 8px", borderRadius: 999,

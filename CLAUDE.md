@@ -9,7 +9,7 @@ big/irreversible moves.
 Local-money / P2P Bitcoin marketplace: **Fedimint** (ecash), **Nostr** (identity, chat,
 escrow coordination), **Lightning** (funding). Platforms: web (getchama.app /
 chama.community), **Tauri** desktop, **Android APK** (Zapstore + GitHub). Version: see
-`package.json` (**v3.7.0** as of 2026-06-23). Targeting a **Nairobi launch**; Benin/Cameroon
+`package.json` (**v4.0.0** shipped 2026-06-24). Targeting a **Nairobi launch**; Benin/Cameroon
 francophone framing.
 
 ## Doc set (read, don't duplicate)
@@ -17,6 +17,9 @@ francophone framing.
 `INVARIANTS.md` must-holds · `BRAND.md` · `PRE-LAUNCH-QA-GATE.md` go/no-go ·
 `native/fedimint-bridge/FRESH-JOIN-SMOKE.md` mobile smoke ·
 `design/mockups/chama-fedimint-freshjoin-CC-brief.md` iroh brief + live status.
+**4.1 / bond briefs (2026-06-24):** `chama-arbiter-bond-phase2-brief.md` (finish-the-bond, staged) ·
+`chama-inapp-help-brief.md` (E) · `chama-4.1-newbie-polish-brief.md` (ratings-in-chat · TradeView
+rect + default-pane · CBP picker · unread badge) · `chama-notifications-fix-brief.md`.
 
 ## ⭐ RELEASE WORKFLOW (the one Jetty shouldn't have to re-explain)
 After a fix, decide scope, then **one gated command**:
@@ -34,7 +37,12 @@ typo can't half-bump the tree.
 *after* the bump, e.g. 3.7.0 + patch → `3.7.1`), placed in `/tmp` (`CHAMA_COMMIT_DIR` default):
 - `/tmp/chama-v<TARGET>_release_notes` — **REQUIRED**. Doubles as the commit message AND the
   GitHub release body.
-- `/tmp/chama-v<TARGET>_zapstore_notes` — optional, short Zapstore card text.
+- `/tmp/chama-v<TARGET>_zapstore_notes` — optional, short Zapstore card text. **Style = match the
+  PREVIOUS card** (`zapstore/release-notes.md`): a `# Theme` title, a one-line ⚡ tagline,
+  **emoji-led benefit bullets** (🇰🇪/⚡/🛡️/🌍…), and a `·`-separated proof closer (e.g. tests-green
+  count). Spice it — don't just list features. **Until board #20 ships, always include a "your
+  country's coming Live" signal** — global demand is real (US: 846k Zapstore impressions / month) but
+  capped by the "is it even live here?" perception.
 
 Template: `scripts/release-notes-template.txt`. Bump sizing: patch = small fix, minor =
 features, major = breaking/big. Handy flags: `--dry-run` (print plan, run nothing),
@@ -87,28 +95,117 @@ features, major = breaking/big. Handy flags: `--dry-run` (print plan, run nothin
 Federations are multi (BP, Afribit Kibera, Bitsacco, BLF [iroh-only, browser default], GBF) —
 never break fed-switching.
 
-## TASK BOARD (mirror of Jetty's Progress list, 2026-06-23 — keep in sync)
-**Done:** storyboard end-to-end demo video · Obsidian vault sweep · French Nairobi deck
-(Benin/Cameroon).
-**Open:**
-- 7. Ship live: Tauri/APK now, Fedi after funding fix
-- 8. Verify native notification taps on real Tauri + APK (pre-demo)
-- 9. **Funding fund-loss fix** — CC build + native verify (LAUNCH BLOCKER, gates Fedi live)
-- 10. Fiat ramps (pre-Nairobi) — **DECIDED 2026-06-24 (revised):** all external swaps are
-  **OFFRAMP-only, post-CLAIM, country-matched** (`EXTERNAL_SWAPS_ENABLED=true`, redirect model +
-  honesty copy). **No pre-LOCK CTA** (removed — nobody onramps in-app). **Minmo dropped** (friction);
-  **Banxaas offramp-only** (no bidirectional). EXCEPT **Tando = LUD-16 native offramp** (claim to
-  `<phone>@bitcoin.co.ke` via existing `resolveLightningAddressToInvoice` — one-tap M-Pesa, no
-  redirect; the star). Final set: Banxaas (SN), Chapsmart (TZ), Bitika+Tando (KE), Bitzed (ZM).
-  OFFRAMP works; ONRAMP/"lock with fiat" does NOT (LUD-16 pay-only). Brief:
-  `design/mockups/chama-fiat-ramps-tando-brief.md`. (`chapsmart-lnurl/` separate; not needed for Tando.)
-- 11. Enforce app font — bundle DM Sans + JetBrains Mono
-- 12. CBP per-country bill-type picker (Kenya-first)
-- 15. Brief CC: pager cart-first landing + Chat unread badge
-- 16. [POST-NAIROBI] storefront/menu per-item quantity + persistence
-- 17. **CRITICAL** wire iroh-dns lever into bridge spawn (fresh-join) — pkarr default landed;
-  needs real-mobile verify
-- (queued w/ Jetty) release notes + changelog · pre-launch QA gate (done) · tutorial/walkthrough video
+## TASK BOARD (reconciled 2026-06-24 — v4.0.0 SHIPPED to Zapstore; keep in sync)
+**SHIPPED in v4.0.0 (live):** #9 funding fund-safety (gateway Part1/2 + double-pay Part3 + V8 journal
+fail-closed) · #17 native fresh-join pkarr · relay resilience + chat-wipe · claim-credit reconcile ·
+UI pass (unified vote/mark-done, refund-reason picker, calm refund bubbles, DM Sans, TradeDetail
+one-block) · #10 fiat ramps offramp-only registry + **Tando LUD-16 M-Pesa** · release notes + Zapstore
+publish · launch announcements (EN+FR) · newbie FAQ (EN+FR, 0.5% fee). Live-verified in Kenya (real
+trade → M-Pesa in minutes). **Earlier:** storyboard demo · Obsidian vault · French Nairobi deck · QA gate.
+
+**RELEASE PLAN (set 2026-06-24):**
+- **4.1.0 "newbie-polish" — BUILT 2026-06-25 (uncommitted, predeploy green 2733, typecheck clean):** all 5 UI
+  items landed, zero money-path/reducer touch except the additive `billType` field. (1) **ratings-in-chat** — 3rd
+  `RatingTap` render site at the Chat feed end on COMPLETED (`ChatPanel.ratingCta` ← `TradeDetail.chatRatingCta`);
+  Parties + Me copies kept. (2) **TradeView fixed-rectangle** — shell → `overflow:hidden` (App.tsx `.trade-detail-shell`),
+  action card wrapped in an internal-scroll zone (`flex:0 1 auto`), `td-lower` keeps a min-height FLOOR + `flex:1 1 0`
+  (pager floor moved off `td-pager`), timeline = pinned `flex:0 0 auto` footer; the outer wrapper already pinned 100dvh.
+  Plus `defaultPaneFor` (CREATED/payer-at-LOCK → Details, else Chat) + bold **"You owe KES X"** / "You'll receive"
+  checkout headline (final fiat: p2p folds premium, CBP premium-in-sats so base) + a "manual-swipe-wins-forever"
+  auto-focus guard (`userMovedPaneRef`/`programmaticTargetRef`) + pre-lock storefront-menu compaction. (3) **#12 CBP
+  bill-type picker** — `billType` wired EXACTLY like `country` (CreatePayload + EscrowState types + escrow-client
+  payload + state-machine reducer; informational, never escrow logic); per-country registry `src/communities/bill-types.ts`
+  (Kenya list + generic fallback); picker in CreateForm (single CBP, after desc); chip on TradeCard + Details. (4) **#15
+  unread badge** — device-local `src/chat/unread.ts` (localStorage `chama_chat_last_read_v1`); Chat pager pill + TradeCard
+  badges (Me-tab dot deferred — needs an App trade-scan). (5) **E in-app help** — `HelpScreen` off Me settings, `src/ui/content/faq.ts`
+  hand-mirrored from `docs/FAQ.md`, reusable `HelpTip` "?" on the arbiter form header + fed-operator field (NO bond copy;
+  `TODO(bond 2A)` seam left). **Live-verified in browser (port-pinned preview):** Help screen + accordion, CBP picker
+  (Kenya list renders + selects), HelpTip popover — **caught + fixed a real bug**: the inline-absolute popover clipped
+  inside the narrow arbiter card → rewrote `HelpTip` to a viewport-anchored `position:fixed` popover. Dark + light both
+  legible (note: on a WIDE desktop viewport the body bg stays dark behind the centred phone-width column — PRE-EXISTING,
+  invisible on mobile). ⏳ **Pending Jetty's authoritative 3-instance verify:** the TradeView lifecycle matrix
+  (reserved→locked→marked→vote→2nd-vote→released→claim→settled × buyer/seller/arbiter; outer rect NEVER scrolls;
+  timeline footer always visible; **Tauri AND APK separately** — Jetty suspects a Tauri-only webview dvh quirk) +
+  ratings-CTA-at-settle + unread-badge-live. **Note:** `docs/FAQ.md` has NO "M-Pesa per-transfer limit" line the brief
+  cited — mirrored the file faithfully; add it to the markdown first if wanted. Briefs: `chama-4.1-newbie-polish-brief.md`
+  + `chama-inapp-help-brief.md`. Ships alongside the **notification firing fix** (already uncommitted).
+  - **Punch-list fold-in (2026-06-25, uncommitted, predeploy green 2733):** Jetty's post-build live (Tauri
+    sandbox) list. **DONE + browser-verified on a real CREATED CBP trade:** **#17 chat-closes-at-completion**
+    (`ChatPanel`: on COMPLETED, composer muted + "💬 Chat is closed" line + the rating CTA gets a green glow) ·
+    **#19 pager hard-snap** (`scroll-snap-stop:always` on `.td-pane` + jump-aware `goPane` — a programmatic
+    >1-pane jump scrolls INSTANTLY so snap-stop can't trap it at an intermediate pane; verified Parties→Chat lands
+    on Chat) · **FAQ 3-surface sync** (mirrored the new "Is there a limit on M-Pesa cash-out?" Q&A from `docs/FAQ.md`
+    into `src/ui/content/faq.ts`). Live-confirmed: shell `overflow:hidden` never scrolls, panes hard-snap, default
+    pane = Details pre-lock, bill-type chip + generic fallback (BLF=global) render, composer present pre-completion,
+    FAQ Q&A renders+expands. **DEFERRED to 4.1.1 (Tauri-only, can't validate in browser):** **#16 offramp redirect**
+    — root cause `openExternalSwap` uses `window.open` (`external-swap-registry.ts:292`), blocked in the Tauri
+    webview (Tando works = LUD-16 invoice, not a redirect). Fix = add `@tauri-apps/plugin-opener` (JS dep + Rust
+    plugin in src-tauri) + an `opener:allow-open-url` capability, then call it when `isTauriRuntime()`; the SAME gap
+    breaks `HelpScreen`'s `<a target=_blank>` footer links + every redirect provider (Banxaas/Bitzed too), not just
+    Bitika/Chapsmart. **#18 chat-input focus** — needs a Tauri device repro; the new layout keeps the input in the
+    pager pane (already `overflow:auto`) so it doesn't obviously regress; candidate = WKWebView nested-scroll focus
+    quirk or keyboard/dvh re-layout. **Still pending Jetty's 3-instance (LOCKED/COMPLETED-only):** checkout headline,
+    ratings glow + "Chat is closed" at settle, unread badge live, manual-swipe-wins auto-focus.
+  - **Help-screen readability pass (2026-06-25, pre-ship gate, uncommitted, predeploy green 2733, browser-verified
+    dark+light):** Jetty gated 4.1.0 ship on the FAQ being learnable. (1) `FaqItem.a` widened to
+    `string | {intro?,steps[],outro?}`; the 3 numbered answers (buy / sell / M-Pesa cash-out) converted to structured
+    steps. (2) `HelpScreen` renders steps as a real hanging-indent `<ol>` (number column + text column — wrapped lines
+    align under the step TEXT, not the "1."), and the open answer is now BIG + full-contrast (16px / `T.text` / 1.7 lh,
+    was 12.5 / `T.muted`); questions 13.5→15. (3) **focus-on-expand** — while one answer is open, the intro, section
+    labels, every OTHER row, glossary + footer recede (opacity .32 + blur 1.5px, .2s transition, still tappable) and the
+    open row heroes (faint accent wash + z-lift); collapse restores all equal. Header stays full (it's nav). Live-verified
+    on the real Help screen: aligned hanging-indent list, big high-contrast answer, dim+blur focus, restore-on-collapse.
+- **4.2.0 "finish the bond" (D — FUND-CRITICAL, staged):** brief `chama-arbiter-bond-phase2-brief.md`.
+  Decisions LOCKED 2026-06-24: **2A** custody + ceremony + heal/relock + loud-prompt FIRST (enforcement OFF;
+  trio posts tiny/short SEED bonds on real BLF; **2-of-3 SSS reuse** = owner's 1 share + 2 cabinet custodians)
+  → **2B** wire capacity context + flip `BONDS_ENFORCED`. ⚠ Reframe: flipping the cap on UNBACKED 38130
+  declarations = security theater; the **SSS-lock custody (money path) is the keystone**, not the flip.
+
+**DONE this session (2026-06-24 — briefs/verifications, uncommitted unless noted):**
+- A FAQ on website — **LIVE** (`landing/faq.html` + `.fr.html` deployed; home links → `/` canonical root +
+  nav parity; FR screenshots removed per Jetty).
+- B Zapstore About — refreshed (M-Pesa/Tando one-tap line in `zapstore.yaml`).
+- C Onboarding verify — ConnectScreen **ALIGNED** with locked arbiter/bond design; silent on bonds = correct
+  while DORMANT; the "post a bond" on-ramp is a Phase-2A surface (in the bond brief), NOT a ConnectScreen change.
+- #11 app font — **DONE/verified**: fully self-hosted (`public/fonts/*`, `index.html` preload + `/fonts/fonts.css`);
+  Google-Fonts `@import` removed (`App.tsx:2726`). No CDN.
+- #8 notification TAP — handler correct + wired (`deep-link.ts`, `App.tsx:1352`), BUT **firing REOPENED as
+  broken**. ⚠ Brief's Bug-1 theories were WRONG (CC source-verified `tauri-plugin-notification@2.3.3`,
+  2026-06-25): `extra` is valid, `sendNotification` returns void, desktop permission hard-codes Granted,
+  `default` already grants `allow-notify`. **Real Tauri cause = macOS signing/identity:** dev posts as
+  `com.apple.Terminal`; prod bundle **unsigned** (no `signingIdentity` in tauri.conf.json) → macOS suppresses.
+  **macOS-specific; NOT a launch blocker** (Android-first). Fix = sign prod bundle (Apple Dev ID) + make path
+  diagnosable. **APK resume-only:** `prev` is in-memory, only trade ids persisted (not status) → killed/cold-start
+  (`prev=undefined`) never notifies even on relaunch → fix = **persist per-trade last-seen status** + synthesize
+  `prev` on cold start (fired-tag dedup store must be persistent). True background push = separate effort. Brief:
+  `chama-notifications-fix-brief.md` (see CORRECTION banner). **✅ ON-DEVICE CONFIRMED 2026-06-25:** filtered
+  `[chama/notify]` logs show the app fires correctly (`permission=true` + `tauri notify IPC ok`) for the
+  self-test AND locked/approved/completed — yet no buzz ⇒ **app-side DONE; silence is 100% macOS Terminal/
+  signing**. Verify on APK (no identity gate there); macOS desktop fix = sign prod bundle (deferred).
+  **FIX LANDED** (uncommitted, 2026-06-25, typecheck clean + 2733 tests green): (1) **Tauri diagnosable** —
+  `deliver()` now AWAITs the notify IPC via `__TAURI_INTERNALS__.invoke("plugin:notification|notify")`
+  (fallback `sendNotification`) so a capability/serialize failure surfaces (`console.warn`); opt-in debug seam
+  `notifyDebug` (dev or `localStorage.chama_notify_debug=1`) logs platform/permission/IPC outcome; `notifySelfTest()`
+  (opt-in `localStorage.chama_notify_selftest=1`, wired at `App.tsx` startup) fires one known-good notification
+  through the real path so an on-device tester can prove the OS layer independent of any transition. `extra` kept
+  (verified valid). **No signing chase** (deferred — prod-signing is the real macOS fix, needs Apple Dev ID).
+  Cross-checked Linux (plain D-Bus, no identity gate) + Windows (WinRT toast, `app_id` only for installed builds) —
+  same instrumentation applies. (2) **Bug-2 cold-start catch-up** — persistent per-trade last-seen store
+  (`chama_notif_seen_status_v1`, bounded 500, no-churn) + pure `catchUpPrev` synthesizes a `prev` from last-seen
+  status on a cold first-observation so a transition that advanced while the app was dead buzzes once; fresh
+  installs (no record) stay silent; fired-tag dedup guards repeats. Recorded independent of the enable toggle.
+  All in `notify-service.ts` (+7 unit tests). ⏳ Pending: Jetty's on-device verify (Tauri buzz with window open;
+  APK foreground + killed-then-relaunch fires the missed moment once) + the deferred prod-signing decision.
+
+**STILL OPEN / later:**
+- F ~~Flash offramp~~ — DROPPED 2026-06-24 (KYC, region-locked, controls the flow — against ethos).
+- #15 "pager cart-first landing" — unread badge briefed (4.1); the "cart-first" half = likely the **storefront
+  menu eating too much vertical space in Details PRE-LOCK** (Jetty's recollection) → fold into the
+  TradeView/default-pane work (compact the pre-lock menu pane). Needs a clean repro.
+- **V7 + V6** payout-journal hardening (deferred leg; `design/mockups/chama-payout-journal-hardening-brief.md`).
+- **Clean UI/UX pass** — Jetty: only AFTER the above.
+- **Tutorial/walkthrough video** — Jetty recording 3-device snippets into a project folder for Claude to assemble.
+- 16. [POST-NAIROBI] storefront/menu per-item quantity + persistence.
 
 ## KNOWN ISSUES being worked
 - **#9 funding/gateway** — PINNED (2026-06-23): federation has 3 LN gateways; 2 reachable

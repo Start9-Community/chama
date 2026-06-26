@@ -186,6 +186,65 @@ candidate list with the older roadmap.
       notification center, and graceful fallback when push is unavailable.
       Target after onboarding/NWC and dispute polish are shaped.
 
+- [ ] **US fiat off-ramp via a fiat-converting Lightning Address (Strike
+      flagship).** Port the Tando pattern to the US. A Strike username IS a
+      LUD-16 Lightning Address (`username@strike.me`); with the user's Strike
+      "default receive currency" set to **Cash**, inbound Lightning
+      auto-converts to **USD** in their Strike balance (ACH to bank). Chama
+      just pays that address via the existing `resolveLightningAddressToInvoice`
+      path — no redirect, no Strike-for-Business, no incorporation, no custody.
+      Confirmed against Strike's FAQ + NYDFS license (NMLS 1902919). See
+      DECISIONS 2026-06-26.
+
+      - **Module:** mirror `tando-offramp.ts` (e.g. `strike-offramp.ts`), but
+        lighter — `username@strike.me` is already a valid destination, so no
+        phone→MSISDN normalization. Provide `isStrikeLightningAddress()` + an
+        `isUSPayoutContext()` analog to `isKenyaPayoutContext` (match the
+        `us-usd` / GBF "USA · USD" community family or USD `fiatCurrency`).
+        Reuse the shared payout-destinations store — a Strike address IS a
+        Lightning Address.
+      - **UX:** save your Strike Lightning Address as a payout destination; a
+        one-time "set Strike to receive **Cash (USD)**" hint (Chama can't set
+        it for you — left on Bitcoin you just receive sats); show "≈ $X at
+        Strike's rate" (Chama sends sats; rate/spread are Strike's at receipt).
+        Resolve via LNURL-pay, never the captcha-gated web page.
+      - **Rides** the claim gateway pay path (#9 family) — needs a reachable LN
+        gateway. Independent of `EXTERNAL_SWAPS_ENABLED` (Tando precedent).
+        Dodges the Tauri `window.open` opener bug (#16) — a paste is a Lightning
+        destination, not a redirect.
+      - **Availability:** Strike isn't in every US state/country + has limits —
+        carry availability metadata; degrade gracefully to paste-invoice.
+      - **Fast-follow siblings (same seam):** Bitcoin Well (non-custodial,
+        sell-to-US-bank over Lightning, live Apr 2025) and Cash App (Lightning
+        receive via invoice — no static LUD-16 address). v1 = Strike only.
+
+      Source: 2026-06-26 design session (Tando → US generalization).
+
+- [ ] **`Rail.settlement` reversibility field — chargeback-aware payment rails.**
+      The `Rail` interface (`rail-registry.ts:23`) models privacy
+      (`allowPublicHandle`) but **not finality** — so reversible rails (PayPal
+      `:467`, Venmo `:474`) sit beside irreversible ones (Zelle, wire, mobile
+      money) with no signal. Chama's escrow protects only the **Bitcoin** leg:
+      on a reversible fiat rail a scam buyer can pay → ecash releases (trade
+      "completes" correctly) → buyer files a PayPal/Venmo dispute (~180-day
+      window) → fiat clawed back → the seller eats it, and escrow can't help
+      because the protocol did its job. Classic LocalBitcoins/Paxful PayPal scam.
+
+      - Add `settlement?: "irreversible" | "reversible" | "unknown"` to `Rail`;
+        tag the registry (Zelle / wire / mobile money / instant-push tags =
+        irreversible; PayPal / Venmo + card-funded Cash App = reversible;
+        default `unknown`).
+      - **Warn at trade time** when the selected rail is `reversible`, aimed at
+        the BTC *seller*: "⚠ PayPal can be reversed by the buyer for ~180 days —
+        prefer Zelle/cash for selling." De-rank (or gate behind a confirm)
+        reversible rails for the sell-BTC direction; never silently block — some
+        users knowingly accept the risk.
+      - Same field can **rank the off-ramp / payout picker** and the US-first
+        rail order — one concept, two payoffs.
+
+      Source: 2026-06-26 review (PayPal found live in `rail-registry.ts:467`
+      with no finality gate).
+
 ---
 
 ## Scratched Off

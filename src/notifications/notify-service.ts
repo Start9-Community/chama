@@ -40,6 +40,47 @@ function isTauriNative(): boolean {
   return Boolean(g.__TAURI__ || g.__TAURI_INTERNALS__);
 }
 
+function platformName(): "capacitor" | "tauri" | "web" {
+  return isCapacitorNative() ? "capacitor" : isTauriNative() ? "tauri" : "web";
+}
+
+// ── Diagnostics (opt-in; the silent-on-Tauri / resume-only debugging seam) ────
+//
+// Notification delivery is deliberately fire-and-forget and swallows every
+// failure so a missed buzz can't break a trade. That makes "why didn't it
+// fire?" un-diagnosable in the field — especially on Tauri/macOS, where the
+// plugin reports permission `granted` unconditionally and the real notify-rust
+// delivery is gated by the app's macOS identity (dev posts as "Terminal";
+// an unsigned prod bundle is silently dropped). These logs convert "silent"
+// into "diagnosable": permission result, platform, and whether the OS-level
+// IPC actually resolved — so you can tell transition-didn't-fire vs.
+// permission vs. IPC-error vs. OS-swallowed in one run.
+//
+// On in dev builds; opt-in on any build via localStorage chama_notify_debug=1
+// (so a packaged Tauri/APK can be inspected without a dev rebuild).
+const DEBUG_KEY = "chama_notify_debug";
+/** Opt-in flag for the one-shot delivery self-test (notifySelfTest). Separate
+ *  from DEBUG so dev builds don't buzz a test notification on every launch. */
+const SELFTEST_KEY = "chama_notify_selftest";
+
+function notifyDebugEnabled(): boolean {
+  try {
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) return true;
+  } catch { /* non-Vite host (test runner) — fall through */ }
+  try {
+    return globalThis.localStorage?.getItem(DEBUG_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Log a diagnostic line when notify-debug is on. Takes a thunk so the message
+ *  is never built when disabled. Never throws. */
+function notifyDebug(msg: () => string): void {
+  if (!notifyDebugEnabled()) return;
+  try { console.info(`[chama/notify] ${msg()}`); } catch { /* ignore */ }
+}
+
 // ── Preference (default ON — the OS permission is the real gate) ─────────────
 
 export function notificationsEnabled(): boolean {
@@ -101,6 +142,87 @@ function recordFiredTag(tag: string): void {
   }
 }
 
+// ── Last-seen status (persisted, for cold-start catch-up) ────────────────────
+//
+// The transition core only buzzes on an OBSERVED prev→next change, and `prev`
+// is the IN-MEMORY prior state. That's right for a live session and for a
+// backgrounded-but-alive app (resume reconnects, prev is retained → the missed
+// moment fires). But a KILLED app (GrapheneOS kills aggressively) cold-starts
+// with an empty escrow map: the first observation has prev=undefined, so a
+// transition that advanced while the app was dead is silently suppressed.
+//
+// Only trade *ids* are persisted (not state), so we keep a tiny per-trade
+// last-seen status here. On a cold first-observation we feed it back as a
+// synthesized prev (catchUpPrev) so the missed transition buzzes once — the
+// fired-tag dedup still prevents repeats. A fresh install / wiped store has no
+// record, so cold-replay of historical trades stays silent (no spam).
+const SEEN_KEY = "chama_notif_seen_status_v1";
+/** Cap the seen-status map so it can't grow unbounded over a lifetime. */
+const MAX_SEEN_TRADES = 500;
+
+function readSeenStatuses(): Record<string, string> {
+  try {
+    const raw = globalThis.localStorage?.getItem(SEEN_KEY);
+    const obj = raw ? (JSON.parse(raw) as unknown) : {};
+    return obj && typeof obj === "object" && !Array.isArray(obj)
+      ? (obj as Record<string, string>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The status this trade was last observed at in any prior session, or null. */
+export function readSeenStatus(escrowId: string): string | null {
+  const v = readSeenStatuses()[escrowId];
+  return typeof v === "string" ? v : null;
+}
+
+/** Record the latest observed status for a trade. No-op when unchanged (avoids
+ *  storage churn); trims to the most-recent MAX_SEEN_TRADES. Never throws. */
+export function recordSeenStatus(escrowId: string, status: string): void {
+  try {
+    const all = readSeenStatuses();
+    if (all[escrowId] === status) return;
+    delete all[escrowId];       // re-insert at the end so key order ≈ recency
+    all[escrowId] = status;
+    const keys = Object.keys(all);
+    let next = all;
+    if (keys.length > MAX_SEEN_TRADES) {
+      next = {};
+      for (const k of keys.slice(-MAX_SEEN_TRADES)) next[k] = all[k];
+    }
+    globalThis.localStorage?.setItem(SEEN_KEY, JSON.stringify(next));
+  } catch {
+    /* diagnostic baseline only; ignore storage failure */
+  }
+}
+
+/**
+ * Pick the `prev` to compare a transition against — pure, so the cold-start
+ * catch-up rule is exhaustively testable. A live in-memory `prev` always wins.
+ * Otherwise, if a prior session recorded an EARLIER status for this trade,
+ * synthesize a prev pinned at that status so a transition that advanced while
+ * the app was dead is detected. No prior record (fresh install / never seen) ⇒
+ * return undefined so cold-replay of historical trades stays silent.
+ *
+ * Note: vote-based transitions (a dispute opening) can't be reconstructed from
+ * a status alone, so a dispute that opened while the app was dead won't buzz on
+ * cold start — the arbiter still sees it in-app. Status-based moments (locked,
+ * claim-ready, completed, expired) all catch up correctly.
+ */
+export function catchUpPrev(
+  prev: EscrowState | null | undefined,
+  next: EscrowState,
+  seenStatus: string | null | undefined,
+): EscrowState | null | undefined {
+  if (prev) return prev;
+  if (seenStatus && seenStatus !== next.status) {
+    return { ...next, status: seenStatus as EscrowState["status"] };
+  }
+  return undefined;
+}
+
 // ── Permission ───────────────────────────────────────────────────────────────
 
 /** Request/confirm OS notification permission for the current platform.
@@ -134,6 +256,7 @@ export async function ensureNotificationPermission(): Promise<boolean> {
 // ── Delivery ─────────────────────────────────────────────────────────────────
 
 async function deliver(n: TradeNotification): Promise<void> {
+  notifyDebug(() => `deliver tag=${n.tag} platform=${platformName()}`);
   try {
     if (isCapacitorNative()) {
       const { LocalNotifications } = await import("@capacitor/local-notifications");
@@ -146,13 +269,36 @@ async function deliver(n: TradeNotification): Promise<void> {
           extra: { escrowId: n.escrowId },
         }],
       });
+      notifyDebug(() => `capacitor scheduled tag=${n.tag}`);
       return;
     }
     if (isTauriNative()) {
-      const mod = await import("@tauri-apps/plugin-notification");
       // `extra` rides the notification so onAction (deep-link.ts) can route the
-      // tap to this trade on desktop — the Nairobi demo surface.
-      mod.sendNotification({ title: n.title, body: n.body, extra: { escrowId: n.escrowId } });
+      // tap to this trade on desktop. NOTE: `extra` IS a valid field in
+      // plugin-notification 2.x (NotificationData.extra) — it is accepted, not
+      // the cause of any silence.
+      //
+      // We post via the plugin's own IPC command rather than its void
+      // `sendNotification` so we can AWAIT the result and surface a
+      // capability/registration/serialize failure (otherwise swallowed). A
+      // resolved IPC with no visible buzz on macOS means the gate is the OS
+      // layer (dev → "Terminal"; unsigned prod → dropped), NOT the app.
+      const opts = { title: n.title, body: n.body, extra: { escrowId: n.escrowId } };
+      const internals = (globalThis as {
+        __TAURI_INTERNALS__?: { invoke?: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      try {
+        if (internals?.invoke) {
+          await internals.invoke("plugin:notification|notify", { options: opts });
+        } else {
+          // Older/global-less context: fall back to the public (void) API.
+          const mod = await import("@tauri-apps/plugin-notification");
+          mod.sendNotification(opts);
+        }
+        notifyDebug(() => `tauri notify IPC ok tag=${n.tag} — if no buzz appears, it's the macOS app identity/signing layer (dev posts as "Terminal"), not the app`);
+      } catch (e) {
+        console.warn("[chama/notify] tauri notify IPC failed", e);
+      }
       return;
     }
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
@@ -190,15 +336,33 @@ export function maybeNotifyTransition(
   next: EscrowState,
   userPubkey: string | null | undefined,
 ): void {
+  // Record the observed status FIRST — independent of the enable toggle and of
+  // whether anything buzzes — so a future cold start has a baseline to detect a
+  // transition that advanced while the app was dead. Capture the prior record
+  // BEFORE overwriting it.
+  const seenBefore = readSeenStatus(next.id);
+  recordSeenStatus(next.id, next.status);
+
   if (!notificationsEnabled()) return;
-  const n = notificationForTransition(prev, next, userPubkey);
+
+  // Cold-start catch-up: a killed app re-observes trades with prev=undefined;
+  // synthesize a prev from the persisted last-seen status so the missed moment
+  // still fires once (dedup below guards repeats; fresh installs stay silent).
+  const effectivePrev = catchUpPrev(prev, next, seenBefore);
+  const coldCatchup = !prev && effectivePrev !== undefined;
+
+  const n = notificationForTransition(effectivePrev, next, userPubkey);
   if (!n) return;
-  if (readFiredTags().has(n.tag)) return;
+  if (readFiredTags().has(n.tag)) {
+    notifyDebug(() => `skip (already fired) tag=${n.tag}`);
+    return;
+  }
   // Reserve the tag synchronously so a burst of replays can't double-fire while
   // the async permission/delivery is in flight.
   recordFiredTag(n.tag);
   void (async () => {
     const allowed = await ensureNotificationPermission();
+    notifyDebug(() => `fire tag=${n.tag} platform=${platformName()} permission=${allowed} coldCatchup=${coldCatchup}`);
     if (allowed) await deliver(n);
   })();
 }
@@ -223,6 +387,36 @@ export function maybeNotifyChatMessage(
   if (!n) return;
   void (async () => {
     const allowed = await ensureNotificationPermission();
+    notifyDebug(() => `fire chat tag=${n.tag} platform=${platformName()} permission=${allowed}`);
     if (allowed) await deliver(n);
   })();
+}
+
+// ── Delivery self-test (opt-in; the on-device "is the OS layer alive?" probe) ─
+
+/**
+ * Fire ONE known-good notification through the real platform delivery path and
+ * log each step. No-op unless localStorage chama_notify_selftest=1 — gated
+ * separately from notify-debug so dev builds don't buzz on every launch. Call
+ * once at startup: on Tauri/APK the visible buzz (or its absence + the logs)
+ * tells you whether the OS layer delivers at all on this build, independent of
+ * any trade transition firing. Fully fire-and-forget; never throws.
+ */
+export async function notifySelfTest(): Promise<void> {
+  try {
+    if (globalThis.localStorage?.getItem(SELFTEST_KEY) !== "1") return;
+  } catch {
+    return;
+  }
+  const n: TradeNotification = {
+    escrowId: "sm_selftest",
+    title: "Chama notifications OK",
+    body: "If you can see this, OS notification delivery works on this build.",
+    tag: "selftest",
+  };
+  notifyDebug(() => `self-test start platform=${platformName()}`);
+  const allowed = await ensureNotificationPermission();
+  notifyDebug(() => `self-test permission=${allowed} platform=${platformName()}`);
+  if (allowed) await deliver(n);
+  notifyDebug(() => `self-test done allowed=${allowed} — no buzz on Tauri/macOS ⇒ dev posts as "Terminal" / unsigned prod is dropped (not an app bug)`);
 }

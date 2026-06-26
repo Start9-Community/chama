@@ -1968,3 +1968,77 @@ over-fired on the common case.
 - Fund-SAFE: spent notes can't double-spend; archive-not-delete preserves the recovery path.
 
 **Status:** Briefed, in progress (uncommitted), pre-launch.
+
+---
+
+## 2026-06-26 — US fiat off-ramp = pay a fiat-converting Lightning Address (Strike flagship)
+
+**Context:** Tando proved the cleanest possible off-ramp for Kenya — a Lightning
+Address (`<msisdn>@bitcoin.co.ke`) that settles to KES in M-Pesa, non-custodial,
+riding Chama's existing LUD-16 payout path (`resolveLightningAddressToInvoice`,
+`tando-offramp.ts`). Open question: can the US have an equivalent without Chama
+becoming a money transmitter? It can. A **Strike username is a LUD-16 Lightning
+Address** (`username@strike.me`), and Strike's per-user **default receive currency
+= Cash** setting auto-converts inbound Lightning to **USD** in the recipient's
+Strike balance (withdrawable to a US bank by ACH). Verified against Strike's FAQ
+("delivered directly to your Strike account as either cash or bitcoin… change your
+default delivery method at any time") and licensing footer (Zap Solutions, Inc.,
+NMLS ID 1902919, NYDFS virtual-currency license). The captcha on the
+`strike.me/<user>` web page is irrelevant — we resolve the **Lightning Address via
+LNURL-pay** (Chama sets the amount), the call every wallet makes; the captcha only
+guards the human page.
+
+**Options considered:**
+- (a) **Build our own US fiat bridge** — a Chama-run bot/account that receives
+      Zelle/Cash App and releases ecash. Textbook unlicensed money transmission
+      (18 U.S.C. §1960: FinCEN MSB + ~50 state MTLs + KYC/AML), and the consumer
+      rails freeze the pattern on sight. Rejected.
+- (b) **Strike-for-Business API integration** — branded, programmatic,
+      revenue-share. Requires Chama to be an incorporated entity with a contract
+      + compliance flow-down. Against ethos (no corp) and unnecessary.
+- (c) **Pay a user-supplied, fiat-converting Lightning Address at claim.** Chama
+      stays a coordinator (BOLT11-OUT at claim, per 2026-04-26); the licensed
+      third party does the fiat conversion entirely under the **user's own**
+      account + KYC + limits. Provider-agnostic; Strike is the flagship US
+      instance, Bitcoin Well and Cash App are drop-in siblings.
+
+**Decision:** (c). The US off-ramp is "pay a fiat-converting Lightning Address,"
+provider-agnostic, with **Strike as the flagship**. Same mechanism as Tando,
+generalized: a fiat-converting Lightning Address is a payout *destination*, never
+a redirect-swap and never a Chama-held balance.
+
+**Rationale:** Zero new custody and zero new money-transmission surface — it is
+literally the existing claim BOLT11-OUT, pointed at an address that happens to
+settle in USD. No incorporation, no API relationship, no KYC flow-down to Chama;
+eligibility/limits/identity live entirely with Strike and the user. Stays true to
+"coordinator, not wallet" and "payment methods are first-class extensible data."
+Provider-agnostic so Chama is never locked to one company — Strike, Bitcoin Well,
+and Cash App are interchangeable LUD-16 endpoints.
+
+**Implications:**
+- New module mirrors `tando-offramp.ts` but **lighter** — a Strike user's
+  `username@strike.me` is already a valid payout destination, so there's no
+  phone→address normalization. Mostly `isStrikeLightningAddress()`, an
+  `isUSPayoutContext()` analog to `isKenyaPayoutContext` (match the `us-usd` /
+  GBF "USA · USD" community family or USD currency), and UX glue. Saved in the
+  shared payout-destinations store like any LN Address.
+- **The user must set Strike receive currency to Cash themselves** — Chama can't
+  set it. Flow = save your Strike Lightning Address as a payout destination + a
+  one-time "flip Strike to receive Cash (USD)" hint. Left on Bitcoin, they
+  receive sats (fine, just not an off-ramp).
+- Chama sends **sats**; the USD amount and any spread are Strike's at receipt.
+  UI shows "≈ $X at Strike's rate," never a guarantee.
+- Rides the same Lightning **gateway pay path** as claim payout (the #9 family) —
+  works wherever the fed has a reachable LN gateway. No new infra. Sidesteps the
+  Tauri `window.open` opener bug (#16) for the pay path (an address paste is a
+  Lightning destination, not a redirect); only an optional "open Strike to sign
+  up" link would hit it.
+- **Availability caveat:** Strike is not in every US state / country and has its
+  own limits; the registry entry should carry availability metadata and degrade
+  gracefully (paste-invoice / other providers).
+- Independent of `EXTERNAL_SWAPS_ENABLED` (Tando precedent) — fiat-converting
+  LN-address off-ramps ride the always-available payout path.
+
+**Status:** Decided (2026-06-26, uncommitted). Implementation tracked in BACKLOG
+("US fiat off-ramp via a fiat-converting Lightning Address"). Not gated on 4.1;
+sequence after it.
