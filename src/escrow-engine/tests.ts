@@ -288,6 +288,25 @@ import {
   tandoMsisdnFromAddress,
   isKenyaPayoutContext,
 } from "../payments/tando-offramp.js";
+import {
+  STRIKE_LNADDRESS_DOMAIN,
+  STRIKE_CASH_HINT,
+  normalizeStrikeUsername,
+  isValidStrikeUsername,
+  buildStrikeLightningAddress,
+  isStrikeLightningAddress,
+  strikeUsernameFromAddress,
+  isUSPayoutContext,
+} from "../payments/strike-offramp.js";
+import {
+  HOUR_SECONDS,
+  DAY_SECONDS,
+  FALLBACK_EXPIRY,
+  expiryBoundsForCategory,
+  defaultExpiryForCategory,
+  clampExpiryForCategory,
+  isExtendedExpiry,
+} from "./trade-durations.js";
 
 // v0.3.0 Phase 1 — LNURL + DestinationPicker logic
 import {
@@ -6560,6 +6579,61 @@ console.log("\n── COMMUNITY-PILL TAP EFFECT ──");
   });
   assert(listingNoCommitment.kind === "switch-silent",
     "Zero commitments → foreign-listing tap switch-silent unchanged");
+
+  // ── v4.1 D: cross-chama continuation (narrowed switch-away guard) ──
+  // The block must key on commitments switching AWAY would STRAND — live
+  // trades on a fed OTHER than the target. `activeCommitmentCountElsewhere`,
+  // when supplied, is authoritative; omitted, the legacy fed-agnostic count
+  // still applies (so the live call site is unchanged until wired).
+
+  // LOAD-BEARING SAFETY INVARIANT: you can NEVER switch away from a fed that
+  // holds a live trade. A commitment on another fed (Elsewhere=1) blocks the
+  // foreign-listing tap even though the target fed itself has none.
+  const blockedAwayFromLiveTrade = decideListingTapEffect({
+    listing: { mintUrl: "", community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+    activeCommitmentCount: 1,
+    activeCommitmentCountElsewhere: 1,
+  });
+  assert(blockedAwayFromLiveTrade.kind === "blocked-active-commitment",
+    "SAFETY: a live trade on another fed still blocks switching away (away-block holds)");
+
+  // CONTINUATION: the user's only live trade is on the TARGET fed (the one
+  // they're switching toward to continue it). Nothing would be stranded, so
+  // the tap is allowed — switch-silent at zero balance.
+  const continueOwnTradeOnTarget = decideListingTapEffect({
+    listing: { mintUrl: "", community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+    activeCommitmentCount: 1,          // 1 live trade total…
+    activeCommitmentCountElsewhere: 0, // …but it's on the target fed, not elsewhere
+  });
+  assert(continueOwnTradeOnTarget.kind === "switch-silent",
+    "CONTINUATION: switching toward the fed that holds your own live trade is allowed");
+
+  // Elsewhere>0 with a non-zero balance is still blocked outright (the block
+  // precedes the destroy-confirm branch — stranding a live trade outranks dust).
+  const blockedEvenWithBalance = decideListingTapEffect({
+    listing: { mintUrl: "", community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 5_000_000,
+    activeCommitmentCount: 2,
+    activeCommitmentCountElsewhere: 2,
+  });
+  assert(blockedEvenWithBalance.kind === "blocked-active-commitment",
+    "SAFETY: away-block outranks the balance destroy-confirm branch");
+
+  // BACK-COMPAT: a legacy caller that omits Elsewhere keeps the exact old
+  // behavior — any commitment blocks (no silent relaxation of the live path).
+  const legacyCallerUnchanged = decideListingTapEffect({
+    listing: { mintUrl: "", community: "us-blf" },
+    currentInvite: BP_FEDERATION_INVITE,
+    balanceMsats: 0,
+    activeCommitmentCount: 1, // no Elsewhere field → legacy fed-agnostic block
+  });
+  assert(legacyCallerUnchanged.kind === "blocked-active-commitment",
+    "BACK-COMPAT: omitting activeCommitmentCountElsewhere preserves the legacy block");
 
   // Custom-invite override is bypassed — community-tap honors the
   // community's pinned invite even if a custom override is set elsewhere.
@@ -14581,6 +14655,144 @@ console.log("\n── TANDO NATIVE M-PESA OFFRAMP ──");
     "Non-Kenya context is not eligible for Tando");
   assert(!isKenyaPayoutContext({}),
     "Empty context is not eligible for Tando");
+}
+
+// Strike is the US mirror of Tando: `<username>@strike.me` is a real LUD-16
+// Lightning Address, so the claim flow pays it through the same payout path,
+// converting sats→USD inside the user's own Strike account (no Chama custody).
+// These tests cover the pure username↔address layer (strike-offramp.ts).
+console.log("\n── STRIKE US-DOLLAR OFFRAMP ──");
+{
+  assert(STRIKE_LNADDRESS_DOMAIN === "strike.me",
+    "Strike Lightning-Address host is strike.me");
+  assert(typeof STRIKE_CASH_HINT === "string" && /cash/i.test(STRIKE_CASH_HINT),
+    "Strike cash hint mentions the Cash (USD) receive setting");
+
+  // Username normalization accepts the common input shapes, lowercased.
+  assert(normalizeStrikeUsername("alice") === "alice",
+    "Bare username passes through (lowercased)");
+  assert(normalizeStrikeUsername("@Alice") === "alice",
+    "Leading @ and uppercase are normalized");
+  assert(normalizeStrikeUsername("alice@strike.me") === "alice",
+    "Full Lightning Address yields the local part");
+  assert(normalizeStrikeUsername("https://strike.me/alice") === "alice",
+    "Profile URL yields the handle (resolved via LNURL, never the page)");
+  assert(normalizeStrikeUsername("a.b_c-1") === "a.b_c-1",
+    "Dots, underscores and dashes are allowed inside the handle");
+
+  // Rejects malformed / foreign-host input.
+  assert(normalizeStrikeUsername("alice@getchama.app") === null,
+    "A non-strike.me host is rejected");
+  assert(normalizeStrikeUsername("a") === null,
+    "Single-char usernames are too short");
+  assert(normalizeStrikeUsername(".alice") === null,
+    "Username must start with an alphanumeric");
+  assert(normalizeStrikeUsername("alice@strike.me@x") === null,
+    "More than one @ is malformed");
+  assert(normalizeStrikeUsername("") === null && normalizeStrikeUsername("   ") === null,
+    "Empty / whitespace is rejected");
+  assert(isValidStrikeUsername("alice") && !isValidStrikeUsername("a"),
+    "isValidStrikeUsername mirrors normalize");
+
+  // Address building + round-trip.
+  assert(buildStrikeLightningAddress("Alice") === "alice@strike.me",
+    "buildStrikeLightningAddress forms <username>@strike.me (lowercased)");
+  assert(buildStrikeLightningAddress("a") === null,
+    "buildStrikeLightningAddress returns null for invalid input");
+  assert(isStrikeLightningAddress("alice@strike.me"),
+    "isStrikeLightningAddress recognizes Strike addresses");
+  assert(isStrikeLightningAddress("alice@STRIKE.ME"),
+    "isStrikeLightningAddress is case-insensitive");
+  assert(!isStrikeLightningAddress("254712345678@bitcoin.co.ke"),
+    "isStrikeLightningAddress rejects non-Strike addresses");
+  assert(strikeUsernameFromAddress("alice@strike.me") === "alice",
+    "strikeUsernameFromAddress recovers the username");
+  assert(strikeUsernameFromAddress("alice@getchama.app") === null,
+    "strikeUsernameFromAddress returns null for non-Strike addresses");
+
+  // The Strike address must survive the payout-destinations normalizer
+  // (lowercased) so dedupe works and isStrikeLightningAddress still matches.
+  const strikeAddr = buildStrikeLightningAddress("Alice")!;
+  assert(strikeAddr === strikeAddr.toLowerCase() && isStrikeLightningAddress(strikeAddr),
+    "Strike address is already lowercase and stays recognizable when stored");
+
+  // US context detection — gates the native Strike option (independent of
+  // EXTERNAL_SWAPS_ENABLED), and a Strike address is NOT a Kenya context.
+  assert(isUSPayoutContext({ tradeCommunity: "us-gbf" }),
+    "us-gbf trade community is a US payout context");
+  assert(isUSPayoutContext({ homeCommunity: "us-usd" }),
+    "us-usd home community is a US payout context");
+  assert(isUSPayoutContext({ fiatCurrency: "usd" }),
+    "USD fiat currency (any case) is a US payout context");
+  assert(!isUSPayoutContext({ tradeCommunity: "ke-kes", fiatCurrency: "KES" }),
+    "A Kenya context is not a US payout context");
+  assert(!isUSPayoutContext({}),
+    "Empty context is not eligible for Strike");
+  // Cross-check the two offramps don't claim each other's addresses.
+  assert(!isTandoLightningAddress("alice@strike.me") && !isStrikeLightningAddress("254712345678@bitcoin.co.ke"),
+    "Tando and Strike address detectors are mutually exclusive");
+}
+
+// Per-category trade durations (v4.1 D, UNWIRED — pure CREATE-side expiry
+// policy). The only consensus rule is expirySeconds > 0; these bounds only
+// constrain what a fresh CREATE stamps, never what a client accepts off-wire.
+console.log("\n── TRADE DURATIONS (per-category expiry) ──");
+{
+  // LOCKED defaults: Exchange 3h · CBP 3h · Marketplace 1 day · Lending 7-day cap.
+  assert(defaultExpiryForCategory("p2p-trade") === 3 * HOUR_SECONDS,
+    "Exchange defaults to 3h");
+  assert(defaultExpiryForCategory("bill-pay") === 3 * HOUR_SECONDS,
+    "CBP defaults to 3h");
+  assert(defaultExpiryForCategory("marketplace") === 1 * DAY_SECONDS,
+    "Marketplace defaults to 1 day");
+  assert(defaultExpiryForCategory("lending") === 7 * DAY_SECONDS,
+    "Lending defaults to 7 days (the cap)");
+
+  // CONSENSUS FLOOR: every bound is > 0, and min ≤ default ≤ max for all
+  // known categories + the fallback.
+  const allBounds = [
+    expiryBoundsForCategory("p2p-trade"),
+    expiryBoundsForCategory("bill-pay"),
+    expiryBoundsForCategory("marketplace"),
+    expiryBoundsForCategory("lending"),
+    FALLBACK_EXPIRY,
+  ];
+  assert(allBounds.every(b => b.min > 0 && b.min <= b.default && b.default <= b.max),
+    "SAFETY: every category satisfies 0 < min ≤ default ≤ max (consensus floor holds)");
+
+  // Lending's 7-day cap is a hard ceiling.
+  assert(expiryBoundsForCategory("lending").max === 7 * DAY_SECONDS,
+    "Lending max is the 7-day cap");
+
+  // Clamp enforces the per-category window.
+  assert(clampExpiryForCategory("p2p-trade", 10) === 1 * HOUR_SECONDS,
+    "Below-min Exchange expiry clamps up to the 1h floor");
+  assert(clampExpiryForCategory("p2p-trade", 99 * DAY_SECONDS) === 12 * HOUR_SECONDS,
+    "Above-max Exchange expiry clamps down to the 12h ceiling");
+  assert(clampExpiryForCategory("lending", 30 * DAY_SECONDS) === 7 * DAY_SECONDS,
+    "A 30-day lending term clamps down to the 7-day cap");
+  assert(clampExpiryForCategory("marketplace", 2 * DAY_SECONDS) === 2 * DAY_SECONDS,
+    "An in-range Marketplace expiry passes through unchanged");
+
+  // Non-finite / non-positive falls back to the category default (never ≤ 0).
+  assert(clampExpiryForCategory("p2p-trade", 0) === 3 * HOUR_SECONDS &&
+         clampExpiryForCategory("p2p-trade", -5) === 3 * HOUR_SECONDS &&
+         clampExpiryForCategory("p2p-trade", NaN) === 3 * HOUR_SECONDS,
+    "SAFETY: invalid expiry input falls back to the category default, never ≤ 0");
+
+  // Unknown / legacy category → the generous fallback window (24h default),
+  // so an off-registry vertical is never rejected or over-constrained.
+  assert(defaultExpiryForCategory("some-future-vertical") === 1 * DAY_SECONDS &&
+         defaultExpiryForCategory(undefined) === 1 * DAY_SECONDS,
+    "Unknown / missing category uses the legacy 24h fallback default");
+  assert(clampExpiryForCategory("some-future-vertical", 5 * DAY_SECONDS) === 5 * DAY_SECONDS,
+    "Fallback window admits up to its 7-day max");
+
+  // Extension detection drives the "longer window" tradeoff copy on Create.
+  assert(isExtendedExpiry("p2p-trade", 6 * HOUR_SECONDS) === true,
+    "6h on a 3h-default Exchange reads as an extension");
+  assert(isExtendedExpiry("p2p-trade", 3 * HOUR_SECONDS) === false,
+    "Exactly the default is not an extension");
 }
 
 // ── SIM WALLET — balance subscription end-to-end ─────────────────────────

@@ -9,9 +9,22 @@
 // (hanging-indent) list, and opening one answer makes it the hero — everything
 // else recedes (dim + a light blur) until the user collapses it.
 
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode, type MouseEvent } from "react";
 import { T } from "../theme.js";
 import { FAQ_INTRO, FAQ_SECTIONS, FAQ_GLOSSARY, FAQ_HELP, type FaqItem } from "../content/faq.js";
+import { isTauriRuntime } from "../sign-in-environment.js";
+import { openExternalUrl } from "../open-url.js";
+
+// v4.1 B (#16): under Tauri an `<a target="_blank">` is a silent no-op, so the
+// footer links were dead on desktop/APK. Keep the anchor (browser middle-click /
+// copy stay intact) but intercept the click in the Tauri webview and hand the
+// URL to the OS opener instead. These are Chama's own trusted URLs.
+function openHelpLink(e: MouseEvent<HTMLAnchorElement>, url: string): void {
+  if (isTauriRuntime()) {
+    e.preventDefault();
+    void openExternalUrl(url);
+  }
+}
 
 export function HelpScreen({ onBack }: { onBack: () => void }) {
   const [open, setOpen] = useState<string | null>(null);
@@ -168,9 +181,9 @@ export function HelpScreen({ onBack }: { onBack: () => void }) {
           Still need a hand?
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
-          <a href={`https://${FAQ_HELP.app}`} target="_blank" rel="noopener noreferrer" style={linkChip}>🌐 {FAQ_HELP.app}</a>
-          <a href={FAQ_HELP.zapstore} target="_blank" rel="noopener noreferrer" style={linkChip}>📦 Zapstore</a>
-          <a href={FAQ_HELP.njump} target="_blank" rel="noopener noreferrer" style={linkChip}>⚡ Follow on Nostr</a>
+          <a href={`https://${FAQ_HELP.app}`} target="_blank" rel="noopener noreferrer" onClick={(e) => openHelpLink(e, `https://${FAQ_HELP.app}`)} style={linkChip}>🌐 {FAQ_HELP.app}</a>
+          <a href={FAQ_HELP.zapstore} target="_blank" rel="noopener noreferrer" onClick={(e) => openHelpLink(e, FAQ_HELP.zapstore)} style={linkChip}>📦 Zapstore</a>
+          <a href={FAQ_HELP.njump} target="_blank" rel="noopener noreferrer" onClick={(e) => openHelpLink(e, FAQ_HELP.njump)} style={linkChip}>⚡ Follow on Nostr</a>
         </div>
         <div style={{ fontFamily: T.sans, fontSize: 11, color: T.muted, marginTop: 12, lineHeight: 1.5 }}>
           Trade with your community. Trust the math, not a middleman. ⚡🌍

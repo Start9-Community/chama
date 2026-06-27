@@ -72,6 +72,7 @@ import {
 import { Toast } from "./components/Toast.js";
 import { BitcoinAmount } from "./components/BitcoinAmount.js";
 import { BottomNav, BOTTOM_NAV_HEIGHT, type Tab } from "./components/BottomNav.js";
+import { CoachMarkTour, readCoachSeen, type CoachStep } from "./components/CoachMarkTour.js";
 import { BrowserSupportBanner } from "./components/BrowserSupportBanner.js";
 import { ActiveTradePill } from "./components/ActiveTradePill.js";
 import { BitcoinPricePill } from "./components/BitcoinPricePill.js";
@@ -174,6 +175,37 @@ const TAB_FOR_VIEW: Record<View, Tab> = {
   advanced: "me",
   help: "me",
 };
+
+// v4.1 C1: the one-time post-sign-in coach-mark tour over the home screen's
+// reachable surfaces (3 bottom-nav tabs + the 2 floating action buttons), so a
+// newcomer sees what they can do instead of being glued to the picker.
+const COACH_STEPS: CoachStep[] = [
+  {
+    selector: '[data-coach="nav-browse"]',
+    title: "Browse the marketplace",
+    body: "Every trade your community has posted lives here. Tap a listing to see the deal and chat with the other side.",
+  },
+  {
+    selector: '[data-coach="fab-create"]',
+    title: "Start your own trade",
+    body: "This ✎ button is always one tap away — swap cash for sats, pay a bill, sell something, or lend.",
+  },
+  {
+    selector: '[data-coach="fab-arbiter"]',
+    title: "Lead your community",
+    body: "Want to help settle disputes and earn the fee? Apply to become a community arbiter here — no rush, build it up as you trade.",
+  },
+  {
+    selector: '[data-coach="nav-create"]',
+    title: "…or create from the tab bar",
+    body: "Same new-trade flow as the ✎ button, right in the bottom bar when you need it.",
+  },
+  {
+    selector: '[data-coach="nav-me"]',
+    title: "Your space",
+    body: "Your wallet, active trades, ratings, payout methods, and settings all live under Me.",
+  },
+];
 
 type GivenRatingSlot = {
   tradeId: string;
@@ -392,6 +424,11 @@ export default function App() {
   });
 
   const [view, setView] = useState<View>("browse");
+  // v4.1 C1 coach-mark tour: shown once after the user's first sign-in, on the
+  // Browse home screen (where the FABs are mounted). `coachReady` adds a short
+  // settle delay so the bottom-nav + FAB layout has painted before we measure.
+  const [coachSeen, setCoachSeen] = useState<boolean>(() => readCoachSeen());
+  const [coachReady, setCoachReady] = useState(false);
   // v3.2: the create flow opens as one shared overlay. The Browse pencil and
   // the old bottom-nav Create slot both hit this same path for now.
   const [createOverlayOpen, setCreateOverlayOpen] = useState(false);
@@ -614,6 +651,14 @@ export default function App() {
     if (!connected || !browseCommunity) return;
     actions.refreshCommunityRoster(browseCommunity).catch(() => {});
   }, [connected, browseCommunity]);
+  // v4.1 C1: arm the coach-mark tour a beat after first sign-in, once the home
+  // screen has painted (so the nav + FABs are measurable). Skips entirely for
+  // returning users (coachSeen).
+  useEffect(() => {
+    if (!connected || coachSeen) return;
+    const t = setTimeout(() => setCoachReady(true), 600);
+    return () => clearTimeout(t);
+  }, [connected, coachSeen]);
   // Browser-support banner state lives in a dedicated hook so the
   // per-pubkey scoping (Bug E from v0.1.85 smoke testing) stays
   // testable in isolation and App.tsx stays an orchestrator.
@@ -2676,6 +2721,15 @@ export default function App() {
       )}
 
       {!detailMode && <BottomNav active={createOverlayOpen ? "create" : activeTab} onSelect={switchTab} />}
+
+      {/* v4.1 C1: one-time post-sign-in tour. Only on the Browse home screen
+          (FABs mounted), never over the create sheet or a detail view. */}
+      {coachReady && !coachSeen && !detailMode && !createOverlayOpen && view === "browse" && (
+        <CoachMarkTour
+          steps={COACH_STEPS}
+          onDone={() => { setCoachSeen(true); setCoachReady(false); }}
+        />
+      )}
 
       {/* v3.2: the create flow opens from either the Browse floating-menu pencil
           or the old bottom-nav Create slot. CreateForm is self-contained (its own header /

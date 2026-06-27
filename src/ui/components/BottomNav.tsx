@@ -37,6 +37,7 @@ export function BottomNav({ active, onSelect }: {
             <button
               key={item.id}
               onClick={() => onSelect(item.id)}
+              data-coach={`nav-${item.id}`}
               style={{
                 flex: 1, padding: "10px 4px",
                 background: "none", border: "none",

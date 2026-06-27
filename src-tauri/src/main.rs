@@ -407,6 +407,11 @@ fn main() {
         // #88 desktop notifications: trade-event buzzes (counterparty locked,
         // claim ready, a dispute needs the arbiter, settled/timed out).
         .plugin(tauri_plugin_notification::init())
+        // v4.1 #16: open external URLs via the OS. In the WebView `window.open`
+        // is a silent no-op, so every redirect offramp + the Help links were
+        // dead on desktop/APK. The frontend routes them through this plugin
+        // (see src/ui/open-url.ts); scope is opener:allow-open-url.
+        .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             start_bridge_sidecar(app, &bridge_runtime)?;
             Ok(())

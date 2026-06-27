@@ -155,6 +155,7 @@ export function BrowseView({
         {/* arbiter recruitment (secondary) */}
         <button
           type="button" onClick={() => setShowRecruit(s => !s)}
+          data-coach="fab-arbiter"
           title="Become a community arbiter" aria-label="Arbiter recruitment"
           style={{
             width: 50, height: 50, borderRadius: "50%", flexShrink: 0,
@@ -174,6 +175,7 @@ export function BrowseView({
         {/* create a trade (primary) */}
         <button
           type="button" onClick={onCreate}
+          data-coach="fab-create"
           title="Create a trade" aria-label="Create a trade"
           style={{
             width: 58, height: 58, borderRadius: "50%", flexShrink: 0,

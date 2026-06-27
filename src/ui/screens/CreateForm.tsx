@@ -80,11 +80,13 @@ type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
 type ListingMode = "single" | "menu";
 
-const VERTICALS: { id: Vertical; label: string; icon: string; description: string }[] = [
+const VERTICALS: { id: Vertical; label: string; icon: string; description: string; comingSoon?: boolean }[] = [
   { id: "p2p-trade", label: "Exchange", icon: "⚡", description: "Swap sats for fiat with another user." },
   { id: "bill-pay", label: "Community Bill Pay", icon: "🧾", description: "Pay a bill in exchange for sats." },
   { id: "marketplace", label: "Marketplace", icon: "🏪", description: "Sell goods, services, or digital items." },
-  { id: "lending", label: "Lending", icon: "🤝", description: "Lend sats with repayment terms." },
+  // v4.1 D: lending's repayment flow isn't wired yet — show it so people know
+  // it's coming, but it isn't creatable. Flip `comingSoon` off when it lands.
+  { id: "lending", label: "Lending", icon: "🤝", description: "Lend sats with repayment terms.", comingSoon: true },
 ];
 
 interface FormState {
@@ -1507,20 +1509,33 @@ function Step1({
       }}>
         {VERTICALS.map(v => {
           const active = vertical === v.id;
+          const soon = !!v.comingSoon;
           return (
             <button
               key={v.id}
-              onClick={() => setVertical(v.id)}
+              type="button"
+              disabled={soon}
+              onClick={() => { if (!soon) setVertical(v.id); }}
               style={{
                 display: "flex", flexDirection: "column", alignItems: "flex-start",
                 gap: 6, padding: "16px 14px",
                 background: active ? T.accentDim : T.surface,
                 border: `1px solid ${active ? T.accent + "66" : T.border}`,
-                borderRadius: T.r, cursor: "pointer",
+                borderRadius: T.r, cursor: soon ? "not-allowed" : "pointer",
                 textAlign: "left" as const, transition: "all 0.15s",
+                opacity: soon ? 0.6 : 1,
               }}
             >
-              <span style={{ fontSize: 22 }}>{v.icon}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 7, width: "100%" }}>
+                <span style={{ fontSize: 22 }}>{v.icon}</span>
+                {soon && (
+                  <span style={{
+                    marginLeft: "auto", fontSize: 8, fontWeight: 800, letterSpacing: 0.5,
+                    color: T.amber, background: `${T.amber}22`,
+                    padding: "1px 5px", borderRadius: 999,
+                  }}>SOON</span>
+                )}
+              </span>
               <span style={{
                 fontSize: 13, fontWeight: 700, color: active ? T.accent : T.text,
                 fontFamily: T.sans,

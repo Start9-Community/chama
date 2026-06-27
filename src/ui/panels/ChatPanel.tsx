@@ -250,10 +250,13 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // Auto-scroll to bottom when new messages or attachments arrive
+  // Auto-scroll to bottom when new messages or attachments arrive — and (A) when the
+  // closing rating CTA appears. The COMPLETED transition adds no new message, so the
+  // length-keyed deps miss it and the CTA lands below the fold; key on its presence too.
+  const hasRatingCta = Boolean(ratingCta);
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [state.chatMessages.length]);
+  }, [state.chatMessages.length, hasRatingCta]);
 
   const handleSend = async () => {
     const text = msg.trim();
@@ -422,12 +425,15 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
           // #17: glow the closing rating CTA so it reads as the next action now that
           // the chat is settled, not a buried trailing card.
           <div style={{
-            margin: "6px 2px 2px",
-            padding: "4px 10px 2px",
+            margin: "8px auto 4px",
+            maxWidth: 340,
+            width: "100%",
+            padding: "6px 14px 4px",
             borderRadius: T.r,
             background: `${T.green}10`,
             border: `1px solid ${T.green}44`,
             boxShadow: `0 0 0 3px ${T.green}14`,
+            textAlign: "center",
           }}>
             <RatingTap
               tradeId={ratingCta.tradeId}

@@ -26,6 +26,8 @@
 // new modal, no new code path. The ClaimPayoutModal picker reads this
 // registry and renders whichever entries match the trade context.
 
+import { openExternalUrl } from "../ui/open-url.js";
+
 export type ExternalSwapStatus = "enabled" | "coming-soon";
 
 export type ExternalSwapProviderId =
@@ -282,12 +284,14 @@ export function getExternalSwapsForContext(input: {
 }
 
 /**
- * Open the provider's swap URL in a new tab. Centralised so the
- * window.open guards live in one place — easy to noop in SSR or to
- * swap for a Capacitor browser plugin if the in-app browser becomes
- * a better UX than a system-handed-off tab.
+ * Open the provider's swap URL. Centralised so the new-tab guards live in one
+ * place. v4.1 B (#16): routes through `openExternalUrl`, which hands the URL to
+ * the OS opener under Tauri (where `window.open` is a silent no-op, leaving
+ * every redirect offramp dead on desktop/APK) and uses a normal new tab in the
+ * browser. The provider's `swapUrl` is a trusted registry value, safe to hand
+ * to the OS.
  */
 export function openExternalSwap(provider: ExternalSwapProvider): void {
   if (typeof window === "undefined") return;
-  window.open(provider.swapUrl, "_blank", "noopener,noreferrer");
+  void openExternalUrl(provider.swapUrl);
 }

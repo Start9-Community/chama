@@ -917,6 +917,16 @@ export interface ListingTapInputs {
    *  tap. A foreign-listing tap silently switches the wallet's fed, which
    *  must never happen out from under a live trade. Optional → 0. */
   activeCommitmentCount?: number;
+  /** v4.1 D (cross-chama continuation): active buyer/seller commitments on
+   *  feds OTHER than this listing's target fed. When provided, it — not the
+   *  fed-agnostic `activeCommitmentCount` — drives the switch-away block, so a
+   *  user can switch TOWARD the fed where their OWN live trade lives to
+   *  continue it (safe + necessary) while still being blocked from switching
+   *  AWAY from a fed that holds a live trade (the load-bearing invariant).
+   *  Omitted ⇒ falls back to `activeCommitmentCount` (legacy behavior — the
+   *  current call site does NOT pass this, so runtime is unchanged until the
+   *  wiring is reviewed). */
+  activeCommitmentCountElsewhere?: number;
 }
 
 function inviteForFederationId(fedId: string | null | undefined): string | null {
@@ -1007,11 +1017,19 @@ export function decideListingTapEffect(inputs: ListingTapInputs): ListingTapEffe
   // V3 #72 (same invariant as the community tap): a foreign-listing tap
   // dispatches a silent fed switch — never while a live trade needs the
   // user on the current fed. Matching listings above are unaffected.
-  if (inputs.currentInvite && (inputs.activeCommitmentCount ?? 0) > 0) {
+  //
+  // v4.1 D: the block is keyed on commitments that switching AWAY would
+  // strand — i.e. live trades on a fed OTHER than the target. When the caller
+  // supplies `activeCommitmentCountElsewhere` it is authoritative (so a user
+  // can switch TOWARD the fed holding their own live trade to continue it);
+  // otherwise we fall back to the fed-agnostic count (unchanged legacy guard).
+  const blockingCommitmentCount =
+    inputs.activeCommitmentCountElsewhere ?? inputs.activeCommitmentCount ?? 0;
+  if (inputs.currentInvite && blockingCommitmentCount > 0) {
     return {
       kind: "blocked-active-commitment",
       displayName,
-      activeCommitmentCount: inputs.activeCommitmentCount ?? 0,
+      activeCommitmentCount: blockingCommitmentCount,
     };
   }
   // Same material-balance dust line as decideCommunityTapEffect: dust never

@@ -70,11 +70,27 @@ export function ArbiterApplyForm({
           >×</button>
         )}
       </div>
+      {/* v4.1 C1 reframe: the arbiter on-ramp is the aspirational LEADER pitch,
+          self-selecting — recruiter voice up top, then an honest bond-ceremony
+          teaser (real custody lands with Phase 2A; today it's apply-and-build). */}
       <div style={{ fontSize: 11, color: T.muted, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 10 }}>
-        The neutral third key — you vote only when buyer and seller disagree, and
-        the dispute fee (1.5%, split-paid by both parties) is yours for the work.
-        Presence will be bonded; fairness is your public rating. The steward
-        reviews applications and signs the roster today.
+        <span style={{ color: T.text, fontWeight: 700 }}>
+          If you want to lead your community — or already do — this is your seat.
+        </span>{" "}
+        You're the neutral third key: you vote only when buyer and seller
+        disagree, and the dispute fee (1.5%, split-paid by both parties) is yours
+        for the work. Fairness is your public rating.
+        <div style={{
+          marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}`,
+          fontSize: 10.5, lineHeight: 1.5,
+        }}>
+          <span style={{ color: ROLE_COLOR.arbiter, fontWeight: 700 }}>What's coming:</span>{" "}
+          becoming a fully bonded arbiter will mean posting a small bond together
+          with two other trusted people you choose — <strong>not today</strong>.
+          For now, apply, keep trading, and build your reputation riding alongside
+          the founding arbiters. The steward reviews applications and signs the
+          roster.
+        </div>
       </div>
       <textarea
         value={statement}

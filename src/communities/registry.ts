@@ -415,7 +415,10 @@ export const COMMUNITY_REGISTRY: Community[] = [
   },
   // Sunset entry — kept alive so old listings carrying community: "sv-usd"
   // still resolve, but hidden from the curated picker until a community
-  // leader claims El Salvador.
+  // leader claims El Salvador. (Invite stays null → BP fallback on the wire,
+  // a deliberately-tested invariant; the optional v4.1 LatNet-repoint hygiene
+  // was dropped — sv-usd is hidden so the picker is unaffected, and a fresh SV
+  // tap already resolves to LatNet via the regional shell.)
   {
     slug: "sv-usd",
     displayName: "El Salvador · USD",
@@ -522,6 +525,32 @@ export const REAL_CHAMA_FEDERATION_INVITES: ReadonlySet<string> = new Set([
 export function isRealLocalChama(community: Community): boolean {
   return community.federationInvite !== null
     && REAL_CHAMA_FEDERATION_INVITES.has(community.federationInvite);
+}
+
+/** The G-Bot-class federations Jetty verified NATIVE end-to-end (see
+ *  NATIVE_VERIFIED_NOTE): lock/claim flawless on the Rust sidecar. A country
+ *  backed by one of these can really trade TODAY — the cabinet's global
+ *  arbiters back every escrow — even though it hasn't seated its own elected
+ *  LOCAL arbiters yet. This is the picker's NEW second green tier
+ *  ("✓ Available now"), distinct from the elected-local "⚡ Live now" tier
+ *  (isRealLocalChama, unchanged). The honest split is preserved: "available"
+ *  never claims a local Chama, it states the federation route works. */
+export const NATIVE_VERIFIED_FEDERATION_INVITES: ReadonlySet<string> = new Set([
+  GBF_FEDERATION_INVITE,
+  BLF_FEDERATION_INVITE,
+  OCA_FEDERATION_INVITE,
+  LATNET_FEDERATION_INVITE,
+]);
+
+/** True when `community` is backed by a native-verified G-Bot fed and is NOT
+ *  already a real local Chama — i.e. it earns the green "✓ Available now"
+ *  tier. The regional resolver routes effectively every country onto one of
+ *  these feds, so almost everywhere is "available"; only genuinely uncovered
+ *  shells (federationInvite === null, e.g. El Salvador) fall to "coming soon". */
+export function isNativeVerifiedChama(community: Community): boolean {
+  return community.federationInvite !== null
+    && !isRealLocalChama(community)
+    && NATIVE_VERIFIED_FEDERATION_INVITES.has(community.federationInvite);
 }
 
 // ══════════════════════════════════════════════════════════════════════════

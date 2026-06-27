@@ -21,6 +21,7 @@ import {
   defaultCountryChama,
   flagEmojiForCountry,
   getCommunitiesByCountry,
+  isNativeVerifiedChama,
   isRealLocalChama,
 } from "./registry.js";
 import { COUNTRY_CURRENCY, currencyForCountry } from "./country-currency.js";
@@ -53,6 +54,12 @@ export type PickerCountry = {
   /** Verified local Chamas (real arbiters) for this country: 0, 1, or many
    *  (Kenya → Afribit + Bitsacco). >0 ⇒ land directly / disambiguate. */
   realChamas: Community[];
+  /** ALL named registry chamas for this country — real-local AND
+   *  native-verified (US → GBF; Kenya → Afribit + Bitsacco) — excluding the
+   *  synthesized country shell. Drives the N-chama drill-down: ≥2 ⇒ show the
+   *  disambiguation picker (tier-tagged), regardless of which tier each is.
+   *  Empty ⇒ the country lands on its generated shell. */
+  chamas: Community[];
   /** What a press resolves to when there's no real Chama yet: the country's
    *  own flag + currency on its regional default federation. Prefers an
    *  existing registry slug (stable, e.g. tz-tzs); otherwise a generated
@@ -60,6 +67,12 @@ export type PickerCountry = {
    *  select, since its slug isn't in the pre-seed registry. */
   defaultCommunity: Community;
   isGeneratedShell: boolean;
+  /** The picker's green-tier split:
+   *   • "live"       — elected LOCAL arbiters (isRealLocalChama). ⚡ Live now.
+   *   • "available"  — backed by a native-verified G-Bot fed, no local
+   *                    arbiters yet. ✓ Available now (still green, honest).
+   *   • "comingSoon" — genuinely uncovered (no verified fed). Quiet, rare. */
+  availability: "live" | "available" | "comingSoon";
 };
 
 export function getAllPickerCountries(): PickerCountry[] {
@@ -74,14 +87,22 @@ export function getAllPickerCountries(): PickerCountry[] {
     const defaultCommunity =
       registryDefault ??
       defaultCountryChama({ country: code, name, currency, languages: [] });
+    const availability: PickerCountry["availability"] =
+      realChamas.length > 0
+        ? "live"
+        : isNativeVerifiedChama(defaultCommunity)
+          ? "available"
+          : "comingSoon";
     return {
       code,
       name,
       flag: flagEmojiForCountry(code),
       currency,
       realChamas,
+      chamas: all,
       defaultCommunity,
       isGeneratedShell: registryDefault === null,
+      availability,
     };
   }).sort((a, b) => a.name.localeCompare(b.name));
 }

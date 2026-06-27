@@ -33,6 +33,7 @@
         { "url": "https://cdn.jsdelivr.net/*" }
       ]
     },
-    "notification:default"
+    "notification:default",
+    "opener:allow-open-url"
   ]
 }
