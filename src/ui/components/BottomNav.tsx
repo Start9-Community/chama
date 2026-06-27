@@ -1,7 +1,7 @@
 import { T } from "../theme.js";
 import { getSignInEnvironment, shouldApplyCssSafeAreaInsets } from "../sign-in-environment.js";
 
-export type Tab = "browse" | "create" | "me";
+export type Tab = "browse" | "dashboard" | "me";
 
 export const BOTTOM_NAV_HEIGHT = 64;
 
@@ -12,13 +12,13 @@ export function BottomNav({ active, onSelect }: {
   onSelect: (t: Tab) => void;
 }) {
   const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(getSignInEnvironment());
-  // v3.2: the old Create tab mirrors the Browse pencil for now. Both surfaces
-  // open the same overlay, keeping one create path until the tab's permanent
-  // future is decided.
+  // v4.2.1: the middle tab is now the Dashboard home (standing / stats /
+  // earnings / ratings / the bond land here — placeholder for now). Creating
+  // a trade lives on the Browse pencil FAB; this tab is its own destination.
   const items: { id: Tab; label: string; icon: string }[] = [
-    { id: "browse", label: "Browse", icon: "🔍" },
-    { id: "create", label: "Create", icon: "✎" },
-    { id: "me",     label: "Me",     icon: "👤" },
+    { id: "browse",    label: "Browse",    icon: "🔍" },
+    { id: "dashboard", label: "Dashboard", icon: "📊" },
+    { id: "me",        label: "Me",        icon: "👤" },
   ];
   return (
     <div style={{

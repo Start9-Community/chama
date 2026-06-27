@@ -428,7 +428,10 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
             margin: "8px auto 4px",
             maxWidth: 340,
             width: "100%",
-            padding: "6px 14px 4px",
+            // RatingTap (leading) carries 2px top but 16px bottom margin; offset
+            // that here so the row sits vertically centered in the glow box
+            // (top gap 16+2 ≈ bottom gap 2+16) instead of riding high.
+            padding: "16px 14px 2px",
             borderRadius: T.r,
             background: `${T.green}10`,
             border: `1px solid ${T.green}44`,

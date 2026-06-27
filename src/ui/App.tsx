@@ -143,6 +143,7 @@ type View =
   | "browse"
   | "detail"
   | "create"
+  | "dashboard"
   | "me"
   | "saved-handles"
   | "payout-destinations"
@@ -168,7 +169,10 @@ type PendingDestroyConfirm = {
 const TAB_FOR_VIEW: Record<View, Tab> = {
   browse: "browse",
   detail: "browse",
-  create: "create",
+  // v4.2.1: the inline create view is legacy/dead (Create lives on the pencil
+  // FAB overlay now); keep it mapped to a valid tab. The middle tab is Dashboard.
+  create: "browse",
+  dashboard: "dashboard",
   me: "me",
   "saved-handles": "me",
   "payout-destinations": "me",
@@ -176,9 +180,11 @@ const TAB_FOR_VIEW: Record<View, Tab> = {
   help: "me",
 };
 
-// v4.1 C1: the one-time post-sign-in coach-mark tour over the home screen's
-// reachable surfaces (3 bottom-nav tabs + the 2 floating action buttons), so a
-// newcomer sees what they can do instead of being glued to the picker.
+// v4.1 C1 / v4.2.1: the one-time post-sign-in coach-mark tour over the home
+// screen's reachable surfaces. Trimmed to four clean steps — Browse, the
+// create pencil FAB, the new Dashboard home, and Me — so a newcomer sees what
+// they can do without a redundant second Create stop or a leader pitch they
+// aren't ready for. (The arbiter on-ramp returns with the bond, Phase 2A.)
 const COACH_STEPS: CoachStep[] = [
   {
     selector: '[data-coach="nav-browse"]',
@@ -191,14 +197,9 @@ const COACH_STEPS: CoachStep[] = [
     body: "This ✎ button is always one tap away — swap cash for sats, pay a bill, sell something, or lend.",
   },
   {
-    selector: '[data-coach="fab-arbiter"]',
-    title: "Lead your community",
-    body: "Want to help settle disputes and earn the fee? Apply to become a community arbiter here — no rush, build it up as you trade.",
-  },
-  {
-    selector: '[data-coach="nav-create"]',
-    title: "…or create from the tab bar",
-    body: "Same new-trade flow as the ✎ button, right in the bottom bar when you need it.",
+    selector: '[data-coach="nav-dashboard"]',
+    title: "Your home base",
+    body: "Your standing, stats, earnings, and ratings are coming here — the place that tracks how you're doing as you trade.",
   },
   {
     selector: '[data-coach="nav-me"]',
@@ -1475,7 +1476,7 @@ export default function App() {
         setSwitchingToCommunity({ displayName: home.displayName });
         setToast({ message: `Returning to ${home.displayName}...`, type: "info" });
         await actions.switchFederation(homeInvite);
-        setToast({ message: `Back home on ${home.displayName}.`, type: "info" });
+        setToast({ message: `Back home in ${home.displayName}.`, type: "info" });
       } catch (e: any) {
         console.warn("[chama] snap-back to home failed:", e?.message || e);
       } finally {
@@ -1496,7 +1497,7 @@ export default function App() {
 
   const switchTab = (t: Tab) => {
     if (t === "browse") setView("browse");
-    else if (t === "create") setCreateOverlayOpen(true);
+    else if (t === "dashboard") setView("dashboard");
     else if (t === "me") setView("me");
     // V3 #75: leaving a visited trade via the bottom nav counts as backing
     // out — same snap-back as the detail back button.
@@ -2500,6 +2501,44 @@ export default function App() {
             />
           )}
         </div>
+      ) : view === "dashboard" ? (
+        // v4.2.1: Dashboard home — a calm "coming soon" placeholder. The real
+        // surface (standing / stats / earnings / ratings / the bond) ships with
+        // Phase 2A. No actions here yet; just an inviting card, dark + light.
+        <div style={{ animation: "fadeIn 0.3s ease" }}>
+          <div style={{
+            minHeight: "60vh", display: "flex",
+            alignItems: "center", justifyContent: "center",
+            padding: "24px 16px",
+          }}>
+            <div style={{
+              width: "100%", maxWidth: 360, textAlign: "center",
+              background: T.card, border: `1px solid ${T.border}`,
+              borderRadius: T.r, padding: "32px 24px",
+              boxShadow: "0 12px 34px rgba(0,0,0,0.25)",
+            }}>
+              <div style={{ fontSize: 40, lineHeight: 1, marginBottom: 14 }}>📊</div>
+              <h1 style={{
+                margin: "0 0 10px", color: T.text, fontFamily: T.sans,
+                fontSize: 22, fontWeight: 800,
+              }}>
+                Your Dashboard
+              </h1>
+              <p style={{
+                margin: "0 0 12px", color: T.text, fontFamily: T.sans,
+                fontSize: 15, lineHeight: 1.55,
+              }}>
+                Your standing, your stats, your earnings — <strong>coming soon.</strong>
+              </p>
+              <p style={{
+                margin: 0, color: T.muted, fontFamily: T.sans,
+                fontSize: 13.5, lineHeight: 1.5, fontStyle: "italic",
+              }}>
+                Public ratings and your arbiter standing land here next.
+              </p>
+            </div>
+          </div>
+        </div>
       ) : view === "me" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
           {activeTrade && (
@@ -2720,7 +2759,7 @@ export default function App() {
         </>
       )}
 
-      {!detailMode && <BottomNav active={createOverlayOpen ? "create" : activeTab} onSelect={switchTab} />}
+      {!detailMode && <BottomNav active={activeTab} onSelect={switchTab} />}
 
       {/* v4.1 C1: one-time post-sign-in tour. Only on the Browse home screen
           (FABs mounted), never over the create sheet or a detail view. */}

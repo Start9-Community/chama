@@ -9,6 +9,12 @@ import { LoadTradeInput } from "../components/LoadTradeInput.js";
 import { type NostrProfileNameMap } from "../nostr-profiles.js";
 import { type AmountDisplayMode } from "../amount-display.js";
 
+// v4.2.1: the arbiter / recruitment on-ramp is hidden for now — it pushes a
+// leader decision at brand-new users before the bond exists. ArbiterApplyForm
+// and all arbiter code stay intact; this just gates the FAB entry point. Flip
+// back to true when the bond (Phase 2A) lands and the leader pitch is real.
+const SHOW_ARBITER_FAB = false;
+
 // Browse tab content — category filters, collapsed Chama selector, and card list.
 // Per PHILOSOPHY.md §2.3, the community pills are the user's identity
 // affordance: tapping one updates chama_community, switches/joins the
@@ -135,7 +141,7 @@ export function BrowseView({
         opacity: (menuScrolling && !showRecruit) ? 0.35 : 1,
         transition: "opacity 0.2s ease",
       }}>
-        {showRecruit && (
+        {SHOW_ARBITER_FAB && showRecruit && (
           <div style={{
             width: 300, maxWidth: "calc(100vw - 32px)", marginBottom: 2,
             padding: "14px 16px", maxHeight: "min(72vh, 480px)", overflowY: "auto",
@@ -152,7 +158,9 @@ export function BrowseView({
             />
           </div>
         )}
-        {/* arbiter recruitment (secondary) */}
+        {/* arbiter recruitment (secondary) — v4.2.1: hidden until the bond
+            (Phase 2A) makes the leader pitch real; gate flips it back on. */}
+        {SHOW_ARBITER_FAB && (
         <button
           type="button" onClick={() => setShowRecruit(s => !s)}
           data-coach="fab-arbiter"
@@ -172,6 +180,7 @@ export function BrowseView({
             <path d="M9 12l-3 -6l-3 6a3 3 0 0 0 6 0" /><path d="M21 12l-3 -6l-3 6a3 3 0 0 0 6 0" />
           </svg>
         </button>
+        )}
         {/* create a trade (primary) */}
         <button
           type="button" onClick={onCreate}
