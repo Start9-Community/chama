@@ -57,6 +57,7 @@ import type { VoteShareEnvelope } from "./types.js";
 import { EscrowNotifier } from "./notifier.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
 import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
+import { getCachedEvents, putCachedEvents } from "./escrow-event-cache.js";
 import { createEnvelope, decryptFromEnvelope } from "./envelope.js";
 import { RelayManager, RelayStatus, type NostrFilter } from "./relay-manager.js";
 import {
@@ -341,6 +342,13 @@ export class EscrowClient {
     this.relayManager.forceReconnectAll();
   }
 
+  /** #37: connected-relay count, surfaced for the native-lock recovery's
+   *  healthy-read gate (a "no LOCK exists" fetch is only trustworthy when
+   *  enough of the pool actually answered). */
+  getConnectedRelayCount(): number {
+    return this.relayManager.getConnectedCount();
+  }
+
   // ── Part 6: relay-recovery chat/chain backfill ──────────────────────────
 
   /** Collapse a burst of relay (re)connections into a single debounced
@@ -565,6 +573,9 @@ export class EscrowClient {
     arbiterFeeMsats?: number;
     expirySeconds?: number;
     communityArbiters?: string[];
+    /** 2B prefer-bonded: funded bonded subset (⊆ communityArbiters), stamped into
+     *  CREATE so every client replays the same preferred seat. */
+    bondedArbiters?: string[];
     subscription?: {
       totalPeriods: number;
       periodAmountMsats: number;
@@ -624,6 +635,7 @@ export class EscrowClient {
       items: params.items,
       expirySeconds: params.expirySeconds || this.config.defaultExpirySeconds!,
       communityArbiters: params.communityArbiters,
+      bondedArbiters: params.bondedArbiters,
       // v0.1.72 federation gates: optional locker-fed identity
       fedPrefix: params.fedPrefix,
       fed: params.fed,
@@ -1513,7 +1525,20 @@ export class EscrowClient {
       this.rawEvents.get(escrowId) ?? [],
       current?.eventChain.map(event => event.raw) ?? [],
     );
-    const rawEvents = mergeRawEventsById(cachedRawEvents, fetchedRawEvents);
+    let rawEvents = mergeRawEventsById(cachedRawEvents, fetchedRawEvents);
+    // Durable rebuild is a FALLBACK, not a hot-path seed: only reach for the
+    // persistent event cache when relays + memory produced NOTHING (an
+    // archived trade whose events aged off the relays). This keeps IndexedDB
+    // OFF the normal launch path — the discovery flood loads relay-present
+    // trades without ever touching it — so a stalled WKWebView IndexedDB can't
+    // freeze launch. Fully time-bounded even here (see escrow-event-cache).
+    if (rawEvents.length === 0 && !this.rawEvents.has(escrowId)) {
+      const durable = await getCachedEvents(escrowId);
+      if (durable.length > 0) {
+        this.rawEvents.set(escrowId, durable);
+        rawEvents = mergeRawEventsById(durable, fetchedRawEvents);
+      }
+    }
     console.debug(
       `[escrow] loadEscrow ${escrowId}: fetched ${fetchedRawEvents.length} raw events from relays` +
         (cachedRawEvents.length > 0 ? `, replaying ${rawEvents.length} with local cache` : ""),
@@ -1640,6 +1665,10 @@ export class EscrowClient {
 
     this.states.set(escrowId, result.state);
     this.rawEvents.set(escrowId, rawEvents);
+    // Durable event cache: persist the full chain so it rebuilds offline next
+    // session even if the relays have dropped it. Fire-and-forget; the status
+    // drives evict-oldest-terminal priority.
+    void putCachedEvents(escrowId, rawEvents, result.state.status);
 
     // Notify UI of the reconstructed state
     this.callbacks.onStateUpdate?.(escrowId, result.state);

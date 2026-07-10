@@ -1,0 +1,62 @@
+# Caddyfile — NEW IncogNET box (web.getchama.app)
+# Faithful replica of the OLD 1984 box's two STATIC site blocks.
+# Source of truth: OLD /etc/caddy/Caddyfile (backed up in migration/backup/caddy/).
+# Rules: replicate headers exactly (no more, no less). NO COOP/COEP. NO wasm MIME override
+# (Caddy serves .wasm as application/wasm natively). Automatic HTTPS (Let's Encrypt).
+#
+# DECISIONS (2026-06-28): ACME email set to 5its9hrp@addy.io (Jetty's choice; OLD had none).
+# chama.exchange = neutral 200 hold ("coming soon"); keeps its LE cert, bounces nowhere (Jetty 2026-06-28).
+#   Future protocol/technical site: swap `respond` for `file_server` + `root`, or repoint DNS.
+# satoshimarket.app + subdomains = NOT migrated (legacy non-static apps stay on OLD; source backed up).
+{
+	email 5its9hrp@addy.io
+}
+
+getchama.app {
+	root * /home/satoshi/chama-dist
+	file_server
+
+	# SPA fallback — all routes serve index.html
+	try_files {path} /index.html
+	@assets path /assets/*
+	@html not path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	header @html Cache-Control "no-store, must-revalidate"
+
+	header {
+		X-Content-Type-Options nosniff
+		X-XSS-Protection "1; mode=block"
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/getchama-access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+		format json
+	}
+}
+
+chama.community {
+	root * /home/satoshi/chama-landing
+	file_server
+	try_files {path} /index.html
+
+	header {
+		X-Content-Type-Options nosniff
+		X-XSS-Protection "1; mode=block"
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	encode zstd gzip
+}
+
+chama.exchange {
+	header -Server
+	respond "Chama protocol — coming soon." 200
+}

@@ -8,16 +8,27 @@
 // (exposure.ts) reads these to compute live capacity and gate assignment.
 //
 // ⚠️  PHASE 1 = DECLARATION ONLY, UNBACKED. A 38130 event is a *claim*, not
-// custody. The real SSS-lock that makes a bond slashable — owner holds ONE
-// share, the cabinet the rest; slash = strand-by-withholding — is Phase 2
-// (DESIGN-arbiter-economy §3). Phase 1 trusts the declaration so the ledger +
-// consent gate can be built and tested now; NOTHING here moves or locks money.
-// Never read a 38130 event as proof that capital is actually posted.
+// custody. The ON-CHAIN backing is the single-key timelock COMMITMENT bond
+// (bond-multisig/commitment-bond.ts — the sealed v1 model, DECISIONS 2026-07-03):
+// the arbiter's own sats, CLTV-locked to their own key for the term. Phase 1
+// trusts the declaration so the ledger + consent gate can be built and tested;
+// NOTHING here moves or locks money. Never read a 38130 event as proof that
+// capital is actually posted.
 //
 // KIND ALLOCATION — 38130 sits clear of the escrow wire (38100–38112), the
 // roster (38120), the application (38121), the reserved admission-vote (38122),
 // and ratings (38123). Governance / economy events live in the 38120+ band;
-// trade parsers never see them. (Confirmed no collision repo-wide, 2026-06-22.)
+// trade parsers never see them. Also allocated in this band:
+//   • 38131 — victim "made-whole" attestation (arbiters/victim-attestation.ts).
+//   • 38132–38134 — RETIRED with the 2-of-3 cabinet-custody bond (key
+//     attestation / descriptor / return-PSBT transport; deleted 2026-07-05 —
+//     a skeptic's pass proved cabinet custody self-dealing). Do not reuse
+//     these kinds for anything else: stale events may exist on relays.
+//   • 38135 — commitment-bond ANNOUNCEMENT (bond-multisig/bond-announcement.ts):
+//     the CHAIN-BACKED companion to 38130's unbacked claim. An arbiter advertises
+//     their on-chain single-key timelock bond for a community; verification
+//     recomputes the address + reads it on-chain. The live-chama liveness signal's
+//     data source (chama-live-chama-signal-brief.md). d=community, signer-authoritative.
 //
 // Replaceable semantics mirror the roster: a bond is keyed per signing arbiter
 // (one current bond each), newest created_at wins, ties break to the

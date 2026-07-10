@@ -13,6 +13,7 @@ import type {
   OnchainInfo,
   OnchainWithdrawFees,
   OnchainWithdrawResult,
+  PayOutcomeByEscrowResult,
 } from "./fedimint-client.js";
 import { hasBolt11Amount } from "../payments/bolt11.js";
 import type { ChamaOperationMeta } from "../payments/sats-trace.js";
@@ -118,6 +119,15 @@ interface NativePayResponse {
   operationId?: string;
   fee_msat?: number;
   preimage?: string;
+  error?: string;
+}
+
+interface NativePayOutcomeByEscrowResponse {
+  // V7 /pay-outcome-by-escrow: the /pay-outcome statuses plus `none`
+  // (scan complete, no payment ever stamped with this escrow id).
+  status?: "settled" | "refunded" | "inflight" | "none";
+  operation_id?: string;
+  operationId?: string;
   error?: string;
 }
 
@@ -691,6 +701,41 @@ export class NativeBridgeWallet implements IFedimintWallet {
       return result.notes;
     },
 
+    // #37 lock crash-safety: lock spends pass an explicit long
+    // try_cancel horizon (the bridge default is 7 days — shorter than a
+    // disputed trade's life) and surface the spend operation id for the
+    // pending-native-locks stash.
+    spendNotesDetailed: async (
+      amountMsats: number,
+      opts: { tryCancelAfterSecs?: number },
+      _meta?: ChamaOperationMeta,
+    ): Promise<{ notes: string; operationId?: string }> => {
+      await this.ensureBridgeReady();
+      const result = await this.request<NativeSpendNotesResponse>("/spend-notes", {
+        method: "POST",
+        body: {
+          amountMsats,
+          allowOverpay: false,
+          ...(typeof opts.tryCancelAfterSecs === "number"
+            ? { timeoutSecs: Math.floor(opts.tryCancelAfterSecs) }
+            : {}),
+        },
+      });
+      // Fire-and-forget: the notes must reach the caller's crash guard with
+      // ZERO additional awaits after the spend resolves (#37, F12). The 3s
+      // /info poll keeps subscribers fresh anyway.
+      void this.refreshBalance().catch((error) => {
+        console.warn("[chama] native bridge balance refresh after spend failed:", error);
+      });
+      // Diagnostics-only field — read directly (readOperationId synthesizes
+      // a fake `native-<ts>` fallback we must not persist in the stash).
+      const rawOperationId = result.operation_id ?? result.operationId;
+      return {
+        notes: result.notes,
+        operationId: rawOperationId ? String(rawOperationId) : undefined,
+      };
+    },
+
     redeemEcash: async (
       oobNotes: string,
       _meta?: ChamaOperationMeta,
@@ -760,6 +805,12 @@ export class NativeBridgeWallet implements IFedimintWallet {
             paymentInfo: bolt11,
             ...(shouldSendAmount ? { amountMsats } : {}),
             noWait: false,
+            // V7: the bridge stamps this into the payment's fedimint
+            // operation-log entry (extra_meta) — the durable op↔escrow map
+            // /pay-outcome-by-escrow reconciles against after a crash that
+            // lost the operationId. Old bridge binaries ignore unknown
+            // fields, so this is back-compatible.
+            ...(meta ? { extraMeta: meta } : {}),
           },
         });
       } catch (error) {
@@ -833,6 +884,38 @@ export class NativeBridgeWallet implements IFedimintWallet {
       if (result.status === "settled") return "settled";
       if (result.status === "refunded") return "refunded";
       return "unknown";
+    },
+
+    // V7 reconcile-by-escrow: resolve the payment(s) the bridge ever
+    // dispatched for this escrow via the op log's chama_escrow_id stamp.
+    // Any transport error, non-2xx, OR an old bridge binary without the
+    // route ⇒ "unknown" (refuse re-pay now; the boot sweep retries later).
+    payOutcomeByEscrow: async (
+      escrowId: string,
+      sinceMs?: number,
+    ): Promise<PayOutcomeByEscrowResult> => {
+      await this.ensureBridgeReady();
+      let result: NativePayOutcomeByEscrowResponse;
+      try {
+        result = await this.request<NativePayOutcomeByEscrowResponse>(
+          "/pay-outcome-by-escrow",
+          {
+            method: "POST",
+            body: { escrowId, ...(sinceMs !== undefined ? { sinceMs } : {}) },
+          },
+        );
+      } catch (error) {
+        console.warn("[chama] native bridge /pay-outcome-by-escrow reconcile failed:", error);
+        return { outcome: "unknown" };
+      }
+      const operationId = typeof result.operation_id === "string"
+        ? result.operation_id
+        : typeof result.operationId === "string" ? result.operationId : undefined;
+      if (result.status === "settled") return { outcome: "settled", operationId };
+      if (result.status === "refunded") return { outcome: "refunded", operationId };
+      if (result.status === "inflight") return { outcome: "inflight", operationId };
+      if (result.status === "none") return { outcome: "none" };
+      return { outcome: "unknown" };
     },
   };
 

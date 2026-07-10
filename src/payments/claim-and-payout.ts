@@ -102,6 +102,7 @@
 
 import { markSatsTracesDrained, recordSatsTrace } from "./sats-trace.js";
 import { maxLightningPayoutSats } from "./lightning-fees.js";
+import { PAY_RECONCILE_SINCE_MARGIN_MS } from "./payout-journal.js";
 
 // ── Phase types ──────────────────────────────────────────────────────────
 
@@ -395,13 +396,34 @@ export interface RunClaimAndPayoutDeps {
   // no-op). Bound to payments/payout-journal.ts + bridge.awaitPayoutOutcome
   // in the hook. See that module's header for the incident this prevents.
   /** Read the persisted payout record for this escrow (null when none). */
-  getPayoutRecord?: (escrowId: string) => { status: "submitted" | "settled"; operationId?: string } | null;
+  getPayoutRecord?: (escrowId: string) => {
+    status: "intent" | "submitted" | "settled";
+    operationId?: string;
+    createdAt?: number;
+  } | null;
+  /** V7 pre-send intent: persist that a payout dispatch is imminent, BEFORE
+   *  payInvoice — a crash mid-pay then leaves a record for the
+   *  reconcile-by-escrow guard instead of an empty journal. */
+  recordPayoutIntent?: (input: { escrowId: string; amountMsats?: number }) => void;
   /** Persist that a payout was submitted (gateway accepted; outcome unknown). */
   recordPayoutSubmitted?: (input: { escrowId: string; operationId?: string; amountMsats?: number }) => void;
   /** Persist that a payout reached `success{preimage}`. Blocks all re-pay. */
   markPayoutSettled?: (escrowId: string, operationId?: string) => void;
   /** Drop the payout record — ONLY on a CONFIRMED refund (retry becomes safe). */
   clearPayoutRecord?: (escrowId: string) => void;
+  /** V7 reconcile-by-escrow: resolve the payout(s) the wallet ever dispatched
+   *  for this escrow by scanning the fedimint operation log for LN-pay ops
+   *  stamped `chama_escrow_id` — durable in the client DB, so it survives a
+   *  crash that lost the operationId (the V7 window). `sinceMs` bounds the
+   *  scan: reaching ops older than it proves completeness, so "none" is a
+   *  POSITIVE no-payment-exists verdict, not a blind miss. Outcomes:
+   *  settled / refunded / inflight (operationId carried for re-attach) /
+   *  none / unknown (scan failed or unavailable ⇒ refuse re-pay for now —
+   *  the boot sweep + trade-open reattach retry the reconcile later). */
+  payOutcomeByEscrow?: (escrowId: string, sinceMs?: number) => Promise<{
+    outcome: "settled" | "refunded" | "inflight" | "none" | "unknown";
+    operationId?: string;
+  }>;
   /** Probe (v4.0.0 fail-closed): throws if the payout journal can't be
    *  persisted right now (quota / private mode / disabled storage). Called
    *  pre-send so the orchestrator refuses to dispatch a payout it can't guard
@@ -502,43 +524,128 @@ export async function runClaimAndPayout(
       emit({ kind: "done" });
       return { kind: "done" };
     }
-    if (prior?.status === "submitted") {
-      // A payout is in flight for this escrow. Resolve its TRUE outcome by
-      // re-attaching to the operationId — never by paying again.
+    // V7 reconcile-by-escrow, shared by the intent and opId-less-submitted
+    // branches below. Resolves via the operation log's chama_escrow_id stamp
+    // (survives restarts that lost the operationId). `trustNone` encodes the
+    // fund-safety asymmetry: for an INTENT record, "none" is a positive
+    // proof no payment was ever dispatched (intents are new, so their pays
+    // always carry the meta stamp) ⇒ safe to pay fresh. For a SUBMITTED
+    // record, the gateway DID accept a payment — a "none" scan can only mean
+    // the op predates meta-stamping ⇒ treat as unknown, refuse re-pay.
+    const reconcileByEscrow = async (
+      via: "intent" | "submitted-no-opid",
+      createdAt: number | undefined,
+      trustNone: boolean,
+    ): Promise<ClaimAndPayoutTerminal | "pay-fresh"> => {
       emit({ kind: "payout-confirming" });
-      let outcome: "settled" | "refunded" | "unknown" = "unknown";
-      if (opts.awaitPayoutOutcome && prior.operationId) {
+      let res: { outcome: "settled" | "refunded" | "inflight" | "none" | "unknown"; operationId?: string } =
+        { outcome: "unknown" };
+      if (opts.payOutcomeByEscrow) {
         try {
-          outcome = await opts.awaitPayoutOutcome(prior.operationId);
+          res = await opts.payOutcomeByEscrow(
+            opts.escrowId,
+            createdAt !== undefined ? createdAt - PAY_RECONCILE_SINCE_MARGIN_MS : undefined,
+          );
         } catch {
-          outcome = "unknown";
+          res = { outcome: "unknown" };
         }
       }
-      claimTrace("orchestrator-payout-reattach", { escrowId: opts.escrowId, outcome });
-      if (outcome === "settled") {
+      claimTrace("orchestrator-payout-reconcile-by-escrow", {
+        escrowId: opts.escrowId, via, outcome: res.outcome,
+        op: (res.operationId ?? "?").slice(0, 16),
+      });
+      if (res.outcome === "settled") {
         try {
-          opts.markPayoutSettled?.(opts.escrowId, prior.operationId);
+          opts.markPayoutSettled?.(opts.escrowId, res.operationId);
         } catch (persistErr) {
-          // Couldn't upgrade submitted→settled, but the SUBMITTED record (which
-          // got here) still persists and blocks re-pay — fund-safe. Proceed.
+          // The existing record still blocks a blind re-pay — fund-safe.
           console.warn(
-            "[chama] claim: re-attach markPayoutSettled persist failed (submitted record still guards):",
+            "[chama] claim: reconcile markPayoutSettled persist failed (prior record still guards):",
             persistErr,
           );
         }
-        await publishCompleteBestEffort("reattach-settled");
+        await publishCompleteBestEffort(`reconcile-${via}`);
         emit({ kind: "done" });
         return { kind: "done" };
       }
-      if (outcome === "refunded") {
-        // The sats came back — clear the record and fall through to a fresh
-        // claim+payout (re-pay is now correct, not a double-send).
-        opts.clearPayoutRecord?.(opts.escrowId);
-      } else {
-        // unknown ⇒ refuse to re-pay. Keep the submitted record so a later
-        // attempt re-attaches again rather than sending a second payment.
+      if (res.outcome === "inflight") {
+        // A live payment exists — adopt its operationId so future attempts
+        // re-attach directly, then refuse to re-pay.
+        try {
+          opts.recordPayoutSubmitted?.({
+            escrowId: opts.escrowId,
+            operationId: res.operationId,
+            amountMsats: opts.expectedDeltaMsats,
+          });
+        } catch { /* prior record still guards */ }
         emit({ kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY });
         return { kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY };
+      }
+      if (res.outcome === "refunded" || (res.outcome === "none" && trustNone)) {
+        // Sats demonstrably back / payment demonstrably never existed —
+        // clear the record and pay fresh.
+        opts.clearPayoutRecord?.(opts.escrowId);
+        return "pay-fresh";
+      }
+      // unknown (or an untrusted "none") ⇒ refuse to re-pay NOW. The record
+      // stays; the boot sweep and trade-open reattach retry this reconcile
+      // until it resolves — refusal with a resolver, never a dead end.
+      emit({ kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY });
+      return { kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY };
+    };
+    if (prior?.status === "intent") {
+      // V7 window: a pre-send intent survived but no submit/settle upgrade —
+      // the app died somewhere around the dispatch. Only the operation log
+      // knows whether a payment actually left.
+      const verdict = await reconcileByEscrow("intent", prior.createdAt, true);
+      if (verdict !== "pay-fresh") return verdict;
+    }
+    if (prior?.status === "submitted") {
+      if (!prior.operationId) {
+        // V6 residue: a submitted record whose operationId never persisted.
+        // Reconcile by escrow instead of stranding on "confirming" forever.
+        // NOTE trustNone=false: submitted means the gateway accepted a
+        // payment, so an empty scan is blindness, not proof of absence.
+        const verdict = await reconcileByEscrow("submitted-no-opid", prior.createdAt, false);
+        if (verdict !== "pay-fresh") return verdict;
+      } else {
+        // A payout is in flight for this escrow. Resolve its TRUE outcome by
+        // re-attaching to the operationId — never by paying again.
+        emit({ kind: "payout-confirming" });
+        let outcome: "settled" | "refunded" | "unknown" = "unknown";
+        if (opts.awaitPayoutOutcome) {
+          try {
+            outcome = await opts.awaitPayoutOutcome(prior.operationId);
+          } catch {
+            outcome = "unknown";
+          }
+        }
+        claimTrace("orchestrator-payout-reattach", { escrowId: opts.escrowId, outcome });
+        if (outcome === "settled") {
+          try {
+            opts.markPayoutSettled?.(opts.escrowId, prior.operationId);
+          } catch (persistErr) {
+            // Couldn't upgrade submitted→settled, but the SUBMITTED record (which
+            // got here) still persists and blocks re-pay — fund-safe. Proceed.
+            console.warn(
+              "[chama] claim: re-attach markPayoutSettled persist failed (submitted record still guards):",
+              persistErr,
+            );
+          }
+          await publishCompleteBestEffort("reattach-settled");
+          emit({ kind: "done" });
+          return { kind: "done" };
+        }
+        if (outcome === "refunded") {
+          // The sats came back — clear the record and fall through to a fresh
+          // claim+payout (re-pay is now correct, not a double-send).
+          opts.clearPayoutRecord?.(opts.escrowId);
+        } else {
+          // unknown ⇒ refuse to re-pay. Keep the submitted record so a later
+          // attempt re-attaches again rather than sending a second payment.
+          emit({ kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY });
+          return { kind: "payout-confirming", error: PAYOUT_CONFIRMING_COPY };
+        }
       }
     }
   }
@@ -773,6 +880,26 @@ export async function runClaimAndPayout(
           "Can't pay out safely right now — this device's storage is full or unavailable, so the anti-double-pay guard can't be saved. No payment was sent; free up space (or leave private browsing) and try again.",
         );
         claimTrace("orchestrator-payout-journal-unwritable", { escrowId: opts.escrowId });
+        emit({ kind: "payout-failed", error, claimCompleted: false });
+        return { kind: "payout-failed", error, claimCompleted: false };
+      }
+      // V7: persist the pre-send INTENT before dispatching. If the app dies
+      // anywhere between here and the settled/submitted upgrade below, the
+      // retry's top guard reconciles BY ESCROW (the payment carries
+      // chama_escrow_id in the op log) instead of finding an empty journal
+      // and paying twice. A failed write here refuses the send — same
+      // fail-closed stance as the probe (nothing sent yet, retry is safe).
+      try {
+        opts.recordPayoutIntent?.({
+          escrowId: opts.escrowId,
+          amountMsats: opts.expectedDeltaMsats,
+        });
+      } catch (e) {
+        const error = errorMessage(
+          e,
+          "Can't pay out safely right now — the anti-double-pay guard couldn't be saved. No payment was sent; try again.",
+        );
+        claimTrace("orchestrator-payout-intent-unwritable", { escrowId: opts.escrowId });
         emit({ kind: "payout-failed", error, claimCompleted: false });
         return { kind: "payout-failed", error, claimCompleted: false };
       }

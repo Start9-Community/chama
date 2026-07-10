@@ -182,6 +182,38 @@ export function canAssignArbiter(params: {
   );
 }
 
+/** ⭐ S4 BRIDGE — which chain-verified **38135 commitment** bonded arbiters can be
+ *  SEATED on a trade of `tradeMsats`, applying the §8 caps to the REAL bond
+ *  (`actualSats`) instead of the legacy 38130 declaration:
+ *    • per-trade  — trade ≤ bond, AND
+ *    • aggregate  — Σ(their other open bonded trades) + trade ≤ bond.
+ *  A sub-floor trade needs no bond, so every bonded arbiter qualifies. This is
+ *  the "auto-select by bond amount (per trade / combination of trades)" rule.
+ *  Pure; the caller passes FUNDED+ACTIVE bonds (VerifiedBond) so no term-gating
+ *  is needed. Feed the result to getTrustedArbiterPool's `bondedPool`. */
+export function assignableBondedArbiters(params: {
+  bonds: readonly { npub: string; actualSats: bigint }[];
+  tradeMsats: number;
+  allTrades: Iterable<EscrowState>;
+  excludeTradeId?: string | null;
+}): string[] {
+  const materialized = [...params.allTrades];
+  const subFloor = params.tradeMsats < UNBONDED_FLOOR_MSATS;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const b of params.bonds) {
+    const npub = normPk(b.npub);
+    if (!npub || seen.has(npub)) continue;
+    seen.add(npub);
+    if (subFloor) { out.push(npub); continue; }
+    const bondMsats = Number(b.actualSats) * 1000;
+    const sumOther = sumOpenExposure(getOpenBondedTrades(npub, materialized, { excludeId: params.excludeTradeId }));
+    // Both caps use ≤ — the bond must COVER its exposure (brief 2026-06-22).
+    if (params.tradeMsats <= bondMsats && sumOther + params.tradeMsats <= bondMsats) out.push(npub);
+  }
+  return out;
+}
+
 /** §L display band for a bond size. Display-only; the cap is the bond amount. */
 export function exposureTier(bondMsats: number): ExposureTier {
   if (bondMsats >= EXPOSURE_TIER_GOLD_FLOOR_MSATS) return "Gold";

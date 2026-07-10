@@ -1,7 +1,9 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { T } from "../theme.js";
 import { BrandHeader } from "../components/BrandHeader.js";
 import { GlobeHero } from "../components/GlobeHero.js";
+import { LivenessSignal } from "../components/LivenessSignal.js";
+import type { ChamaLiveness } from "../../arbiters/live-chama.js";
 import {
   getAllPickerCountries,
   GLOBE_MARKERS,
@@ -18,15 +20,16 @@ import {
 // (PHILOSOPHY.md §6). A spinning globe hero + a searchable, full-world country
 // list. Every country is tappable and lands on its OWN flag + currency + fed.
 //
-// THE TWO-GREEN-TIER RULE (the anchor — the old "no local Chama, an arbiter
-// would be a stranger" dark landing nearly cost a real first trader). Never
-// make a visitor feel they're standing in the dark. The honest split is kept
-// in the WORDS, never in the presence/absence of light:
-//   • ⚡ Live now    (green) — elected LOCAL arbiters (isRealLocalChama). Kenya.
-//   • ✓ Available now (green) — backed by a native-verified G-Bot fed; the
-//                    cabinet's global arbiters back every escrow, local arbiters
-//                    coming. Effectively everywhere. NEVER claims a local Chama.
-//   • Coming soon   (quiet, rare — still not red) — genuinely uncovered feds.
+// NEVER-DARK RULE (the anchor — the old "no local Chama, an arbiter would be a
+// stranger" dark landing nearly cost a real first trader). Never make a visitor
+// feel they're standing in the dark. Every covered country reads green ("you can
+// trade here today"); only a genuinely-uncovered "comingSoon" recedes — never red.
+//   • ✓ covered (green) — trade today, backed by Chama's arbiters. Effectively
+//                everywhere. NEVER claims elected local arbiters by fiat.
+//   • Coming soon (quiet, rare — still not red) — genuinely uncovered feds.
+// NO hardcoded "Live" tier: liveness is EARNED, shown as the computed 🛡 bonded-
+// arbiter count (loadBondedCounts) — never a baked-in badge that blessed Kenya as
+// special when it wasn't true. Kenya lists like any country; its 🛡 count is real.
 //
 // The arbiter / "run your country's Chama" on-ramp moved OUT of onboarding to
 // the blue Listings FAB (ArbiterApplyForm) — a leader pitch belongs where a
@@ -56,36 +59,91 @@ function localeCountryCode(): string | null {
   return null;
 }
 
-export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => void }) {
+export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, livenessBlocksPerDay = 144 }: {
+  onSelect: (slug: string) => void;
+  /** Optional: compute a community's chain-verified liveness (getChamaLiveness).
+   *  Absent during pre-signer onboarding (no connected client) — the detail screen
+   *  then falls back to the "trade today" reassurance, never a dark landing. When a
+   *  caller CAN fetch (post-connect re-pick), the graduated signal renders for real. */
+  loadLiveness?: (slug: string) => Promise<ChamaLiveness | null>;
+  /** Optional: ONE batched per-community bonded-arbiter count (slug → count of
+   *  chain-verified funded+active bonds; fetchBondedArbiterCounts). ADDITIVE over
+   *  the registry tiers: rows with real bonds gain a "🛡 N bonded" note, rows
+   *  without lose nothing — the computed signal can only light up, never darken.
+   *  Fails soft; absent (pre-signer callers) the registry tiers stand alone. */
+  loadBondedCounts?: () => Promise<Record<string, number>>;
+  /** Blocks/day for the liveness "~D-day" term readout (signet ~2880, mainnet ~144). */
+  livenessBlocksPerDay?: number;
+}) {
   const countries = useMemo(() => getAllPickerCountries(), []);
-  const liveCountries = useMemo(
-    () => countries.filter((c) => c.availability === "live"),
-    [countries],
-  );
-  // The user's own country, featured — but only when it's an "available" tier
-  // (a live-tier home country is already prominent in the Live now group, so we
-  // don't double-list it). Null when locale is unknown or the home country is
-  // live/uncovered.
+  // The user's own country, featured at the top (locale-derived, privacy-clean).
+  // No hardcoded "Live" tier any more — liveness is EARNED from bonds (the
+  // computed 🛡 count), never a baked-in badge — so every country lists equally;
+  // the home country just gets a gentle head-start. Null when locale is unknown.
   const homeCountry = useMemo(() => {
     const code = localeCountryCode();
     if (!code) return null;
-    const c = countries.find((x) => x.code === code);
-    return c && c.availability === "available" ? c : null;
+    return countries.find((x) => x.code === code) ?? null;
   }, [countries]);
   const featuredCodes = useMemo(
     () => new Set(homeCountry ? [homeCountry.code] : []),
     [homeCountry],
   );
-  // The full searchable world, minus the rows already shown in the Live + the
-  // featured home-country zone above (no duplicates).
+  // The full searchable world, minus the featured home-country row (no dupes).
   const restCountries = useMemo(
-    () => countries.filter((c) => c.availability !== "live" && !featuredCodes.has(c.code)),
+    () => countries.filter((c) => !featuredCodes.has(c.code)),
     [countries, featuredCodes],
   );
 
   const [query, setQuery] = useState("");
   // A country opened for disambiguation (≥2 chamas) or the green landing.
   const [selected, setSelected] = useState<PickerCountry | null>(null);
+  // Chain-verified liveness for the opened single-community landing (best-effort).
+  const [liveness, setLiveness] = useState<ChamaLiveness | null>(null);
+  const [livenessLoading, setLivenessLoading] = useState(false);
+
+  // The batched list signal: slug → chain-verified bonded-arbiter count.
+  // Fetched once per mount, fail-soft (null ⇒ registry tiers stand alone).
+  const [bondedBySlug, setBondedBySlug] = useState<Record<string, number> | null>(null);
+  useEffect(() => {
+    if (!loadBondedCounts) return;
+    let cancelled = false;
+    loadBondedCounts()
+      .then((r) => { if (!cancelled) setBondedBySlug(r); })
+      .catch(() => { /* fail-soft — the list never darkens for a failed read */ });
+    return () => { cancelled = true; };
+    // Fire once per mount — the prop is a fresh identity each render but reads
+    // the live client internally, so a stale closure is fine.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // A country's note sums its chamas' counts (an arbiter bonded in two chamas of
+  // one country counts per chama — the per-chama truth lives on the detail view).
+  const bondedForCountry = (c: PickerCountry): number => {
+    if (!bondedBySlug) return 0;
+    const slugs = new Set<string>([...c.chamas.map((x) => x.slug), c.defaultCommunity.slug]);
+    let n = 0;
+    for (const s of slugs) n += bondedBySlug[s] ?? 0;
+    return n;
+  };
+
+  // Fetch liveness once, when a SINGLE-community country is opened and a fetcher
+  // is wired. Multi-chama countries disambiguate first (per-chama liveness is a
+  // later pass). Fails soft — a null/throw just leaves the reassurance standing.
+  useEffect(() => {
+    setLiveness(null);
+    if (!selected || !loadLiveness || selected.chamas.length >= 2) return;
+    const slug = selected.defaultCommunity.slug;
+    let cancelled = false;
+    setLivenessLoading(true);
+    loadLiveness(slug)
+      .then((l) => { if (!cancelled) setLiveness(l); })
+      .catch(() => { if (!cancelled) setLiveness(null); })
+      .finally(() => { if (!cancelled) setLivenessLoading(false); });
+    return () => { cancelled = true; };
+    // Key off the opened country only — `loadLiveness` is a fresh identity each
+    // render (reads the live client internally), so a stale closure is fine.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
 
   const q = query.trim().toLowerCase();
   const results = q
@@ -187,8 +245,8 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
                     {c.disambiguator ?? c.displayName}
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: T.mono, color: T.muted, fontSize: 10, marginTop: 3 }}>
-                    {real ? <LiveDot /> : <CheckDot />}
-                    {c.currency} · {real ? "live local Chama" : "available now"}
+                    <CheckDot />
+                    {c.currency} · {real ? "local Chama" : "available now"}
                   </span>
                 </span>
                 <span style={{ fontFamily: T.mono, color: T.accent, fontSize: 16, lineHeight: 1 }}>→</span>
@@ -202,6 +260,12 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
           // works and the cabinet backs the trade. "Coming soon" stays calm
           // (still not red) and still lets the user in on the global fed.
           <div style={{ width: "100%", maxWidth: 380, display: "grid", gap: 12 }}>
+            {/* The computed liveness signal — earned, chain-verified, graduated.
+                Only when a fetcher is wired (post-connect); pre-signer onboarding
+                shows the reassurance below on its own, never a dark landing. */}
+            {loadLiveness && (
+              <LivenessSignal liveness={liveness} loading={livenessLoading} blocksPerDay={livenessBlocksPerDay} />
+            )}
             <div style={{
               padding: "14px 15px", borderRadius: T.r,
               background: `${T.green}12`, border: `1px solid ${T.green}44`,
@@ -287,7 +351,7 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
           <SectionLabel>{`${results.length} ${results.length === 1 ? "match" : "matches"}`}</SectionLabel>
           <div style={{ display: "grid", gap: 8, width: "100%", maxWidth: 380 }}>
             {results.map((c) => (
-              <CountryRow key={c.code} country={c} onTap={() => openCountry(c)} />
+              <CountryRow key={c.code} country={c} bonded={bondedForCountry(c)} onTap={() => openCountry(c)} />
             ))}
             {results.length === 0 && (
               <div style={{
@@ -302,32 +366,20 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
         </>
       ) : (
         <>
-          {liveCountries.length > 0 && (
-            <>
-              <SectionLabel accent>
-                <LiveDot /> {`Live now · ${liveCountries.length}`}
-              </SectionLabel>
-              <div style={{ display: "grid", gap: 8, width: "100%", maxWidth: 380, marginBottom: 18 }}>
-                {liveCountries.map((c) => (
-                  <CountryRow key={c.code} country={c} onTap={() => openCountry(c)} />
-                ))}
-              </div>
-            </>
-          )}
           {homeCountry && (
             <>
               <SectionLabel accent>
-                <CheckDot /> Available now · your country
+                <CheckDot /> Your country
               </SectionLabel>
               <div style={{ display: "grid", gap: 8, width: "100%", maxWidth: 380, marginBottom: 18 }}>
-                <CountryRow country={homeCountry} onTap={() => openCountry(homeCountry)} />
+                <CountryRow country={homeCountry} bonded={bondedForCountry(homeCountry)} onTap={() => openCountry(homeCountry)} />
               </div>
             </>
           )}
           <SectionLabel>Every country</SectionLabel>
           <div style={{ display: "grid", gap: 8, width: "100%", maxWidth: 380 }}>
             {restCountries.map((c) => (
-              <CountryRow key={c.code} country={c} onTap={() => openCountry(c)} />
+              <CountryRow key={c.code} country={c} bonded={bondedForCountry(c)} onTap={() => openCountry(c)} />
             ))}
           </div>
         </>
@@ -336,17 +388,16 @@ export function GlobeCountryPicker({ onSelect }: { onSelect: (slug: string) => v
   );
 }
 
-function CountryRow({ country, onTap }: { country: PickerCountry; onTap: () => void }) {
+function CountryRow({ country, bonded = 0, onTap }: { country: PickerCountry; bonded?: number; onTap: () => void }) {
   const tier = country.availability;
-  // Two greens: both "live" and "available" read green (you're in); only the
-  // rare genuinely-uncovered "comingSoon" recedes — and even then, never red.
-  const green = tier === "live" || tier === "available";
+  // No "Live" tier: a covered country reads green ("you can trade here"), only a
+  // genuinely-uncovered "comingSoon" recedes — never red. Liveness (bonded
+  // arbiters) is the computed 🛡 note, not a baked-in badge.
+  const green = tier !== "comingSoon";
   const subtitle =
-    tier === "live"
-      ? country.realChamas.length > 1
-        ? `${country.currency} · ${country.realChamas.length} Chamas`
-        : country.currency
-      : tier === "available"
+    country.realChamas.length > 1
+      ? `${country.currency} · ${country.realChamas.length} Chamas`
+      : green
         ? `${country.currency} · available now`
         : `${country.currency} · coming soon`;
   return (
@@ -370,9 +421,16 @@ function CountryRow({ country, onTap }: { country: PickerCountry; onTap: () => v
             {country.name}
           </span>
           <span style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: T.mono, color: T.muted, fontSize: 10, marginTop: 2 }}>
-            {tier === "live" && <LiveDot />}
-            {tier === "available" && <CheckDot />}
+            {green && <CheckDot />}
             {subtitle}
+            {/* The computed layer over the registry tiers: chain-verified
+                funded+active bonds. Purely additive — appears only when real
+                sats back real arbiters here; its absence changes nothing. */}
+            {bonded > 0 && (
+              <span style={{ color: T.green, fontWeight: 800, whiteSpace: "nowrap" }}>
+                · 🛡 {bonded} bonded
+              </span>
+            )}
           </span>
         </span>
       </span>
@@ -381,18 +439,9 @@ function CountryRow({ country, onTap }: { country: PickerCountry; onTap: () => v
   );
 }
 
-function LiveDot() {
-  return (
-    <span style={{
-      display: "inline-block", width: 6, height: 6, borderRadius: "50%",
-      background: T.green, boxShadow: `0 0 6px ${T.green}aa`, flexShrink: 0,
-    }} />
-  );
-}
-
-// The "✓ Available now" mark — a calm green check, the second green. Distinct
-// from the pulsing LiveDot so the two tiers read apart at a glance, but both
-// unmistakably green (no darkness, ever).
+// The "✓ covered" mark — a calm green check ("you can trade here"). No pulsing
+// "Live" dot any more: a country is never labeled special/live by fiat; real
+// liveness is the computed 🛡 bonded count. Green ≠ "live", just "covered".
 function CheckDot() {
   return (
     <span style={{

@@ -27,3 +27,12 @@ outputs/
 
 # scratch dir (agent session) — not source
 tmp/
+
+# Mutinynet bond live-attack harness — signet test keys (never commit)
+scripts/.mutinynet-bond-keys.json
+
+# Mutinynet commitment-bond harness — signet test key (never commit)
+scripts/.mutinynet-commitment-keys.json
+
+# Mutinynet commitment-bond adversarial verifier — signet test key (never commit)
+scripts/.mutinynet-verify-keys.json

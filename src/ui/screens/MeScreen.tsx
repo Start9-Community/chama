@@ -33,13 +33,18 @@ import {
 } from "../../escrow-engine/types.js";
 import { getWinner } from "../../escrow-engine/state-machine.js";
 import { arbiterVotePriority, substitutionEligibleAt } from "../../escrow-engine/arbiter-substitution.js";
-import { BLF_OFFICIAL_ARBITERS } from "../../arbiters/pool.js";
-import {
-  DEFAULT_COMMUNITY_SLUG,
-  addCustomCommunity,
-  getCommunityBySlug,
-} from "../../communities/registry.js";
-import { getAllPickerCountries, type PickerCountry } from "../../communities/countries.js";
+import { BLF_OFFICIAL_ARBITERS, isCabinetMember } from "../../arbiters/pool.js";
+import { SHOW_BOND_CEREMONY } from "../panels/BondCeremonyModal.js";
+import { LivenessSignal, useLiveness } from "../components/LivenessSignal.js";
+import type { ChamaLiveness } from "../../arbiters/live-chama.js";
+
+/** How often the Me screen re-checks its own chama's liveness (a bond appearing
+ *  or a rating landing shows up without a manual reload). Slow — liveness drifts
+ *  on the scale of blocks, not seconds. */
+const LIVENESS_POLL_MS = 90_000;
+import { getCommunityBySlug } from "../../communities/registry.js";
+import { countryMatchesSearch, countrySubline, resolveCountryCommunitySlug } from "../../communities/country-resolve.js";
+import { getAllPickerCountries } from "../../communities/countries.js";
 import {
   MAIN_SURFACE_RECOVERY_MIN_SATS,
   formatStepInCountdown,
@@ -57,6 +62,7 @@ import {
 } from "../../payments/sats-trace.js";
 import { getEcashExport } from "../../payments/ecash-exports.js";
 import { listStrandedRedemptions, partitionStrandedClaims, resolveUnresolvedCredit, type StrandedRedemption } from "../../fedimint/pending-redemptions.js";
+import type { PendingNativeLock } from "../../fedimint/pending-native-locks.js";
 import { T, ROLE_COLOR, type ThemeMode } from "../theme.js";
 import {
   notificationsEnabled,
@@ -68,6 +74,7 @@ import {
 } from "../../notifications/notify-service.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
+import type { TradeIndexEntry } from "../../escrow-engine/trade-index.js";
 import { readKind0Toggle, writeKind0Toggle } from "../nostr-profiles.js";
 
 type MeTradeFilter = "all" | "needs" | "live" | "listings" | "done";
@@ -88,6 +95,8 @@ export function MeScreen({
   onThemeModeChange,
   myTrades,
   allTrades,
+  archivedTrades,
+  onOpenArchivedTrade,
   ratings,
   onOpenTrade,
   onRefreshTrades,
@@ -108,6 +117,12 @@ export function MeScreen({
   onRateCounterparty,
   myGivenRatings,
   onExportStrandedClaim,
+  onOpenBondCeremony,
+  loadLiveness,
+  livenessBlocksPerDay,
+  hasPendingNativeLock,
+  hasPendingClaimPayout,
+  stuckNativeLocks,
 }: {
   pubkey: string;
   kind0Enabled?: boolean;
@@ -117,6 +132,13 @@ export function MeScreen({
   onThemeModeChange?: (mode: ThemeMode) => void;
   myTrades: EscrowState[];
   allTrades?: EscrowState[];
+  /** Durable-index trades not currently loaded — the loss-proof "earlier
+   *  trades" tail of the history list. Absent ⇒ section omitted. */
+  archivedTrades?: TradeIndexEntry[];
+  /** Rehydrate + open an archived trade (awaits the reload; stays put + toasts
+   *  when the chain can't be rebuilt). Distinct from onOpenTrade, which assumes
+   *  a loadable trade and would dump the user on Browse on a null load. */
+  onOpenArchivedTrade?: (id: string) => void;
   /** Aggregate rating data. v0.2.0 always null (no rating events yet);
    *  v0.2.1 wires the aggregator. */
   ratings: AggregateRatings | null;
@@ -151,6 +173,28 @@ export function MeScreen({
   /** Bound to handleSelectCommunity — switches Chama (with the same funds-at-
    *  risk destroy-confirm guard the Browse pill used to trigger). */
   onSelectCommunity?: (slug: string) => void;
+  /** Bond Phase 2A: open the cabinet-only "Post your bond" ceremony. Rendered
+   *  only for a seated cabinet member behind SHOW_BOND_CEREMONY. */
+  onOpenBondCeremony?: () => void;
+  /** Compute the user's OWN chama liveness (getChamaLiveness) — post-auth the
+   *  client is connected, so this is a single cheap fetch. Absent ⇒ the card just
+   *  omits the signal. */
+  loadLiveness?: (slug: string) => Promise<ChamaLiveness | null>;
+  /** Blocks/day for the "~D-day" term readout (signet ~2880, mainnet ~144). */
+  livenessBlocksPerDay?: number;
+  /** #37: an actionable pending lock attempt exists — the balance belongs
+   *  to a known trade mid-recovery, so the SATS RECOVERY drain card hides
+   *  (the Browse-surface "Finish locking your trade" card owns the story). */
+  hasPendingNativeLock?: boolean;
+  /** Stranded-payout recovery: an unfinished claim payout explains the
+   *  balance — the SATS RECOVERY drain card hides while the Browse-surface
+   *  "Finish your payout" card owns the story (bounded upstream by
+   *  PENDING_PAYOUT_SUPPRESS_MAX_MS). */
+  hasPendingClaimPayout?: boolean;
+  /** #37: lock-recovery entries whose automatic retries were exhausted —
+   *  surfaced as a calm informational card (bearer notes are kept safe;
+   *  re-opening the trade retries with a fresh budget). */
+  stuckNativeLocks?: PendingNativeLock[];
 }) {
   const npubShort = pubkey.slice(0, 8) + "…" + pubkey.slice(-4);
   const [localKind0On, setLocalKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
@@ -167,7 +211,13 @@ export function MeScreen({
   const localRecoverySats = Math.floor(Math.max(0, balanceMsats) / 1000);
   const localRecoverableSats = maxLightningPayoutSats(balanceMsats);
   const localReserveSats = lightningPayoutReserveSats(balanceMsats);
-  const showLocalRecovery = !hasActiveCommitment && localRecoverySats > 0;
+  // #37: while a pending lock attempt owns the balance story, the drain
+  // card hides — recovering here would abandon a resumable live trade.
+  // Stranded-payout recovery: same rule while an unfinished claim payout
+  // owns it — the "Finish your payout" card is the honest surface.
+  const showLocalRecovery =
+    !hasActiveCommitment && localRecoverySats > 0
+    && !hasPendingNativeLock && !hasPendingClaimPayout;
   const isSmallLeftover = localRecoverySats < MAIN_SURFACE_RECOVERY_MIN_SATS;
   // A leftover below the material dust line never offers an ACTIVE recover
   // button — recovering ~1 sat burns more than itself in Lightning fees (the
@@ -252,6 +302,8 @@ export function MeScreen({
           communitySlug={communitySlug ?? null}
           hasActiveCommitment={hasActiveCommitment}
           onSelectCommunity={onSelectCommunity}
+          loadLiveness={loadLiveness}
+          livenessBlocksPerDay={livenessBlocksPerDay}
         />
       )}
 
@@ -342,7 +394,12 @@ export function MeScreen({
         </div>
       ))}
 
-      {showLocalRecovery && (
+      {/* Only surface a leftover once it's worth acting on. Below the dust line it
+          reads as "you're losing sats in limbo" — against Chama's no-wallet promise —
+          so it stays hidden and silently accumulates until it crosses the threshold,
+          when this card (and its fee-free ecash exit) reappears. A pending minted
+          ecash note still shows below regardless. */}
+      {showLocalRecovery && !isSmallLeftover && (
         <div style={{
           background: isClaimPayoutRecovery ? T.amberDim : T.card,
           border: `1px solid ${isSmallLeftover ? T.border : T.amber}`,
@@ -425,6 +482,50 @@ export function MeScreen({
           )}
         </div>
       )}
+
+      {/* #37 — lock-recovery entries whose automatic retries were exhausted.
+          Calm + informational (the notes are kept safe, nothing is lost):
+          re-opening the trade and tapping Fund/Finish retries recovery with
+          a fresh budget. Deliberately NOT the loud red treatment — the
+          value is bearer notes in localStorage, not maybe-live claim money. */}
+      {stuckNativeLocks && stuckNativeLocks.length > 0 && stuckNativeLocks.map((entry) => (
+        <div key={entry.escrowId} style={{
+          background: T.card, border: `1px solid ${T.amber}55`,
+          borderRadius: T.r, padding: 16, marginBottom: 16,
+        }}>
+          <div style={{
+            fontSize: 11, fontWeight: 600, color: T.amber,
+            fontFamily: T.mono, letterSpacing: 1, marginBottom: 10,
+          }}>
+            LOCK RECOVERY PAUSED
+          </div>
+          <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
+            A funding attempt of{" "}
+            <BitcoinAmount msats={entry.amountMsats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />{" "}
+            couldn't be recovered automatically after several tries. Your notes
+            are kept safe on this device — opening the trade and funding it
+            again retries the recovery first.
+          </div>
+          <div style={{
+            marginTop: 8, fontFamily: T.mono, fontSize: 10, color: T.muted,
+            wordBreak: "break-all" as const,
+          }}>
+            {entry.escrowId}
+            {entry.lastError ? <div style={{ marginTop: 4 }}>Last error: {entry.lastError.slice(0, 120)}</div> : null}
+          </div>
+          <button
+            onClick={() => onOpenTrade(entry.escrowId)}
+            style={{
+              width: "100%", padding: "11px", marginTop: 12,
+              background: T.surface, border: `1px solid ${T.border}`,
+              borderRadius: T.rs, color: T.text,
+              fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer",
+            }}
+          >
+            Open trade
+          </button>
+        </div>
+      ))}
 
       {/* v2.4 #56 — pending ecash export re-entry. After generating a note the
           balance reads 0, so the SATS RECOVERY card hides; this is how the user
@@ -557,6 +658,9 @@ export function MeScreen({
         <NotificationsRow />
         <DmNotificationsRow />
         <NostrNamesRow on={kind0On} onToggle={() => setKind0On(!kind0On)} />
+        {SHOW_BOND_CEREMONY && onOpenBondCeremony && (
+          <SettingsRow label="Post your bond" hint="Lock your own sats for a term — a public commitment to arbitrate fairly" onClick={onOpenBondCeremony} />
+        )}
         <SettingsRow label="Payment methods" hint="Phone, mobile money, bank, and app IDs" onClick={onOpenSavedHandles} />
         <SettingsRow label="Lightning Addresses" hint="Saved addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
         <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
@@ -575,6 +679,8 @@ export function MeScreen({
         onRefreshTrades={onRefreshTrades}
         onRateCounterparty={onRateCounterparty}
         myGivenRatings={myGivenRatings}
+        archivedTrades={archivedTrades}
+        onOpenArchivedTrade={onOpenArchivedTrade}
       />
     </div>
   );
@@ -593,6 +699,8 @@ function MeTradeHistory({
   onRefreshTrades,
   onRateCounterparty,
   myGivenRatings,
+  archivedTrades,
+  onOpenArchivedTrade,
 }: {
   trades: EscrowState[];
   totalCount: number;
@@ -604,6 +712,11 @@ function MeTradeHistory({
   onRefreshTrades?: () => Promise<number> | void;
   onRateCounterparty?: (tradeId: string, ratee: string, thumb: RatingThumb) => Promise<void>;
   myGivenRatings?: Array<{ tradeId: string; ratee: string; thumb: RatingThumb }>;
+  /** Durable-index trades NOT currently loaded (chain couldn't rehydrate this
+   *  session). Rendered as compact "earlier trades" rows so history never
+   *  silently shrinks; tapping rehydrates from the community relay. */
+  archivedTrades?: TradeIndexEntry[];
+  onOpenArchivedTrade?: (id: string) => void;
 }) {
   const activeFilterLabel = ME_TRADE_FILTERS.find((filter) => filter.id === activeFilter)?.label ?? "All";
   const [refreshing, setRefreshing] = useState(false);
@@ -742,7 +855,102 @@ function MeTradeHistory({
           })}
         </div>
       )}
+
+      {/* Loss-proof history: trades remembered in the durable index that the
+          relays couldn't rebuild this session. Only under "All" (the full
+          history view); compact rows, tappable to attempt rehydration. */}
+      {activeFilter === "all" && (archivedTrades?.length ?? 0) > 0 && (
+        <div style={{ marginTop: trades.length > 0 ? 16 : 0 }}>
+          <div style={{
+            fontSize: 9, fontWeight: 700, color: T.muted, fontFamily: T.mono,
+            letterSpacing: 1, textTransform: "uppercase", marginBottom: 8,
+            display: "flex", alignItems: "center", gap: 8,
+          }}>
+            <span>Earlier trades</span>
+            <span style={{ flex: 1, height: 1, background: T.border }} />
+            <span style={{ opacity: 0.7 }}>{archivedTrades!.length} from history</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {archivedTrades!.map((e) => (
+              <ArchivedTradeRow
+                key={e.id}
+                entry={e}
+                onOpen={() => (onOpenArchivedTrade ?? onOpenTrade)(e.id)}
+              />
+            ))}
+          </div>
+          <div style={{
+            marginTop: 8, fontSize: 9, color: T.muted, fontFamily: T.mono,
+            lineHeight: 1.5, opacity: 0.7,
+          }}>
+            Remembered on this device. Tap to reload the full trade from your Chama relay.
+          </div>
+        </div>
+      )}
     </section>
+  );
+}
+
+/** Compact row for a durable-index trade the relays couldn't rebuild. Shows
+ *  the anchors needed to audit it — date, amount, last-known status, id — and
+ *  rehydrates the full chain on tap (openEscrow background-loads by id). */
+function ArchivedTradeRow({
+  entry,
+  onOpen,
+}: {
+  entry: TradeIndexEntry;
+  onOpen: () => void;
+}) {
+  const when = entry.createdAt > 0
+    ? new Date(entry.createdAt * 1000).toLocaleString(undefined, {
+        month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit",
+      })
+    : "—";
+  const cat = entry.category === "p2p-trade" ? "Exchange"
+    : entry.category === "bill-pay" ? "Com. Bill Pay"
+    : entry.category === "marketplace" ? "Market"
+    : entry.category === "lending" ? "Lending"
+    : entry.category;
+  const statusLabel = entry.lastStatus.charAt(0) + entry.lastStatus.slice(1).toLowerCase();
+  return (
+    <div
+      onClick={onOpen}
+      title="Tap to reload this trade"
+      style={{
+        display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+        padding: "9px 11px", background: T.surface,
+        border: `1px solid ${T.border}`, borderRadius: T.rs,
+      }}
+    >
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6, marginBottom: 3,
+        }}>
+          <span style={{ fontFamily: T.sans, fontSize: 12, color: T.text, fontWeight: 600 }}>
+            {cat}
+          </span>
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.muted }}>
+            · {statusLabel}
+          </span>
+        </div>
+        {/* Date prominent (its own line, real weight) — the key audit anchor. */}
+        <div style={{
+          fontFamily: T.mono, fontSize: 12, color: T.text, fontWeight: 600, marginBottom: 2,
+        }}>
+          {when}
+        </div>
+        <div style={{
+          fontFamily: T.mono, fontSize: 9, color: T.muted,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const,
+        }}>
+          {entry.id}
+        </div>
+      </div>
+      <div style={{ flexShrink: 0, textAlign: "right" as const }}>
+        <BitcoinAmount msats={entry.amountMsats} size={13} gap={3} glyphScale={1.15} color={T.text} glyphColor={T.muted} />
+      </div>
+      <span aria-hidden="true" style={{ flexShrink: 0, color: T.muted, opacity: 0.6, fontFamily: T.mono, fontSize: 12 }}>›</span>
+    </div>
   );
 }
 
@@ -1692,13 +1900,20 @@ function YourChamaCard({
   communitySlug,
   hasActiveCommitment,
   onSelectCommunity,
+  loadLiveness,
+  livenessBlocksPerDay = 144,
 }: {
   communitySlug: string | null;
   hasActiveCommitment: boolean;
   onSelectCommunity: (slug: string) => void;
+  loadLiveness?: (slug: string) => Promise<ChamaLiveness | null>;
+  livenessBlocksPerDay?: number;
 }) {
   const [changing, setChanging] = useState(false);
   const [query, setQuery] = useState("");
+  // Your own chama's chain-verified liveness — auto-refreshed (mount, focus, and a
+  // gentle poll) so a bond appearing shows up without a manual reload. Fails soft.
+  const { liveness, loading: livenessLoading } = useLiveness(communitySlug, loadLiveness, { intervalMs: LIVENESS_POLL_MS });
   const current = communitySlug ? getCommunityBySlug(communitySlug) : null;
   const countries = getAllPickerCountries();
   const currentCountry = current?.country
@@ -1778,6 +1993,12 @@ function YourChamaCard({
           current
         </div>
       </div>
+
+      {loadLiveness && (
+        <div style={{ marginTop: 12 }}>
+          <LivenessSignal liveness={liveness} loading={livenessLoading} blocksPerDay={livenessBlocksPerDay} />
+        </div>
+      )}
 
       {hasActiveCommitment && (
         <div style={{
@@ -1880,46 +2101,6 @@ function YourChamaCard({
   );
 }
 
-function countryMatchesSearch(country: PickerCountry, search: string): boolean {
-  return [
-    country.code,
-    country.name,
-    country.currency,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase()
-    .includes(search);
-}
-
-function countrySubline(country: PickerCountry): string {
-  return `${country.currency} · ${country.code}`;
-}
-
-function resolveCountryCommunitySlug(country: PickerCountry): string {
-  const realLocal = country.realChamas[0];
-  if (realLocal) return realLocal.slug;
-
-  const dc = country.defaultCommunity;
-  try {
-    if (country.isGeneratedShell && !getCommunityBySlug(dc.slug) && dc.federationInvite) {
-      addCustomCommunity({
-        slug: dc.slug,
-        displayName: dc.displayName,
-        currency: dc.currency,
-        country: dc.country,
-        flagEmoji: dc.flagEmoji,
-        federationInvite: dc.federationInvite,
-        browserReliable: dc.browserReliable,
-        languages: dc.languages,
-        disambiguator: dc.disambiguator,
-      });
-    }
-    return dc.slug;
-  } catch {
-    return DEFAULT_COMMUNITY_SLUG;
-  }
-}
 
 function buildMeDashboard(
   myTrades: EscrowState[],

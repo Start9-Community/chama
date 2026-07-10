@@ -55,6 +55,15 @@ import {
   tandoMsisdnFromAddress,
   TANDO_LNADDRESS_DOMAIN,
 } from "../../payments/tando-offramp.js";
+import {
+  buildChapsmartLightningAddress,
+  formatTanzanianMsisdnDisplay,
+  isTanzaniaPayoutContext,
+  isChapsmartLightningAddress,
+  normalizeTanzanianMsisdn,
+  chapsmartMsisdnFromAddress,
+  CHAPSMART_LNADDRESS_DOMAIN,
+} from "../../payments/chapsmart-offramp.js";
 import { resolveLightningAddressToInvoice, LnurlError } from "../../payments/lnurl.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
@@ -121,13 +130,15 @@ type Stage =
   | { kind: "terminal"; terminal: ClaimAndPayoutTerminal };
 
 // The picker dispatches into Lightning (direct payout), Onchain (onchain
-// payout), Tando (native one-tap M-Pesa offramp — a LUD-16 Lightning
-// Address, NOT a redirect), or an external offramp-redirect provider drawn
-// from `external-swap-registry.ts` (Banxaas / Chapsmart / Bitika / Bitzed).
+// payout), Tando / ChapSmart (native one-tap M-Pesa offramps — LUD-16 Lightning
+// Addresses, NOT redirects: Kenya `<phone>@bitcoin.co.ke`, Tanzania
+// `<phone>@chapsmart.com`), or an external offramp-redirect provider drawn from
+// `external-swap-registry.ts` (Banxaas / Bitika / Bitzed).
 type PayoutMethod =
   | { kind: "lightning" }
   | { kind: "onchain" }
   | { kind: "tando" }
+  | { kind: "chapsmart" }
   | { kind: "external"; match: ExternalSwapMatch };
 
 /** Stashed dispatch arguments from the initial picker resolve. Used by
@@ -190,6 +201,11 @@ export function ClaimPayoutModal({
   // NOT a redirect and does NOT gate on EXTERNAL_SWAPS_ENABLED — it rides
   // the same payInvoice journal/double-pay guard as any other claim.
   const tandoEligible = isKenyaPayoutContext({ homeCommunity, tradeCommunity, fiatCurrency });
+
+  // ChapSmart is Tanzania's lead cash-out — the Tando mirror. Native LUD-16
+  // (`<phone>@chapsmart.com`), NOT a redirect; rides the same payInvoice
+  // journal/double-pay guard. Mutually exclusive with tandoEligible (Kenya).
+  const chapsmartEligible = isTanzaniaPayoutContext({ homeCommunity, tradeCommunity, fiatCurrency });
 
   // Common dispatch helper — used by both the picker's first resolve
   // and the terminal retry path. Updates stage transitions and
@@ -345,6 +361,7 @@ export function ClaimPayoutModal({
           payoutSats={payoutSats}
           externalSwaps={externalSwaps}
           tandoEligible={tandoEligible}
+          chapsmartEligible={chapsmartEligible}
           savedNwcConnections={savedNwcConnections}
           onSelect={setPayoutMethod}
           onSelectSavedNwc={dispatchSavedNwcClaim}
@@ -356,6 +373,20 @@ export function ClaimPayoutModal({
     if (payoutMethod.kind === "tando") {
       return (
         <TandoMpesaPicker
+          payoutSats={payoutSats}
+          reserveSats={reserveSats}
+          savedDestinations={savedDestinations}
+          onResolve={(bolt11, address) =>
+            resolveDestination(bolt11, { saveAfter: true, addressUsed: address })}
+          onBack={() => setPayoutMethod(null)}
+          onCancel={() => onClose(undefined)}
+        />
+      );
+    }
+
+    if (payoutMethod.kind === "chapsmart") {
+      return (
+        <ChapsmartMpesaPicker
           payoutSats={payoutSats}
           reserveSats={reserveSats}
           savedDestinations={savedDestinations}
@@ -486,6 +517,7 @@ function ClaimMethodChooser({
   payoutSats,
   externalSwaps,
   tandoEligible,
+  chapsmartEligible,
   savedNwcConnections,
   onSelect,
   onSelectSavedNwc,
@@ -496,6 +528,9 @@ function ClaimMethodChooser({
   /** Kenya context — surface the native one-tap Tando M-Pesa offramp as
    *  the lead cash-out card. Independent of the external-swap registry. */
   tandoEligible: boolean;
+  /** Tanzania context — surface the native one-tap ChapSmart M-Pesa offramp
+   *  as the lead cash-out card (the Tando mirror). */
+  chapsmartEligible: boolean;
   /** v1.2.5: saved NWC connections, promoted to top-level quick-pick
    *  buttons here just like AtomicFundingModal does on the funding
    *  side. A returning user with a saved wallet can claim straight
@@ -508,7 +543,7 @@ function ClaimMethodChooser({
   // Single-column layout once external swaps or Tando are surfaced (they
   // have taller cards with flag + status badge); two-column when only the
   // built-in Lightning + Onchain methods are available.
-  const hasTallCards = externalSwaps.length > 0 || tandoEligible;
+  const hasTallCards = externalSwaps.length > 0 || tandoEligible || chapsmartEligible;
   const methodGridColumns = hasTallCards ? "1fr" : "1fr 1fr";
   const methodMinHeight = hasTallCards ? 92 : 118;
 
@@ -629,6 +664,42 @@ function ClaimMethodChooser({
               </div>
               <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
                 Cash out to M-Pesa with Tando. Enter your phone — KES lands in seconds.
+              </div>
+            </button>
+          )}
+          {/* ChapSmart — Tanzania's lead cash-out. Native one-tap M-Pesa
+              offramp (LUD-16 Lightning Address `<phone>@chapsmart.com`), not a
+              redirect. The Tando mirror; rendered first for Tanzanian claims. */}
+          {chapsmartEligible && (
+            <button
+              onClick={() => onSelect({ kind: "chapsmart" })}
+              style={{
+                minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
+                background: T.greenDim, border: `1px solid ${T.green}66`,
+                color: T.text, cursor: "pointer", textAlign: "left",
+              }}
+            >
+              <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                gap: 10, marginBottom: 8,
+              }}>
+                <span style={{ fontSize: 20 }}>🇹🇿</span>
+                <span style={{
+                  fontSize: 8, fontFamily: T.mono, color: T.green,
+                  border: `1px solid ${T.green}55`, borderRadius: 4,
+                  padding: "2px 6px", textTransform: "uppercase",
+                }}>
+                  one tap
+                </span>
+              </div>
+              <div style={{
+                fontSize: 12, fontWeight: 800, color: T.green,
+                fontFamily: T.mono, marginBottom: 6, textTransform: "uppercase",
+              }}>
+                M-Pesa · TZS
+              </div>
+              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+                Cash out to M-Pesa with ChapSmart. Enter your phone — TZS lands in seconds.
               </div>
             </button>
           )}
@@ -1156,6 +1227,249 @@ function TandoMpesaPicker({
   );
 }
 
+// ── ChapSmart native M-Pesa offramp (Tanzania) ──────────────────────────────
+//
+// Tanzania's lead cash-out — the exact Tando mirror. The user types their
+// Vodacom M-Pesa number; Chama forms the LUD-16 Lightning Address
+// `<msisdn>@chapsmart.com` and resolves it to a BOLT11 for the claim amount via
+// the SAME `resolveLightningAddressToInvoice` path. Released escrow sats pay it
+// and ChapSmart deposits TZS to the phone in ~60s. No redirect, no new fund
+// surface — it returns a plain BOLT11 into the normal `resolveDestination` path
+// (same claim journal / double-pay guard), and the address is saved as a payout
+// destination (saveAfter: true) so it's one-tap reusable. (Kept a separate
+// component from TandoMpesaPicker so the proven Tando path is untouched.)
+function formatChapsmartLnurlError(e: unknown): string {
+  if (e instanceof LnurlError) {
+    switch (e.code) {
+      case "LnurlAmountOutOfRangeError":
+        return `This amount is outside ChapSmart's M-Pesa limits. ${e.message}`;
+      case "LnurlDnsError":
+        return "Couldn't reach ChapSmart (chapsmart.com). Check your connection and try again.";
+      case "LnurlServerError":
+        return "ChapSmart's server is busy right now. Try again in a moment.";
+      case "LnurlMalformedError":
+        return "ChapSmart returned an unexpected response. Try again, or use Lightning.";
+      case "LnurlParseError":
+        return "That number didn't resolve to a valid M-Pesa cash-out address.";
+    }
+  }
+  return (e as { message?: string })?.message || "Couldn't reach ChapSmart. Try again.";
+}
+
+function ChapsmartMpesaPicker({
+  payoutSats,
+  reserveSats,
+  savedDestinations,
+  onResolve,
+  onBack,
+  onCancel,
+}: {
+  payoutSats: number;
+  reserveSats: number;
+  savedDestinations: PayoutDestination[];
+  /** Fired with the resolved BOLT11 and the ChapSmart Lightning Address used,
+   *  so the consumer can save it (saveAfter: true) and dispatch the claim. */
+  onResolve: (bolt11: string, address: string) => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
+  const btcPrice = useBitcoinPrice();
+  const fiatRates = useFiatRates();
+
+  // A saved ChapSmart number is just a saved Lightning Address ending in
+  // @chapsmart.com — pull the most-recent one to pre-fill the phone field.
+  const lastSavedMsisdn = useMemo(() => {
+    const cs = savedDestinations.find((d) => isChapsmartLightningAddress(d.address));
+    return cs ? chapsmartMsisdnFromAddress(cs.address) : null;
+  }, [savedDestinations]);
+
+  const [phone, setPhone] = useState(() =>
+    lastSavedMsisdn ? formatTanzanianMsisdnDisplay(lastSavedMsisdn) : "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const msisdn = normalizeTanzanianMsisdn(phone);
+  const valid = msisdn !== null;
+  const tzsEstimate = formatEstimatedFiatForMsats({
+    amountMsats: payoutSats * 1000,
+    currency: "TZS",
+    usdPerBtc: btcPrice.usd,
+    usdFiatRates: fiatRates.rates,
+  });
+
+  const submit = async () => {
+    if (!msisdn) {
+      setErr("Enter a valid Tanzanian Vodacom M-Pesa number, e.g. 0740 034 110.");
+      return;
+    }
+    const address = buildChapsmartLightningAddress(msisdn);
+    if (!address) {
+      setErr("Enter a valid Tanzanian Vodacom M-Pesa number, e.g. 0740 034 110.");
+      return;
+    }
+    setErr(null);
+    setBusy(true);
+    try {
+      // Pre-resolves .well-known/lnurlp/<msisdn> (validating the address +
+      // checking the claim amount against ChapSmart's min/max) then fetches the
+      // BOLT11. Throws LnurlAmountOutOfRangeError if out of bounds.
+      const bolt11 = await resolveLightningAddressToInvoice(address, payoutSats);
+      onResolve(bolt11, address);
+    } catch (e) {
+      setErr(formatChapsmartLnurlError(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16, animation: "fadeIn 0.2s ease",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: T.card, border: `1px solid ${T.borderHi}`,
+          borderRadius: T.r, padding: 24, maxWidth: 420, width: "100%",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
+              M-PESA CLAIM · CHAPSMART
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
+              <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
+            </div>
+          </div>
+          <button onClick={onCancel} style={{
+            background: "none", border: "none", color: T.muted,
+            fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
+          }}>×</button>
+        </div>
+
+        <div style={{
+          padding: "12px", borderRadius: T.r,
+          background: T.greenDim, border: `1px solid ${T.green}44`,
+          color: T.text, marginBottom: 12,
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 10, marginBottom: 8,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <span style={{ fontSize: 20 }}>🇹🇿</span>
+              <span style={{
+                color: T.green, fontFamily: T.mono, fontSize: 11,
+                fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}>
+                Cash out to M-Pesa
+              </span>
+            </div>
+            <span style={{
+              flexShrink: 0, color: T.green, background: T.greenDim,
+              border: `1px solid ${T.green}55`, borderRadius: 4, padding: "2px 6px",
+              fontFamily: T.mono, fontSize: 8, fontWeight: 900,
+              textTransform: "uppercase",
+            }}>
+              one tap
+            </span>
+          </div>
+          <div style={{
+            color: T.muted, fontFamily: T.mono, fontSize: 10,
+            lineHeight: 1.5,
+          }}>
+            Enter your M-Pesa number. Chama pays it straight from your claim and
+            ChapSmart deposits TZS in seconds — no redirect, no pasting invoices.
+            {reserveSats > 0 && (
+              <>
+                {" "}About <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+              </>
+            )}
+          </div>
+        </div>
+
+        <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
+          M-PESA PHONE NUMBER
+        </div>
+        <input
+          type="tel"
+          inputMode="tel"
+          autoComplete="tel"
+          autoCorrect="off"
+          spellCheck={false}
+          value={phone}
+          onChange={(e) => { setPhone(e.target.value); setErr(null); }}
+          onKeyDown={(e) => { if (e.key === "Enter" && valid && !busy) { e.preventDefault(); void submit(); } }}
+          placeholder="0740 034 110"
+          disabled={busy}
+          style={{ ...inputStyle, marginBottom: 8 }}
+        />
+
+        <div style={{
+          fontSize: 10, color: T.muted, fontFamily: T.mono,
+          lineHeight: 1.5, marginBottom: 12, minHeight: 14,
+        }}>
+          {valid ? (
+            <>
+              Paying <span style={{ color: T.green }}>{msisdn}@{CHAPSMART_LNADDRESS_DOMAIN}</span>
+              {tzsEstimate && <> · ≈ {tzsEstimate}</>}
+            </>
+          ) : phone.trim().length > 0 ? (
+            "Tanzanian Vodacom numbers look like 0740 034 110 or 255740034110."
+          ) : (
+            tzsEstimate ? <>You'll receive ≈ {tzsEstimate} to M-Pesa.</> : "Vodacom M-Pesa, Tanzania."
+          )}
+        </div>
+
+        <button
+          onClick={() => void submit()}
+          disabled={!valid || busy}
+          style={{
+            width: "100%", padding: "12px 16px", borderRadius: T.rs,
+            background: valid && !busy ? T.green : T.surface,
+            border: `1px solid ${valid && !busy ? T.green : T.border}`,
+            color: valid && !busy ? T.bg : T.muted,
+            fontFamily: T.mono, fontSize: 12, fontWeight: 900,
+            cursor: valid && !busy ? "pointer" : "default",
+            marginBottom: 8,
+          }}
+        >
+          {busy ? "Reaching ChapSmart…" : "Cash out to M-Pesa"}
+        </button>
+
+        {err && (
+          <div style={{
+            marginBottom: 8, padding: 10, borderRadius: T.rs,
+            background: T.redDim, border: `1px solid ${T.red}44`,
+            color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
+          }}>
+            {err}
+          </div>
+        )}
+
+        <button
+          onClick={onBack}
+          disabled={busy}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, fontSize: 11,
+            fontWeight: 700, cursor: busy ? "not-allowed" : "pointer",
+          }}
+        >
+          Back
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function OnchainPayoutPicker({
   payoutSats,
   onResolve,
@@ -1256,14 +1570,12 @@ function OnchainPayoutPicker({
 }
 
 // v1.2.4: the inline ChapsmartPayoutOption (phone + name form that
-// POSTed to the now-dead nwc.chapsmart.com endpoint) was deleted.
-// Chapsmart now lives in external-swap-registry.ts as a guided
-// redirect alongside Banxaas / Bitika / Bitzed, and surfaces through
-// the shared ExternalSwapRedirectPicker. (Tando is the exception — a
-// native LUD-16 M-Pesa offramp via TandoMpesaPicker, not a redirect.)
-// The per-user profile helpers (phone + name) remain in
-// chapsmart-payout.ts for any future on-Chapsmart pre-fill but no
-// longer hit the network from Chama itself.
+// POSTed to the now-dead nwc.chapsmart.com endpoint) was deleted. ChapSmart
+// then GRADUATED (like Tando) to a native LUD-16 M-Pesa offramp — the
+// ChapsmartMpesaPicker above (`<phone>@chapsmart.com`), NOT a redirect and no
+// longer in external-swap-registry.ts. The per-user profile helpers (phone +
+// name) remain in chapsmart-payout.ts, unused by this native path (which
+// pre-fills from saved Lightning-Address destinations like Tando).
 
 // ── Sub-panels ──────────────────────────────────────────────────────────
 
@@ -1293,6 +1605,8 @@ function RunningPanel({
     phase.kind === "payout-confirming" ? "Confirming your payout…" :
     phase.kind === "paying-invoice" && payoutMethod?.kind === "tando"
       ? "Sending to M-Pesa (Tando)…"
+      : phase.kind === "paying-invoice" && payoutMethod?.kind === "chapsmart"
+      ? "Sending to M-Pesa (ChapSmart)…"
       : phase.kind === "paying-invoice" && payoutMethod?.kind === "external"
       ? `Sending to ${payoutMethod.match.provider.displayName}…`
       : phase.kind === "paying-invoice" ? "Sending to your wallet…" :
@@ -1369,7 +1683,7 @@ function TerminalPanel({
       }}>
         <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
         <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
-          {payoutMethod?.kind === "tando"
+          {payoutMethod?.kind === "tando" || payoutMethod?.kind === "chapsmart"
             ? "Sent to M-Pesa"
             : payoutMethod?.kind === "external"
               ? `Sent to ${payoutMethod.match.provider.displayName}`

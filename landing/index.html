@@ -130,9 +130,9 @@ nav::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:1px;ba
 .prod:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--tile-ac) 42%,rgba(255,255,255,.17));background:linear-gradient(135deg,rgba(255,255,255,.066),rgba(255,255,255,.028));box-shadow:0 28px 80px rgba(0,0,0,.36),0 0 64px color-mix(in srgb,var(--tile-ac) 18%,transparent),inset 0 1px 0 rgba(255,255,255,.06)}
 .prod:hover::after{opacity:1;box-shadow:0 0 58px color-mix(in srgb,var(--tile-ac) 16%,transparent),inset 0 0 0 1px color-mix(in srgb,var(--tile-ac) 18%,transparent)}
 .prod-thumb{grid-area:thumb;position:relative;width:100%;aspect-ratio:28/19;border-radius:16px;overflow:hidden;background:#070707;box-shadow:0 22px 58px rgba(0,0,0,.42),0 0 0 1px color-mix(in srgb,var(--tile-ac) 34%,rgba(255,255,255,.16))}
-.prod-thumb img{width:100%;height:100%;object-fit:cover;display:block;filter:saturate(1.08) contrast(1.04);transition:transform .6s cubic-bezier(.16,1,.3,1),filter .6s}
-.prod:hover .prod-thumb img{transform:scale(1.025);filter:saturate(1.16) contrast(1.07)}
-.prod-thumb::after{content:'';position:absolute;inset:0;border-radius:16px;background:linear-gradient(180deg,rgba(10,10,10,0) 58%,rgba(10,10,10,.34));box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);pointer-events:none}
+.prod-thumb>img{width:100%;height:100%;object-fit:cover;display:block;filter:saturate(1.08) contrast(1.04);transition:transform .6s cubic-bezier(.16,1,.3,1),filter .6s}
+.prod:hover .prod-thumb>img{transform:scale(1.025);filter:saturate(1.16) contrast(1.07)}
+.prod-thumb::after{content:'';position:absolute;z-index:2;inset:0;border-radius:16px;background:linear-gradient(180deg,rgba(10,10,10,0) 58%,rgba(10,10,10,.34));box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);pointer-events:none}
 .prod-featured{grid-template-columns:minmax(390px,50%) minmax(0,1fr);gap:18px 34px;padding:26px 28px 26px 26px;box-shadow:0 24px 74px rgba(0,0,0,.34),0 0 0 1px color-mix(in srgb,var(--tile-ac) 22%,transparent),0 0 72px color-mix(in srgb,var(--tile-ac) 12%,transparent),inset 0 1px 0 rgba(255,255,255,.06)}
 .prod-featured::after{border-width:1.5px;box-shadow:0 0 54px color-mix(in srgb,var(--tile-ac) 14%,transparent),inset 0 0 0 1px color-mix(in srgb,var(--tile-ac) 18%,transparent)}
 .prod-featured .prod-thumb{border-radius:18px;box-shadow:0 30px 80px rgba(0,0,0,.48),0 0 0 1px color-mix(in srgb,var(--tile-ac) 52%,rgba(255,255,255,.16)),0 0 36px color-mix(in srgb,var(--tile-ac) 18%,transparent)}
@@ -147,8 +147,12 @@ nav::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:1px;ba
 .prod-desc{font-size:15px;color:var(--t3);line-height:1.55;max-width:62ch}
 .prod-cta{grid-area:cta;align-self:start;justify-self:start;font-size:14px;color:var(--t2);white-space:nowrap;display:inline-flex;gap:5px;align-items:center}
 .prod-cta:hover{color:var(--t1)}
-.live{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:var(--r-pill);background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.11);font-family:var(--mono);font-size:9.5px;color:var(--t3);letter-spacing:.8px;text-transform:uppercase}
-.live::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--t3);animation:pulse 2s ease-in-out infinite}
+.live{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:var(--r-pill);background:linear-gradient(135deg,var(--tile-ac,var(--orange)),color-mix(in srgb,var(--tile-ac,var(--orange)) 72%,white));border:1px solid color-mix(in srgb,var(--tile-ac,var(--orange)) 66%,white);box-shadow:0 0 18px color-mix(in srgb,var(--tile-ac,var(--orange)) 24%,transparent);font-family:var(--mono);font-size:9.5px;font-weight:700;color:#0A0A0A;letter-spacing:.8px;text-transform:uppercase}
+.live::before{content:'';width:5px;height:5px;border-radius:50%;background:#0A0A0A;animation:pulse 2s ease-in-out infinite}
+.soon{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:var(--r-pill);background:color-mix(in srgb,var(--tile-ac,var(--teal)) 16%,transparent);border:1px solid color-mix(in srgb,var(--tile-ac,var(--teal)) 44%,rgba(255,255,255,.12));box-shadow:0 0 16px color-mix(in srgb,var(--tile-ac,var(--teal)) 14%,transparent);font-family:var(--mono);font-size:9.5px;font-weight:700;color:color-mix(in srgb,var(--tile-ac,var(--teal)) 82%,white);letter-spacing:.8px;text-transform:uppercase}
+.prod-cta.is-soon{color:color-mix(in srgb,var(--tile-ac,var(--teal)) 78%,white);opacity:.92;cursor:default;pointer-events:none}
+.ph-soon{display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 120% at 50% 38%,color-mix(in srgb,var(--tile-ac) 20%,transparent),transparent 70%),#0d0f14;border:1px solid color-mix(in srgb,var(--tile-ac) 24%,transparent)}
+.ph-soon .ph-glyph{font-size:34px;line-height:1;filter:drop-shadow(0 0 16px color-mix(in srgb,var(--tile-ac) 45%,transparent))}
 @media(max-width:860px){.prod{grid-template-columns:minmax(260px,42%) minmax(0,1fr);gap:14px 20px;padding:16px}.prod:not(.prod-featured){width:88%;grid-template-columns:minmax(250px,52%) minmax(0,1fr)}.prod-featured{grid-template-columns:minmax(300px,48%) minmax(0,1fr);padding:20px}.prod-desc{max-width:none}}
 @media(max-width:760px){.prod{grid-template-columns:1fr;grid-template-areas:"thumb" "main" "cta";gap:14px;padding:18px}.prod:not(.prod-featured){width:91%;grid-template-columns:1fr;padding:16px}.prod:not(.prod-featured) .prod-desc{max-width:none}.prod-featured{padding:20px}.prod-featured .prod-name{font-size:clamp(24px,8vw,30px)}.prod-thumb{width:100%;aspect-ratio:28/19}.prod-cta{margin-top:0}}
 
@@ -252,8 +256,12 @@ nav::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:1px;ba
 /* community chat */
 .chat-row{display:flex;gap:30px;align-items:center;margin-top:28px;flex-wrap:wrap}
 .chat-qr{display:flex;flex-direction:column;align-items:center;gap:10px}
-.chat-qr img{width:150px;height:150px;border-radius:14px;background:#fff;padding:9px;display:block}
-.chat-qr span{font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;color:var(--t3);text-transform:uppercase}
+.chat-qr-frame{position:relative;display:grid;place-items:center;padding:12px;border-radius:22px;background:radial-gradient(circle at 28% 20%,rgba(46,230,214,.10),transparent 52%),rgba(10,10,10,.30)}
+.chat-qr-frame::before{content:'';position:absolute;inset:0;border-radius:22px;pointer-events:none;background:linear-gradient(var(--orange),var(--orange)) left top/32px 2px no-repeat,linear-gradient(var(--orange),var(--orange)) left top/2px 32px no-repeat,linear-gradient(var(--teal),var(--teal)) right top/32px 2px no-repeat,linear-gradient(var(--teal),var(--teal)) right top/2px 32px no-repeat,linear-gradient(var(--purple),var(--purple)) left bottom/32px 2px no-repeat,linear-gradient(var(--purple),var(--purple)) left bottom/2px 32px no-repeat,linear-gradient(var(--orange),var(--orange)) right bottom/32px 2px no-repeat,linear-gradient(var(--orange),var(--orange)) right bottom/2px 32px no-repeat;filter:drop-shadow(0 0 10px rgba(46,230,214,.24))}
+.chat-qr-frame>img{width:150px;height:150px;border-radius:14px;background:#fff;padding:9px;display:block;box-shadow:0 12px 34px rgba(0,0,0,.24),0 0 0 1px rgba(255,255,255,.92)}
+.chat-qr-logo{position:absolute;left:50%;top:50%;width:24px;height:24px;transform:translate(-50%,-50%);display:grid;place-items:center;border-radius:50%;background:#fff;border:1px solid rgba(10,10,10,.10);box-shadow:0 5px 16px rgba(0,0,0,.24),0 0 0 2px rgba(255,255,255,.92);pointer-events:none}
+.chat-qr-logo img{width:18px;height:18px;padding:0;border-radius:0;background:transparent;box-shadow:none}
+.chat-qr-label{font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;color:var(--t3);text-transform:uppercase}
 .chat-links{display:flex;flex-direction:column;gap:14px}
 .chat-links a{font-family:var(--sora);font-weight:600;font-size:18px;letter-spacing:-.01em;color:var(--t1);display:inline-flex;gap:7px;align-items:center}
 .chat-links a:hover{color:var(--teal-m)}
@@ -385,7 +393,7 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
   <!-- PRODUCTS -->
   <section class="blk" id="products">
     <div class="kick r" style="--ac:var(--orange)"><span class="node"></span><span data-i18n="kick.products">02 · Products</span></div>
-    <h2 class="hl r d1" data-i18n="products.h2">Four products.<br>One trust primitive.</h2>
+    <h2 class="hl r d1" data-i18n="products.h2">Six flows.<br>One trust primitive.</h2>
     <p class="lead r d2" data-i18n="products.sub">Everything runs on the same 2-of-3 escrow. Different flows, identical trust model: zero.</p>
     <div class="prod-list">
       <div class="prod prod-featured r" style="--tile-ac:var(--orange-l)">
@@ -415,14 +423,32 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
         </div>
         <a class="prod-cta" href="https://getchama.app/?sim=1" target="_blank" rel="noopener"><span data-i18n="p.stores.cta">Browse stores</span> <span class="arrow">→</span></a>
       </div>
-      <div class="prod r" style="--tile-ac:var(--blue)">
-        <div class="prod-thumb"><img src="img/p-lend-v2.jpg" alt="A community lending table with ledger, repayment cash, and a neon Bitcoin escrow phone" loading="eager" decoding="async"></div>
+      <div class="prod prod-soon r" style="--tile-ac:var(--blue)">
+        <div class="prod-thumb"><img src="img/p-work-v20.jpg" alt="A Black woman mechanic repairs a bicycle while a customer watches beside a locked Bitcoin escrow phone" loading="lazy" decoding="async"></div>
         <div class="prod-main">
-          <div class="prod-name"><span data-i18n="p.lend.name">Community Lending</span> <span class="live" data-i18n="live">Live</span></div>
-          <div class="prod-tag" data-i18n="p.lend.tag">Digital tontines</div>
-          <p class="prod-desc" data-i18n="p.lend.desc">Lock sats as loans with trust-tiered limits. Auto-generated repayment escrows, interest tracking, arbiter-verified repayments. Microfinance on Bitcoin.</p>
+          <div class="prod-name"><span data-i18n="p.work.name">Work</span> <span class="soon" data-i18n="soon">Soon</span></div>
+          <div class="prod-tag" data-i18n="p.work.tag">Get paid for the job</div>
+          <p class="prod-desc" data-i18n="p.work.desc">Escrow a job before it starts. The client locks sats, the worker delivers, the arbiter settles any dispute. Freelance and gigs with trust built in.</p>
         </div>
-        <a class="prod-cta" href="https://getchama.app/?sim=1" target="_blank" rel="noopener"><span data-i18n="p.lend.cta">Lend sats</span> <span class="arrow">→</span></a>
+        <span class="prod-cta is-soon" data-i18n="soon.cta">Coming soon</span>
+      </div>
+      <div class="prod prod-soon r" style="--tile-ac:var(--blue)">
+        <div class="prod-thumb"><img src="img/p-chipin-v20.jpg" alt="Neighbors contribute together into a shared basket at an outdoor community gathering beside a locked Bitcoin escrow phone" loading="lazy" decoding="async"></div>
+        <div class="prod-main">
+          <div class="prod-name"><span data-i18n="p.chipin.name">Chip In</span> <span class="soon" data-i18n="soon">Soon</span></div>
+          <div class="prod-tag" data-i18n="p.chipin.tag">Pool sats together</div>
+          <p class="prod-desc" data-i18n="p.chipin.desc">Everyone chips in toward a shared goal — a gift, an event, a group buy. Each contribution locks in escrow and releases when the goal is met.</p>
+        </div>
+        <span class="prod-cta is-soon" data-i18n="soon.cta">Coming soon</span>
+      </div>
+      <div class="prod prod-soon r" style="--tile-ac:var(--blue)">
+        <div class="prod-thumb"><img src="img/p-stack-v19.jpg" alt="A diverse group builds individual coin stacks beside a locked Bitcoin escrow phone" loading="lazy" decoding="async"></div>
+        <div class="prod-main">
+          <div class="prod-name"><span data-i18n="p.stack.name">Stack</span> <span class="soon" data-i18n="soon">Soon</span></div>
+          <div class="prod-tag" data-i18n="p.stack.tag">Save together</div>
+          <p class="prod-desc" data-i18n="p.stack.desc">Group savings, one sat at a time. Stack toward a target with your circle — your own keys, visible progress, no custodian.</p>
+        </div>
+        <span class="prod-cta is-soon" data-i18n="soon.cta">Coming soon</span>
       </div>
     </div>
   </section>
@@ -586,7 +612,7 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
     <h2 class="hl r d1" data-i18n="chat.h2">Come say hi.</h2>
     <p class="lead r d2" data-i18n="chat.lead">A place to say hi, thank someone, or share feedback — on Fedi. Scan to join every room at once, or pick yours.</p>
     <div class="chat-row r d2">
-      <a class="chat-qr" href="https://app.fedi.xyz/link#screen=join&id=fed11qgqyj3mfwfhksw309ajrwvmxvenxgvpkvyursenxxvur2c3sv4jkxdfcxf3kgdmyvs6nzcehvc6xzctzxumrxdmr89jnwdtpv5enqwtpxqmrsvfh89skxv34qqqjpzytwrkr28r8mjas4ej467utd7excr7fapj7ukgc4ugacm6nu2u73k7ram" target="_blank" rel="noopener"><img src="img/fedi-qr.png" alt="Scan to join the Chama community chat on Fedi" width="150" height="150" loading="lazy"><span data-i18n="chat.scan">Scan — join all rooms</span></a>
+      <a class="chat-qr" href="https://app.fedi.xyz/link#screen=join&id=fed11qgqyj3mfwfhksw309ajrwvmxvenxgvpkvyursenxxvur2c3sv4jkxdfcxf3kgdmyvs6nzcehvc6xzctzxumrxdmr89jnwdtpv5enqwtpxqmrsvfh89skxv34qqqjpzytwrkr28r8mjas4ej467utd7excr7fapj7ukgc4ugacm6nu2u73k7ram" target="_blank" rel="noopener"><span class="chat-qr-frame"><img src="img/fedi-qr.png" alt="Scan to join the Chama community chat on Fedi" width="150" height="150" loading="lazy"><span class="chat-qr-logo" aria-hidden="true"><img src="icons/chama-mark-64.png" alt=""></span></span><span class="chat-qr-label" data-i18n="chat.scan">Scan — join all rooms</span></a>
       <div class="chat-links">
         <a href="https://app.fedi.xyz/link#screen=join&id=community210v3xzat5dphhyhmsw43xketeygazyv33vvmnzvmxx5unqwpkxdnxxvfs893rjwfcvsukxcmzxsmkxcnyvf3kywpnxscxzdnyxq6rvcmpxuengvp4xdsn2wfcvymrgvpexesjytpzvdhk6mt4de5hg72lw46kjezldpjhsg36yfskyephv5cnqwpjvdnrqenrxpnrxvmrxs6nscfkxymnvdrpv4jngwpjvdskgce3xy6nvdf5vfjxyef4x9jrvceevejrvcenxcekydtrygkzyer9vde8jur5d9hkuhmtv4ujyw3zvymkvmr0gcu4wuth2eh9zkr9vdc8z3m4w4m56v60w3j9zwrpxdvhw3n9ga3kwcfcgc4kk0fz05fkv4p3" target="_blank" rel="noopener"><span data-i18n="chat.en">English room</span> <span class="arrow">→</span></a>
         <a href="https://app.fedi.xyz/link#screen=join&id=community210v3xzat5dphhyhmsw43xketeygazyde5xf3kzvpnx9skzdnyxpjrvdm9xpskzc3kxucrxwpex33xxe3exvmnxvtxv9jryefexsmnqvty8yunvd35vgunywrzxvmrsvpj8q6jytpzvdhk6mt4de5hg72lw46kjezldpjhsg36yfnrqcf3vserxvfevyck2wtyxanxzvf5x9skgdfhvd3rwc3jv5crsetyx3jxvdesxserxerpvdskzcehxpjr2wf5vymkxenpx56kvwrpygkzyer9vde8jur5d9hkuhmtv4ujyw3zfphhy3t3vym8sd6vg4a9v6n2fsek7m6k23ux6v6ytp65jeekd4pkj5nzw39xcanh0pkrg0fz055t3dve" target="_blank" rel="noopener"><span data-i18n="chat.fr">Salle française</span> <span class="arrow">→</span></a>
@@ -647,9 +673,9 @@ en:{
  'weave.arbiter.role':'Arbiter','weave.arbiter.h3':'Truth settles it',
  'weave.arbiter.p':'Steps in only when the two disagree, and rules for whoever is telling the truth. A bond-staked community member: open roster, public record, ratings that keep the work honest.',
  'weave.rule':'<span class="c-t">Teal passes over orange.</span> <span class="c-o">Orange passes over purple.</span> <span class="c-p">Purple passes over teal.</span><br>No role dominates forever — the weave rule lives in the logo and in the protocol.',
- 'products.h2':'Four products.<br>One trust primitive.',
+ 'products.h2':'Six flows.<br>One trust primitive.',
  'products.sub':'Everything runs on the same 2-of-3 escrow. Different flows, identical trust model: zero.',
- 'live':'Live','p.flag':'Featured earner',
+ 'live':'Live','p.flag':'Featured earner','soon':'Soon','soon.cta':'Coming soon',
  'p.billpay.name':'Community Bill Pay','p.billpay.tag':'The front door to Bitcoin',
  'p.billpay.desc':'Post any bill — electricity, rent, school fees. Lock sats in escrow. A community volunteer pays it and claims the sats. No wallet required to understand it. This is how the next billion people meet Bitcoin.',
  'p.billpay.cta':'Start a bill',
@@ -659,9 +685,12 @@ en:{
  'p.stores.name':'Stores','p.stores.tag':'Every seller is a store',
  'p.stores.desc':'Community storefronts with real reputations. Pay sats, goods ship, escrow protects both sides — ratings follow the npub, not the platform.',
  'p.stores.cta':'Browse stores',
- 'p.lend.name':'Community Lending','p.lend.tag':'Digital tontines',
- 'p.lend.desc':'Lock sats as loans with trust-tiered limits. Auto-generated repayment escrows, interest tracking, arbiter-verified repayments. Microfinance on Bitcoin.',
- 'p.lend.cta':'Lend sats',
+ 'p.work.name':'Work','p.work.tag':'Get paid for the job',
+ 'p.work.desc':'Escrow a job before it starts. The client locks sats, the worker delivers, the arbiter settles any dispute. Freelance and gigs with trust built in.',
+ 'p.chipin.name':'Chip In','p.chipin.tag':'Pool sats together',
+ 'p.chipin.desc':'Everyone chips in toward a shared goal — a gift, an event, a group buy. Each contribution locks in escrow and releases when the goal is met.',
+ 'p.stack.name':'Stack','p.stack.tag':'Save together',
+ 'p.stack.desc':'Group savings, one sat at a time. Stack toward a target with your circle — your own keys, visible progress, no custodian.',
  'comm.h2':'Every country gets a community.',
  'comm.sub':'Pick your flag at sign-in — currency, languages, payment rails, and arbiters are all local. The cryptography stays invisible plumbing.',
  'comm.rails.h3':'Pay the way your neighbors already pay',
@@ -727,9 +756,9 @@ fr:{
  'weave.arbiter.role':'Arbitre','weave.arbiter.h3':'La vérité tranche',
  'weave.arbiter.p':'N’intervient que si les deux sont en désaccord, et tranche en faveur de celui qui dit la vérité. Membre de la communauté engagé par une caution : liste ouverte, historique public, évaluations qui gardent le travail honnête.',
  'weave.rule':'<span class="c-t">Le turquoise passe sur l’orange.</span> <span class="c-o">L’orange passe sur le violet.</span> <span class="c-p">Le violet passe sur le turquoise.</span><br>Aucun rôle ne domine pour toujours — la règle du tissage vit dans le logo comme dans le protocole.',
- 'products.h2':'Quatre produits.<br>Une seule primitive de confiance.',
+ 'products.h2':'Six parcours.<br>Une seule primitive de confiance.',
  'products.sub':'Tout repose sur le même séquestre 2-sur-3. Des parcours différents, un modèle de confiance identique : zéro.',
- 'live':'En ligne','p.flag':'Revenu vedette',
+ 'live':'En ligne','p.flag':'Revenu vedette','soon':'Bientôt','soon.cta':'Bientôt disponible',
  'p.billpay.name':'Paiement communautaire de factures','p.billpay.tag':'La porte d’entrée vers Bitcoin',
  'p.billpay.desc':'Publiez n’importe quelle facture — électricité, loyer, frais de scolarité. Verrouillez des sats sous séquestre. Un volontaire de la communauté la paie et réclame les sats. Pas besoin de wallet pour comprendre. C’est ainsi que le prochain milliard de personnes rencontrera Bitcoin.',
  'p.billpay.cta':'Publier une facture',
@@ -739,9 +768,12 @@ fr:{
  'p.stores.name':'Boutiques','p.stores.tag':'Chaque vendeur est une boutique',
  'p.stores.desc':'Des vitrines communautaires avec de vraies réputations. Payez en sats, la marchandise est livrée, le séquestre protège les deux parties — la note suit le npub, pas la plateforme.',
  'p.stores.cta':'Parcourir les boutiques',
- 'p.lend.name':'Prêts communautaires','p.lend.tag':'Tontines numériques',
- 'p.lend.desc':'Verrouillez des sats en prêts avec des plafonds gradués par la confiance. Séquestres de remboursement automatiques, suivi des intérêts, remboursements vérifiés par arbitre. La microfinance sur Bitcoin.',
- 'p.lend.cta':'Prêter des sats',
+ 'p.work.name':'Travail','p.work.tag':'Payé pour le travail',
+ 'p.work.desc':'Mettez un travail sous séquestre avant de commencer. Le client verrouille les sats, le travailleur livre, l’arbitre tranche en cas de litige. Freelance et petits boulots, avec la confiance intégrée.',
+ 'p.chipin.name':'Cagnotte','p.chipin.tag':'Mettez en commun',
+ 'p.chipin.desc':'Chacun participe à un objectif commun — un cadeau, un événement, un achat groupé. Chaque contribution est verrouillée sous séquestre et libérée une fois l’objectif atteint.',
+ 'p.stack.name':'Épargne','p.stack.tag':'Épargnez ensemble',
+ 'p.stack.desc':'Une épargne de groupe, sat après sat. Progressez vers un objectif avec votre cercle — vos propres clés, une progression visible, aucun dépositaire.',
  'comm.h2':'Chaque pays a sa communauté.',
  'comm.sub':'Choisissez votre drapeau à l’inscription — devise, langues, moyens de paiement et arbitres sont tous locaux. La cryptographie reste de la plomberie invisible.',
  'comm.rails.h3':'Payez comme vos voisins paient déjà',
@@ -807,9 +839,9 @@ es:{
  'weave.arbiter.role':'Árbitro','weave.arbiter.h3':'La verdad resuelve',
  'weave.arbiter.p':'Interviene solo cuando ambos discrepan, y falla a favor de quien dice la verdad. Un miembro de la comunidad con una fianza en juego: lista abierta, historial público, calificaciones que mantienen el trabajo honesto.',
  'weave.rule':'<span class="c-t">El turquesa pasa sobre el naranja.</span> <span class="c-o">El naranja pasa sobre el morado.</span> <span class="c-p">El morado pasa sobre el turquesa.</span><br>Ningún rol domina para siempre — la regla del tejido vive en el logo y en el protocolo.',
- 'products.h2':'Cuatro productos.<br>Una sola primitiva de confianza.',
+ 'products.h2':'Seis flujos.<br>Una sola primitiva de confianza.',
  'products.sub':'Todo corre sobre la misma custodia 2-de-3. Flujos distintos, modelo de confianza idéntico: cero.',
- 'live':'En vivo','p.flag':'Ingreso destacado',
+ 'live':'En vivo','p.flag':'Ingreso destacado','soon':'Pronto','soon.cta':'Muy pronto',
  'p.billpay.name':'Pago comunitario de facturas','p.billpay.tag':'La puerta de entrada a Bitcoin',
  'p.billpay.desc':'Publica cualquier factura — luz, alquiler, colegiatura. Bloquea sats en custodia. Un voluntario de la comunidad la paga y reclama los sats. No hace falta una wallet para entenderlo. Así conocerá Bitcoin el próximo billón de personas.',
  'p.billpay.cta':'Publicar una factura',
@@ -819,9 +851,12 @@ es:{
  'p.stores.name':'Tiendas','p.stores.tag':'Cada vendedor es una tienda',
  'p.stores.desc':'Escaparates comunitarios con reputaciones reales. Pagas sats, la mercancía se envía, la custodia protege a ambas partes — la valoración sigue al npub, no a la plataforma.',
  'p.stores.cta':'Explorar tiendas',
- 'p.lend.name':'Préstamos comunitarios','p.lend.tag':'Tandas digitales',
- 'p.lend.desc':'Bloquea sats como préstamos con límites según el nivel de confianza. Custodias de reembolso automáticas, seguimiento de intereses, reembolsos verificados por árbitro. Microfinanzas sobre Bitcoin.',
- 'p.lend.cta':'Prestar sats',
+ 'p.work.name':'Trabajo','p.work.tag':'Cobra por el trabajo',
+ 'p.work.desc':'Pon un trabajo en custodia antes de empezar. El cliente bloquea sats, el trabajador entrega, el árbitro resuelve cualquier disputa. Freelance y changas con confianza incorporada.',
+ 'p.chipin.name':'Aporta','p.chipin.tag':'Junten sats',
+ 'p.chipin.desc':'Todos aportan a una meta común — un regalo, un evento, una compra grupal. Cada aporte se bloquea en custodia y se libera al alcanzar la meta.',
+ 'p.stack.name':'Ahorro','p.stack.tag':'Ahorren juntos',
+ 'p.stack.desc':'Ahorro grupal, sat a sat. Avancen hacia una meta con su círculo — tus propias llaves, progreso visible, sin custodio.',
  'comm.h2':'Cada país tiene su comunidad.',
  'comm.sub':'Elige tu bandera al registrarte — moneda, idiomas, medios de pago y árbitros son todos locales. La criptografía queda como plomería invisible.',
  'comm.rails.h3':'Paga como ya pagan tus vecinos',

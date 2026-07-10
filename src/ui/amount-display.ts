@@ -27,7 +27,12 @@ export function writeAmountDisplayMode(mode: AmountDisplayMode): void {
 }
 
 export function formatFiatAmount(amount: number, currency: string): string {
-  return `${currency} ${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  // USD keeps cents (small-dollar amounts care). Every other currency drops
+  // decimals: for high-denomination fiat (TZS/KES/ARS/…) the cents are noise
+  // and eat scarce width on small devices — no one prices a trade to the
+  // fractional shilling (Jetty's call).
+  const maximumFractionDigits = currency.trim().toUpperCase() === "USD" ? 2 : 0;
+  return `${currency} ${amount.toLocaleString(undefined, { maximumFractionDigits })}`;
 }
 
 export function estimateFiatForMsats({

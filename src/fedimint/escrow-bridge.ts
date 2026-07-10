@@ -12,14 +12,35 @@
 // This is the integration layer the UI calls for the money-critical steps.
 
 import { type EscrowClient, type Signer } from "../escrow-engine/escrow-client.js";
-import { type EscrowLockBundle, type FedimintClient, type SSSShare } from "./fedimint-client.js";
+import {
+  hashNotes,
+  LOCK_SPEND_TRY_CANCEL_SECS,
+  type EscrowLockBundle,
+  type FedimintClient,
+  type PayOutcomeByEscrowResult,
+  type SSSShare,
+} from "./fedimint-client.js";
 import { stashPendingRedemption, clearPendingRedemption, markUnresolvedCredit } from "./pending-redemptions.js";
+import {
+  assertNativeLockStashWritable,
+  clearPendingNativeLock,
+  getPendingNativeLock,
+  markNativeLockPublishAttempted,
+  recoverPendingNativeLock,
+  stashNativeLockIntent,
+  upgradeNativeLockToSpent,
+  withNativeLockFlow,
+  type NativeLockRecoveryDeps,
+  type NativeLockRecoveryOutcome,
+} from "./pending-native-locks.js";
+import { isTestnetMode } from "./mock-wallet.js";
 import {
   type EscrowState,
   type SelectedMenuItem,
   type LockShareEntry,
   type VotePayload,
   EscrowEventKind,
+  EscrowStatus,
   Role,
   Outcome,
   getEffectiveParticipantAt,
@@ -34,8 +55,9 @@ import {
 } from "../escrow-engine/holder-shares.js";
 import { arbiterPriorityOrderFor } from "../escrow-engine/arbiter-substitution.js";
 import { getSavedHandle } from "../payments/saved-handles.js";
-import { pickArbiterFromPool } from "../arbiters/pool.js";
-import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
+import { pickArbiterFromPool, pickPreferredArbiter } from "../arbiters/pool.js";
+import { isSimModeOn } from "../sim/simMode.js";
+import { buildChamaOperationMeta, recordSatsTrace, type ChamaOperationMeta } from "../payments/sats-trace.js";
 import { receiveFediEcash } from "./fedi-internal.js";
 import { effectiveCreateFederationId } from "./federation-config.js";
 
@@ -113,12 +135,28 @@ export class EscrowFedimintBridge {
     const state = this.escrow.getState(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
 
+    // #37 hardening: refuse pre-spend AND pre-publish when the trade is no
+    // longer CREATED. The reducer only accepts LOCK from CREATED, but until
+    // now nothing checked status before the spend fired and the LOCK event
+    // hit relays — and a second distinct LOCK on a chain is a permanent
+    // replay-poison. "Cannot LOCK" keeps the hook's benign-stale swallow.
+    if (state.status !== EscrowStatus.CREATED) {
+      throw new Error(
+        `Cannot LOCK in state ${state.status} — this trade is no longer lockable. ` +
+        `(No sats were spent.)`
+      );
+    }
+
     const createEvent = state.eventChain.find(
       (e: any) => e.kind === 38100 || e.payload?.type === "escrow:create"
     );
     const expectedFed = effectiveCreateFederationId(createEvent?.payload as any);
 
-    if (expectedFed) {
+    // #35: sim mode uses a fake federation (SIM_FEDERATION_ID) that never equals
+    // a trade's real stamped fed. This fed-match gate is a real-money defense, so
+    // it must not fire in sim — else the lock (and thus a full sim trade) can
+    // never complete. No sats are real in sim, so nothing to protect.
+    if (expectedFed && !isSimModeOn()) {
       let probe: { fed: string | null };
       try {
         probe = await this.fedimint.probeReachable();
@@ -160,7 +198,11 @@ export class EscrowFedimintBridge {
       throw new Error("Cannot lock — no seller pubkey known for this trade.");
     }
     const arbiterPubkey = getEffectiveParticipantAt(state, Role.ARBITER, nowSec, { includeLockGrace: true })
-      ?? pickArbiterFromPool(state.communityArbiters, state.id, [buyerPubkey, sellerPk]);
+      // 2B prefer-bonded: seat the bonded-preferred arbiter when none has JOINed.
+      // The reducer JOIN gate + C1 classifier both accept this pick AND the legacy
+      // one, so a mixed-version counterparty never reads it as off-assignment.
+      // (Orthogonal to #37's spend/publish/stash — pure arbiter selection.)
+      ?? pickPreferredArbiter(state.communityArbiters, state.bondedArbiters, state.id, [buyerPubkey, sellerPk]);
     if (!arbiterPubkey) {
       throw new Error(
         "Cannot lock — no arbiter available. The trade has no JOINed arbiter " +
@@ -271,31 +313,200 @@ export class EscrowFedimintBridge {
 
   // ── Lock: Spend ecash → SSS split → encrypt shares → publish LOCK ──────
 
+  /** #37: sim/testnet run the plain flow — their fake notes must never
+   *  enter the real recovery stash, and there is nothing to recover. */
+  private nativeLockGuardOn(): boolean {
+    return !isSimModeOn() && !isTestnetMode();
+  }
+
   /**
-   * Full lock flow:
-   *   0. v0.1.72: Probe-and-verify locker's federation matches CREATE's.
-   *   1. Spend ecash from Fedimint wallet (total trade amount)
-   *   2. Split into 2-of-3 SSS shares
-   *   3. NIP-44 encrypt each share to its recipient
-   *   4. Publish the LOCK event to Nostr relays
+   * #37: the fail-closed recovery dependency set, bound to the live client
+   * + wallet. Shared by the inline pre-lock settle below and the boot
+   * drain (useEscrow passes this to drainPendingNativeLocks).
+   */
+  nativeLockRecoveryDeps(): NativeLockRecoveryDeps {
+    return {
+      loadEscrow: (id) => this.escrow.loadEscrow(id),
+      getConnectedRelayCount: () => this.escrow.getConnectedRelayCount(),
+      redeemNotes: (notes) => this.fedimint.redeemWithRetry(notes),
+      currentFederationId: () => this.fedimint.getFederationId(),
+      hashNotes,
+      // Re-absorb story-loss fix: leave a durable "your funding came back"
+      // breadcrumb so the restored balance reads as a calm funds-returned
+      // recovery, not the generic "trade needs attention" alarm. Merges with
+      // any existing funding trace for this escrow (fund-and-lock's
+      // lock-failed-after-funding), just updating the reason.
+      recordReabsorbedResidue: ({ escrowId, amountMsats }) =>
+        recordSatsTrace({
+          source: "funding",
+          escrowId,
+          amountMsats,
+          reason: "lock-reabsorbed",
+        }),
+    };
+  }
+
+  /**
+   * #37: settle any notes-carrying stash entry for this trade. Returns
+   * "none" when no such entry exists. Called (a) by the funding
+   * orchestrator BEFORE it creates an invoice — an unsettled prior attempt
+   * must never invite a SECOND payment — and (b) by lockAndPublish as
+   * defense-in-depth before any new spend. User-initiated, so the boot
+   * drain's attempt cap does not apply by default.
    *
-   * After this, the money is in escrow — no one can move it alone.
+   * Serialized on the per-escrow flow mutex so it can never act while a
+   * live lock flow for the same trade is between spend and publish-confirm
+   * (re-absorbing there would hollow the escrow — review F7/F11).
+   */
+  async settlePendingNativeLock(
+    escrowId: string,
+    opts: { ignoreAttemptCap?: boolean } = { ignoreAttemptCap: true },
+  ): Promise<NativeLockRecoveryOutcome | "none"> {
+    return withNativeLockFlow(escrowId, () =>
+      this.settlePendingNativeLockInner(escrowId, opts),
+    );
+  }
+
+  /** Unlocked body — callable only while the caller HOLDS the flow mutex
+   *  (lockAndPublish's inner flow) or via the locked wrapper above. */
+  private async settlePendingNativeLockInner(
+    escrowId: string,
+    opts: { ignoreAttemptCap?: boolean },
+  ): Promise<NativeLockRecoveryOutcome | "none"> {
+    if (!this.nativeLockGuardOn()) return "none";
+    const prior = getPendingNativeLock(escrowId);
+    if (!prior || prior.stage === "intent") return "none";
+    return recoverPendingNativeLock(prior, this.nativeLockRecoveryDeps(), opts);
+  }
+
+  /**
+   * Full lock flow (crash-safe since #37):
+   *   0. v0.1.72: Probe-and-verify locker's federation matches CREATE's;
+   *      #37: refuse when the trade is no longer CREATED.
+   *   1. Settle any prior attempt's stash entry (re-absorb / idempotent
+   *      resume / honest refuse) — its bearer notes must never be clobbered.
+   *   2. Persist an INTENT record, fail-closed on unwritable storage.
+   *   3. Spend ecash (90-day try_cancel horizon) → stash the notes
+   *      SYNCHRONOUSLY before anything else can await, throw, or reload.
+   *   4. Split into 2-of-3 SSS shares, NIP-44 encrypt, publish the LOCK.
+   *   5. Clear the stash ONLY on a confirmed LOCKED-with-our-notesHash.
+   *
+   * After this, the money is in escrow — no one can move it alone. On any
+   * crash or failure in between, the stash entry drives fail-closed
+   * recovery (pending-native-locks.ts) instead of stranding the sats.
    */
   async lockAndPublish(escrowId: string, opts: LockOptions = {}): Promise<EscrowState> {
+    // Whole flow under the per-escrow mutex: recovery (settle/drain) can
+    // never interleave with the spend→publish→confirm window of a LIVE
+    // lock for the same trade (review F7/F11/F15).
+    return withNativeLockFlow(escrowId, () => this.lockAndPublishInner(escrowId, opts));
+  }
+
+  private async lockAndPublishInner(escrowId: string, opts: LockOptions = {}): Promise<EscrowState> {
     const context = await this.prepareLockContext(escrowId);
     const amountMsats = amountMsatsForLock(context.state, opts.selectedItems);
-    const lockBundle = await this.fedimint.createEscrowLock(
+    const meta = buildChamaOperationMeta({
+      flow: "lock_spend",
+      escrowId,
       amountMsats,
-      {
-        arbiterFeeMsats: context.state.fees.arbiterMsats,
-      },
-      buildChamaOperationMeta({
-        flow: "lock_spend",
+    });
+    const guardOn = this.nativeLockGuardOn();
+    const lockOpts = {
+      savedHandleId: opts.savedHandleId,
+      selectedItems: opts.selectedItems,
+    };
+
+    if (guardOn) {
+      // A prior attempt's entry holds bearer notes — settle it before any
+      // new spend can exist for the same trade. (Inner variant: we already
+      // hold the flow mutex.)
+      const outcome = await this.settlePendingNativeLockInner(escrowId, { ignoreAttemptCap: true });
+      if (outcome !== "none") {
+        if (outcome === "cleared-committed") {
+          // The crash-window publish actually landed: the trade is already
+          // locked with the prior notes. Idempotent resume — never spend
+          // again, never publish a second LOCK.
+          const settled = this.escrow.getState(escrowId);
+          if (settled) return settled;
+          throw new Error(
+            "Cannot LOCK — this trade already locked with your previous funding. " +
+            "Reopen it to continue."
+          );
+        }
+        if (outcome === "kept") {
+          throw new Error(
+            "Chama is still recovering your previous funding attempt for this trade. " +
+            "Your sats are safe — recovery retries automatically. Try again in a " +
+            "moment. (No new sats were spent.)"
+          );
+        }
+        // reabsorbed / cleared-dead-notes ⇒ the wallet is whole again —
+        // proceed with a fresh lock.
+      }
+
+      // FAIL-CLOSED (V8 pattern): if the crash guard can't persist, refuse
+      // the lock BEFORE any sats move.
+      assertNativeLockStashWritable();
+      stashNativeLockIntent({
         escrowId,
         amountMsats,
-      }),
+        federationId: this.fedimint.getFederationId(),
+        spendTimeoutSecs: LOCK_SPEND_TRY_CANCEL_SECS,
+        lockOpts,
+      });
+    }
+
+    // The sats exist ONLY as the returned notes the instant the wallet
+    // call resolves — the onSpent callback persists them SYNCHRONOUSLY
+    // inside spendNotesForLock, before its own diagnostics awaits can
+    // widen the unstashed window (review F12).
+    const spend = await this.fedimint.spendNotesForLock(
+      amountMsats,
+      meta,
+      guardOn
+        ? (oobNotes, operationId) => upgradeNativeLockToSpent({
+            escrowId,
+            oobNotes,
+            amountMsats,
+            federationId: this.fedimint.getFederationId(),
+            operationId,
+            spendTimeoutSecs: LOCK_SPEND_TRY_CANCEL_SECS,
+            lockOpts,
+          })
+        : undefined,
     );
-    return this.publishLockBundle(escrowId, context.state, lockBundle, context, opts);
+
+    const lockBundle = await this.fedimint.buildEscrowLockBundle(
+      spend.oobNotes,
+      amountMsats,
+      { arbiterFeeMsats: context.state.fees.arbiterMsats },
+    );
+
+    if (guardOn) markNativeLockPublishAttempted(escrowId);
+    // On a publish throw the entry stays `publish-attempted` and we rethrow:
+    // deliberately NO inline re-absorb here — right after a failed publish,
+    // a relay that timed out may still have taken the LOCK frame, so the
+    // "no LOCK exists" read is not yet trustworthy. The next Fund tap or
+    // the next boot drain settles it once relay state is readable.
+    const resultState = await this.publishLockBundle(
+      escrowId, context.state, lockBundle, context, opts,
+    );
+
+    if (guardOn) {
+      if (resultState?.lock?.notesHash === lockBundle.notesHash) {
+        // Positive confirmation — the LOCK committed OUR notes.
+        clearPendingNativeLock(escrowId);
+      } else {
+        // Stale-suppression resolve or a competing lock committed different
+        // notes: ours are NOT in escrow. Keep the entry; recovery re-absorbs
+        // when provably safe.
+        console.warn(
+          `[chama] lockAndPublish: LOCK did not commit our notes for ${escrowId} ` +
+          `— stash entry kept for recovery`
+        );
+      }
+    }
+    return resultState;
   }
 
   async preflightLock(escrowId: string): Promise<void> {
@@ -573,7 +784,7 @@ export class EscrowFedimintBridge {
       throw err;
     }
 
-    if (expectedFed && redeemProbe.fed !== expectedFed) {
+    if (expectedFed && !isSimModeOn() && redeemProbe.fed !== expectedFed) {
       const err: any = new Error(
         `This trade's sats were minted on federation ${expectedFed}. ` +
           `Your wallet is on ${redeemProbe.fed}. ` +
@@ -918,6 +1129,16 @@ export class EscrowFedimintBridge {
     operationId: string,
   ): Promise<"settled" | "refunded" | "unknown"> {
     return await this.fedimint.awaitPayOutcome(operationId);
+  }
+
+  /** V7 reconcile-by-escrow: resolve the payment(s) ever dispatched for this
+   *  escrow via the operation log's chama_escrow_id stamp — survives a crash
+   *  that lost the operationId. "unknown" ⇒ refuse re-pay for now. */
+  async payOutcomeByEscrow(
+    escrowId: string,
+    sinceMs?: number,
+  ): Promise<PayOutcomeByEscrowResult> {
+    return await this.fedimint.payOutcomeByEscrow(escrowId, sinceMs);
   }
 
   async spendNotes(amountMsats: number, meta?: ChamaOperationMeta): Promise<string> {

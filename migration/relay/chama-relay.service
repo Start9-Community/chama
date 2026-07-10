@@ -1,0 +1,37 @@
+[Unit]
+Description=Chama community Nostr relay (khatru)
+Documentation=https://getchama.app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=satoshi
+Group=satoshi
+WorkingDirectory=/home/satoshi/relay
+ExecStart=/home/satoshi/relay/chama-relay
+Environment=RELAY_ADDR=127.0.0.1:7777
+Environment=RELAY_DB=/home/satoshi/relay/data
+# Soft-cap the Go heap on this small (426 MB) box.
+Environment=GOMEMLIMIT=256MiB
+Restart=always
+RestartSec=3
+
+# Protect the production web app: the relay may never eat the whole box.
+# Real use is ~80-120 MB; these are ceilings. If exceeded, systemd throttles/
+# kills and Restart brings it back while clients fall back to the public pool.
+MemoryHigh=200M
+MemoryMax=300M
+
+# Hardening — the relay only needs to write its own data dir.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/satoshi/relay
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

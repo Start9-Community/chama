@@ -1,0 +1,134 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Chama — the "Live chama" liveness score
+// ══════════════════════════════════════════════════════════════════════════
+//
+// How alive is a community? Computed from CHAIN-VERIFIED commitment bonds
+// (bond-announcement.ts) + arbiter ratings — never a hardcoded "Kenya is green".
+// The commitment bond democratized arbiter-hood, so every community earns its
+// liveness from the ground up (chama-live-chama-signal-brief.md, Jetty's Q3):
+//
+//   liveness ≈ (# bonded arbiters) × (their combined ratings) × (bond size × duration)
+//
+// Each factor: coverage (unity/redundancy), reputation (proven trust), and
+// commitment ("how much × how long" — PHILOSOPHY §2.11). This module is PURE +
+// tunable; the weights/constants are exported so tuning never means editing logic.
+// It NEVER auto-lists a single OG arbiter as "the answer" — it reports a count, so
+// thin coverage reads as *opportunity* (apply!) not sufficiency.
+
+import type { VerifiedBond } from "../bond-multisig/bond-announcement.js";
+
+export interface RatingSummary { count: number; positive: number; negative: number; }
+
+export interface ChamaLiveness {
+  community: string;
+  /** ≥1 funded + still-active bonded arbiter. */
+  isLive: boolean;
+  /** Distinct funded + active bonded arbiters. */
+  arbiterCount: number;
+  /** Σ actual on-chain sats across live bonds (chain truth). */
+  totalBondSats: bigint;
+  /** Σ sats × remaining-term-blocks — the "how much × how long" commitment. */
+  bondWeightSatBlocks: bigint;
+  /** Sat-weighted average remaining term, in blocks. */
+  avgRemainingBlocks: number;
+  ratings: { count: number; positive: number; negative: number; positiveRate: number };
+  /** 0–100 headline strength (a tunable composite of coverage/commitment/reputation). */
+  score: number;
+}
+
+export interface LivenessWeights { coverage: number; commitment: number; reputation: number; }
+/** Tunable weights (sum ~1). Reputation and commitment lead; coverage rewards unity. */
+export const DEFAULT_LIVENESS_WEIGHTS: LivenessWeights = { coverage: 0.3, commitment: 0.4, reputation: 0.3 };
+
+/** Arbiter count that saturates the coverage term (more still helps the readout). */
+export const COVERAGE_SATURATES_AT = 3;
+/** Reference bond-weight (sats × remaining-blocks) that anchors the commitment
+ *  term's mid-scale — a ~100k-sat bond held ~10,000 blocks. Chosen so realistic
+ *  bonds spread across 0–1 rather than saturating; ~10× the reference ≈ full credit.
+ *  Tunable (the exact number is a product knob, not logic). */
+export const COMMITMENT_REF_SATBLOCKS = 100_000 * 10_000;
+
+/** Compute a community's liveness from its chain-verified bonds + arbiter ratings.
+ *  `tipHeight` sets remaining-term (lockUntil − tip). Only FUNDED + ACTIVE bonds
+ *  count — an unfunded claim or an expired bond contributes nothing. */
+export function computeChamaLiveness(
+  community: string,
+  bonds: readonly VerifiedBond[],
+  ratingsByNpub: ReadonlyMap<string, RatingSummary>,
+  tipHeight: number,
+  weights: LivenessWeights = DEFAULT_LIVENESS_WEIGHTS,
+): ChamaLiveness {
+  // One live bond per arbiter (newest already selected upstream); dedup defensively.
+  const byArbiter = new Map<string, VerifiedBond>();
+  for (const b of bonds) {
+    if (!b.funded || !b.active) continue;
+    const cur = byArbiter.get(b.npub);
+    if (!cur || b.actualSats > cur.actualSats) byArbiter.set(b.npub, b);
+  }
+  const live = [...byArbiter.values()];
+  const arbiterCount = live.length;
+
+  const totalBondSats = live.reduce((s, b) => s + b.actualSats, 0n);
+  const bondWeightSatBlocks = live.reduce(
+    (s, b) => s + b.actualSats * BigInt(Math.max(0, b.lockUntil - tipHeight)),
+    0n,
+  );
+  const avgRemainingBlocks = totalBondSats > 0n ? Number(bondWeightSatBlocks / totalBondSats) : 0;
+
+  let rc = 0, rp = 0, rn = 0;
+  for (const b of live) {
+    const r = ratingsByNpub.get(b.npub);
+    if (r) { rc += r.count; rp += r.positive; rn += r.negative; }
+  }
+  const positiveRate = rc > 0 ? rp / rc : 0;
+
+  // ── Composite (0–100), each term normalized to 0–1 ────────────────────────
+  const coverage = Math.min(1, arbiterCount / COVERAGE_SATURATES_AT);
+  // Log-scaled commitment: diminishing returns, ~1.0 at 10× the reference weight.
+  const commitment = bondWeightSatBlocks > 0n
+    ? Math.min(1, Math.log10(1 + Number(bondWeightSatBlocks) / COMMITMENT_REF_SATBLOCKS) / Math.log10(11))
+    : 0;
+  // Bayesian-smoothed positive rate (5 pseudo-votes at 50%) so a 1-rating arbiter
+  // isn't a raw 0% or 100%.
+  const reputation = (rp + 2.5) / (rc + 5);
+  const raw = weights.coverage * coverage + weights.commitment * commitment + weights.reputation * reputation;
+
+  return {
+    community,
+    isLive: arbiterCount > 0,
+    arbiterCount,
+    totalBondSats,
+    bondWeightSatBlocks,
+    avgRemainingBlocks,
+    ratings: { count: rc, positive: rp, negative: rn, positiveRate },
+    score: arbiterCount === 0 ? 0 : Math.round(100 * raw),
+  };
+}
+
+/** The distinct npubs assignable as arbiters from a set of chain-verified bonds
+ *  for a community — funded + still-active only (an unfunded claim or an expired
+ *  bond enrolls no one). This is the permissionless bond → arbiter pool source
+ *  (S1 of chama-bond-arbiter-enrollment-brief.md): the bond IS the trust, so a
+ *  chain-verified bonded npub can be seated without a steward sign-off. Pure +
+ *  governance-neutral — wiring it into the assignable pool is a later, gated step. */
+export function bondedArbitersForCommunity(bonds: readonly VerifiedBond[]): string[] {
+  const set = new Set<string>();
+  for (const b of bonds) {
+    if (b.funded && b.active) set.add(b.npub.toLowerCase());
+  }
+  return [...set];
+}
+
+/** Human readout for the onboarding chip — "3 arbiters · 96% · ~60-day bonds".
+ *  `blocksPerDay` maps remaining-term blocks to days (signet ~2880, mainnet ~144).
+ *  Never names a single arbiter — a bare count keeps scarcity reading as opportunity. */
+export function formatLivenessReadout(l: ChamaLiveness, blocksPerDay = 144): string {
+  if (l.arbiterCount === 0) return "No bonded arbiters yet — be the first";
+  const parts = [`${l.arbiterCount} arbiter${l.arbiterCount === 1 ? "" : "s"}`];
+  if (l.ratings.count > 0) parts.push(`${Math.round(l.ratings.positiveRate * 100)}%`);
+  if (l.avgRemainingBlocks > 0) {
+    const days = Math.max(1, Math.round(l.avgRemainingBlocks / blocksPerDay));
+    parts.push(`~${days}-day bond${days === 1 ? "" : "s"}`);
+  }
+  return parts.join(" · ");
+}

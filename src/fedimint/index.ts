@@ -27,6 +27,19 @@ export {
   listPendingFundings,
   drainPendingFundings,
 } from "./pending-fundings.js";
+export {
+  clearPendingNativeLockIfIntent,
+  drainPendingNativeLocks,
+  getPendingNativeLock,
+  listPendingNativeLocks,
+  stashNativeLockIntent,
+  summarizeNativeLocksForUi,
+  MAX_NATIVE_LOCK_DRAIN_ATTEMPTS,
+} from "./pending-native-locks.js";
+export type {
+  NativeLockUiSummary,
+  PendingNativeLock,
+} from "./pending-native-locks.js";
 export { deriveCreateFedTags } from "./create-fed-tags.js";
 export type { CreateFedTags, CreateFedTagsInputs } from "./create-fed-tags.js";
 export {

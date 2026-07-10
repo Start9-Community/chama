@@ -114,8 +114,13 @@ export function isKenyaPayoutContext(input: {
 }): boolean {
   const isKenyaSlug = (slug?: string | null): boolean =>
     !!slug && slug.toLowerCase().startsWith("ke-kes");
-  if (isKenyaSlug(input.tradeCommunity) || isKenyaSlug(input.homeCommunity)) {
-    return true;
+  const currency = (input.fiatCurrency ?? "").trim().toUpperCase();
+  // The TRADE context is authoritative: when the claim carries a community or a
+  // currency, decide from THAT alone — a Kenyan-home user cashing out a Cameroon
+  // (XAF) trade must NOT see M-Pesa (it's unusable there). Home is only the
+  // fallback for a context-less claim (legacy: no community AND no currency tag).
+  if (input.tradeCommunity || currency) {
+    return isKenyaSlug(input.tradeCommunity) || currency === "KES";
   }
-  return (input.fiatCurrency ?? "").trim().toUpperCase() === "KES";
+  return isKenyaSlug(input.homeCommunity);
 }

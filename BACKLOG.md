@@ -12,10 +12,36 @@ removing one without addressing it requires a note in
 
 ---
 
+**Reading this doc:** shipped work is folded into collapsible `✅ Shipped` blocks
+(expand to see the history); `- [ ]` = open, `- [x]` = done. The quick "what's on the
+table" is right here:
+
+## 🔜 Now / Next — open work at a glance
+
+- **Bond = single-key timelock COMMITMENT — BUILT + wired + Mutinynet-proven (2026-07-03).**
+  Ceremony (post→fund→lock→reclaim), multi-UTXO funding, tests green. Next: Jetty's real-sats
+  app walk-through; then vestigial 2-of-3 cleanup (manifest in DECISIONS/STATUS). No cabinet.
+- 🔥 **Private community federations over Nostr** (encrypted `#p`-scoped fed invite; the
+  "ultra-private chamas" + recruitment on-ramp; cross-fed lockdown LOCKED). HIGH — Jetty's pick.
+  (`chama-private-community-feds-brief.md`; DECISIONS 2026-07-03.)
+- **Onboarding "Live" chama signal** — represent a chama's liveness by # arbiters × combined
+  ratings × bond length; don't auto-list the OG as default arbiter (incentivize applications).
+  (Design open — see the 2026-07-03 note / Q3.)
+- **Work** + **Chip In** (CPS) + **Stack** (savings) — the post-launch verticals (Product
+  Expansion; DECISIONS 2026-07-01/03).
+- **Notifications grand finale** + the rest of the open **Current Priority** items below.
+- Deeper open queues: **Product Expansion · Later Protocol Work · OSS Contributions ·
+  Investigation Queue · Field-test asks** — each still has open `- [ ]` items.
+
+---
+
 ## Current Priority
 
 These are the highest-leverage items after consolidating the old v0.4.x
 candidate list with the older roadmap.
+
+<details>
+<summary>✅ <b>Shipped — 16 completed items</b> (click to expand the history)</summary>
 
 - [x] **LN addresses are payout destinations, not payment handles.**
       Counterparty handles (Wave, Zelle, Revtag, Orange Money, etc.)
@@ -177,6 +203,10 @@ candidate list with the older roadmap.
       NIP-94-backed blobs remain the scale-up path if relay event-size
       pressure shows up.
 
+</details>
+
+### Open — the actual current priority
+
 - [ ] **Notifications grand finale.** Treat notifications as a major final
       polish layer, not a tiny toast sweep. Users need to know when a trade
       needs action, when sats are locked, when the counterparty voted, when
@@ -252,6 +282,9 @@ candidate list with the older roadmap.
 Completed or already moved out of the immediate backlog by the current
 codebase. Keep these here briefly so the consolidation has memory.
 
+<details>
+<summary>✅ <b>Scratched / shipped — 8 items</b> (click to expand)</summary>
+
 - [x] **v0.3.0 atomic lifecycle surfaces.** `AtomicFundingModal`,
       `DestinationPicker`, claim-and-payout, recovery payout, destroy
       recovery, ChamaBar states, and claim bridge error surfacing are all
@@ -296,6 +329,8 @@ codebase. Keep these here briefly so the consolidation has memory.
       universal, locked-private rail with a visible quick-add section in
       Payment handles for mobile-money-first users.
 
+</details>
+
 ---
 
 ## Product Expansion
@@ -321,6 +356,75 @@ codebase. Keep these here briefly so the consolidation has memory.
       without consuming or hiding the parent storefront. Seller dashboards
       manage quantities, availability, and paused/deleted state.
 
+- [ ] **Cut the Lending vertical** (DECISIONS 2026-07-01). Escrow solves
+      simultaneous-exchange trust, not future-promise trust — once a loan
+      disburses the machinery has no grip, and Chama lacks the tight social
+      graph that makes real chamas' lending work. Gut-check any usage/default
+      data first, then remove it as a category (leave a v3 door only for a
+      community-internal form). Frees the vertical slot for Work + CPS below.
+
+- [ ] **"Work" vertical (replaces Lending).** Services/labor as a first-class
+      category, named simply **Work**: small discrete jobs (fix / build / tutor
+      / translate / deliver). Poster funds escrow → worker submits proof →
+      poster releases (arbiter on dispute). Reuses the escrow envelope +
+      reputation + arbiter wholesale; the escrow IS the repayment-recourse
+      lending never had. Scope = small jobs only, not recruiting/large offers.
+      Likely an elevation/positioning of existing service/commission surfaces,
+      not a new engine. (DECISIONS 2026-07-01.)
+
+- [ ] **Chip In (CPS / Community Pool Sats)** — the "chama" unlock. >1 npub pool sats
+      toward ONE fixed, transparent destination (merchant/store LUD-16 or a
+      specific address), released on goal / refunded all-or-nothing on miss
+      (Kickstarter-shaped, deadline-bounded → short escrow, Fedimint-friendly;
+      each donor an independent escrow, so it avoids the savings-ROSCA's
+      dynamic-membership complexity). The **destination-lock** is the unlock:
+      earmarked purpose, can't redirect to the requester → purposed remittance,
+      not begging. Reuses the LUD-16 payout rail + escrow + ratings. It is
+      lending's INTENT via escrow's STRENGTH. Reverse-lending anti-abuse:
+      requester pre-locks a % (skin-in-the-game), ratings + receipt
+      confirmation, tier caps. ⚠ Design FIRST: **destination collusion**
+      (sock-puppet merchant) → require verified merchant destinations + donor
+      receipt confirmation + caps; also sybil/farming resistance + the
+      fund-safety-grade all-or-nothing refund path. (DECISIONS 2026-07-01.)
+      - **Reverse-lending tier model (front-% by trust — Jetty 2026-07-01):**
+        newbie fronts **≥60%** of the bill to a VERIFIED destination; medium
+        (good ratings, repeat, registered store) **50%**; OG (excellent ratings)
+        **30%** — ALL tiers pay a verified merchant. **Vetting oracle = reuse
+        others' solutions:** bootstrap on offramp merchant registration (e.g.
+        `pay.chapsmart.com` — registration is a real process = a vetting signal,
+        and the payout lands in a KYC'd mobile-money account = accountability),
+        evolving to Chama-native merchant reputation (a fulfilled-order track
+        record). The **merchant is the THIRD stakeholder** (their registration +
+        rating), so collusion needs a registered merchant willing to burn their
+        account — that's what actually closes the collusion hole. A
+        merchant-landing-page-as-free-bond is a fine low-friction extra layer,
+        weak alone (a scammer can make a cheap page) → defense-in-depth, not the
+        gate.
+      - **De-risk via a capped pilot (validate before betting):** one community,
+        verified-merchant destinations only, tiny caps, instrumented; define
+        kill/keep metrics UP FRONT (e.g. "60 days: ≥N genuine requests funded by
+        ≥M distinct donors, <X% collusion attempts") to dodge the lending
+        sunk-cost trap. Cheap to be wrong (escrow refunds donors all-or-nothing;
+        caps bound scams; no user funds lost if unused). **Base demand is the
+        mundane universal case** — a group splitting/pooling ONE bill (restaurant,
+        family need), done in cash / fragmented mobile money today; stranger-help
+        is the viral upside, not the whole thesis. Merchant-rail (single-payer) is
+        the lower-risk proven-demand hedge under it.
+
+- [ ] **Stack (group savings).** The
+      "chama" made literal, and the SIBLING to CPS: friends each keep sats in
+      their OWN ecash and see each other's *progress* read-only (NIP-44
+      encrypted, opt-in), then graduate on-chain privately via the peg-out rail
+      when the stack is meaningful. ⭐ **Individual custody + social visibility —
+      NOT a pooled pot** (that's CPS): personal stacks side-by-side with a shared
+      window, so it never inherits CPS's shared-mutable-custody complexity.
+      Escrow-ethos-clean: nobody holds anyone else's money → no future-promise
+      trust (the line that killed Lending). Reuses ecash + NIP-44 + peg-out +
+      (naturally) a private community fed as the container. Guardrails: share
+      progress/streak not raw balance; opt-in per-person; small-sats framing;
+      chat skipped/optional; same app not a separate repo; POST-launch.
+      (DECISIONS 2026-07-03.)
+
 - [ ] **`user@chama.community` Lightning Address service.** Optional,
       self-hostable LNURL-pay resolver backed by the user's own Chama
       instance, with explicit opt-in and uptime/privacy copy.
@@ -332,8 +436,26 @@ real collateral; make it legible. Read-only v1 surface; no UI work
 until election events exist.
 
 - [ ] **Recurring payments unlock.** Reveal subscription listings only for
-      graduated sellers once aggregate ratings are populated. Currently hidden;
-      gating for graduated sellers is blocked on the Ratings primitive below.
+      graduated sellers (`canOfferSubscription`, 5+ / 0). The escrow spine is
+      built + tested (SUBSCRIBE / PERIOD_RELEASE / `handleSubscribe` in
+      escrow-client + state-machine); the cited Ratings-primitive blocker is
+      **CLEARED** (kind:38123 shipped 2026-06-08 — `canOfferSubscription` now
+      reads real data). Remaining = UI only: a Create-subscription form behind
+      the gate, a period-release surface, a subscription card in TradeView, and
+      wiring extension kinds 38109-38110. **Field-validated 2026-06-27** by the
+      first trader (asked for it unprompted). Model = prepaid-and-released, NOT
+      open-ended Patreon — frame as renewable fixed terms. See DECISIONS
+      2026-06-27 for the three-way split + the open-ended/NWC deferral.
+
+- [ ] **On-request / commission listings.** The first trader's "on-request
+      beats / commission artwork" case = repeat one-off *commissions*, distinct
+      from subscriptions. Mostly reuses the existing Marketplace **service**
+      fulfillment type ("Service rendered") + buyer↔seller chat delivery
+      (Blossom upload already exists for Exchange); the new bits are a
+      buyer-initiated "request" framing (Bill Pay already proves inverted
+      initiation) and storefront-per-npub (below) so a buyer can re-commission.
+      Lightest of the three threads — near-zero new protocol. Provenance: first
+      trader, 2026-06-27.
 
 - [x] **Ratings primitive (core — unblocks graduation).** **[✅ PRIMITIVE SHIPPED — `src/reputation/ratings.ts` + kind:38123 (RatingTap/MeScreen/TradeDetail), DECISIONS 2026-06-08. The #73 CONSUMERS — tiered assignment, arbiter dashboard, amount caps — remain, tracked in the arbiter-economy build.]** Implement the actual
       per-counterparty rating capture + aggregation that `canOfferSubscription`

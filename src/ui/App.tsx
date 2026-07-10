@@ -22,6 +22,7 @@ import {
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
 import { remainingStock, isSoldOut, overcommittedChildren } from "../escrow-engine/storefront.js";
+import { archivedTradeEntries } from "../escrow-engine/trade-index.js";
 import {
   CURATED_PRESETS,
   getActiveInvite,
@@ -31,8 +32,11 @@ import {
   isNativeBridgeModeOn,
   isTestnetMode,
   expectedFederationIdForInvite,
+  listPendingNativeLocks,
   setActiveInvite,
+  summarizeNativeLocksForUi,
 } from "../fedimint/index.js";
+import { getPayoutRecord } from "../payments/payout-journal.js";
 import {
   getCommunityBySlug,
   communityForInvite,
@@ -68,6 +72,9 @@ import {
   isMidFunding,
   shouldShowOnBrowse,
   listingMatchesActiveRoute,
+  summarizePendingPayoutsForUi,
+  selectPayoutReattachTargets,
+  strandedSourceExplainsBalance,
 } from "./decisions.js";
 import { Toast } from "./components/Toast.js";
 import { BitcoinAmount } from "./components/BitcoinAmount.js";
@@ -77,11 +84,15 @@ import { BrowserSupportBanner } from "./components/BrowserSupportBanner.js";
 import { ActiveTradePill } from "./components/ActiveTradePill.js";
 import { BitcoinPricePill } from "./components/BitcoinPricePill.js";
 import { RecoveryBanner } from "./screens/RecoveryBanner.js";
+import { PendingLockCard } from "./components/PendingLockCard.js";
+import { PendingPayoutCard } from "./components/PendingPayoutCard.js";
 import { useBrowserBanner } from "./hooks/useBrowserBanner.js";
 import { useFederationCommands } from "./hooks/useFederationCommands.js";
 
 import { BrowseView } from "./screens/BrowseView.js";
 import { ConnectScreen } from "./screens/ConnectScreen.js";
+import { GlobeCountryPicker } from "./screens/GlobeCountryPicker.js";
+import { DashboardScreen } from "./screens/DashboardScreen.js";
 import { TradeDetail } from "./screens/TradeDetail.js";
 import { CreateForm } from "./screens/CreateForm.js";
 import { MeScreen } from "./screens/MeScreen.js";
@@ -94,6 +105,8 @@ import { DestroyEcashConfirmModal } from "./panels/DestroyEcashConfirmModal.js";
 import { FundWalletModal } from "./panels/FundWalletModal.js";
 import { AtomicFundingModal } from "./panels/AtomicFundingModal.js";
 import { ClaimPayoutModal } from "./panels/ClaimPayoutModal.js";
+import { BondCeremonyModal } from "./panels/BondCeremonyModal.js";
+import { copyTextRobust } from "./components/CopyButton.js";
 import { RecoveryPayoutModal } from "./panels/RecoveryPayoutModal.js";
 import { EcashExportModal } from "./panels/EcashExportModal.js";
 import { addOrTouchPayoutDestination, listPayoutDestinations } from "../payments/payout-destinations.js";
@@ -106,6 +119,7 @@ import { balanceBlocksFederationSwitch } from "../payments/lightning-fees.js";
 import {
   buildChamaOperationMeta,
   getBestSatsTrace,
+  listOpenSatsTraces,
   recordSatsTrace,
   type SatsTraceEntry,
 } from "../payments/sats-trace.js";
@@ -165,6 +179,10 @@ type PendingDestroyConfirm = {
    *  restore the old community/filter alongside the active invite. */
   restoreCommunitySlug?: string | null;
 };
+
+// Liveness "~D-day" readout scale. Commitment bonds live on BOND_NETWORK (mainnet,
+// ~10-min blocks ⇒ ~144/day) as of v5.0.
+const BOND_LIVENESS_BLOCKS_PER_DAY = 144;
 
 const TAB_FOR_VIEW: Record<View, Tab> = {
   browse: "browse",
@@ -454,6 +472,10 @@ export default function App() {
   const [browseCommunity, setBrowseCommunity] = useState<string>(
     () => getUserCommunitySlugRaw() ?? DEFAULT_COMMUNITY_SLUG,
   );
+  // v4.3 auth-first: a fresh npub connects with no home chama yet. This gates the
+  // post-connect GlobeCountryPicker (the pick moved out of the pre-signer
+  // ConnectScreen). Re-evaluated whenever a signer connects.
+  const [needsHomePick, setNeedsHomePick] = useState(false);
   const [nip46Uri, setNip46Uri] = useState<string | null>(null);
   const [loginSuccess, setLoginSuccess] = useState(false);
   const [nip46Waiting, setNip46Waiting] = useState(false);
@@ -469,6 +491,10 @@ export default function App() {
   const [autoLoginChecked, setAutoLoginChecked] = useState(false);
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<PendingDestroyConfirm | null>(null);
+  // #25 foreign-chama guidance: a trade whose fed ≠ the wallet's fed (FED_MISMATCH)
+  // — instead of "sign out and rejoin with the correct federation", offer a one-tap
+  // switch to the chama the trade lives in. Captures the trade's community + a retry.
+  const [pendingFedSwitch, setPendingFedSwitch] = useState<{ community: string; retry: () => Promise<void> } | null>(null);
   const [autoInitDone, setAutoInitDone] = useState(false);
   // Relay-resilience re-arm. The auto-init effect latches autoInitDone on
   // dispatch so it fires once and never hot-loops — but that left a failed/empty
@@ -513,6 +539,7 @@ export default function App() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, pubkey, connectedRelays, ratingHydrationKey]);
+
   const handleRateCounterparty = async (tradeId: string, ratee: string, thumb: RatingThumb) => {
     await actions.rateCounterparty(tradeId, ratee, thumb);
     const lc = ratee.toLowerCase();
@@ -563,6 +590,7 @@ export default function App() {
     // so only ClaimPayoutModal actually reads these now.
     tradeCommunity?: string | null;
     fiatCurrency?: string | null;
+    tradeCategory?: string | null;
     resolve: () => void;
   } | null>(null);
   // v0.3.0 Phase 3: ClaimPayoutModal mount state. Same shape as
@@ -575,6 +603,8 @@ export default function App() {
     fiatCurrency?: string | null;
     resolve: () => void;
   } | null>(null);
+  // Bond Phase 2A: the cabinet-only "Post your bond" ceremony modal.
+  const [showBondCeremony, setShowBondCeremony] = useState(false);
   const [blockedClaimReasons, setBlockedClaimReasons] = useState<Record<string, string>>({});
   // v0.3.0 Phase 4: RecoveryPayoutModal mount state. Single mount used
   // by BOTH the failure-mode RecoveryBanner (no follow-up after drain)
@@ -590,6 +620,11 @@ export default function App() {
       amountMsats?: number;
     };
   } | null>(null);
+  // #37: true while the PendingLockCard's "Finish lock" call is in flight.
+  const [pendingLockBusy, setPendingLockBusy] = useState(false);
+  // Stranded-payout recovery: escrows already swept by the once-per-session
+  // background reattachPayout (the boot sweep effect below).
+  const payoutReattachSweptRef = useRef<Set<string>>(new Set());
   const [kind0Enabled, setKind0Enabled] = useState(false);
   const [nostrProfiles, setNostrProfiles] = useState<NostrProfileNameMap>({});
   const [amountDisplayMode, setAmountDisplayModeState] = useState<AmountDisplayMode>(readAmountDisplayMode);
@@ -720,6 +755,9 @@ export default function App() {
     if (!connected) return;
     setBrowseCommunity(getUserCommunitySlugRaw() ?? DEFAULT_COMMUNITY_SLUG);
     setKind0Enabled(readKind0Toggle(pubkey));
+    // Auth-first: if THIS npub has never picked a home chama, gate the
+    // post-connect picker before the main app renders.
+    setNeedsHomePick(getUserCommunitySlugRaw() === null);
   }, [connected, pubkey]);
 
   // v2.7 onboarding completion — two pre-login deferrals settle once a signer
@@ -799,6 +837,17 @@ export default function App() {
 
     const activeInvite = getActiveInvite();
     const storedHomeCommunity = getUserCommunitySlugRaw();
+    // v4.3 auth-first: while the post-connect home picker gates the app
+    // (this npub has never picked a home → same condition as needsHomePick,
+    // read from the source to stay effect-order-proof), do NOT auto-init a
+    // default fed behind it. The pick itself resolves + inits the chosen
+    // federation (handleSelectCommunity), so initing BLF here would (a)
+    // burn a join + immediate switch, and (b) worse: use-default PERSISTS
+    // a home this user never picked — quit mid-pick + relaunch would then
+    // skip the picker silently. Deferred WITHOUT latching autoInitDone so
+    // the effect re-arms normally once the pick lands (its guards then
+    // skip re-dispatch: the pick's own init sets busy/initialized).
+    if (storedHomeCommunity === null) return;
     const nativeCommunity = isNativeBridgeModeOn()
       ? getConfiguredNativeBridgeCommunitySlug()
       : null;
@@ -933,6 +982,15 @@ export default function App() {
 
   const myTrades = visibleTrades.filter(isParticipant);
 
+  // Loss-proof history: durable-index trades whose chain isn't loaded this
+  // session (relay eviction / pre-community-relay / never-locked). Excludes
+  // everything currently loaded so there are no dupes; the Me "All" view
+  // renders these as compact "earlier trades" rows below the live list. Cheap
+  // synchronous scoped-localStorage read; recomputed as escrows load.
+  const archivedTrades = pubkey
+    ? archivedTradeEntries(escrows.keys())
+    : [];
+
   // v0.6.5: hasActiveBuyerSellerCommitment + findActiveTrade are now
   // informational only — they still drive the ChamaBar "in escrow"
   // pill and the ActiveTradePill, but no longer gate Create or Fund.
@@ -970,6 +1028,127 @@ export default function App() {
   // the state field directly keeps the call site terse.
   const midFunding = isMidFunding({ fundingInProgress });
 
+  // #37: pending SDK-wallet lock attempts (crash-window recovery). While an
+  // actionable entry exists, the balance belongs to a KNOWN trade — the
+  // drain-shaped surfaces (banner / stranded pill / Me recover card /
+  // fed-switch drain CTA) suppress and the "finish locking" card takes
+  // over. Synchronous scoped-localStorage read per render, same precedent
+  // as isSimModeOn() below; empty (and cost-free) pre-connect.
+  // Sim/testnet render NOTHING here (F4): a real-mode entry must not offer
+  // a resume whose lock would spend fake notes into a real trade; the
+  // entries wait untouched for the next real-mode session.
+  // Fed + balance context bound the story (F1/F9): other-fed entries go to
+  // the calm stuck card instead of suppressing, and an intent only speaks
+  // when the balance could actually satisfy its lock.
+  const nativeLockSummary = (!isSimModeOn() && !isTestnetMode())
+    ? summarizeNativeLocksForUi(listPendingNativeLocks(), Date.now(), {
+        currentFederationId: fedimint.federationId,
+        balanceMsats: fedimint.balanceMsats ?? 0,
+      })
+    : { suppressRecovery: false, resume: null, stuck: [] };
+  // Display-side staleness filter: only offer resume while the trade is
+  // still lockable (CREATED) — or not yet loaded (trust the stash until
+  // relay state proves otherwise; the boot drain settles it).
+  const nativeLockResume = nativeLockSummary.resume && (() => {
+    const trade = escrows.get(nativeLockSummary.resume.escrowId);
+    return !trade || trade.status === EscrowStatus.CREATED;
+  })()
+    ? nativeLockSummary.resume
+    : null;
+  // Suppress the drain surfaces ONLY while the resume is actually ACTIONABLE
+  // (its trade is still CREATED / not-yet-loaded). A stash entry whose trade
+  // has since gone terminal/expired must NOT keep suppressing — that would
+  // hide a safe, recoverable balance for up to the intent TTL (the re-absorb
+  // story-loss gap: a downgraded-to-intent trade that later expires). Once
+  // the resume is filtered out, the funding trace + honest "funds returned"
+  // banner take over instead. (summarize couples suppressRecovery↔resume, so
+  // this only ever RELEASES suppression the display filter already dropped.)
+  const hasPendingNativeLock = nativeLockResume !== null;
+
+  // Stranded-payout recovery: the claim-side analog of the block above. A
+  // CLAIMED-not-COMPLETED trade the user won means claimed ecash sits in
+  // the wallet with its outbound payout still owed — that balance is
+  // EXPLAINED, so the drain-shaped surfaces suppress and the calm "Finish
+  // your payout" card takes over (the trade's own double-pay-guarded RETRY
+  // CLAIM is the money path). Bounded upstream: other-fed trades and
+  // entries older than PENDING_PAYOUT_SUPPRESS_MAX_MS stop suppressing.
+  // Sim/testnet render nothing here, same gate as the native-lock summary.
+  const pendingPayoutSummary = (pubkey && !isSimModeOn() && !isTestnetMode())
+    ? summarizePendingPayoutsForUi({
+        escrows: escrows.values(),
+        userPubkey: pubkey,
+        getPayoutRecord,
+        balanceMsats: fedimint.balanceMsats ?? 0,
+        nowMs: Date.now(),
+        currentFederationId: fedimint.federationId,
+      })
+    : { suppressRecovery: false, card: null, entries: [] };
+  const hasPendingClaimPayout = pendingPayoutSummary.suppressRecovery;
+  // Display-side staleness filter, mirroring nativeLockResume: only card a
+  // trade that's still CLAIMED locally (the summary reads the same map, so
+  // this is just belt-and-braces against a mid-render status flip).
+  const pendingPayoutCard = pendingPayoutSummary.card
+    && escrows.get(pendingPayoutSummary.card.escrowId)?.status === EscrowStatus.CLAIMED
+    ? pendingPayoutSummary.card
+    : null;
+
+  // #37: one-tap resume. The bridge settles the stashed entry first
+  // (re-absorb / idempotent already-locked return), then locks fresh from
+  // the restored balance — no new invoice, no double payment.
+  const handleFinishPendingLock = async () => {
+    if (!nativeLockResume || pendingLockBusy) return;
+    const { escrowId, lockOpts } = nativeLockResume;
+    setPendingLockBusy(true);
+    try {
+      const st = await actions.lockAndPublish(escrowId, lockOpts ?? {});
+      // Positive confirmation (F5): the hook swallows "Cannot LOCK" as a
+      // benign stale and resolves with the current state — a trade that
+      // just went terminal must not toast a success.
+      if (st?.lock?.notesHash) {
+        setToast({ message: "Lock finished — your sats are in escrow.", type: "success" });
+      } else {
+        setToast({
+          message: "This trade can no longer be locked — your sats are safe in your wallet.",
+          type: "info",
+        });
+      }
+      openEscrow(escrowId);
+    } catch (e: any) {
+      setToast({
+        message: e?.message || "Couldn't finish the lock yet — recovery keeps retrying automatically.",
+        type: "error",
+      });
+    } finally {
+      setPendingLockBusy(false);
+    }
+  };
+
+  // Stranded-payout recovery: boot sweep. Every CLAIMED trade the user won
+  // that still holds a payout-journal record gets ONE background
+  // reattachPayout per session — a stuck "payout confirming" resolves
+  // (settled → COMPLETE published, refunded → record cleared so RETRY CLAIM
+  // goes live) without the user having to re-open the trade. reattachPayout
+  // only re-attaches to the existing operationId; it structurally never
+  // re-pays. Gated on an initialized wallet so requireBridge() inside
+  // doesn't fail-soft and waste the once-per-session latch.
+  useEffect(() => {
+    if (!pubkey || !fedimint.initialized) return;
+    if (isSimModeOn() || isTestnetMode()) return;
+    const targets = selectPayoutReattachTargets({
+      escrows: escrows.values(),
+      userPubkey: pubkey,
+      getPayoutRecord,
+    });
+    for (const id of targets) {
+      if (payoutReattachSweptRef.current.has(id)) continue;
+      payoutReattachSweptRef.current.add(id);
+      void actions.reattachPayout(id);
+    }
+    // actions.* is a fresh identity each render but reads live refs
+    // internally (same pattern as the MeScreen liveness effect).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pubkey, fedimint.initialized, escrows]);
+
   // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND nothing
   // else explains the balance — no locked/approved commitment, no
   // mid-funding flow, no mid-claim sweep. CREATED listings do not explain
@@ -984,17 +1163,67 @@ export default function App() {
     // directly (a pure localStorage read); the memoized `simOn` in the
     // connect-screen block is declared later in this render body.
     simModeOn: isSimModeOn(),
+    hasPendingNativeLock,
+    // Stranded-payout recovery: an unfinished claim payout explains the
+    // balance — the "Finish your payout" card owns the story instead.
+    hasPendingClaimPayout,
   });
   const walletBalanceMsats = fedimint.balanceMsats ?? 0;
+  // #37: the pending-lock gate also stops the WRONG durable attribution —
+  // without it, the effect below persists an "inferred-from-claim-history"
+  // sats-trace naming an unrelated old claim for a balance that actually
+  // belongs to the pending lock's trade (fires from 1 sat, banner or not).
   const hasTraceableIdleBalance = Math.floor(Math.max(0, walletBalanceMsats) / 1000) > 0
     && committedMsats <= 0
     && !midFunding
-    && !claimPayoutInProgress;
+    && !claimPayoutInProgress
+    && !hasPendingNativeLock
+    // Same rule for a pending claim payout: while it owns the balance
+    // story, don't persist an inferred-from-claim-history trace that may
+    // name a DIFFERENT (older) claim than the one actually pending.
+    && !hasPendingClaimPayout;
   const traceableStrandedSource = pubkey && hasTraceableIdleBalance
     ? identifyStrandedEcashSource({ escrows: escrows.values(), userPubkey: pubkey })
     : null;
-  const strandedSource = showRecoveryBanner ? traceableStrandedSource : null;
   const bestSatsTrace: SatsTraceEntry | null = getBestSatsTrace(walletBalanceMsats);
+  // Re-absorb story-loss fix + attribution correctness: a FUNDING trace is a
+  // DIRECT record of "this balance is your funding for trade X that didn't
+  // lock" (written by fund-and-lock's lock-failed-after-funding + the
+  // reabsorb's lock-reabsorbed). It BEATS identifyStrandedEcashSource, which
+  // WALKS claim history and mis-attributes a funding residue to an unrelated
+  // old claim (Jetty's ₿6,463-buyer-card-on-a-₿2,000-funding-balance repro).
+  // Scan the open traces (persisted, synchronous — so the banner is stable
+  // from first render, no glitchy claim-walk flip as escrows load async) for
+  // a funding trace whose amount explains the balance.
+  const fundingResidueTrace = showRecoveryBanner
+    ? (listOpenSatsTraces().find(t =>
+        t.source === "funding" && !!t.escrowId && typeof t.amountMsats === "number"
+        && strandedSourceExplainsBalance(t.amountMsats, walletBalanceMsats)) ?? null)
+    : null;
+  const fundingReturned = !!fundingResidueTrace;
+  // The RIGHT trade to name on the funds-returned card (the funded trade
+  // itself), looked up from the trace's escrowId. Description fills in once
+  // the escrow loads; the id + amount are always honest.
+  const fundingTrade = fundingResidueTrace
+    ? {
+        escrowId: fundingResidueTrace.escrowId!,
+        description: escrows.get(fundingResidueTrace.escrowId!)?.description ?? "",
+        amountMsats: fundingResidueTrace.amountMsats!,
+      }
+    : null;
+  // Stranded-payout recovery (attribution honesty): the CLAIM identity card
+  // only names a claim whose amount can explain the balance being swept, and
+  // only when a funding trace hasn't already claimed the story. When residue
+  // from more than one trade is mixed in (a ₿1,570 claim on a ₿2,462 balance)
+  // the card drops to "leftover sats from earlier trades" — it never fronts
+  // an aggregate sweep with a single trade's number.
+  const strandedSourceConsistent = !!traceableStrandedSource
+    && strandedSourceExplainsBalance(traceableStrandedSource.amountMsats, walletBalanceMsats);
+  const strandedSource = showRecoveryBanner && !fundingReturned && strandedSourceConsistent
+    ? traceableStrandedSource
+    : null;
+  const strandedGenericResidue =
+    showRecoveryBanner && !fundingReturned && !!traceableStrandedSource && !strandedSourceConsistent;
   const displayedSatsTrace: SatsTraceEntry | null = bestSatsTrace ?? (
     traceableStrandedSource
       ? {
@@ -1010,9 +1239,25 @@ export default function App() {
         }
       : null
   );
+  // Stranded-payout recovery (stale-key fix): the recovery drain's
+  // double-pay journal is keyed by this escrowId — an INHERITED key from
+  // the most-recent-CLAIM / sats-trace inference. If that trade's amount
+  // can't explain the live balance, the key is provably about some OTHER
+  // (usually already-settled) payout, and keying the drain to it makes the
+  // journal's settled short-circuit return a false green "Recovered!"
+  // without sending anything (the observed Recover → success → banner-back
+  // no-op loop). Same consistency rule as the banner's identity card:
+  // unexplained balance ⇒ keyless drain ("a drained balance is its own
+  // guard", balance-recovery.ts).
+  const recoveryTraceCandidate = traceableStrandedSource
+    ? { escrowId: traceableStrandedSource.escrowId as string | undefined, amountMsats: traceableStrandedSource.amountMsats as number | undefined }
+    : { escrowId: bestSatsTrace?.escrowId, amountMsats: bestSatsTrace?.amountMsats };
+  const recoveryKeyTrusted = recoveryTraceCandidate.escrowId !== undefined
+    && recoveryTraceCandidate.amountMsats !== undefined
+    && strandedSourceExplainsBalance(recoveryTraceCandidate.amountMsats, walletBalanceMsats);
   const recoveryTraceContext = pendingRecovery?.traceContext ?? {
-    escrowId: traceableStrandedSource?.escrowId ?? bestSatsTrace?.escrowId,
-    amountMsats: traceableStrandedSource?.amountMsats ?? bestSatsTrace?.amountMsats,
+    escrowId: recoveryKeyTrusted ? recoveryTraceCandidate.escrowId : undefined,
+    amountMsats: recoveryTraceCandidate.amountMsats,
   };
 
   useEffect(() => {
@@ -1376,6 +1621,39 @@ export default function App() {
     });
   };
 
+  // Open a durable-index "Earlier trade" whose chain isn't loaded. Unlike
+  // openEscrow, this AWAITS the rehydrate and only navigates on success — a
+  // trade whose events aged off the relay returns null, and blindly opening
+  // the detail view for a null escrow silently dumps the user on Browse (the
+  // detail render only mounts when `selected` is truthy). Instead: reload,
+  // open if it comes back, else stay put and explain honestly.
+  const openArchivedTrade = async (id: string) => {
+    setToast({ message: "Reloading trade…", type: "info" });
+    // Cap the wait: loadEscrow's relay fetch runs to a 15s timeout and can add
+    // completeness retries (~45s worst case), so awaiting it raw left the user
+    // hanging on a stuck-looking toast. Race a 10s cap — a reloadable trade
+    // (events still on the relay / durable cache) resolves in a couple seconds;
+    // an aged-off one just yields the honest "not on the relay" result faster.
+    // If loadEscrow finishes AFTER the cap, its result still lands in the live
+    // list on the next render (harmless), so we never double-load.
+    let state: EscrowState | null = null;
+    try {
+      state = await Promise.race([
+        actions.loadEscrow(id),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 10_000)),
+      ]);
+    } catch { /* handled below */ }
+    if (state) {
+      openEscrow(id, "me");
+      return;
+    }
+    setToast({
+      message: "This trade's full history isn't on your Chama relay anymore — "
+        + "the summary here is what's saved on this device.",
+      type: "info",
+    });
+  };
+
   useEffect(() => {
     if (urlEscrowOpenAttemptedRef.current || !connected) return;
     const params = new URLSearchParams(window.location.search);
@@ -1510,9 +1788,11 @@ export default function App() {
   const fediWebView = isFediWebViewSignInEnvironment(signInEnvironment);
   const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(signInEnvironment);
   const safeAreaTop = useSafeAreaInsets ? "env(safe-area-inset-top, 0px)" : 0;
-  const shellPaddingTop = simOn
-    ? (useSafeAreaInsets ? `calc(${SIM_PILL_HEIGHT}px + env(safe-area-inset-top, 0px))` : SIM_PILL_HEIGHT)
-    : safeAreaTop;
+  // The sim-pill offset is now an in-flow spacer inside <SimModePill/> (a plain
+  // height applies reliably; the inline paddingTop env() calc below was being
+  // dropped by React's style reconciliation on the main shell — the header
+  // rendered under the banner). shellPaddingTop now handles only the safe-area.
+  const shellPaddingTop = safeAreaTop;
   const shellPaddingBottom = useSafeAreaInsets
     ? `calc(${BOTTOM_NAV_HEIGHT}px + env(safe-area-inset-bottom, 0px))`
     : BOTTOM_NAV_HEIGHT;
@@ -1546,7 +1826,7 @@ export default function App() {
                   setToast({ message: "⚡ Key scanned — signing you in.", type: "success" });
                   actions.connect();
                 } else if (scanned.startsWith("nostrconnect://") || scanned.startsWith("bunker://")) {
-                  navigator.clipboard?.writeText(scanned);
+                  copyTextRobust(scanned);
                   setToast({ message: "Signer URI copied to clipboard.", type: "success" });
                 } else {
                   setToast({ message: "Unrecognized QR code.", type: "error" });
@@ -1599,6 +1879,40 @@ export default function App() {
           error={error}
           nip46Uri={nip46Uri}
           nip46Waiting={nip46Waiting}
+        />
+      </div>
+    );
+  }
+
+  // ── Connected but no home chama yet → the post-connect market picker ──
+  // v4.3 auth-first: the pick moved here from the pre-signer ConnectScreen. The
+  // npub is known, so onSelect writes straight to its scope (handleSelectCommunity
+  // persists + resolves the federation), and — because the client is connected —
+  // the picker's country-detail liveness signal can actually fetch.
+  if (needsHomePick) {
+    return (
+      <div style={{
+        background: T.bg, color: T.text, minHeight: "100dvh", fontFamily: T.sans,
+        display: "flex", flexDirection: "column", alignItems: "center",
+        justifyContent: "flex-start", padding: "36px 18px", textAlign: "center",
+        paddingTop: shellPaddingTop,
+      }}>
+        <style>{globalCss()}</style>
+        <SimModePill />
+        {/* Failed first picks toast their reason (handleSelectCommunity's
+            "Couldn't reach X. Try another community.") — without this the
+            gate swallowed them and a retry looked like a dead tap. */}
+        {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
+        <GlobeCountryPicker
+          onSelect={async (slug) => {
+            await handleSelectCommunity(slug);
+            // Advance only if the pick actually committed (a failed first-time
+            // switch clears it, leaving the picker up to retry).
+            setNeedsHomePick(getUserCommunitySlugRaw() === null);
+          }}
+          loadLiveness={actions.getChamaLiveness}
+          loadBondedCounts={actions.fetchBondedArbiterCounts}
+          livenessBlocksPerDay={BOND_LIVENESS_BLOCKS_PER_DAY}
         />
       </div>
     );
@@ -1715,6 +2029,12 @@ export default function App() {
               // shouldShowRecoveryBanner is gated the same way. simOn is in
               // scope here (declared above the connected render).
               simModeOn: simOn,
+              // #37: same suppressor as the banner — the pill one-taps into
+              // the drain modal, which must not fire on a recoverable lock.
+              hasPendingNativeLock,
+              // Stranded-payout recovery: same rule while an unfinished
+              // claim payout owns the balance story.
+              hasPendingClaimPayout,
             })}
             onTapStranded={() => setPendingRecovery({
               title: "Recover sats",
@@ -1790,6 +2110,7 @@ export default function App() {
           homeCommunity={getUserCommunitySlugRaw()}
           tradeCommunity={pendingFundAndLock.tradeCommunity}
           fiatCurrency={pendingFundAndLock.fiatCurrency}
+          tradeCategory={pendingFundAndLock.tradeCategory}
           fundAndLock={actions.fundAndLock}
           getOnchainInfo={actions.getOnchainInfo}
           lockAndPublish={actions.lockAndPublish}
@@ -1869,6 +2190,17 @@ export default function App() {
             },
           }}
           onClose={() => setStrandedClaimExport(null)}
+        />
+      )}
+
+      {showBondCeremony && pubkey && (
+        <BondCeremonyModal
+          createCommitmentBond={actions.createCommitmentBond}
+          checkCommitmentFunding={actions.checkCommitmentFunding}
+          reclaimCommitmentBond={actions.reclaimCommitmentBond}
+          getBondChainTip={actions.getBondChainTip}
+          publishBondAnnouncement={actions.publishBondAnnouncement}
+          onClose={() => setShowBondCeremony(false)}
         />
       )}
 
@@ -1967,6 +2299,7 @@ export default function App() {
         <DestroyEcashConfirmModal
           targetLabel={pendingDestroyConfirm.label}
           balanceMsats={pendingDestroyConfirm.balanceMsats}
+          hasPendingNativeLock={hasPendingNativeLock}
           onWithdraw={() => {
             // pendingSwitchAfterWithdraw state machine unchanged —
             // only the trigger surface moves from FundWalletModal
@@ -2001,6 +2334,48 @@ export default function App() {
           }}
         />
       )}
+
+      {/* #25 foreign-chama guidance — a trade on a fed the wallet isn't currently
+          on. Instead of the raw "sign out and rejoin with the correct federation"
+          error, name the chama and offer a one-tap switch + auto-retry the join. */}
+      {pendingFedSwitch && (() => {
+        const chama = getCommunityBySlug(pendingFedSwitch.community);
+        const name = chama?.displayName ?? pendingFedSwitch.community;
+        const flag = chama?.flagEmoji ?? "🌍";
+        return (
+          <div style={{ position: "fixed", inset: 0, background: "#000c", zIndex: 9998, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+            onClick={(e) => { if (e.target === e.currentTarget) setPendingFedSwitch(null); }}>
+            <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, borderRadius: T.r, width: "100%", maxWidth: 360, padding: 22 }}>
+              <div style={{ fontSize: 26, marginBottom: 10, textAlign: "center" }}>🔀</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.text, fontFamily: T.sans, textAlign: "center", marginBottom: 10 }}>
+                This trade lives in {flag} {name}
+              </div>
+              <div style={{ fontSize: 13, color: T.muted, fontFamily: T.sans, lineHeight: 1.55, textAlign: "center", marginBottom: 18 }}>
+                Your wallet is on a different Chama right now. Switch to <b style={{ color: T.text }}>{name}</b> to pick up this trade where you left off — your sats are safe either way.
+              </div>
+              <button
+                onClick={async () => {
+                  const target = pendingFedSwitch;
+                  setPendingFedSwitch(null);
+                  try {
+                    await handleSelectCommunity(target.community);
+                    await target.retry();
+                    setToast({ message: `On ${name} — trade picked up.`, type: "success" });
+                  } catch (err: any) {
+                    setToast({ message: err?.message || `Couldn't switch to ${name}. If you have another live trade, finish that one first.`, type: "error" });
+                  }
+                }}
+                style={{ width: "100%", padding: "13px", borderRadius: T.rs, background: T.accent, border: "none", color: T.bg, fontFamily: T.sans, fontSize: 14, fontWeight: 800, cursor: "pointer", marginBottom: 8 }}>
+                Switch to {flag} {name} →
+              </button>
+              <button onClick={() => setPendingFedSwitch(null)}
+                style={{ width: "100%", padding: "11px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 12, cursor: "pointer" }}>
+                Not now
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* v0.3.0 Phase 4: RecoveryPayoutModal — single mount serving
           both the failure-mode RecoveryBanner path AND the destroy-
@@ -2085,7 +2460,7 @@ export default function App() {
           // a chat pager that flexes to take the leftover room, and the timeline
           // glued to the bottom. It scrolls only when a tall phase truly needs
           // it. Subtract the top chrome (safe-area / sim pill) the shell pads for.
-          height: `calc(100dvh - ${typeof shellPaddingTop === "number" ? `${shellPaddingTop}px` : shellPaddingTop} - env(safe-area-inset-bottom, 0px))`,
+          height: `calc(100dvh - ${typeof shellPaddingTop === "number" ? `${shellPaddingTop}px` : shellPaddingTop} - ${simOn ? `${SIM_PILL_HEIGHT}px` : "0px"} - env(safe-area-inset-bottom, 0px))`,
           display: "flex", flexDirection: "column", minHeight: 0,
         }}>
           <TradeDetail
@@ -2099,6 +2474,7 @@ export default function App() {
             onRateCounterparty={handleRateCounterparty}
             myGivenRatings={myGivenRatings}
             fetchRatingSummary={actions.fetchRatingSummary}
+            fetchCommunityBonds={actions.fetchCommunityBonds}
             // v0.3.1 Phase 3 (Q4 scope): same boot-probe flag the
             // ChamaBar's "unreachable" pill reads from. Fund + Claim
             // buttons disable with the "Federation unreachable —
@@ -2172,6 +2548,15 @@ export default function App() {
                   type: "success",
                 });
               } catch (e: any) {
+                // #25: the trade lives on a different fed than the wallet. Don't
+                // dump "sign out and rejoin" — offer a one-tap switch to its chama.
+                if (e?.code === "FED_MISMATCH" && selected?.community) {
+                  setPendingFedSwitch({
+                    community: selected.community,
+                    retry: async () => { await actions.joinEscrow(selectedId!, role, joinOpts); },
+                  });
+                  return;
+                }
                 setToast({ message: e.message || "Failed to join", type: "error" });
               }
             }}
@@ -2448,6 +2833,7 @@ export default function App() {
                   selectedItems,
                   tradeCommunity: selected.community,
                   fiatCurrency: selected.fiatCurrency,
+                  tradeCategory: selected.category,
                   resolve,
                 });
               });
@@ -2472,10 +2858,28 @@ export default function App() {
               onTap={() => openEscrow(activeTrade.id)}
             />
           )}
+          {nativeLockResume && (
+            <PendingLockCard
+              entry={nativeLockResume}
+              tradeDescription={escrows.get(nativeLockResume.escrowId)?.description ?? null}
+              busy={pendingLockBusy}
+              onFinishLock={handleFinishPendingLock}
+              onOpenTrade={() => openEscrow(nativeLockResume.escrowId)}
+            />
+          )}
+          {pendingPayoutCard && (
+            <PendingPayoutCard
+              entry={pendingPayoutCard}
+              onOpenTrade={() => openEscrow(pendingPayoutCard.escrowId)}
+            />
+          )}
           {showRecoveryBanner ? (
             <RecoveryBanner
               balanceMsats={fedimint.balanceMsats ?? 0}
               source={strandedSource}
+              genericResidue={strandedGenericResidue}
+              fundsReturned={fundingReturned}
+              fundingTrade={fundingTrade}
               fetchKind0Enabled={false}
               onRecover={() => {
                 // v0.3.0 Phase 4: open RecoveryPayoutModal — no
@@ -2498,47 +2902,23 @@ export default function App() {
               activeInvite={liveActiveInvite}
               amountDisplayMode={amountDisplayMode}
               communitySlug={browseCommunity}
+              fetchCommunityBonds={actions.fetchCommunityBonds}
             />
           )}
         </div>
       ) : view === "dashboard" ? (
-        // v4.2.1: Dashboard home — a calm "coming soon" placeholder. The real
-        // surface (standing / stats / earnings / ratings / the bond) ships with
-        // Phase 2A. No actions here yet; just an inviting card, dark + light.
-        <div style={{ animation: "fadeIn 0.3s ease" }}>
-          <div style={{
-            minHeight: "60vh", display: "flex",
-            alignItems: "center", justifyContent: "center",
-            padding: "24px 16px",
-          }}>
-            <div style={{
-              width: "100%", maxWidth: 360, textAlign: "center",
-              background: T.card, border: `1px solid ${T.border}`,
-              borderRadius: T.r, padding: "32px 24px",
-              boxShadow: "0 12px 34px rgba(0,0,0,0.25)",
-            }}>
-              <div style={{ fontSize: 40, lineHeight: 1, marginBottom: 14 }}>📊</div>
-              <h1 style={{
-                margin: "0 0 10px", color: T.text, fontFamily: T.sans,
-                fontSize: 22, fontWeight: 800,
-              }}>
-                Your Dashboard
-              </h1>
-              <p style={{
-                margin: "0 0 12px", color: T.text, fontFamily: T.sans,
-                fontSize: 15, lineHeight: 1.55,
-              }}>
-                Your standing, your stats, your earnings — <strong>coming soon.</strong>
-              </p>
-              <p style={{
-                margin: 0, color: T.muted, fontFamily: T.sans,
-                fontSize: 13.5, lineHeight: 1.5, fontStyle: "italic",
-              }}>
-                Public ratings and your arbiter standing land here next.
-              </p>
-            </div>
-          </div>
-        </div>
+        // v5.0 "finish the bond": the real Dashboard — standing (ratings), your
+        // bond, chama liveness, and trade stats, composed from data the app
+        // already has. Replaces the v4.2.1 "coming soon" placeholder.
+        <DashboardScreen
+          pubkey={pubkey!}
+          ratings={myRatings}
+          myTrades={myTrades}
+          communitySlug={browseCommunity}
+          loadLiveness={actions.getChamaLiveness}
+          livenessBlocksPerDay={BOND_LIVENESS_BLOCKS_PER_DAY}
+          onOpenBondCeremony={() => setShowBondCeremony(true)}
+        />
       ) : view === "me" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
           {activeTrade && (
@@ -2557,12 +2937,17 @@ export default function App() {
             onThemeModeChange={setThemeMode}
             myTrades={myTrades}
             allTrades={visibleTrades}
+            archivedTrades={archivedTrades}
+            onOpenArchivedTrade={openArchivedTrade}
             ratings={myRatings}
             onRateCounterparty={handleRateCounterparty}
             myGivenRatings={myGivenRatings}
             balanceMsats={fedimint.balanceMsats ?? 0}
             hasActiveCommitment={hasActiveCommitment}
             satsTrace={displayedSatsTrace}
+            hasPendingNativeLock={hasPendingNativeLock}
+            hasPendingClaimPayout={hasPendingClaimPayout}
+            stuckNativeLocks={nativeLockSummary.stuck}
             onRecoverSats={() => setPendingRecovery({
               title: "Recover sats",
               traceContext: recoveryTraceContext,
@@ -2612,6 +2997,9 @@ export default function App() {
             onExportStrandedClaim={(entry) => setStrandedClaimExport(entry)}
             communitySlug={browseCommunity}
             onSelectCommunity={handleSelectCommunity}
+            onOpenBondCeremony={() => setShowBondCeremony(true)}
+            loadLiveness={actions.getChamaLiveness}
+            livenessBlocksPerDay={BOND_LIVENESS_BLOCKS_PER_DAY}
           />
         </div>
       ) : view === "saved-handles" ? (
@@ -2702,10 +3090,28 @@ export default function App() {
         </div>
       ) : (
         <>
+          {nativeLockResume && (
+            <PendingLockCard
+              entry={nativeLockResume}
+              tradeDescription={escrows.get(nativeLockResume.escrowId)?.description ?? null}
+              busy={pendingLockBusy}
+              onFinishLock={handleFinishPendingLock}
+              onOpenTrade={() => openEscrow(nativeLockResume.escrowId)}
+            />
+          )}
+          {pendingPayoutCard && (
+            <PendingPayoutCard
+              entry={pendingPayoutCard}
+              onOpenTrade={() => openEscrow(pendingPayoutCard.escrowId)}
+            />
+          )}
           {showRecoveryBanner ? (
             <RecoveryBanner
               balanceMsats={fedimint.balanceMsats ?? 0}
               source={strandedSource}
+              genericResidue={strandedGenericResidue}
+              fundsReturned={fundingReturned}
+              fundingTrade={fundingTrade}
               fetchKind0Enabled={false}
               onRecover={() => {
                 // v0.3.0 Phase 4: open RecoveryPayoutModal — no
@@ -2814,6 +3220,7 @@ export default function App() {
               activeInvite={liveActiveInvite}
               amountDisplayMode={amountDisplayMode}
               communitySlug={browseCommunity}
+              fetchCommunityBonds={actions.fetchCommunityBonds}
             />
           </div>
         </>

@@ -37,7 +37,7 @@ import { type MenuItem } from "../../escrow-engine/types.js";
 import { randomId } from "../../storage/random-id.js";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
 import { getCommunityBySlug, communityForInvite, DEFAULT_COMMUNITY_SLUG } from "../../communities/registry.js";
-import { billTypesForCountry } from "../../communities/bill-types.js";
+import { billTypesForCountry, billTypeDisplay } from "../../communities/bill-types.js";
 import {
   getUserCommunitySlug,
   getUserCommunitySlugRaw,
@@ -45,6 +45,8 @@ import {
 } from "../../communities/storage.js";
 import { defaultCurrencyForCommunity } from "../../communities/currency.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
+import { assignableBondedArbiters } from "../../arbiters/exposure.js";
+import type { VerifiedBond } from "../../bond-multisig/bond-announcement.js";
 import { type ArbiterWarning, displayCounterpartyName, resolveCreateMintUrl } from "../decisions.js";
 import { T, inputStyle, fmtSats } from "../theme.js";
 import {
@@ -80,13 +82,19 @@ type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
 type ListingMode = "single" | "menu";
 
-const VERTICALS: { id: Vertical; label: string; icon: string; description: string; comingSoon?: boolean }[] = [
+// Trade-type cards, mirroring the onboarding splash (INTRO_USE_CASES). The three
+// live verticals carry real `Vertical` ids; the coming-soon previews carry
+// display-only ids (never reach setVertical — the click is guarded on !soon) so
+// the wizard sells the same vision the splash does without promising a creatable
+// flow that isn't wired. `id` is `string` for that reason. Lending retired here
+// (Work replaces it); the "lending" Vertical + logic stay in code for back-compat.
+const VERTICALS: { id: string; label: string; icon: string; description: string; comingSoon?: boolean }[] = [
   { id: "p2p-trade", label: "Exchange", icon: "⚡", description: "Swap sats for fiat with another user." },
   { id: "bill-pay", label: "Community Bill Pay", icon: "🧾", description: "Pay a bill in exchange for sats." },
   { id: "marketplace", label: "Marketplace", icon: "🏪", description: "Sell goods, services, or digital items." },
-  // v4.1 D: lending's repayment flow isn't wired yet — show it so people know
-  // it's coming, but it isn't creatable. Flip `comingSoon` off when it lands.
-  { id: "lending", label: "Lending", icon: "🤝", description: "Lend sats with repayment terms.", comingSoon: true },
+  { id: "work", label: "Work", icon: "🛠️", description: "Get small jobs done — fix, build, tutor.", comingSoon: true },
+  { id: "chip-in", label: "Chip In", icon: "🤝", description: "Pool sats together with your community.", comingSoon: true },
+  { id: "stack", label: "Stack", icon: "🪙", description: "Save toward a goal — your keys, your sats.", comingSoon: true },
 ];
 
 interface FormState {
@@ -531,7 +539,8 @@ function clearDraft(vertical: Vertical): void {
 
 function readAllDrafts(): SavedDraft[] {
   return VERTICALS
-    .map(v => readDraft(v.id))
+    .filter(v => !v.comingSoon)
+    .map(v => readDraft(v.id as Vertical))
     .filter((d): d is SavedDraft => d !== null)
     .sort((a, b) => b.savedAt - a.savedAt);
 }
@@ -640,6 +649,11 @@ function descriptionPlaceholder(vertical: Vertical, usingMenu: boolean): string 
 }
 
 function descriptionRequired(vertical: Vertical, usingMenu: boolean): boolean {
+  // A single (non-menu) CBP listing needs no free-text description: the bill-type
+  // chip + amount already say what it is, and it's a no-KYC private bill pay —
+  // a description just adds friction (and a place to leak private detail). Mirror
+  // Exchange, which already skips it. Menu/bundle listings still take a name.
+  if (vertical === "bill-pay" && !usingMenu) return false;
   return usingMenu || vertical !== "p2p-trade";
 }
 
@@ -656,6 +670,10 @@ function buildListingDescription(form: FormState, vertical: Vertical, menuItems:
   if (desc) return desc;
   if (menuItems.length > 0) return fallbackMenuDescription(vertical, menuItems);
   if (vertical === "p2p-trade") return "Sats for sale";
+  // CBP (#12): the free-text description is retired for single bills — the
+  // bill-type IS the identity. Fall back to its label so the listing always has
+  // a title (and the publish gate's `listingDescription.length > 0` passes).
+  if (vertical === "bill-pay") return billTypeDisplay(form.billType)?.label ?? "Bill payment";
   return "";
 }
 
@@ -770,13 +788,13 @@ function supportsPremium(vertical: Vertical): boolean {
 
 function premiumLabelForVertical(vertical: Vertical): string {
   if (vertical === "lending") return "PREMIUM APR (%)";
-  if (vertical === "bill-pay") return "SERVICE PREMIUM (%)";
+  if (vertical === "bill-pay") return "VOLUNTEER BONUS (%)";
   return "PREMIUM (%)";
 }
 
 function premiumHintForVertical(vertical: Vertical, currency: string): string {
   if (vertical === "lending") return "Shown as APR on the loan request.";
-  if (vertical === "bill-pay") return `${currency} bill price stays fixed; premium increases locked sats.`;
+  if (vertical === "bill-pay") return `Extra sats the volunteer keeps for paying your bill — your ${currency} bill amount doesn't change.`;
   return `Shown with the ${currency} exchange price.`;
 }
 
@@ -874,11 +892,11 @@ function premiumCheckoutLine(form: FormState, vertical: Vertical): string | null
     const baseSats = parseWholeSats(form.sats);
     if (premiumBps === undefined || baseSats <= 0) return null;
     const lockSats = satsWithPremium(baseSats, premiumBps);
-    const signed = premiumBps > 0 ? `+${formatPremiumPercent(premiumBps)}%` : `${formatPremiumPercent(premiumBps)}%`;
-    const due = baseFiat !== null && baseFiat > 0
-      ? formatFiatAmount(baseFiat, form.cur)
-      : `${form.cur} bill`;
-    return `${due} due stays fixed; ${signed} locks ₿ ${fmtSats(lockSats * 1000)}`;
+    const billLabel = baseFiat !== null && baseFiat > 0
+      ? `${formatFiatAmount(baseFiat, form.cur)} bill`
+      : "bill";
+    const bonusNote = premiumBps > 0 ? ` (its value + ${formatPremiumPercent(premiumBps)}% bonus)` : "";
+    return `You lock ₿ ${fmtSats(lockSats * 1000)} — a volunteer pays your ${billLabel} and keeps the sats${bonusNote}.`;
   }
   if (premiumBps === undefined || baseFiat === null || baseFiat <= 0) return null;
   const checkoutFiat = baseFiat * (1 + premiumBps / 10_000);
@@ -937,6 +955,7 @@ export function CreateForm({
   canOfferSubscription, userPubkey, activeInvite,
   amountDisplayMode,
   communitySlug,
+  fetchCommunityBonds,
 }: {
   onCreate: (params: any) => void;
   onClose: () => void;
@@ -946,6 +965,11 @@ export function CreateForm({
   userPubkey: string | null;
   activeInvite: string | null;
   amountDisplayMode: AmountDisplayMode;
+  /** Bond → arbiter enrollment (S3): fetch a community's chain-verified 38135
+   *  bonds so bonded arbiters whose commitment COVERS this trade get seated in
+   *  its pool (alongside the always-present OG cabinet). Optional + fail-soft —
+   *  absent/throwing just leaves the OG pool, never blocks publish. */
+  fetchCommunityBonds?: (community: string) => Promise<VerifiedBond[]>;
   /** v2.1.1: the community the shell is currently presenting as the
    *  user's identity (the header/Browse pill). Create stamps THIS, so
    *  what the user sees is what they publish. Previously this read the
@@ -1065,9 +1089,21 @@ export function CreateForm({
           ? (communityForInvite(activeInvite)?.slug ?? community)
           : community;
       const mintUrl = resolveCreateMintUrl({ activeInvite, community: effectiveCommunity });
+      // Bond → arbiter enrollment (S3): fold in chain-verified bonded arbiters
+      // whose commitment COVERS this trade (per-trade cap; the OG cabinet stays
+      // the always-present, unbounded fallback for anything above their bond).
+      // Fail-soft — any fetch/verify hiccup just yields the OG pool.
+      let bondedPool: string[] = [];
+      if (fetchCommunityBonds) {
+        try {
+          const bonds = (await fetchCommunityBonds(effectiveCommunity)).filter(b => b.funded && b.active);
+          bondedPool = assignableBondedArbiters({ bonds, tradeMsats: amountMsats, allTrades: [] });
+        } catch { /* leave bondedPool empty — OG pool carries it */ }
+      }
       const communityArbiters = getTrustedArbiterPool({
         community: effectiveCommunity,
         excludePubkeys: [userPubkey],
+        bondedPool,
       });
       const params: any = {
         description,
@@ -1099,6 +1135,17 @@ export function CreateForm({
         fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
         communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,
+        // 2B prefer-bonded: stamp the funded bonded subset (∩ the final pool) into
+        // CREATE so every client replays the SAME preferred seat (the reducer
+        // can't fetch bonds). bondedPool is already capacity-fitting for this trade
+        // (assignableBondedArbiters above); pickPreferredArbiter re-intersects with
+        // the pool so this is belt-and-suspenders. Empty ⇒ undefined ⇒ legacy pick.
+        bondedArbiters: (() => {
+          if (bondedPool.length === 0 || communityArbiters.length === 0) return undefined;
+          const poolSet = new Set(communityArbiters.map((pk: string) => pk.toLowerCase()));
+          const stamped = bondedPool.filter((pk) => poolSet.has(pk.toLowerCase()));
+          return stamped.length > 0 ? stamped : undefined;
+        })(),
         // Marketplace is sats-only — never carry payment rails on it.
         paymentMethods: categoryUsesPaymentRails(vertical) && form.paymentMethods.length > 0 ? form.paymentMethods : undefined,
         items: hasMenu ? menuItems : undefined,
@@ -1515,7 +1562,7 @@ function Step1({
               key={v.id}
               type="button"
               disabled={soon}
-              onClick={() => { if (!soon) setVertical(v.id); }}
+              onClick={() => { if (!soon) setVertical(v.id as Vertical); }}
               style={{
                 display: "flex", flexDirection: "column", alignItems: "flex-start",
                 gap: 6, padding: "16px 14px",
@@ -1617,23 +1664,27 @@ function Step1({
           only the sign-in screen used to be able to change — the caption
           becomes a one-tap "Set as home" so a stale home is fixable at
           the exact moment the mismatch is visible. */}
-      <div style={{
-        padding: "10px 12px", marginBottom: 24,
-        background: T.surface, border: `1px solid ${T.border}`,
-        borderRadius: T.rs,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 18, lineHeight: 1 }}>
-            {homeCommunity?.flagEmoji ?? "🌐"}
-          </span>
-          <span style={{ flex: 1, fontSize: 12, color: T.text, fontFamily: T.sans }}>
-            Listing in <strong>{homeCommunity?.displayName ?? "your community"}</strong>
-          </span>
-          {isHomeCommunity ? (
-            <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5 }}>
-              YOUR COMMUNITY
+      {/* v5: this block used to always show "Listing in <your community>",
+          which is pure redundancy when you're creating in your OWN home (you
+          land in Browse, the header already names it, and you'd never
+          deliberately list elsewhere). Reclaim that real estate: render ONLY on
+          the drift case — you've navigated into a community that isn't your
+          persisted home — where it both warns you AND one-taps to fix a stale
+          home. Home never changes silently; it's only set on sign-in or here. */}
+      {!isHomeCommunity && (
+        <div style={{
+          padding: "10px 12px", marginBottom: 24,
+          background: T.surface, border: `1px solid ${T.amber}55`,
+          borderRadius: T.rs,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 18, lineHeight: 1 }}>
+              {homeCommunity?.flagEmoji ?? "🌐"}
             </span>
-          ) : (
+            <span style={{ flex: 1, fontSize: 12, color: T.text, fontFamily: T.sans }}>
+              Listing in <strong>{homeCommunity?.displayName ?? "your community"}</strong>
+              {" "}— not your home
+            </span>
             <button
               onClick={onSetHome}
               style={{
@@ -1645,9 +1696,7 @@ function Step1({
             >
               SET AS HOME →
             </button>
-          )}
-        </div>
-        {!isHomeCommunity && (
+          </div>
           <div style={{
             marginTop: 6, fontSize: 10, color: T.muted,
             fontFamily: T.sans, lineHeight: 1.4,
@@ -1655,8 +1704,8 @@ function Step1({
             Home decides where Chama signs you in. One tap makes{" "}
             {homeCommunity?.displayName ?? "this community"} your home.
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       <button onClick={onNext} style={{
         width: "100%", padding: "14px",
@@ -1709,8 +1758,12 @@ function Step2({
   const lendingCapExceeded = hasLendingAmountAboveCurrentCap(form, vertical);
   const showSubscriptionMode = false && canOfferSubscription;
   const descriptionOk = !descriptionRequired(vertical, usingMenu) || form.desc.trim().length > 0 || hasMenu;
+  // CBP single listings now REQUIRE a bill-type — it's the listing identity since
+  // the free-text description was retired, so no publishing a bare fallback title.
+  const billTypeOk = vertical !== "bill-pay" || usingMenu || !!form.billType;
   const ready =
     descriptionOk &&
+    billTypeOk &&
     (usingMenu ? hasMenu : form.sats.trim().length > 0) &&
     !partialMenuRows &&
     !amountTooSmall &&
@@ -1843,7 +1896,12 @@ function Step2({
   // toggle moved to Step 1, under the category pick).
   const menuTitle = menuTitleForVertical(vertical);
   const menuHint = menuHintForVertical(vertical);
-  const fiatPrimary = amountDisplayMode === "fiat" && vertical !== "lending";
+  // CBP is intrinsically fiat-denominated (a bill IS a fiat amount — nobody thinks
+  // of their electricity bill in sats), so lead with the fiat PRICE field there
+  // regardless of the global sats/fiat display toggle. Other verticals still
+  // follow the toggle. (Marketplace stays on the toggle — see the create-form UX
+  // notes; a fiat-thinking seller already gets fiat-first via the toggle.)
+  const fiatPrimary = (amountDisplayMode === "fiat" || vertical === "bill-pay") && vertical !== "lending";
   const menuFiatFloorValue = amountDisplayMode === "fiat" ? menuFiatFloor(menuItems) : null;
   const menuDisplayFiatFloorValue = amountDisplayMode === "fiat"
     ? menuFiatFloorValue ?? estimatedMenuFiatFloor({
@@ -1920,7 +1978,7 @@ function Step2({
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FULFILLMENT</div>
           <select value={form.fulfillment} onChange={e => set("fulfillment", e.target.value as Fulfillment)}
             style={{ ...inputStyle, color: T.text, background: T.surface }}>
-            <option value="physical">Physical</option>
+            <option value="physical">Shipping</option>
             <option value="service">Service</option>
             <option value="digital">Digital</option>
           </select>
@@ -1963,7 +2021,7 @@ function Step2({
       {vertical === "bill-pay" && !usingMenu && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-            BILL TYPE <span style={{ opacity: 0.6 }}>· optional</span>
+            BILL TYPE <span style={{ color: T.amber, opacity: 0.9 }}>· pick one</span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
             {billTypesForCountry(homeCommunity?.country).map(bt => {
@@ -1998,7 +2056,7 @@ function Step2({
           {!fiatPrimary && (
           <div style={{ flex: vertical === "lending" ? 1.15 : 1 }}>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-              {vertical === "lending" ? "LOAN PRINCIPAL (SATS)" : "AMOUNT (SATS)"}
+              {vertical === "lending" ? "LOAN PRINCIPAL (SATS)" : "PRICE"}
             </div>
             <input
               type="number"
@@ -2011,7 +2069,7 @@ function Step2({
           )}
           {fiatPrimary && (
           <div style={{ flex: 1.15 }}>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>{form.cur} PRICE</div>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>PRICE</div>
             <div style={{ display: "flex", gap: 6 }}>
               <div style={{
                 width: 72,
@@ -2037,7 +2095,7 @@ function Step2({
           {fiatPrimary && (
           <div style={{ flex: 0.85 }}>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-              AMOUNT (SATS)
+              SATS
             </div>
             <input
               type="number"
@@ -2391,23 +2449,6 @@ function Step2({
               </div>
             )}
           </div>
-          <button
-            onClick={addMenuItem}
-            disabled={form.menuItems.length >= MAX_MENU_ITEMS}
-            style={{
-              padding: "8px 10px",
-              borderRadius: T.rs,
-              border: `1px solid ${T.border}`,
-              background: T.surface,
-              color: form.menuItems.length >= MAX_MENU_ITEMS ? T.muted : T.accent,
-              fontFamily: T.mono,
-              fontSize: 11,
-              fontWeight: 800,
-              cursor: form.menuItems.length >= MAX_MENU_ITEMS ? "default" : "pointer",
-            }}
-          >
-            {menuAddLabelForVertical(vertical)}
-          </button>
         </div>
         {form.menuItems.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2504,7 +2545,7 @@ function Step2({
                       onChange={e => updateMenuItem(item.id, { fulfillment: e.target.value as Fulfillment })}
                       style={{ ...inputStyle, width: 108, padding: "12px 6px", fontSize: 11, color: T.text, background: T.card }}
                     >
-                      <option value="physical">Physical</option>
+                      <option value="physical">Shipping</option>
                       <option value="service">Service</option>
                       <option value="digital">Digital</option>
                     </select>
@@ -2637,6 +2678,24 @@ function Step2({
             )}
           </div>
         )}
+        {/* The single "+ add" now lives HERE — below the list, ALWAYS visible (even
+            at 0 items, so an emptied menu can be refilled), following the user down
+            as they build. Replaces the old header "+" (removed as redundant). */}
+        <button
+          type="button"
+          onClick={addMenuItem}
+          disabled={form.menuItems.length >= MAX_MENU_ITEMS}
+          style={{
+            width: "100%", padding: "11px 12px", borderRadius: T.rs, marginTop: 10,
+            border: `1px dashed ${form.menuItems.length >= MAX_MENU_ITEMS ? T.border : T.accent + "66"}`,
+            background: "none",
+            color: form.menuItems.length >= MAX_MENU_ITEMS ? T.muted : T.accent,
+            fontFamily: T.mono, fontSize: 12, fontWeight: 800,
+            cursor: form.menuItems.length >= MAX_MENU_ITEMS ? "default" : "pointer",
+          }}
+        >
+          {form.menuItems.length >= MAX_MENU_ITEMS ? `Max ${MAX_MENU_ITEMS} reached` : menuAddLabelForVertical(vertical)}
+        </button>
       </div>
       )}
 
@@ -2768,8 +2827,10 @@ function Step3({
     totalSats > 0 &&
     totalSats < MIN_REAL_ATOMIC_FUNDING_SATS;
   const lendingCapExceeded = hasLendingAmountAboveCurrentCap(form, vertical);
+  const billTypeOk = vertical !== "bill-pay" || hasMenu || !!form.billType;
   const ready =
     listingDescription.length > 0 &&
+    billTypeOk &&
     (form.sats.trim().length > 0 || hasMenu) &&
     !partialMenuRows &&
     !amountTooSmall &&

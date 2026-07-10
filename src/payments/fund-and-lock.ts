@@ -44,6 +44,7 @@
 // claim-watchdog pattern.
 
 import { recordSatsTrace } from "./sats-trace.js";
+import { isSimModeOn } from "../sim/simMode.js";
 import type { SelectedMenuItem } from "../escrow-engine/types.js";
 
 // ── Phase types ──────────────────────────────────────────────────────────
@@ -569,6 +570,12 @@ export async function runFundAndLock(
       timeoutPromise,
     ]);
     if (watchOverride) return watchOverride;
+    // #35 sim: the sim wallet's Lightning receive is mocked (invoices auto-settle)
+    // and never fires a real receive-watch-ready signal. The watcher gate is a
+    // real-money "can we detect the incoming payment" defense — meaningless in
+    // sim — so resolve it immediately and let pollForFunding pick up the
+    // auto-settled balance. Real mode is untouched.
+    if (isSimModeOn()) finishReceiveWatchReady();
     if (!receiveWatchReady) {
       receiveWatchReadyTimer = setTimeout(() => {
         finishReceiveWatchReady(new Error(

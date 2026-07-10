@@ -45,7 +45,7 @@ import {
 import { payoutRecipientFor } from "./recipients.js";
 import { validateVoteShareEnvelope } from "./holder-shares.js";
 import { arbiterVotePriority, substitutionEligibleAt, clampSubstitutionGraceSeconds, oneSidedEscalationAt, isPerformanceContest } from "./arbiter-substitution.js";
-import { pickArbiterFromPool } from "../arbiters/pool.js";
+import { pickArbiterFromPool, pickPreferredArbiter } from "../arbiters/pool.js";
 
 // Re-export so existing callers (escrow-client, escrow-bridge, tests) keep
 // importing payoutRecipientFor from the state machine.
@@ -103,6 +103,7 @@ function cloneState(state: EscrowState): EscrowState {
         ) as EscrowState["joinHolds"]
       : undefined,
     communityArbiters: [...state.communityArbiters],
+    bondedArbiters: state.bondedArbiters ? [...state.bondedArbiters] : undefined,
     subscription: state.subscription ? {
       ...state.subscription,
       periodStartTimes: [...state.subscription.periodStartTimes],
@@ -340,6 +341,7 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
     joinHolds: {},
     initiator: { pubkey: event.pubkey, role: initiatorRole },
     communityArbiters: p.communityArbiters || [],
+    bondedArbiters: p.bondedArbiters || [],
     subscription: null,
     votes: {},
     resolvedOutcome: null,
@@ -519,19 +521,36 @@ function handleJoin(state: EscrowState, event: ParsedEscrowEvent<JoinPayload>): 
     // v2.3.1 — deterministic-assignment integrity. Membership (above) is not
     // enough: a LEGIT pool member who is NOT the arbiter this escrow id
     // deterministically selects could front-run a JOIN and seat themselves on
-    // a trade they want to sway. Only priority 0 — pickArbiterFromPool(pool,
-    // id, [buyer, seller]) — may JOIN-seat the slot pre-lock. Backups never
-    // JOIN; they step in by VOTING after the grace window (substitution) or on
-    // an expired trade (healing), so this can't strand either path. Empty pool
-    // ⇒ assigned is undefined ⇒ no gate (legacy volunteer-arbiter trades).
-    const assignedArbiter = pickArbiterFromPool(
+    // a trade they want to sway. Only the priority-0 pick may JOIN-seat the slot
+    // pre-lock. Backups never JOIN; they step in by VOTING after the grace window
+    // (substitution) or on an expired trade (healing), so this can't strand
+    // either path. Empty pool ⇒ no pick ⇒ no gate (legacy volunteer-arbiter).
+    //
+    // 2B prefer-bonded: accept EITHER the bonded-preferred seat OR the legacy
+    // pick — the seating client prefers the bonded arbiter, and EVERY client
+    // (old or new) accepts BOTH bases, so a mixed-version replay can never
+    // diverge on ARBITER_NOT_ASSIGNED (the accept-any-of-N doctrine C1 uses).
+    // bondedArbiters is STAMPED into CREATE, so this stays pure + replay-
+    // identical. Empty/absent bonded ⇒ the two picks coincide ⇒ byte-identical
+    // to the pre-2B single-pick gate. Front-run is still blocked: only the two
+    // *computed* picks pass — not any bonded pool member.
+    const legacyAssigned = pickArbiterFromPool(
       state.communityArbiters,
       state.id,
       [state.participants[Role.BUYER], state.participants[Role.SELLER]],
     );
-    if (assignedArbiter && event.pubkey !== assignedArbiter) {
+    const preferredAssigned = pickPreferredArbiter(
+      state.communityArbiters,
+      state.bondedArbiters,
+      state.id,
+      [state.participants[Role.BUYER], state.participants[Role.SELLER]],
+    );
+    const acceptedArbiters = [preferredAssigned, legacyAssigned].filter(
+      (pk): pk is string => !!pk,
+    );
+    if (acceptedArbiters.length > 0 && !acceptedArbiters.includes(event.pubkey)) {
       return err("ARBITER_NOT_ASSIGNED",
-        "Only the deterministically-assigned arbiter may join this trade; backups step in by voting after the grace window",
+        "Only the deterministically-assigned arbiter (bonded-preferred or legacy pick) may join this trade; backups step in by voting after the grace window",
         event.raw.id
       );
     }

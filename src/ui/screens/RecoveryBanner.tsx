@@ -35,6 +35,9 @@ export function RecoveryBanner({
   source,
   fetchKind0Enabled,
   onRecover,
+  genericResidue = false,
+  fundsReturned = false,
+  fundingTrade = null,
 }: {
   balanceMsats: number;
   source: StrandedEcashSource | null;
@@ -43,6 +46,27 @@ export function RecoveryBanner({
    *  onRecover to match the failure-mode framing — this is structural
    *  repair, not a routine wallet withdrawal. */
   onRecover: () => void;
+  /** Stranded-payout recovery (attribution honesty): true when a
+   *  most-recent-CLAIM source EXISTS but its amount can't explain the
+   *  balance (strandedSourceExplainsBalance failed — the sweep mixes
+   *  residue from more than one trade). The shell passes source=null in
+   *  that case; this flag swaps the "didn't finish cleanly" headline for
+   *  honest residue copy so we never blame a single trade for an
+   *  aggregate balance. */
+  genericResidue?: boolean;
+  /** Re-absorb story-loss fix: the balance is the user's OWN funding for a
+   *  lock that didn't complete, re-absorbed back to the wallet — NOT a
+   *  failed trade needing attention. Swaps the pulsing amber alarm for a
+   *  calm "↩ funds returned" framing. The sats are safe and recoverable;
+   *  the user can sweep them out or just leave them. Takes precedence over
+   *  the failure framings (the shell only sets it with source=null). */
+  fundsReturned?: boolean;
+  /** The trade whose funding came back, for the funds-returned identity card.
+   *  Named from the funding trace's OWN escrowId (the actually-funded trade),
+   *  NOT the claim-history walk — so it can't mis-attribute the balance to an
+   *  unrelated old trade. `description` fills in once the escrow loads; the id
+   *  + amount are always honest. Only rendered in fundsReturned mode. */
+  fundingTrade?: { escrowId: string; description: string; amountMsats: number } | null;
 }) {
   const totalSats = Math.floor(balanceMsats / 1000);
   const recoverableSats = maxLightningPayoutSats(balanceMsats);
@@ -55,32 +79,44 @@ export function RecoveryBanner({
       })
     : "an unknown counterparty";
 
-  const headline = source
-    ? `Your trade with ${counterpartyName} didn't finish cleanly`
-    : "Your last trade didn't finish cleanly";
+  const headline = fundsReturned
+    ? "Your funding came back to your wallet"
+    : source
+      ? `Your trade with ${counterpartyName} didn't finish cleanly`
+      : genericResidue
+        ? "You have leftover sats from earlier trades"
+        : "Your last trade didn't finish cleanly";
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
       <div style={{
-        background: T.amberDim, border: `1px solid ${T.amber}66`,
+        // fundsReturned is a CALM recovery (your own money came back), not a
+        // failure to repair — soft surface + accent border, no amber alarm.
+        background: fundsReturned ? T.surface : T.amberDim,
+        border: `1px solid ${fundsReturned ? `${T.accent}55` : `${T.amber}66`}`,
         borderRadius: T.r, padding: 20, marginBottom: 16,
       }}>
         {/* v0.3.0: failure-mode small-caps header. "Continue your trade"
             (v0.2.0) reframed to "Trade needs attention" because Pillar
             2.1 Option B treats stranded balance as a failure to repair,
-            not a normal step. */}
+            not a normal step. fundsReturned overrides this to a calm,
+            non-pulsing "↩ funds returned" — the sats came back, nothing
+            is wrong. */}
         <div style={{
           display: "flex", alignItems: "center", gap: 8,
-          fontSize: 10, fontWeight: 700, color: T.amber, fontFamily: T.mono,
+          fontSize: 10, fontWeight: 700,
+          color: fundsReturned ? T.accent : T.amber, fontFamily: T.mono,
           letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 12,
         }}>
-          <span style={{
-            width: 8, height: 8, borderRadius: "50%",
-            background: T.amber,
-            boxShadow: `0 0 8px ${T.amber}88`,
-            animation: "pulse 2s ease-in-out infinite",
-          }} />
-          ⚠ Trade needs attention
+          {!fundsReturned && (
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: T.amber,
+              boxShadow: `0 0 8px ${T.amber}88`,
+              animation: "pulse 2s ease-in-out infinite",
+            }} />
+          )}
+          {fundsReturned ? "↩ Funds returned" : "⚠ Trade needs attention"}
         </div>
 
         <div style={{
@@ -94,19 +130,70 @@ export function RecoveryBanner({
           fontSize: 13, color: T.text, fontFamily: T.sans,
           lineHeight: 1.55, marginBottom: 16,
         }}>
-          <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-          are still in your local Chama.{" "}
-          <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-          can be sent to your Lightning address now
-          {reserveSats > 0 && (
+          {fundsReturned ? (
+            <>A trade you funded didn't complete, so your{" "}
+            <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+            came back to your wallet — safe and yours. Send{" "}
+            <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+            to your Lightning address
+            {reserveSats > 0 && (
+              <>{" "}(about{" "}
+                <BitcoinAmount sats={reserveSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+                stays for fees)</>
+            )}
+            , or just leave them here.</>
+          ) : (
             <>
-              , with about{" "}
-              <BitcoinAmount sats={reserveSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-              kept for Lightning fees
+              <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+              are still in your local Chama.{" "}
+              <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+              can be sent to your Lightning address now
+              {reserveSats > 0 && (
+                <>
+                  , with about{" "}
+                  <BitcoinAmount sats={reserveSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
+                  kept for Lightning fees
+                </>
+              )}
+              .
             </>
           )}
-          .
         </div>
+
+        {/* Funds-returned identity card — names the FUNDED trade (from the
+            funding trace's own escrowId), so it can't mis-attribute like the
+            claim-history walk. No "role" line: the framing is simply "you
+            funded this and it came back". */}
+        {fundsReturned && fundingTrade && (
+          <div style={{
+            background: T.card, border: `1px solid ${T.border}`,
+            borderRadius: T.rs, padding: 14, marginBottom: 16,
+          }}>
+            <div style={{
+              fontSize: 9, color: T.muted, fontFamily: T.mono,
+              letterSpacing: 1, marginBottom: 8,
+            }}>
+              FUNDED TRADE
+            </div>
+            <div style={{
+              fontFamily: T.mono, fontSize: 11, color: T.muted,
+              wordBreak: "break-all" as const, marginBottom: fundingTrade.description ? 6 : 0,
+            }}>
+              {fundingTrade.escrowId}
+            </div>
+            {fundingTrade.description && (
+              <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, marginBottom: 6 }}>
+                {fundingTrade.description}
+              </div>
+            )}
+            <div style={{ fontSize: 12, color: T.muted, fontFamily: T.mono }}>
+              You funded{" "}
+              <span style={{ color: T.accent, fontWeight: 700 }}>
+                <BitcoinAmount msats={fundingTrade.amountMsats} size={12} gap={4} glyphScale={1.18} />
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Trade identity card — when we have source. Generic copy
             without this card when the local replay yielded no CLAIM. */}

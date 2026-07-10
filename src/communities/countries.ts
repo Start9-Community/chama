@@ -107,20 +107,14 @@ export function getAllPickerCountries(): PickerCountry[] {
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// Globe hub markers (lat, lng) — the "live activity dots showing where trades
-// are happening" nod from PHILOSOPHY.md §6. A curated set of major hubs so the
-// spinning globe reads as populated. Cosmetic only; not real-time trade
-// geography (privacy).
-export const GLOBE_MARKERS: readonly [number, number][] = [
-  [-1.29, 36.82],   // Nairobi, Kenya
-  [6.52, 3.38],     // Lagos, Nigeria
-  [5.60, -0.19],    // Accra, Ghana
-  [14.69, -17.44],  // Dakar, Senegal
-  [-26.20, 28.04],  // Johannesburg, South Africa
-  [-6.79, 39.21],   // Dar es Salaam, Tanzania
-  [0.35, 32.58],    // Kampala, Uganda
-  [9.07, 7.49],     // Abuja, Nigeria
-  [40.71, -74.01],  // New York, USA
-  [-23.55, -46.63], // São Paulo, Brazil
-  [13.69, -89.19],  // San Salvador, El Salvador
-];
+// Globe hub markers (lat, lng) — the "live activity dots" nod from PHILOSOPHY.md §6.
+// EMPTIED 2026-07-03: now that every country is enabled, a curated orange subset
+// implied "only these places" and contradicted the two-green-tier "you're covered
+// wherever you are" message. An empty set = a clean, uniform spinning world (the
+// globe still turns; the country list below does the actual selecting). To restore
+// a populated look, either repopulate this array or scatter dots across ALL enabled
+// countries. Former hubs, kept for easy revival:
+//   [-1.29,36.82] Nairobi · [6.52,3.38] Lagos · [5.60,-0.19] Accra · [14.69,-17.44]
+//   Dakar · [-26.20,28.04] Joburg · [-6.79,39.21] Dar · [0.35,32.58] Kampala ·
+//   [9.07,7.49] Abuja · [40.71,-74.01] NYC · [-23.55,-46.63] São Paulo · [13.69,-89.19] San Salvador
+export const GLOBE_MARKERS: readonly [number, number][] = [];

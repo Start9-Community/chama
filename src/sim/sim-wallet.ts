@@ -36,9 +36,13 @@ const STARTING_BALANCE_MSATS = 0;
 
 const STORAGE_PREFIX = "chama_sim_wallet_";
 
-// 3-8s with uniform jitter — feels like a slow federation roundtrip
-const MIN_DELAY_MS = 3000;
-const MAX_DELAY_MS = 8000;
+// Demo-tuned per-op delay: ~1.2-2.6s with uniform jitter — still reads as a real
+// federation roundtrip (not instant), but the CLAIM chains several of these
+// (redeem → payout auto-settle → balance poll), so the old 3-8s stacked to ~20s+
+// and dragged the demo. This keeps a single step ~lock-speed while the multi-step
+// claim stays a few seconds. Tune here — it's the one knob for all sim latency.
+const MIN_DELAY_MS = 1200;
+const MAX_DELAY_MS = 2600;
 
 // ── Persistent state shape (per-npub localStorage value) ──────────────────
 
@@ -294,6 +298,40 @@ export function createSimWallet(opts: CreateSimWalletOptions = { npub: null }): 
         persist();
         notifyBalance();
         return { operationId: `sim_pay_${Date.now()}` };
+      },
+    },
+
+    // On-chain support — REAL feature (TZS off-ramp pays out to a BTC address).
+    // The sim mocks it exactly like the LN payInvoice leg: `withdraw` DRAINS the
+    // balance and succeeds, so an on-chain payout in sim behaves identically to a
+    // Lightning one (no phantom leftover). The deposit-side methods are stubs (sim
+    // funding is via the LN invoice); they exist only to satisfy the interface.
+    onchain: {
+      async getInfo() {
+        return { network: "simnet", finalityDelay: 0, pegInFeeSats: 0, pegOutFeeSats: 0, minimumDepositSats: 0 };
+      },
+      async createDepositAddress() {
+        return { operationId: `sim_op_${Date.now()}`, address: `bcrt1qsim${randomId(20)}`, finalityDelay: 0 };
+      },
+      async awaitDeposit(operationId: string) {
+        return { status: "confirmed", operationId };
+      },
+      async getWithdrawFees(_address: string, amountSats: number) {
+        return { amountSats, feesSats: 0, totalSats: amountSats };
+      },
+      async withdraw(_address: string, amountSats: number) {
+        await simDelay();
+        const debit = amountSats * 1000;
+        if (debit > state.balanceMsats) {
+          throw new Error(
+            `Sim wallet: insufficient balance for on-chain payout ` +
+            `(have ${state.balanceMsats} msat, need ${debit} msat).`
+          );
+        }
+        state.balanceMsats -= debit;
+        persist();
+        notifyBalance();
+        return { operationId: `sim_onchain_${Date.now()}_${randomId(6)}`, status: "confirmed", txid: `sim${randomId(24)}`, feesSats: 0 };
       },
     },
 

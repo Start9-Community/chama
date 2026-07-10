@@ -78,16 +78,24 @@ export CHAMA_TAURI_BRIDGE_PORT
 # Cmd+Q. Tauri's `beforeDevCommand` vite child also orphans on a Rust-side panic.
 # We only ever touch this instance's vite + bridge ports, never another
 # instance's, so it's safe to run all three windows in parallel.
-for p in "$PORT" "$CHAMA_TAURI_BRIDGE_PORT"; do
-  pids=$(lsof -ti "tcp:$p" 2>/dev/null || true)
-  if [ -n "$pids" ]; then
-    echo "  ⟲ freeing stale port :$p (was held by pid $pids)"
-    kill $pids 2>/dev/null || true
-    sleep 0.4
-    pids=$(lsof -ti "tcp:$p" 2>/dev/null || true)
-    [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
-  fi
-done
+#
+# 2026-07-05: the cleanup moved into Node (scripts/dev-free-ports.mjs). The
+# previous inline `lsof -ti | kill | kill -9` loop is a textbook
+# malware-behavior signature and macOS XProtect killed a live dev session
+# mid-run ("Malicious Script Blocked"). Same reason `exec npm` below became a
+# plain child: the exec made this script's PID *be* the whole dev tree, so an
+# OS-level kill of "the script" took the app, vite, and cargo with it — and
+# left zero forensics. Now bash survives as supervisor and prints the exit
+# status, so a silent death is legible (137 = SIGKILL = external kill).
+node "$(dirname "$0")/dev-free-ports.mjs" "$PORT" "$CHAMA_TAURI_BRIDGE_PORT"
 
 echo "▶ Chama [${LABEL}] → http://localhost:${PORT} · bridge :${CHAMA_TAURI_BRIDGE_PORT} · session '${LABEL}'  (persistent, fixed ports)"
-exec npm run tauri:dev -- --config "${CONFIG}"
+status=0
+npm run tauri:dev -- --config "${CONFIG}" || status=$?
+if [ "$status" -ge 128 ]; then
+  sig=$((status - 128))
+  echo "✖ Chama [${LABEL}] dev tree died on signal ${sig} (9/137 = SIGKILL → external kill: XProtect, OOM, or a manual kill -9; 15 = SIGTERM)."
+elif [ "$status" -ne 0 ]; then
+  echo "✖ Chama [${LABEL}] dev tree exited with status ${status}."
+fi
+exit "$status"

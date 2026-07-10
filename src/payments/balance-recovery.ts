@@ -19,6 +19,7 @@
 // here are cosmetic (the payout already succeeded).
 
 import { markSatsTracesDrained, recordSatsTrace } from "./sats-trace.js";
+import { MATERIAL_RECOVERY_MIN_SATS } from "./lightning-fees.js";
 
 export type RecoveryPayoutPhase =
   | { kind: "paying-invoice" }
@@ -66,7 +67,7 @@ export interface RunRecoveryPayoutOpts {
   // ── R3-1 double-pay guard (shares the claim path's escrow-keyed journal) ──
   // All optional + only active when traceContext.escrowId is set, so existing
   // callers/tests run unchanged. See payments/payout-journal.ts.
-  getPayoutRecord?: (escrowId: string) => { status: "submitted" | "settled"; operationId?: string } | null;
+  getPayoutRecord?: (escrowId: string) => { status: "intent" | "submitted" | "settled"; operationId?: string } | null;
   recordPayoutSubmitted?: (input: { escrowId: string; operationId?: string; amountMsats?: number }) => void;
   markPayoutSettled?: (escrowId: string, operationId?: string) => void;
   clearPayoutRecord?: (escrowId: string) => void;
@@ -98,7 +99,36 @@ export async function runRecoveryPayout(
   opts: RunRecoveryPayoutOpts,
 ): Promise<RecoveryPayoutTerminal> {
   const emit = (p: RecoveryPayoutPhase) => opts.onPhase(p);
-  const escrowId = opts.traceContext?.escrowId;
+  // The journal key for this drain. Downgraded to undefined (keyless drain —
+  // the module's original semantics: "a drained balance is its own guard")
+  // when the settled-record staleness check below proves the inherited key
+  // can't be about THIS balance.
+  let guardKey = opts.traceContext?.escrowId;
+
+  // Stale-key detector: a SETTLED record says that trade's payout already
+  // went out and its sats LEFT the wallet — so if the wallet still holds a
+  // material balance (the very balance the user is draining), the record
+  // cannot be about this drain. The key was inherited from an older trade
+  // (most-recent-CLAIM / sats-trace inference) and short-circuiting "done"
+  // on it is a false green that sends nothing — the observed Recover →
+  // "Recovered to your wallet" → banner-returns no-op loop. Unknown balance
+  // (no reader / read failed) keeps the fund-safe short-circuit.
+  const balanceStillMaterial = async (): Promise<boolean> => {
+    if (!opts.getBalance) return false;
+    try {
+      const bal = await opts.getBalance();
+      return Math.floor(Math.max(0, bal) / 1000) >= MATERIAL_RECOVERY_MIN_SATS;
+    } catch {
+      return false;
+    }
+  };
+  const dropStaleKey = (via: string) => {
+    console.warn(
+      `[chama] recovery: settled payout record for ${guardKey} (${via}) but the wallet still holds a material balance — ` +
+        "stale inherited key; draining keyless instead of returning a false done.",
+    );
+    guardKey = undefined;
+  };
 
   // ── R3-1 double-pay guard ────────────────────────────────────────────────
   // Mirrors runClaimAndPayout's top guard, on the SAME escrow-keyed journal:
@@ -106,13 +136,27 @@ export async function runRecoveryPayout(
   // out (the refund's twin of the claim-side bug). Only active with an
   // escrowId — a generic balance drain has no stable key, and a drained
   // balance is its own guard.
-  if (escrowId) {
-    const prior = opts.getPayoutRecord?.(escrowId) ?? null;
-    if (prior?.status === "settled") {
-      emit({ kind: "done" });
-      return { kind: "done" };
-    }
-    if (prior?.status === "submitted") {
+  if (guardKey) {
+    const prior = opts.getPayoutRecord?.(guardKey) ?? null;
+    if (prior?.status === "intent") {
+      // V7: an intent record belongs to the CLAIM flow's pre-send guard —
+      // its reconcile-by-escrow must resolve it, not a recovery drain. Drop
+      // to keyless so this drain neither trips on nor overwrites it. (UI
+      // routing makes this near-unreachable: an actionable intent suppresses
+      // the recovery surfaces via the pending-payout summary.)
+      console.warn(
+        `[chama] recovery: payout record for ${guardKey} is a claim-flow intent — draining keyless.`,
+      );
+      guardKey = undefined;
+    } else if (prior?.status === "settled") {
+      if (await balanceStillMaterial()) {
+        dropStaleKey("prior-settled");
+        // Fall through to the keyless send below.
+      } else {
+        emit({ kind: "done" });
+        return { kind: "done" };
+      }
+    } else if (prior?.status === "submitted") {
       emit({ kind: "payout-confirming" });
       let outcome: "settled" | "refunded" | "unknown" = "unknown";
       if (opts.awaitPayoutOutcome && prior.operationId) {
@@ -121,14 +165,20 @@ export async function runRecoveryPayout(
       }
       if (outcome === "settled") {
         // Submitted record (which got us here) persists and already blocks
-        // re-pay; a failed settled-upgrade is fund-safe. Proceed to done.
-        try { opts.markPayoutSettled?.(escrowId, prior.operationId); }
+        // re-pay; a failed settled-upgrade is fund-safe.
+        try { opts.markPayoutSettled?.(guardKey, prior.operationId); }
         catch (e) { console.warn("[chama] recovery: re-attach markPayoutSettled persist failed (submitted record still guards):", e); }
-        emit({ kind: "done" });
-        return { kind: "done" };
-      }
-      if (outcome === "refunded") {
-        opts.clearPayoutRecord?.(escrowId); // sats came back — pay fresh below
+        if (await balanceStillMaterial()) {
+          // The old payout settled AND the balance is still here — same
+          // stale-key situation as prior-settled above.
+          dropStaleKey("reattach-settled");
+          // Fall through to the keyless send below.
+        } else {
+          emit({ kind: "done" });
+          return { kind: "done" };
+        }
+      } else if (outcome === "refunded") {
+        opts.clearPayoutRecord?.(guardKey); // sats came back — pay fresh below
       } else {
         emit({ kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY });
         return { kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY };
@@ -136,10 +186,10 @@ export async function runRecoveryPayout(
     }
   }
 
-  // v4.0.0 FAIL-CLOSED (guard only active with an escrowId): refuse to SEND if
-  // the journal can't be persisted, so a later re-tap can't double-pay. Nothing
-  // is sent here, so a retry once storage recovers is safe.
-  if (escrowId && opts.assertPayoutJournalWritable) {
+  // v4.0.0 FAIL-CLOSED (guard only active with a journal key): refuse to SEND
+  // if the journal can't be persisted, so a later re-tap can't double-pay.
+  // Nothing is sent here, so a retry once storage recovers is safe.
+  if (guardKey && opts.assertPayoutJournalWritable) {
     try {
       opts.assertPayoutJournalWritable();
     } catch (e) {
@@ -158,9 +208,9 @@ export async function runRecoveryPayout(
     // payInvoice only resolves on success — journal it settled so a retry is
     // a no-op, never a second send. If that write fails after a SENT payout, do
     // not surface a re-payable failure — force payout-confirming.
-    if (escrowId) {
+    if (guardKey) {
       try {
-        opts.markPayoutSettled?.(escrowId, typeof res === "string" ? res : undefined);
+        opts.markPayoutSettled?.(guardKey, typeof res === "string" ? res : undefined);
       } catch (persistErr) {
         console.error("[chama] recovery: markPayoutSettled persist failed after a sent payout; forcing payout-confirming:", persistErr);
         emit({ kind: "payout-confirming", error: RECOVERY_CONFIRMING_COPY });
@@ -173,11 +223,11 @@ export async function runRecoveryPayout(
     // Submitted-but-unconfirmed (watch timed out mid-flight) ⇒ never a
     // re-payable failure. Journal it and surface payout-confirming.
     if (code === "LN_PAY_INFLIGHT") {
-      if (escrowId) {
+      if (guardKey) {
         // Even if the submitted guard can't persist, force payout-confirming —
         // never fall through to the re-payable terminal for an in-flight payout.
         try {
-          opts.recordPayoutSubmitted?.({ escrowId, operationId: opId, amountMsats: opts.traceContext?.amountMsats });
+          opts.recordPayoutSubmitted?.({ escrowId: guardKey, operationId: opId, amountMsats: opts.traceContext?.amountMsats });
         } catch (persistErr) {
           console.error("[chama] recovery: recordPayoutSubmitted persist failed for an in-flight payout; forcing payout-confirming anyway:", persistErr);
         }
@@ -187,7 +237,7 @@ export async function runRecoveryPayout(
     }
     // Definite failure (confirmed refund, submit-failed, other) — re-paying is
     // correct; drop any record so a retry isn't wrongly blocked.
-    if (escrowId) opts.clearPayoutRecord?.(escrowId);
+    if (guardKey) opts.clearPayoutRecord?.(guardKey);
     const error = errorMessage(e, "Lightning payment failed");
     emit({ kind: "payout-failed", error });
     return { kind: "payout-failed", error };
@@ -207,7 +257,10 @@ export async function runRecoveryPayout(
       if (Math.floor(Math.max(0, balance) / 1000) > 0) {
         recordSatsTrace({
           source: "recovery",
-          escrowId: opts.traceContext?.escrowId,
+          // guardKey, not the raw traceContext: after a stale-key keyless
+          // drain, persisting a trace that names the stale escrow would
+          // re-poison the very inference this run just corrected.
+          escrowId: guardKey,
           amountMsats: opts.traceContext?.amountMsats,
           balanceMsats: balance,
           reason: "recovery-leftover",

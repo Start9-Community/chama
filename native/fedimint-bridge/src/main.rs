@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::extract::{Query, State};
@@ -28,8 +28,8 @@ use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::util::SafeUrl;
 use fedimint_ln_client::common::LightningGateway;
 use fedimint_ln_client::{
-    InternalPayState, LightningClientInit, LightningClientModule, LnPayState, LnReceiveState,
-    OutgoingLightningPayment, PayType,
+    InternalPayState, LightningClientInit, LightningClientModule, LightningOperationMeta,
+    LightningOperationMetaVariant, LnPayState, LnReceiveState, OutgoingLightningPayment, PayType,
 };
 use fedimint_meta_client::MetaClientInit;
 use fedimint_mint_client::{
@@ -646,6 +646,7 @@ async fn main() -> Result<()> {
                     gateway_id,
                     force_internal,
                     no_wait,
+                    None,
                 )
                 .await?;
             print_json(&value)?;
@@ -1255,6 +1256,12 @@ impl Bridge {
         gateway_id: Option<PublicKey>,
         force_internal: bool,
         no_wait: bool,
+        // V7: caller-supplied JSON stamped into the payment's operation-log
+        // entry (fedimint `extra_meta`, persisted in the client DB). Chama
+        // sends its ChamaOperationMeta incl. `chama_escrow_id`, which
+        // `/pay-outcome-by-escrow` reconciles against after a crash that
+        // lost the operation id.
+        extra_meta: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
         let ln = client.get_first_module::<LightningClientModule>()?;
         let invoice = fedimint_ln_client::get_invoice(
@@ -1292,7 +1299,8 @@ impl Bridge {
             contract_id: _,
             fee,
         } = ln
-            .pay_bolt11_invoice(gateway, invoice, ())
+            // `Value::Null` when unset serializes identically to the old `()`.
+            .pay_bolt11_invoice(gateway, invoice, extra_meta.unwrap_or(serde_json::Value::Null))
             .await
             .context("failed to start outgoing LN payment")?;
         let operation_id = payment_type.operation_id();
@@ -1353,6 +1361,126 @@ impl Bridge {
             operation_id,
             None,
         ))?)
+    }
+
+    /// V7 reconcile-by-escrow: resolve every outgoing payment ever stamped
+    /// with this escrow id (`extra_meta.chama_escrow_id`, written by `/pay`)
+    /// by scanning the fedimint operation log — the client DB persists it, so
+    /// this survives an app crash that lost the JS-side operation id (the V7
+    /// double-pay window). Never re-sends anything; observation only.
+    ///
+    /// Fund-safety contract of the verdicts:
+    ///   settled  — SOME matching payment reached `success{preimage}`.
+    ///   inflight — a matching payment exists but is not at a fund-safe
+    ///              terminal ⇒ the caller must refuse to re-pay.
+    ///   refunded — every matching payment was CONFIRMED refunded/canceled.
+    ///   none     — the scan PROVABLY covered the window (reached ops older
+    ///              than `since_ms`, or walked the whole log) and found no
+    ///              match ⇒ no payment was ever dispatched.
+    ///   (An incomplete scan — cap hit before `since_ms` — reports `unknown`
+    ///   so the caller refuses now and reconciles again later.)
+    async fn pay_outcome_by_escrow(
+        &self,
+        client: &ClientHandleArc,
+        escrow_id: String,
+        since_ms: Option<u64>,
+    ) -> Result<serde_json::Value> {
+        const PAGE: usize = 64;
+        const SCAN_CAP: usize = 4096;
+        let ln = client.get_first_module::<LightningClientModule>()?;
+        let since: Option<SystemTime> =
+            since_ms.map(|ms| UNIX_EPOCH + Duration::from_millis(ms));
+
+        let mut matches: Vec<OperationId> = Vec::new();
+        let mut last_seen = None;
+        let mut scanned: usize = 0;
+        let mut scan_complete = false;
+        'pages: loop {
+            let page = client
+                .operation_log()
+                .paginate_operations_rev(PAGE, last_seen)
+                .await;
+            if page.is_empty() {
+                // Walked past the oldest entry — the whole log was covered.
+                scan_complete = true;
+                break;
+            }
+            for (key, entry) in &page {
+                if let Some(since) = since {
+                    if key.creation_time < since {
+                        // Reached ops older than the journal record that
+                        // triggered this reconcile — nothing before it can be
+                        // the payment we're looking for.
+                        scan_complete = true;
+                        break 'pages;
+                    }
+                }
+                scanned += 1;
+                if entry.operation_module_kind() != "ln" {
+                    continue;
+                }
+                let Ok(meta) = entry.try_meta::<LightningOperationMeta>() else {
+                    continue;
+                };
+                if !matches!(meta.variant, LightningOperationMetaVariant::Pay(_)) {
+                    continue;
+                }
+                if meta
+                    .extra_meta
+                    .get("chama_escrow_id")
+                    .and_then(|v| v.as_str())
+                    == Some(escrow_id.as_str())
+                {
+                    matches.push(key.operation_id);
+                }
+            }
+            if scanned >= SCAN_CAP {
+                break; // completeness unproven — "none" must not be claimed
+            }
+            last_seen = page.last().map(|(key, _)| *key);
+        }
+
+        if matches.is_empty() {
+            let status = if scan_complete { "none" } else { "unknown" };
+            eprintln!(
+                "pay-outcome-by-escrow: {escrow_id} scanned={scanned} matches=0 -> {status}"
+            );
+            return Ok(json!({ "status": status }));
+        }
+
+        // Classify every match (bounded watch each; matches are ~1-2 in
+        // practice). Fund-safest aggregation: any settled ⇒ settled (this
+        // escrow's payout WAS paid — a re-pay would be the double-send);
+        // else any non-terminal ⇒ inflight; else all refunded ⇒ refunded.
+        let mut refunded_op: Option<OperationId> = None;
+        let mut inflight_op: Option<OperationId> = None;
+        for operation_id in matches {
+            match watch_outgoing_pay(&ln, false, operation_id).await {
+                Some(PayTerminal::Settled { .. }) => {
+                    eprintln!(
+                        "pay-outcome-by-escrow: {escrow_id} -> settled via {operation_id:?}"
+                    );
+                    return Ok(json!({
+                        "status": "settled",
+                        "operation_id": operation_id,
+                    }));
+                }
+                Some(PayTerminal::Refunded { .. }) => refunded_op = Some(operation_id),
+                None => inflight_op = Some(operation_id),
+            }
+        }
+        if let Some(operation_id) = inflight_op {
+            eprintln!("pay-outcome-by-escrow: {escrow_id} -> inflight via {operation_id:?}");
+            return Ok(json!({
+                "status": "inflight",
+                "operation_id": operation_id,
+            }));
+        }
+        eprintln!("pay-outcome-by-escrow: {escrow_id} -> refunded");
+        Ok(json!({
+            "status": "refunded",
+            "operation_id": refunded_op,
+        }))
     }
 
     async fn spend_notes(
@@ -1702,6 +1830,19 @@ struct PayRequest {
     gateway_id: Option<String>,
     force_internal: Option<bool>,
     no_wait: Option<bool>,
+    /// V7: stamped into the payment's operation-log entry (fedimint
+    /// `extra_meta`) — the durable op↔escrow map `/pay-outcome-by-escrow`
+    /// reconciles against.
+    extra_meta: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PayOutcomeByEscrowRequest {
+    escrow_id: String,
+    /// Scan bound (Unix ms): ops older than this can't be the payment being
+    /// reconciled, so reaching them proves a `none` verdict complete.
+    since_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1792,6 +1933,7 @@ async fn serve_bridge(bridge: Bridge, bind: SocketAddr, invite_code: Option<Stri
         .route("/await-invoice", post(api_await_invoice))
         .route("/pay", post(api_pay))
         .route("/pay-outcome", post(api_pay_outcome))
+        .route("/pay-outcome-by-escrow", post(api_pay_outcome_by_escrow))
         .route("/spend-notes", post(api_spend_notes))
         .route("/reissue-notes", post(api_reissue_notes))
         .route("/parse-notes", post(api_parse_notes))
@@ -1894,7 +2036,9 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "ok": true,
         "joined": joined,
-        "api_version": 2,
+        // V7 (pay reconcile-by-escrow) shipped in api_version 3 — the
+        // `/health` probe is how a rebuilt sidecar is confirmed live.
+        "api_version": 3,
         "join_timeout_secs": FEDERATION_JOIN_TIMEOUT.as_secs(),
         "iroh": state.bridge.iroh_config_diagnostics(),
         "discovery": discovery,
@@ -1903,6 +2047,7 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "idempotent_join",
             "effective_iroh_config",
             "discovery_probe",
+            "pay_outcome_by_escrow",
         ],
     }))
 }
@@ -2007,6 +2152,7 @@ async fn api_pay(
                 gateway_id,
                 req.force_internal.unwrap_or(false),
                 req.no_wait.unwrap_or(false),
+                req.extra_meta,
             )
             .await?,
     ))
@@ -2021,6 +2167,19 @@ async fn api_pay_outcome(
         state
             .bridge
             .pay_outcome(&client, req.operation_id)
+            .await?,
+    ))
+}
+
+async fn api_pay_outcome_by_escrow(
+    State(state): State<AppState>,
+    Json(req): Json<PayOutcomeByEscrowRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let client = state.client().await?;
+    Ok(Json(
+        state
+            .bridge
+            .pay_outcome_by_escrow(&client, req.escrow_id, req.since_ms)
             .await?,
     ))
 }

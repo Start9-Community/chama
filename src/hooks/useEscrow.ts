@@ -120,6 +120,7 @@ import {
   Role,
   Outcome,
 } from "../escrow-engine/types.js";
+import { recordTradeToIndex, removeTradeFromIndex } from "../escrow-engine/trade-index.js";
 import {
   FedimintClient,
   EscrowFedimintBridge,
@@ -135,6 +136,10 @@ import {
   stashPendingFunding,
   clearPendingFunding,
   drainPendingFundings,
+  clearPendingNativeLockIfIntent,
+  drainPendingNativeLocks,
+  getPendingNativeLock,
+  stashNativeLockIntent,
   hashNotes,
   checkAndMaybeRepublishSeed,
   getActiveInvite,
@@ -152,18 +157,27 @@ import {
 import { Capacitor } from "@capacitor/core";
 import type { LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
 import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
+// ── Arbiter bond (sealed v1: single-key timelock COMMITMENT) ──────────────────
+import * as btcSigner from "@scure/btc-signer";
+import { findBondFundingUtxos, esploraFetcher, defaultEsploraBase, defaultMinConfs, esploraTipHeight, esploraBroadcast, esploraOutspend, esploraRecommendedFeeRate } from "../bond-multisig/fund-watcher.js";
+import { buildCommitmentBond, buildReclaimTx, deriveBondSigningKey, estimateReclaimFeeSats, MIN_COMMITMENT_TERM_BLOCKS, DEFAULT_RECLAIM_FEE_RATE } from "../bond-multisig/commitment-bond.js";
+import { buildBondAnnouncementEvent, selectLatestAnnouncements, groupLatestAnnouncementsByCommunity, verifyBondAnnouncement, ARBITER_BOND_ANNOUNCEMENT_KIND, type VerifiedBond } from "../bond-multisig/bond-announcement.js";
+import { getCommitmentBond, upsertCommitmentBond, listCommitmentBonds, newBondId } from "../bond-multisig/commitment-store.js";
+import { MAINNET as BOND_NETWORK } from "../bond-multisig/multisig.js";
+import { computeChamaLiveness, type ChamaLiveness, type RatingSummary as LivenessRatingSummary } from "../arbiters/live-chama.js";
 import {
   getPayoutRecord,
+  recordPayoutIntent,
   recordPayoutSubmitted,
   markPayoutSettled,
   clearPayoutRecord,
   assertPayoutJournalWritable,
+  PAY_RECONCILE_SINCE_MARGIN_MS,
 } from "../payments/payout-journal.js";
 import {
   getUserCommunitySlug,
   getUserCommunitySlugRaw,
   setUserCommunitySlug,
-  applyPendingCommunitySelection,
   setLastHomeHint,
 } from "../communities/storage.js";
 import { getCommunityBySlug, type Community } from "../communities/registry.js";
@@ -807,6 +821,41 @@ export interface UseEscrowActions {
   /** V3 #74: publish a signed arbiter application (kind:38121) for a
    *  community. Anyone signed-in may apply; the steward reviews. */
   applyAsArbiter: (community: string, statement: string) => Promise<void>;
+  /** ⭐ The SEALED v1 bond (single-key timelock COMMITMENT). Post one: derive the
+   *  arbiter's OWN bond key, set the term (blocks from the current tip, min
+   *  MIN_COMMITMENT_TERM_BLOCKS), build the one-leaf CLTV address, persist. No
+   *  cabinet, no custody. Returns the address to fund + the unlock height. */
+  createCommitmentBond: (params: { amountSats: bigint; termBlocks: number }) =>
+    Promise<{ bondId: string; address: string; lockUntil: number; amountSats: bigint; tipAtCreate: number }>;
+  /** Re-scan the bond address for confirmed deposits (ANY amount, every call — a
+   *  deposit landing after the first is still recorded) → mark/keep it LOCKED with
+   *  the full UTXO set. { locked:false } = nothing confirmed yet, keep waiting. */
+  checkCommitmentFunding: (bondId: string) => Promise<{ locked: boolean; txid?: string; lockedSats?: bigint; deposits?: number }>;
+  /** After the term (tip ≥ lockUntil), sweep EVERY UTXO at the bond address back to
+   *  the arbiter's own key and broadcast. ⚠ moves the arbiter's OWN sats. Consensus
+   *  is the authority: a too-early attempt is rejected by the network and surfaced
+   *  calmly. Recovers an already-swept bond (lost state / other device) by adopting
+   *  the on-chain spend as the reclaim. */
+  reclaimCommitmentBond: (bondId: string) => Promise<{ txid: string; alreadyReclaimed?: boolean }>;
+  /** Current chain tip height (for the locked screen's live unlock countdown). */
+  getBondChainTip: () => Promise<number>;
+  /** Announce a funded+locked bond to a community (kind 38135) so its liveness is
+   *  publicly computable + chain-verifiable. The event is signed by the arbiter's
+   *  Nostr key; verification recomputes the address + reads it on-chain. */
+  publishBondAnnouncement: (bondId: string, community: string) => Promise<{ community: string; address: string }>;
+  /** Fetch every arbiter's current bond announcement for a community, chain-verified
+   *  (the data source for the live-chama liveness score). */
+  fetchCommunityBonds: (community: string) => Promise<VerifiedBond[]>;
+  /** Compute a community's live-chama liveness score: chain-verified bonds +
+   *  arbiter ratings → coverage/commitment/reputation composite. Pure roll-up over
+   *  fetchCommunityBonds; never a hardcoded "Kenya is green". */
+  getChamaLiveness: (community: string) => Promise<ChamaLiveness>;
+  /** The country-LIST companion to getChamaLiveness: ONE batched kind-38135 read
+   *  (no `#d`) → per-community count of chain-verified FUNDED+ACTIVE bonded
+   *  arbiters (slug → count; zero-count communities omitted). ADDITIVE over the
+   *  registry tiers — it can only light rows up, never darken them. Cheap by
+   *  construction: only communities that actually announced cost a chain read. */
+  fetchBondedArbiterCounts: () => Promise<Record<string, number>>;
   /** V3 #74 steward review: fetch + verify a community's applications,
    *  newest per applicant, already-rostered keys excluded. */
   fetchArbiterApplications: (
@@ -1020,6 +1069,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     // loaded at connect with the reliable pubkey, so this works even before
     // state.pubkey re-renders. Loading it by ID un-forgets it (see loadEscrow).
     if (forgottenIdsRef.current.has(escrowId)) return;
+    // Durable trade-history index: remember every trade the user is a party to
+    // from this central chokepoint, so My Trades survives relay eviction / a
+    // chain that can't rehydrate (loss-proof history). No-op for non-parties;
+    // never blocks the state update. Recorded BEFORE the expired-unfunded hide
+    // so an expired listing still shows in history (it's the user's own).
+    try { recordTradeToIndex(escrowState, stateRef.current?.pubkey ?? null); } catch {}
     if (isExpiredUnfundedEscrow(escrowState)) {
       setState(prev => {
         if (!prev.escrows.has(escrowId)) return prev;
@@ -1112,11 +1167,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         );
       }
       setLocalStorageUserScope(pubkey);
-      // v3.5.1: commit a deferred onboarding community pick to THIS npub's
-      // scope now that the signer is known — BEFORE initFedimint resolves
-      // community → federation below — so a fresh/secondary npub's pick can't
-      // race to the BLF default the way the old pre-signer global write did.
-      applyPendingCommunitySelection();
+      // v4.3 auth-first RETIRED the v3.5.1 pre-signer pick stash: the globe
+      // picker now runs POST-connect and writes the npub scope directly
+      // (handleSelectCommunity), so there is nothing to defer-commit here.
+      // Drop any stale pre-4.3 stash so an old un-applied pick can never
+      // silently claim a future npub on shared storage.
+      try { localStorage.removeItem("chama_pending_community"); } catch { /* no-op */ }
       // v3.5.1 #6: refresh the unscoped pre-signin "last home" hint from THIS
       // npub's now-resolvable scoped home, so a web reload (no auto-login)
       // keeps the user past the first-run globe. Covers users whose home was
@@ -1629,13 +1685,16 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     const createEvent = state?.eventChain?.[0];
     const expectedFed = effectiveCreateFederationId(createEvent?.payload as any);
 
-    if (expectedFed && fedimintRef.current) {
+    // Sim mode has fake federations (SIM_FEDERATION_ID) that never equal a
+    // trade's real stamped fed — this guard is a real-money protection, so
+    // skipping it in sim is what lets a full sim trade (join → lock → settle)
+    // complete end-to-end. #35: sim e2e was silently broken here.
+    if (expectedFed && fedimintRef.current && !isSimModeOn()) {
       const walletFed = fedimintRef.current.getFederationId();
       if (walletFed && walletFed !== expectedFed) {
         const err: any = new Error(
-          `This trade requires federation ${expectedFed}. ` +
-            `Your wallet is on ${walletFed}. ` +
-            `Sign out and rejoin with the correct federation, then try again.`
+          `This trade lives in a different Chama than your wallet is on. ` +
+            `Switch to the trade's Chama to continue — your sats stay safe.`
         );
         err.code = "FED_MISMATCH";
         err.expected = expectedFed;
@@ -2107,6 +2166,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     // the user loads it by ID.
     addForgottenEscrowId(escrowId, pk);
     forgottenIdsRef.current.add(escrowId);
+    // Forgetting a ghost also drops it from the durable history index — the
+    // user explicitly doesn't want it back (loading by ID re-indexes it).
+    try { removeTradeFromIndex(escrowId); } catch {}
     // Stop watching it too, so a late relay event can't silently re-add a
     // ghost the user just dismissed. Re-loading by ID re-subscribes.
     clientRef.current?.unwatchEscrow(escrowId);
@@ -2497,6 +2559,25 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       drainPendingFundings().catch((e) =>
         console.warn("[chama] pending-funding drain error:", e)
       );
+
+      // #37: settle any SDK-wallet lock attempt stranded mid-flight (the
+      // native/browser mirror of the Fedi drain above). Fail-closed decision
+      // table per entry: a LOCK committed with our notes clears the entry;
+      // provably-uncommitted notes are re-absorbed into the wallet; unknown
+      // trade state keeps the entry untouched. Never runs on sim/testnet
+      // (their fake notes never enter this stash). Fire-and-forget; a
+      // balance refresh makes a successful re-absorb visible immediately.
+      if (!isSimModeOn() && !isTestnetMode() && bridgeRef.current) {
+        drainPendingNativeLocks(bridgeRef.current.nativeLockRecoveryDeps())
+          .then((summary) => {
+            if (summary.reabsorbed > 0 || summary.clearedDead > 0) {
+              refreshBalanceRef.current?.().catch(() => {});
+            }
+          })
+          .catch((e) =>
+            console.warn("[chama] pending-native-lock drain error:", e)
+          );
+      }
 
       // v0.1.69: Seed health check + staleness republish.
       // ─────────────────────────────────────────────────────────────────
@@ -2943,8 +3024,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         // Fedi Mini-App funding is atomic via stash + re-absorb: ecash spent
         // out of Fedi is committed only once the LOCK publishes with our
         // notesHash; abort, lock-throw, racing tab, reload, or crash all
-        // refund. See src/payments/fedi-fund-and-lock.ts. (Native is immune —
-        // createEscrowLock spends + SSS-splits atomically inside the SDK.)
+        // refund. See src/payments/fedi-fund-and-lock.ts. (The SDK-wallet
+        // paths below get the same guarantee from the pending-native-locks
+        // stash inside bridge.lockAndPublish — #37.)
         const { runFediFundAndLock } = await import("../payments/fedi-fund-and-lock.js");
         return await runFediFundAndLock({
           escrowId,
@@ -2971,6 +3053,118 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
             return { lockedNotesHash: state?.lock?.notesHash ?? null };
           },
         });
+      }
+
+      // Fedi-shaped runtimes without the internal ecash primitive can't
+      // fund at all — refuse BEFORE any #37 bookkeeping (an intent stashed
+      // for a flow refused one line later tells a false story — F9).
+      if (isFediMiniAppRuntime() || hasFediInternalEcash()) {
+        opts.onPhase({ kind: "lock-failed", error: FEDI_ECASH_UNAVAILABLE });
+        return { kind: "lock-failed", error: FEDI_ECASH_UNAVAILABLE };
+      }
+
+      // #37: a prior lock attempt's stash entry holds bearer notes for THIS
+      // trade — settle it BEFORE creating any invoice, or the modal would
+      // invite a SECOND payment for a trade whose sats already exist.
+      if (!isSimModeOn() && !isTestnetMode()) {
+        try {
+          const settle = await requireBridge().settlePendingNativeLock(escrowId, {
+            ignoreAttemptCap: true,
+          });
+          // The user may have cancelled while the settle ran — never
+          // proceed (especially not into a direct lock) on an aborted
+          // signal (review F6).
+          if (opts.signal?.aborted) {
+            opts.onPhase({ kind: "aborted" });
+            return { kind: "aborted" };
+          }
+          if (settle === "kept") {
+            // Couldn't positively resolve (relays degraded / fed mismatch).
+            // Refuse to take a new payment — fail-safe, nothing moved.
+            const err =
+              "Chama is still recovering your previous funding attempt for this " +
+              "trade. Your sats are safe — recovery retries automatically. Try " +
+              "again in a moment.";
+            opts.onPhase({ kind: "lock-failed", error: err });
+            return { kind: "lock-failed", error: err };
+          }
+          if (settle === "cleared-committed") {
+            // The crash-window publish actually landed — the trade is
+            // already locked with the prior payment. Nothing owed.
+            opts.onPhase({ kind: "locked" });
+            return { kind: "locked" };
+          }
+          // Direct-lock shortcut: no new invoice when the wallet already
+          // holds the trade amount. Covers (a) a just-re-absorbed prior
+          // attempt and (b) the widest crash window — payment landed as
+          // BALANCE but the lock never ran (intent-stage entry) — where a
+          // re-tap of Fund must not solicit a second payment (review F10).
+          const priorIntent = getPendingNativeLock(escrowId);
+          const intentCoverable = priorIntent?.stage === "intent";
+          if (settle === "reabsorbed" || settle === "cleared-dead-notes" || intentCoverable) {
+            const balance = await fedimint.getBalance().catch(() => 0);
+            if (opts.signal?.aborted) {
+              opts.onPhase({ kind: "aborted" });
+              return { kind: "aborted" };
+            }
+            if (balance >= opts.amountMsats) {
+              // Only a CREATED trade is lockable — the settle's fresh
+              // loadEscrow refreshed local state, so refuse honestly here
+              // instead of letting the Cannot-LOCK swallow fake a success
+              // on a cancelled/expired trade (review F8).
+              const st = requireClient().getState(escrowId);
+              if (st && st.status !== EscrowStatus.CREATED) {
+                const err =
+                  "This trade is no longer open to fund — your sats are back " +
+                  "in your wallet, nothing was sent.";
+                opts.onPhase({ kind: "lock-failed", error: err });
+                return { kind: "lock-failed", error: err };
+              }
+              opts.onPhase({ kind: "locking" });
+              const locked = await lockAndPublishAction(escrowId, {
+                savedHandleId: opts.savedHandleId,
+                selectedItems: opts.selectedItems,
+              });
+              // Positive confirmation, not the swallow's word (F8).
+              if (locked?.lock?.notesHash) {
+                opts.onPhase({ kind: "locked" });
+                return { kind: "locked" };
+              }
+              const err =
+                "This trade could no longer be locked — your sats stay in " +
+                "your wallet.";
+              opts.onPhase({ kind: "lock-failed", error: err });
+              return { kind: "lock-failed", error: err };
+            }
+          }
+        } catch (e) {
+          // Fail-soft: bridge.lockAndPublish keeps its own settle gate as
+          // defense-in-depth, and it fires before any spend.
+          console.warn("[chama] pending-lock settle failed (continuing):", e);
+        }
+      }
+
+      // #37: persist a funding INTENT for the SDK-wallet paths below, before
+      // any payment can land. If the app dies mid-funding (payment landed,
+      // lock never ran — the widest crash window), the balance stays
+      // attributable to THIS trade: the recovery surfaces show "finish
+      // locking your trade" instead of the drain banner mis-attributed to an
+      // old claim. Best-effort here (nothing spent yet) — the fail-closed
+      // probe lives at the spend inside bridge.lockAndPublish.
+      if (!isSimModeOn() && !isTestnetMode()) {
+        try {
+          stashNativeLockIntent({
+            escrowId,
+            amountMsats: opts.amountMsats,
+            federationId: fedimint.getFederationId(),
+            lockOpts: {
+              savedHandleId: opts.savedHandleId,
+              selectedItems: opts.selectedItems,
+            },
+          });
+        } catch (e) {
+          console.warn("[chama] funding-intent stash failed (continuing):", e);
+        }
       }
 
       if (opts.fundingMethod === "onchain") {
@@ -3083,13 +3277,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         return { kind: "locked" };
       }
 
-      if (isFediMiniAppRuntime() || hasFediInternalEcash()) {
-        opts.onPhase({ kind: "lock-failed", error: FEDI_ECASH_UNAVAILABLE });
-        return { kind: "lock-failed", error: FEDI_ECASH_UNAVAILABLE };
-      }
+      // (Fedi-runtime-without-ecash refusal hoisted above the #37 settle/
+      // intent block — see F9.)
 
       const { runFundAndLock } = await import("../payments/fund-and-lock.js");
-      return await runFundAndLock({
+      const result = await runFundAndLock({
         escrowId,
         amountMsats: opts.amountMsats,
         description: opts.description,
@@ -3118,6 +3310,17 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         onPhase: opts.onPhase,
         signal: opts.signal,
       });
+      // #37: a clean "expired" (payment never arrived) or a deliberate
+      // user cancel retires the intent record so it can't linger as a
+      // false "you were funding when the app closed" story (F3). Entries
+      // that advanced to `spent` are untouchable by this path, and an
+      // abort that raced a landed payment still surfaces honestly: the
+      // balance-gated resume logic only tells the story when the wallet
+      // actually holds the amount.
+      if (result.kind === "expired" || result.kind === "aborted") {
+        try { clearPendingNativeLockIfIntent(escrowId); } catch {}
+      }
+      return result;
     } catch (e: unknown) {
       const err = describeError(e, "Funding failed");
       opts.onPhase({ kind: "lock-failed", error: err });
@@ -3168,6 +3371,34 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       if (!rec) return;
       if (rec.status === "settled") {
         await completeIfClaimed();
+        return;
+      }
+      // V7: intent records (crash before the submitted/settled upgrade) and
+      // submitted records that lost their operationId reconcile BY ESCROW —
+      // the payment carries chama_escrow_id in the fedimint op log. Never
+      // re-pays; only observes. NOTE the fund-safety asymmetry: "none"
+      // clears an INTENT (payment provably never dispatched ⇒ RETRY CLAIM
+      // goes live) but NOT a submitted record (the gateway accepted a
+      // payment — an empty scan is blindness, not proof of absence).
+      if (rec.status === "intent" || (rec.status === "submitted" && !rec.operationId)) {
+        const sinceMs = rec.createdAt !== undefined
+          ? rec.createdAt - PAY_RECONCILE_SINCE_MARGIN_MS
+          : undefined;
+        const res = await bridge.payOutcomeByEscrow(escrowId, sinceMs);
+        if (res.outcome === "settled") {
+          markPayoutSettled(escrowId, res.operationId);
+          await completeIfClaimed();
+          refreshBalanceRef.current?.().catch(() => {});
+        } else if (res.outcome === "inflight") {
+          // Adopt the live payment's id so future reattaches go direct.
+          recordPayoutSubmitted({ escrowId, operationId: res.operationId, amountMsats: rec.amountMsats });
+        } else if (
+          res.outcome === "refunded" ||
+          (res.outcome === "none" && rec.status === "intent")
+        ) {
+          clearPayoutRecord(escrowId);
+        }
+        // unknown (or untrusted none): keep the record; retried next sweep.
         return;
       }
       if (rec.status !== "submitted" || !rec.operationId) return;
@@ -3298,12 +3529,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         // localStorage (payments/payout-journal.ts); awaitPayoutOutcome
         // re-attaches to a submitted payout's operationId via the bridge.
         getPayoutRecord,
+        recordPayoutIntent,
         recordPayoutSubmitted,
         markPayoutSettled,
         clearPayoutRecord,
         assertPayoutJournalWritable,
         awaitPayoutOutcome: (operationId: string) =>
           bridge.awaitPayoutOutcome(operationId),
+        // V7 reconcile-by-escrow. Sim's mocked pay auto-settles and stamps
+        // no op log — "none" is the truthful sim answer (an intent there can
+        // never mask a real payment), keeping sim retries unstranded.
+        payOutcomeByEscrow: async (id: string, sinceMs?: number) =>
+          isSimModeOn()
+            ? { outcome: "none" as const }
+            : bridge.payOutcomeByEscrow(id, sinceMs),
         payOnchain: async (grossAmountSats: number) => {
           if (!onchainAddress) throw new Error("Paste a bitcoin onchain address");
           let sendSats = grossAmountSats;
@@ -3423,6 +3662,237 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const unsigned = buildArbiterApplicationEvent({ community, statement });
       const signed = await signer.signEvent(unsigned as any);
       await client.publishRaw(signed);
+    },
+    createCommitmentBond: async ({ amountSats, termBlocks }) => {
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Not connected");
+      if (typeof amountSats !== "bigint" || amountSats <= 0n) throw new Error("Bond amount must be a positive number of sats");
+      if (!Number.isInteger(termBlocks) || termBlocks <= 0) throw new Error("Term must be a positive number of blocks");
+      if (termBlocks < MIN_COMMITMENT_TERM_BLOCKS) {
+        // A shorter term can END before funding confirms — a "locked" bond that is
+        // already reclaimable is zero commitment signal (and very confusing).
+        throw new Error(`Term too short — a bond must lock for at least ${MIN_COMMITMENT_TERM_BLOCKS} blocks.`);
+      }
+      // The bond key is BIP86-derived from the same Nostr-backed seed (a distinct path,
+      // no key reuse), so the arbiter alone controls it — no cabinet, no custody.
+      const words = await getOrCreateSeed(client, signer);
+      // ⭐ A FRESH derivation index per bond → a unique key → a unique address, even at
+      // the same term. No two bonds ever share an address (no commingled UTXOs, better
+      // privacy). Index = highest existing + 1 (legacy single-key bonds count as 0).
+      const keyIndex = listCommitmentBonds().reduce((m, b) => Math.max(m, b.keyIndex ?? 0), -1) + 1;
+      const { xonly } = deriveBondSigningKey(words.join(" "), { network: BOND_NETWORK, index: keyIndex });
+      const tip = await esploraTipHeight(esploraFetcher(defaultEsploraBase(BOND_NETWORK)));
+      const lockUntil = tip + termBlocks;
+      const bond = buildCommitmentBond(xonly, lockUntil, BOND_NETWORK);
+      const bondId = newBondId();
+      upsertCommitmentBond({ bondId, bond, amountSats, phase: "created", keyIndex, createdAt: Math.floor(Date.now() / 1000) });
+      return { bondId, address: bond.address, lockUntil, amountSats, tipAtCreate: tip };
+    },
+    checkCommitmentFunding: async (bondId: string) => {
+      const rec = getCommitmentBond(bondId);
+      if (!rec) throw new Error("Unknown bond — post it first.");
+      if (rec.phase === "reclaimed") return { locked: true, txid: rec.utxos?.[0]?.txid, lockedSats: rec.amountSats, deposits: rec.utxos?.length ?? 0 };
+      // Re-scan on EVERY call — never early-return on a cached UTXO. A second deposit
+      // that confirms after the first check must still be recorded, or the reclaim
+      // sweep would strand it at the address. Accept ANY confirmed deposit(s) (the
+      // arbiter's own sats, their own address — more is a bigger bond). Union
+      // chain ∪ cache so one flaky read off a load-balanced Esplora node can't drop
+      // an already-recorded deposit.
+      const found = await findBondFundingUtxos({
+        address: rec.bond.address,
+        fetchJson: esploraFetcher(defaultEsploraBase(BOND_NETWORK)),
+        minConfs: defaultMinConfs(BOND_NETWORK),
+      });
+      const merged = new Map<string, { txid: string; index: number; amountSats: bigint }>();
+      for (const u of rec.utxos ?? []) merged.set(`${u.txid}:${u.index}`, u);
+      for (const f of found) merged.set(`${f.utxo.txid}:${f.utxo.index}`, f.utxo);
+      if (merged.size === 0) return { locked: false };
+      const utxos = [...merged.values()];
+      const total = utxos.reduce((s, u) => s + u.amountSats, 0n);
+      const locked = upsertCommitmentBond({ ...rec, phase: "locked", utxos, amountSats: total });
+      return { locked: true, txid: locked.utxos?.[0]?.txid, lockedSats: total, deposits: utxos.length };
+    },
+    reclaimCommitmentBond: async (bondId: string) => {
+      const rec = getCommitmentBond(bondId);
+      if (!rec) throw new Error("Unknown bond.");
+      if (rec.phase === "reclaimed" && rec.reclaimTxid) return { txid: rec.reclaimTxid, alreadyReclaimed: true };
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Reconnect to reclaim — your bonded sats are safe on-chain either way.");
+      const base = defaultEsploraBase(BOND_NETWORK);
+      const fetchJson = esploraFetcher(base);
+      // ⭐ Sweep what the CHAIN says is at the address, not the local cache — a deposit
+      // that confirmed after the last funding check (or was recorded on another device)
+      // must not be stranded. The cache is the fallback only when the scan itself fails.
+      const cached = rec.utxos ?? [];
+      let utxos = cached;
+      try {
+        const fresh = await findBondFundingUtxos({ address: rec.bond.address, fetchJson, minConfs: defaultMinConfs(BOND_NETWORK) });
+        if (fresh.length > 0) {
+          utxos = fresh.map((f) => f.utxo);
+        } else if (cached.length > 0) {
+          // Scan succeeded but the address is EMPTY while we remember deposits: the
+          // bond leaf is owner-key-only, so a spend of those UTXOs can only ever be
+          // the owner's reclaim (this device crashed post-broadcast, or another
+          // device swept). Adopt the on-chain spend as the reclaim.
+          const out = await esploraOutspend(fetchJson, cached[0].txid, cached[0].index).catch(() => null);
+          if (out?.spent && out.txid) {
+            upsertCommitmentBond({ ...rec, phase: "reclaimed", reclaimTxid: out.txid });
+            return { txid: out.txid, alreadyReclaimed: true };
+          }
+          // Not spent, just not visible (lagging LB node) → sweep the cached set;
+          // consensus is the authority either way.
+        }
+      } catch { /* Esplora unreachable — try the cached set */ }
+      if (utxos.length === 0) throw new Error("This bond isn't funded yet.");
+      // ⚠ Real sats: reclaim the arbiter's OWN bond to their own key. Re-derive the
+      // private key from the seed (never stored). The reclaim tx carries nLockTime =
+      // lockUntil, so CONSENSUS is the authority on whether the term has passed — we
+      // attempt the broadcast and translate a genuine too-early rejection into a calm
+      // message (instead of pre-guessing from a load-balanced, jittery tip height).
+      const words = await getOrCreateSeed(client, signer);
+      // Re-derive at THIS bond's persisted index (default 0 for legacy single-key bonds).
+      const { priv, xonly } = deriveBondSigningKey(words.join(" "), { network: BOND_NETWORK, index: rec.keyIndex ?? 0 });
+      // Sanity: the re-derived key MUST reproduce the bond's stored key (right seed +
+      // index) — otherwise the sig wouldn't satisfy the leaf. Fail loud, never broadcast.
+      if (xonly.length !== rec.bond.ownerXonly.length || !xonly.every((b, i) => b === rec.bond.ownerXonly[i])) {
+        throw new Error("Bond key mismatch — cannot reclaim (unexpected seed or key index).");
+      }
+      const reclaimAddress = btcSigner.p2tr(xonly, undefined, BOND_NETWORK).address as string;
+      // Dynamic reclaim fee: query the live mempool rate (non-urgent ~1h tier),
+      // floored at the flat default so an unreachable Esplora still relays + confirms.
+      const feeRate = await esploraRecommendedFeeRate(fetchJson, { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
+      const feeSats = estimateReclaimFeeSats(rec.bond, utxos.length, feeRate);
+      const rawTx = buildReclaimTx({ bond: rec.bond, utxos, ownerPriv: priv, destination: reclaimAddress, feeSats });
+      let txid: string;
+      try {
+        txid = await esploraBroadcast(base, rawTx);
+      } catch (e: any) {
+        const msg = e?.message ?? "";
+        if (/non-final|locktime|checklocktime|not.*final/i.test(msg)) {
+          throw new Error(`Almost — the chain hasn't quite reached your unlock block (${rec.bond.lockUntil}) yet. Give it a minute and try again; your bond is safe.`);
+        }
+        if (/missingorspent|already.*(mempool|chain|known)|txn-already/i.test(msg)) {
+          // Inputs already swept — only the owner's key can do that. Recover the txid.
+          const out = await esploraOutspend(fetchJson, utxos[0].txid, utxos[0].index).catch(() => null);
+          if (out?.spent && out.txid) {
+            upsertCommitmentBond({ ...rec, phase: "reclaimed", utxos, reclaimTxid: out.txid });
+            return { txid: out.txid, alreadyReclaimed: true };
+          }
+        }
+        throw e;
+      }
+      upsertCommitmentBond({ ...rec, phase: "reclaimed", utxos, reclaimTxid: txid });
+      return { txid };
+    },
+    getBondChainTip: async () => esploraTipHeight(esploraFetcher(defaultEsploraBase(BOND_NETWORK))),
+    publishBondAnnouncement: async (bondId: string, community: string) => {
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Not connected");
+      const rec = getCommitmentBond(bondId);
+      if (!rec) throw new Error("Unknown bond — post it first.");
+      if (rec.phase !== "locked") throw new Error("Announce a bond only once it's funded and locked.");
+      const npub = await signer.getPublicKey();
+      const unsigned = buildBondAnnouncementEvent({
+        pubkey: npub, community,
+        ownerXonly: rec.bond.ownerXonly, lockUntil: rec.bond.lockUntil,
+        amountSats: rec.amountSats, network: BOND_NETWORK, address: rec.bond.address,
+      });
+      const signed = await signer.signEvent(unsigned as any);
+      await client.publishRaw(signed);
+      return { community, address: rec.bond.address };
+    },
+    fetchCommunityBonds: async (community: string) => {
+      const client = clientRef.current;
+      if (!client) throw new Error("Not connected");
+      const events = await client.queryOnce(
+        { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], "#d": [community] } as any, 6_000,
+      );
+      const latest = selectLatestAnnouncements(events as any);
+      const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
+      const tip = await esploraTipHeight(fetchJson).catch(() => undefined);
+      // ⭐ Each announcement is chain-verified (recompute address + read on-chain);
+      // an unfunded or unreproducible claim is dropped, never counted.
+      const verified: VerifiedBond[] = [];
+      for (const a of latest) {
+        const v = await verifyBondAnnouncement(a, { network: BOND_NETWORK, fetchJson, tipHeight: tip });
+        if (v) verified.push(v);
+      }
+      return verified;
+    },
+    fetchBondedArbiterCounts: async (): Promise<Record<string, number>> => {
+      const client = clientRef.current;
+      if (!client) throw new Error("Not connected");
+      // ONE batched read across every community (no #d filter). Announcements
+      // are parameterized-replaceable and rare (one per arbiter × community),
+      // so a 500-limit comfortably covers the world for now.
+      const events = await client.queryOnce(
+        { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], limit: 500 } as any, 6_000,
+      );
+      const byCommunity = groupLatestAnnouncementsByCommunity(events as any);
+      if (byCommunity.size === 0) return {};
+      const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
+      const tip = (await esploraTipHeight(fetchJson).catch(() => 0)) ?? 0;
+      const counts: Record<string, number> = {};
+      for (const [community, anns] of byCommunity) {
+        // ⭐ Same recompute-don't-trust as the detail read — every counted bond
+        // is chain-verified. Per-community chain reads bounded: the list count
+        // saturates visually long before 12, and a flood of fake announcements
+        // must not turn the picker into an esplora hammer.
+        const bonds: VerifiedBond[] = [];
+        for (const a of anns.slice(0, 12)) {
+          const v = await verifyBondAnnouncement(
+            a, { network: BOND_NETWORK, fetchJson, tipHeight: tip },
+          ).catch(() => null);
+          if (v) bonds.push(v);
+        }
+        // Empty ratings map: the list needs the FUNDED+ACTIVE distinct-arbiter
+        // count only (computeChamaLiveness owns that predicate + dedup).
+        const n = computeChamaLiveness(community, bonds, new Map(), tip).arbiterCount;
+        if (n > 0) counts[community] = n;
+      }
+      return counts;
+    },
+    getChamaLiveness: async (community: string): Promise<ChamaLiveness> => {
+      const client = clientRef.current;
+      if (!client) throw new Error("Not connected");
+      // 1. Chain-verified bonds for the community + the chain tip they were verified against.
+      const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
+      const tip = (await esploraTipHeight(fetchJson).catch(() => 0)) ?? 0;
+      const annEvents = await client.queryOnce(
+        { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], "#d": [community] } as any, 6_000,
+      );
+      const bonds: VerifiedBond[] = [];
+      for (const a of selectLatestAnnouncements(annEvents as any)) {
+        const v = await verifyBondAnnouncement(a, { network: BOND_NETWORK, fetchJson, tipHeight: tip });
+        if (v) bonds.push(v);
+      }
+      // 2. Trade-verified ratings for exactly the bonded arbiters (one query, then
+      //    the SAME verification fetchRatingSummary uses — a rating on a trade we
+      //    can't see, or one that never settled, never counts).
+      const npubs = [...new Set(bonds.map((b) => b.npub.toLowerCase()))];
+      const ratingsByNpub = new Map<string, LivenessRatingSummary>();
+      if (npubs.length > 0) {
+        const events = await client.queryOnce(
+          { kinds: [RATING_KIND], "#p": npubs, limit: 500 } as any, 6_000,
+        );
+        const missingTradeIds = [...new Set(
+          (events as any[])
+            .map((e) => parseRatingEvent(e as any)?.tradeId ?? null)
+            .filter((id): id is string => !!id && !client.getState(id)),
+        )].slice(0, 25);
+        await Promise.all(missingTradeIds.map(async (id) => {
+          try { await client.loadEscrow(id); } catch { /* unverifiable → won't count */ }
+        }));
+        for (const npub of npubs) {
+          const agg = aggregateVerifiedRatings(events as any, npub, (id) => client.getState(id));
+          if (agg.count > 0) ratingsByNpub.set(npub, agg);
+        }
+      }
+      // 3. Pure composite.
+      return computeChamaLiveness(community, bonds, ratingsByNpub, tip);
     },
     publishCommunityReport: async (input: CommunityRequestInput) => {
       const signer = signerRef.current;

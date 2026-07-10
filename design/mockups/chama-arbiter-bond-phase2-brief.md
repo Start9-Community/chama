@@ -1,6 +1,6 @@
 # CC Brief — Finish the Arbiter Bond (Phase 2): real custody, ceremony, lifecycle, enforcement
 
-**Status:** DESIGN-LOCKED, ready to build. The spine of **4.1.0**.
+**Status:** DESIGN-LOCKED, ready to build. **The next major track after v4.2.1** (originally scoped as 4.1.0's spine; 4.1/4.2 shipped other work first). **§11 folds in the 2026-06-26 design-review refinements — read it alongside §0.**
 **Author:** cowork (advisory), 2026-06-24. Design home: `docs/DESIGN-arbiter-economy.md`
 (§3 keystone, §8 cap, §2 cabinet, §10 lifecycle, §12 paths, §13 loud prompt).
 **Money-path lineage:** `docs/DESIGN-holder-only-shares.md` (the 2-of-3 SSS lock we reuse).
@@ -329,3 +329,280 @@ owner's own share counted among the shares). The lowest-fund-risk path on every 
 | Bond/cabinet UI | (absent) | build: ceremony, post-a-bond, loud heal-prompt |
 | Tests | `escrow-engine/tests.ts` (~346 cases) | extend; add bond/cabinet specs |
 ```
+
+---
+
+## 11. Refinements folded in (2026-06-26 design review — binding precision + the shape of 2B)
+
+A stress-test of the model (Jetty + an outside take + cowork). **Nothing here changes the 2A
+staging or Decision 0** — it sharpens the honest claims and pre-shapes 2B. Ordered most-important
+first.
+
+### 11.1 — "The cabinet cannot steal" is collusion-resistance-by-stake, NOT cryptographic impossibility — say it precisely
+
+Flat 2-of-3 reuse (Decision 0) is the right call, but it has a property the public claim **must**
+respect: **any 2 of the 3 shares reconstruct — including custodianA + custodianB *without* the
+owner.** Those two custodians are the other two cabinet members; if they collude they can combine
+their own decryptable shares **off-protocol** and rebuild the owner's bond. The
+`INVALID_HEAL_OUTCOME` / REFUND-only-to-owner binding (§3) stops the *protocol* from ever
+redirecting a heal — but it **cannot** stop two humans who each hold a readable share from
+combining them by hand. This is the **same** inherent 2-of-3 property the trade escrow already
+lives with (arbiter + one party can always collude); the bond does **not** invent a new vector.
+
+So the honest — and actually *stronger* — claim is:
+
+> **No single cabinet member can touch your bond. Seizing it takes two members colluding, which
+> burns their own staked bonds and their public standing, detectably, forever. The math stops one;
+> mutual stake stops two.**
+
+That is the MAD-by-mutual-stake the take was reaching for ("if I misbehave I burn capital and
+standing in public"). **Never ship the words "cannot steal" unqualified.**
+- **Detectability:** a colluded seizure spends the bond ecash with no authorized return — surface a
+  "bond returned vs. went-dark" status so a seizure reads *as* a seizure (Fedimint exposes the
+  spent nonce, though blind to *whom*).
+- **Hardening path (deferred, documented):** to make the owner's share *cryptographically
+  mandatory* (block custA+custB) you need a **nested** secret — `owner AND (custA OR custB)`, not
+  flat 2-of-3. New crypto; keep the 2-of-3 reuse for 2A, leave nesting as the maturity upgrade if
+  collusion-by-stake ever proves too weak.
+
+### 11.2 — Strand mechanic, corrected (replaces any "burn slightly pays the operator" framing)
+
+A stranded bond is **stranded, not seized, and pays no one — including the operator.** The shares
+never recombine, so the note is never redeemed; blind issuance means the federation can't identify
+or redeem the dark note, and can't pull its backing without peg-ing out more than the abandoned
+amount (which would undercollateralize live holders — a betrayal of *all* ecash, not a capture of
+the strand). The value sits as permanent over-collateralization, claimable by no one. The owner's
+deterrent is intact (their sats leave their control); the bond adds **no operator-capture surface**.
+This is the mechanism behind §3's "stranded sats benefit no one."
+
+### 11.3 — NEW 2B rule: pool-redundancy gate ("thin pool" protection)
+
+Today's cap answers "can the *assigned* arbiter cover this trade?" It never asks "if she ghosts, do
+enough *backups* have capacity to heal it?" — and the whole substitution/heal path is worthless if
+the answer is one. Add to 2B: a high-value trade is assignable only if **≥2 (ideally 3) arbiters in
+the assigned arbiter's substitution chain each have remaining capacity ≥ the trade size.** Below
+that → **pool-thin** → cap the size / warn / block (consent-layer, never a reducer reject). For the
+seed cabinet this just means the trio needs bonded depth before high-value trades open. (Round-robin
+is capacity-*blind*, so it can *manufacture* thinness by piling exposure on one arbiter;
+capacity-aware assignment — seat the most-headroom eligible arbiter — would help, but only if every
+client recomputes the **same** exposure snapshot from the chain or replay diverges. Document it as
+an option, not a 2B requirement.)
+
+### 11.4 — NEW exposure rule: a bond only counts if it OUTLIVES the trade
+
+A bond counts toward capacity for a trade **only if its remaining term exceeds the trade timeout +
+dispute window + return/heal window.** A bond expiring tomorrow must not authorize a 7-day lending
+trade today — it would expire mid-dispute, unbacked. Plugs straight into `trade-durations.ts`
+(Exchange 3h … Lending 7d): the bond's **remaining term** becomes an input to the duration clamp,
+and an arbiter's eligible *max trade duration* shrinks as the bond nears expiry. Surface it ("bond
+expires in 2d — trades ≤ that, minus dispute+return").
+
+### 11.5 — Honest-actor strand from INACTIVITY (not just refusal) — add an escape hatch
+
+§2.2 frames strand as adversarial withholding; the likelier failure is **benign** — a custodian
+loses a key or drifts off, and an *honest* arbiter's bond (1 share < threshold) can never return.
+The loud heal-prompt (2A-6) mitigates malice, not a dead peer. Add a **timelock self-return
+fallback**: after `term + a long grace`, the owner recovers with their share alone (the lock
+degrades to 1-of-1). It weakens "locked" only *far* past term-end, and it's the difference between
+"honest arbiter waits on a peer" and "honest arbiter loses capital to a peer's dead phone." Low risk
+for the trio; **build the hatch before opening individual (non-cabinet) bonding.**
+
+### 11.6 — Exposure-view completeness: the aggregate cap must FAIL SAFE
+
+The §8 aggregate cap (Σ open across *all* chamas < bond) is only as honest as the relay view of
+every open trade — the **same** completeness gremlin that drops chat messages on a fresh device. A
+partition that hides one open locked trade **under-counts** exposure and **over-authorizes**. The 2B
+reader must fail **safe**: when the exposure view is provably incomplete (fewer relays than quorum
+answered, a watched trade didn't resolve), **assume more exposure, never less** — degrade the
+eligible cap, don't inflate it. Over-authorization is real fund risk; under-authorization is only a
+missed trade.
+
+### 11.7 — Two-key split (identity vs. custody): deferred, YAGNI for 2A
+
+Separating a public identity/roster/reputation key from a bond-custody key is sound hygiene
+*eventually* (rotate custody without rewriting social identity), but for three known cabinet members
+it buys a rotation feature you don't need yet and **costs a new primitive** — a signed
+identity→custody attestation, or an attacker substitutes/repudiates a custody key. One key per
+member for 2A; revisit at many-arbiter scale.
+
+### 11.8 — Restorative strand: a stranded bond is RECOVERABLE on remediation (the bond+extra superpower)
+
+The strand is **reversible, and that's the point.** Because "strand" = *withholding* the bound
+return-heal (§11.2: nobody can seize it — it just sits, reconstructable), the cabinet can cast that
+return-heal **at any later time** — including the day a slashed arbiter makes the victim whole
+(returns the defrauded buyer/seller's sats). Restoration isn't a new feature to build; it's the
+strand **being reversible by construction.** The punishment and the path back are the **same lever**,
+held or released — restorative justice with **no DAO, no court, no token**, just the cabinet's
+discretion to re-open the heal once amends are proven.
+
+Why it's strong (and why the cap makes it work): under pure-burn a *caught* arbiter has **no reason
+to remediate** (the bond's gone either way) → the victim may never be repaid. Under restorative
+strand the rational caught actor **remediates to recover the bond** → the victim is made whole. And
+remediation is the *dominant* strategy **precisely because §8 already enforces bond ≥ trade
+exposure** — the bond you recover by making good is ≥ the sats you could keep by defrauding. The cap
+isn't only an exposure bound; it's what makes "make the victim whole" the rational move. Same coin.
+
+Build honestly:
+- **The judge is cabinet discretion, not a cryptographic proof.** "They proved they refunded" =
+  "the cabinet is convinced." Harden the happy path with a **victim attestation** (the defrauded
+  user signs a "made whole" event the cabinet keys on) — but keep cabinet override, because a paid
+  victim can **refuse to sign to extort** ("pay me again or your bond stays dead"). Attestation as
+  the clean path; cabinet judgment as the backstop.
+- **Restore the bond, NOT the standing.** Disgorge + repay — but the delisting + public record stay
+  permanent even after the bond returns, or fraud becomes *free-if-you-remediate*. Two ledgers:
+  capital can come back, reputation does not.
+- **Bounded by federation health.** A long strand still inherits guardian risk (§2.1) — the
+  "restore anytime" window can't outlive BLF's continued backing of that ecash.
+
+### 11.9 — The nested "owner-mandatory" hardening, in detail (deferred — the real tradeoff)
+
+Goal: make the owner's share **cryptographically required**, so the two custodians **alone** can't
+reconstruct — closing the §11.1 collusion path without leaning on stake/MAD. Construction is a
+two-level threshold **tree**, `owner AND (custA OR custB)`, no exotic math:
+
+1. **AND layer (2-of-2):** split the bond secret `S` into `K_owner + K_team` (XOR/additive) — need
+   **both** halves to get `S`.
+2. **OR layer (1-of-2):** make `K_team` recoverable by **either** custodian → give custA and custB
+   **each a copy** of `K_team`.
+3. Reconstruct = `K_owner` (owner only) + `K_team` (either custodian). custA + custB hold `K_team`
+   (and a spare copy) but **never `K_owner`** → locked out. Owner-alone has `K_owner`, no `K_team` →
+   locked out. Exactly "owner + any one custodian."
+
+Why it's deferred, not recommended:
+- **New crypto on the money path.** It's a *different* lock shape than the audited flat-2-of-3
+  `holder-shares.ts` → you forfeit Decision 0's biggest safety win (reuse the hammered construct)
+  and take on fresh audit surface — the opposite of the 2A posture.
+- **It breaks the §11.5 inactivity hatch.** That hatch is "after a long timelock the owner recovers
+  with their *own share alone*" — but owner-mandatory makes owner-alone insufficient by design. You
+  can't have both "custodians-alone can't" and "owner-alone eventually can"; you'd need a separate
+  timelocked reveal of `K_team` to the owner. More machinery on the most dangerous path.
+- **Owner-key-loss becomes strictly fatal** (cabinet holds `K_team`, never `K_owner` → no recovery).
+
+When it earns its keep: a **large or anonymous** cabinet, where "they'd burn their standing" is a
+weak deterrent (many members, many collusion combos, low mutual visibility). For the **tight,
+mutually-bonded trio**, the *economic* collusion-resistance of §11.1 is sufficient and free.
+**Recommendation: flat 2-of-3 + restorative strand (§11.8) + the honest MAD claim now; nest only
+if/when the cabinet outgrows a trusted set.**
+
+**The trigger rule (pin this — it IS the decision): escalate by TRUST, not size.** Stay on
+social-MAD (flat 2-of-3) for any cabinet where you'd vouch for **every** member with your **own**
+sats; switch to **nested owner-mandatory (§11.9)** the instant you'd seat someone you only trust
+*"enough."* The worst case for social-MAD is the **sleeper** — plays straight to bank street-cred,
+then defects once trusted — and that is the *exact* adversary nesting neutralizes (a sleeper still
+needs a co-defector, and can't beat owner-mandatory crypto, so the path closes). **Corollary
+(Kerckhoffs): the design must stay safe even when a cabinet member understands it completely —
+never rely on a member's ignorance.** A smart, skeptical member who has seen every seam and still
+plays straight is the *strongest* seat there is (informed honesty > ignorant honesty) and the best
+free red-team you'll get before real sats lock. If the only thing keeping a cabinet honest is that
+nobody looked too hard, the seam isn't closed — **close it (nest), don't hope for it.**
+
+---
+
+## 12. CC EXECUTION — build order + the autonomous adversarial test rig
+
+The build-and-prove layer (the "CC brief" half). §5 has the seams; this is the *order* and the
+*test rig* — including the all-keys autonomous setup Jetty proposed, which is the only configuration
+that can directly **prove** §11.
+
+### 12.1 — Build order (2A, `BONDS_ENFORCED = false` throughout)
+
+1. **Decision 0** — bond = flat 2-of-3 reuse, roles `[owner, custA, custB]` (locked).
+2. **2A-1** bond lock-class + auto-refund exclusion (`state-machine.ts` v2.9 branch).
+3. **2A-2** the lock (reuse `escrow-bridge.ts` LOCK split; the `kind:38130` declaration references the
+   lock id, so a verifier sees *backed*, not just declared).
+4. **2A-4** term-end return (one custodian heals → owner reconstructs) — build BEFORE strand so the
+   happy path is proven first.
+5. **§11.8 restorative wiring** — the return-heal is castable *any time*, not only at term: add the
+   "restore on remediation" path + a **victim-attestation seam** (a signed "made whole" event) with
+   cabinet override. This is the superpower; wire it into the return path, not as a bolt-on.
+6. **2A-3** ceremony UX (cabinet simultaneous seed lock → chama flips Live; individual post-a-bond).
+7. **2A-5** slash / strand-by-withholding + relock; **2A-6** the loud heal-prompt.
+8. **UI honesty (§11.1)** — never render "cannot steal" unqualified; ship the MAD-by-mutual-stake copy.
+9. **§11.5 inactivity timelock** — build the honest-actor self-return BEFORE opening individual
+   (non-cabinet) bonding.
+
+2B (caps live + §11.3 redundancy gate + §11.4 outlives-the-trade + §11.6 fail-safe counting) lands
+only after 2A is proven on the **real trio**.
+
+### 12.2 — The autonomous adversarial rig (CC-driven) — Stage 1, supercharged
+
+CC creates **3 self-controlled nsecs**, runs 3 instances against a **Jetty-preconfigured fed** (Jetty
+funds tiny sats, pastes to lock), and drives the whole loop + the proof matrix. One hand on all three
+keys is the *only* setup that can demonstrate the game theory directly.
+
+**Proof matrix** (each as a scripted scenario + a deterministic suite test where possible):
+- **P1 — collusion is real.** custA + custB combine their raw shares **off-protocol** → reconstruct an
+  owner's bond *without* the owner. It SUCCEEDS on flat 2-of-3 → the live proof behind §11.1's honest
+  claim. Document it as *expected*, not a bug.
+- **P2 — restorative reversibility.** Strand a bond (withhold), then later cast the return-heal → owner
+  recovers. Proves §11.8: punishment and the path back are the same lever.
+- **P3 — (once §11.9 nesting exists) collusion FAILS.** The identical custA+custB attempt can't
+  reconstruct → proves owner-mandatory.
+- **P4 — outlives-the-trade.** A near-expiry bond can't authorize a long trade (§11.4 clamp).
+- **P5 — inactivity self-return** unlocks only after `term + grace` (§11.5).
+
+**Rail 1 — Stage 1 ≠ Stage 2.** One actor with all keys proves the *plumbing and the math*, NOT the
+**independent-custodian** property the bond exists for. The real-trio dress rehearsal (Jetty +
+Chapsmart + Graysatoshi, independent keys, the real heal-prompt) is a SEPARATE gate and the only one
+that clears 2B. CC-auto must never be logged as "Stage 2 done."
+
+**Rail 2 — bound blast radius (confirm-first holds for a bot).** Tiny throwaway sats (~500–1,000),
+**Jetty funds and owns every "lock real ecash" moment.** CC owns the exhaustive *logic + adversarial
+matrix* in browser-preview and as suite tests (where the rare double-reconstruct / double-pay races
+actually get caught); the **real-native-fed lock** — the reliable path, where sats move — stays the
+supervised, hands-on step. The fund-safety invariants (no double-pay, no double-reconstruct,
+fail-closed journaling) are proven as **tests**, not by live clicking alone.
+
+**Instrument it.** Log every step (platform / share-index / heal-caster / reconstruct-outcome) so a
+failing autonomous run is *diagnosable*, not an opaque red. Spin up the adversarial-read subagent
+(§8) on the heal / strand / restore branch before Jetty's sign-off — highest-stakes diff in the app.
+
+---
+
+## 13. 2A-2 PRE-FLIGHT — decisions settled before the money-path lock
+
+2A-1 (pure engine, `category==='bond'`) landed green + adversarially cleared (2803 tests). **2A-2 is the
+first real ecash** — the SSS bond LOCK in `escrow-bridge.ts`. Start it with the below already decided so
+the money path is not where they get discovered. Do **0** first, then build 2A-2 to satisfy **1–3**,
+behind the review gate.
+
+**0. Clean up the `isPerformanceContest` overload (2A-1 tidy, do first).** At the auto-refund site, skip on
+`isPerformanceContest(state) || isBondEscrow(state)` and restore `isPerformanceContest` to
+performance-contests-only. A shared fund-predicate that silently includes bonds at *every* future call site
+(incl. `votePrompt`/`canVote`) is a leak we don't want. If it stays overloaded: a loud comment + a test
+asserting every current call site's bond-inclusion is intended.
+
+**1. The LOCK seating invariant (M1, made a hard gate).** At LOCK, whatever the CREATE convention:
+**owner → share-0 (BUYER), custodians → share-1/share-2; assert `buyerPubkey === owner`; recipient routes
+off the `owner` field; reject `owner===custA`, `owner===custB`, `custA===custB`.** A misseated owner
+self-strands — the assert makes that impossible.
+   - *CREATE convention (CC picks the least-churn mechanics that satisfy the invariant):* cleanest is a
+     **bond CREATE that seats no trade-slot** — it records `owner` + the two custodian pubkeys as bond
+     fields, and LOCK does all the seating. That sidesteps the "signer → SELLER" trap (M1) with no
+     cross-signing dance. Do **not** implement the brief's literal "an arbiter locks their own ecash" naively
+     — that phrasing *is* the M1 trap.
+   - *Ceremony tie-in (2A-3):* the seed ceremony should read as **each member posting their own bond**, not
+     peers cross-creating. **DECIDED (Jetty, 2026-06-29): Flavor A — self-create.** Bond CREATE seats
+     **no** trade-slot; LOCK seats owner→share-0 + the two custodians. Each member posts their *own*
+     bond; chama flips Live when all three lock. Flavor B (cross-create) rejected — the UX friction
+     isn't worth the small code saving, and security is a wash given §13.2.
+
+**2. ⭐ THE KEYSTONE CHECK — validate the custodians against the cabinet roster.** Above the seating
+mechanics in importance. **The two custodians MUST be verified real cabinet-roster members**
+(`BLF_CABINET_NPUBS`, reusing the existing arbiter-provenance / self-roster machinery). Without it, an owner
+names two **sock-puppet** custodians they control → owner + 1 puppet = 2 shares → the bond is
+**self-returnable** → strand-by-withholding is defeated and the whole bond is theater. **A bond whose
+custodians aren't roster-verified must not lock.** This is the bond's reason to exist — gate it hardest.
+(This is distinct from M1: M1 is the owner misseated → self-*strand*; this is the custodians being fake →
+self-*return*. The second is the more dangerous, and 2A-1's panel didn't cover it — there was no LOCK yet.)
+
+**3. Forward gates that land in 2A-2:** M2 (reject `SUBSCRIBE` / `PERIOD_RELEASE` on a bond); M4 (64-hex
+`owner` validation); confirm the parser treats an unknown `'bond'` category the consensus-safe way *before*
+any bond event reaches the wire.
+
+**4. The 2B gate (do NOT flip `BONDS_ENFORCED` until):** M3 — exclude bonds from `exposure.ts`'s
+arbiter-summation, or a custodian's own bond seat double-counts as their arbiter exposure and corrupts the cap.
+
+**5. Posture:** 2A-2 is the *you-own-every-lock* step — behind the review gate, tiny Jetty-funded sats, CC
+pauses before the first real lock. Prove the **lock → heal → strand → restore** loop with the §12.2
+autonomous rig before 2A-2 is called done.

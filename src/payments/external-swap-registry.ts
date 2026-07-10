@@ -3,7 +3,10 @@
 // ══════════════════════════════════════════════════════════════════════════
 //
 // Chama is non-custodial: we never touch fiat. Users who want to cash out
-// to mobile money do that through external swap providers. The legacy
+// to mobile money do that through external swap providers. NOTE: a provider
+// that runs a real LUD-16 endpoint should be a NATIVE offramp (like Tando /
+// ChapSmart), not a redirect here — see docs/lud16-offramp-provider-requirements.md
+// (esp. the CORS gate). The legacy
 // `chapsmart-payout.ts` tried to integrate one of those providers via API;
 // that path proved unreliable (the partner's endpoint kept breaking the
 // chain), so the model here is uniform: every provider in THIS registry is
@@ -32,7 +35,6 @@ export type ExternalSwapStatus = "enabled" | "coming-soon";
 
 export type ExternalSwapProviderId =
   | "banxaas"
-  | "chapsmart"
   | "bitika"
   | "bitzed";
 
@@ -128,23 +130,11 @@ export const EXTERNAL_SWAP_PROVIDERS: readonly ExternalSwapProvider[] = [
     recommended: true,
   },
 
-  // ── Chapsmart ── Tanzania, offramp redirect (replaces v1.2.3 API)
-  // ──────────────────────────────────────────────────────────────────
-  // Earlier versions of Chama posted directly to a Chapsmart endpoint
-  // to mint a payout invoice; that endpoint was unreliable in
-  // production. v1.2.4 cuts the API and treats Chapsmart as a guided
-  // redirect like Banxaas. Offramp-only — only shows post-CLAIM.
-  {
-    id: "chapsmart",
-    displayName: "Chapsmart",
-    swapUrl: "https://chapsmart.com",
-    communitySlug: "tz-tzs",
-    countryName: "Tanzania",
-    countryCode: "TZ",
-    flagEmoji: "🇹🇿",
-    currency: "TZS",
-    status: "enabled",
-  },
+  // ── Chapsmart ── GRADUATED to a native LUD-16 M-Pesa offramp (Tanzania),
+  // exactly like Tando (Kenya). Now lives in `chapsmart-offramp.ts` +
+  // ClaimPayoutModal's native ChapsmartMpesaPicker (`<phone>@chapsmart.com`),
+  // NOT a redirect — so it is intentionally NOT registered here (a redirect
+  // entry would double-list it against the native card).
 
   // ── Kenya ── Bitika is the redirect offramp here. Tando is Kenya's
   // lead cash-out but it is a LUD-16 NATIVE offramp (one-tap M-Pesa via
@@ -242,9 +232,14 @@ export function getExternalSwapsForContext(input: {
     let reason: ExternalSwapMatchReason | null = null;
     if (tradeSlug && provider.communitySlug === tradeSlug) {
       reason = "trade-community";
-    } else if (homeSlug && provider.communitySlug === homeSlug) {
+    } else if (!tradeSlug && homeSlug && provider.communitySlug === homeSlug) {
+      // Home + currency are FALLBACKS, used only when the trade carries no
+      // community of its own. When it does, the trade's country is authoritative
+      // — a foreign trade must never surface the user's home-country offramp
+      // (e.g. a Kenyan-home user cashing out a Cameroon trade sees only the
+      // Cameroon redirect, not Bitika/Kenya).
       reason = "home-community";
-    } else if (currency && provider.currency.toUpperCase() === currency) {
+    } else if (!tradeSlug && currency && provider.currency.toUpperCase() === currency) {
       reason = "fiat-currency";
     }
     if (!reason) continue;

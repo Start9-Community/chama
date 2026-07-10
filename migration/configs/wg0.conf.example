@@ -1,0 +1,28 @@
+# /etc/wireguard/wg0.conf on the ORIGIN.
+# Start from `start-tunnel device show-config <SUBNET> <ORIGIN_TUNNEL_IP>` on the EDGE,
+# then keep the tunnel warm with PersistentKeepalive.
+
+[Interface]
+PrivateKey = <from show-config>
+Address    = <ORIGIN_TUNNEL_IP>/<mask>          # from show-config
+
+[Peer]
+PublicKey           = <edge pubkey, from show-config>
+PresharedKey        = <from show-config>
+Endpoint            = <EDGE_IP>:51820
+AllowedIPs          = <tunnel subnet, e.g. 10.x.x.0/24>   # start here; see return-path note
+PersistentKeepalive = 25
+
+# Bring up:  wg-quick up wg0 && systemctl enable wg-quick@wg0
+# Verify:    wg show   (look for a recent handshake before testing)
+#
+# ⚠ RETURN-PATH (validate; most likely failure point):
+#   Check the EDGE NAT mode:  iptables -t nat -L -n -v   (or: nft list ruleset)
+#   - Edge MASQUERADES (origin sees edge tunnel IP): AllowedIPs = <tunnel subnet> is enough.
+#       (You lose real visitor IPs in logs — expected; add PROXY protocol later if wanted.)
+#   - Edge is DNAT-ONLY (origin sees real visitor IP): replies won't return through wg0 →
+#       connections hang. Fix with policy routing on the origin (connmark inbound on wg0,
+#       restore mark on replies, `ip rule fwmark ... table <wg>` defaulting via the tunnel),
+#       OR set AllowedIPs = 0.0.0.0/0 (route all origin egress via edge) AND add an `ip rule`
+#       keeping SSH from <MY_IP> on the public NIC so you don't lock yourself out.
+#   Test in STEP 4 before forwarding ports: a curl that HANGS = return-path, not Caddy.

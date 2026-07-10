@@ -41,6 +41,7 @@ export function DestroyEcashConfirmModal({
   balanceMsats,
   onCancel,
   onWithdraw,
+  hasPendingNativeLock,
 }: {
   targetLabel: string;
   balanceMsats: number;
@@ -52,6 +53,10 @@ export function DestroyEcashConfirmModal({
    *  reaches zero. If the user cancels the picker before resolving,
    *  the shell drops the pending switch (explicit abandonment). */
   onWithdraw: () => void;
+  /** #37: the balance belongs to a trade mid-lock-recovery on THIS Chama.
+   *  Draining it over Lightning would abandon that trade, so the recover-
+   *  and-switch CTA hides and Cancel becomes the primary action. */
+  hasPendingNativeLock?: boolean;
 }) {
   const totalSats = Math.floor(Math.max(0, balanceMsats) / 1000);
   const recoverableSats = maxLightningPayoutSats(balanceMsats);
@@ -98,28 +103,46 @@ export function DestroyEcashConfirmModal({
           {" "}Fedimint ecash is bearer cash — once your local Chama is wiped,
           those sats cannot be recovered from this device.
         </div>
+        {/* #37: while a lock attempt is mid-recovery on this Chama, the
+            balance belongs to that trade — a Lightning drain would abandon
+            it. Say so, hide the drain CTA, promote Cancel. */}
+        {hasPendingNativeLock && (
+          <div style={{
+            fontSize: 12, color: T.amber, fontFamily: T.sans, lineHeight: 1.5,
+            marginBottom: 16,
+          }}>
+            These sats belong to a trade you were locking on this Chama.
+            Finish that lock (or let recovery complete) before switching.
+          </div>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {/* Primary: recover, then auto-dispatch the queued switch.
               Bitcoin-orange to match Pillar 5.2 (accent = sats moving
               with intent). */}
-          <button
-            onClick={onWithdraw}
-            style={{
-              width: "100%", padding: "12px 14px", borderRadius: T.rs,
-              background: T.accent, border: "none",
-              color: T.bg, fontFamily: T.mono, fontSize: 13, fontWeight: 800,
-              cursor: "pointer", letterSpacing: 0.3,
-            }}
-          >
-            ⚡ Recover{recoverableSats > 0 ? <> <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /></> : ""} and switch →
-          </button>
-          {/* Secondary: keep current Chama, abandon the switch. */}
+          {!hasPendingNativeLock && (
+            <button
+              onClick={onWithdraw}
+              style={{
+                width: "100%", padding: "12px 14px", borderRadius: T.rs,
+                background: T.accent, border: "none",
+                color: T.bg, fontFamily: T.mono, fontSize: 13, fontWeight: 800,
+                cursor: "pointer", letterSpacing: 0.3,
+              }}
+            >
+              ⚡ Recover{recoverableSats > 0 ? <> <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /></> : ""} and switch →
+            </button>
+          )}
+          {/* Secondary (primary when a pending lock owns the balance):
+              keep current Chama, abandon the switch. */}
           <button
             onClick={onCancel}
             style={{
-              width: "100%", padding: "10px 14px", borderRadius: T.rs,
-              background: T.surface, border: `1px solid ${T.border}`,
-              color: T.text, fontFamily: T.mono, fontSize: 12, fontWeight: 700,
+              width: "100%", padding: hasPendingNativeLock ? "12px 14px" : "10px 14px", borderRadius: T.rs,
+              background: hasPendingNativeLock ? T.accent : T.surface,
+              border: hasPendingNativeLock ? "none" : `1px solid ${T.border}`,
+              color: hasPendingNativeLock ? T.bg : T.text,
+              fontFamily: T.mono, fontSize: hasPendingNativeLock ? 13 : 12,
+              fontWeight: hasPendingNativeLock ? 800 : 700,
               cursor: "pointer",
             }}
           >

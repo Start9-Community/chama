@@ -35,6 +35,7 @@ import { useFiatRates } from "../hooks/useFiatRates.js";
 import { decideTradeDetailFraming, decideVotePrompt } from "../decisions.js";
 import {
   pickArbiterFromPool,
+  pickPreferredArbiter,
   classifyArbiterProvenance,
   classifyArbiterAssignment,
   classifySelfRoster,
@@ -44,6 +45,8 @@ import {
   type ArbiterProvenance,
 } from "../../arbiters/pool.js";
 import { isPerformanceContest } from "../../escrow-engine/arbiter-substitution.js";
+import { bondedArbitersForCommunity } from "../../arbiters/live-chama.js";
+import type { VerifiedBond } from "../../bond-multisig/bond-announcement.js";
 import { counterpartyToRate, type RatingThumb, type AggregateRatings } from "../../reputation/ratings.js";
 import { RatingTap } from "../components/RatingTap.js";
 import { markChatRead, getLastReadChatAt, countUnreadChat } from "../../chat/unread.js";
@@ -53,6 +56,7 @@ import {
   markStateBExplained,
 } from "./state-b-explainer.js";
 import { Badge } from "../components/Badge.js";
+import { CopyButton } from "../components/CopyButton.js";
 import { Dot } from "../components/Dot.js";
 import { ReputationReadout } from "../components/ReputationReadout.js";
 import { CountdownTimer } from "../components/CountdownTimer.js";
@@ -88,42 +92,13 @@ import {
 const samePubkey = (a?: string | null, b?: string | null): boolean =>
   !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
-/** Copy text to the clipboard, robustly. navigator.clipboard is undefined or a
- *  no-op in some Tauri/Capacitor webviews (same class as window.confirm), so
- *  fall back to a hidden-textarea + execCommand("copy"). Returns whether a copy
- *  path was attempted; callers still show the ID so the user can hand-select if
- *  even the fallback is blocked. */
-function copyTextRobust(text: string): void {
-  try {
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(text).catch(() => execCommandCopy(text));
-      return;
-    }
-  } catch { /* fall through */ }
-  execCommandCopy(text);
-}
-function execCommandCopy(text: string): void {
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.top = "0";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-  } catch { /* user can still hand-select the visible ID */ }
-}
-
 export function TradeDetail({
   state, pubkey, homeCommunity, bootProbeFailed, receiveUnavailable, fundingInProgress,
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
   disableNwc = false, onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc, onConfirmPayout,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
   onPrewarmFunding, onRebroadcast, onForget, onPurchase, stockLeft, isOversoldOrder = false,
-  onRateCounterparty, myGivenRatings, fetchRatingSummary,
+  onRateCounterparty, myGivenRatings, fetchRatingSummary, fetchCommunityBonds,
 }: {
   state: EscrowState; pubkey: string;
   /** User's home community slug — drives State A vs State B subtitle
@@ -172,6 +147,10 @@ export function TradeDetail({
   /** v3.1.1 (#2): fetch a participant's verified rating aggregate on demand —
    *  drives the tap-a-participant reputation readout in the trinity ring. */
   fetchRatingSummary?: (ratee: string) => Promise<AggregateRatings>;
+  /** Bond → arbiter enrollment (S3): fetch this community's chain-verified 38135
+   *  bonds so a seated bonded arbiter is RECOGNIZED (green), not flagged
+   *  "unrecognized". Optional + fail-soft. */
+  fetchCommunityBonds?: (community: string) => Promise<VerifiedBond[]>;
   onJoin: (
     role: Role,
     opts?: { selectedItems?: SelectedMenuItem[]; amountMsats?: number; orderFinalized?: boolean },
@@ -277,7 +256,6 @@ export function TradeDetail({
   // trinity-ring avatar to toggle. null = none shown.
   const [repFor, setRepFor] = useState<string | null>(null);
   const [rebroadcastDone, setRebroadcastDone] = useState(false);
-  const [idCopied, setIdCopied] = useState(false);
   // Inline two-tap forget confirm (no native confirm() — it's a no-op in the
   // Tauri/Capacitor webview, which made the button look frozen).
   const [forgetArmed, setForgetArmed] = useState(false);
@@ -437,19 +415,38 @@ export function TradeDetail({
   const previewArbiterPk = state.status === EscrowStatus.CREATED
     && !participants[Role.ARBITER]
     && state.communityArbiters.length > 0
-    ? (pickArbiterFromPool(state.communityArbiters, state.id, [
+    ? (pickPreferredArbiter(state.communityArbiters, state.bondedArbiters, state.id, [
         participants[Role.BUYER],
         participants[Role.SELLER],
       ]) ?? null)
     : null;
+  // Bond → arbiter enrollment (S3): fetch this community's chain-verified bonded
+  // arbiters so provenance recognizes a seated bonded arbiter (green, not
+  // "unrecognized"). Fetch-once per community, fail-soft (empty ⇒ roster+device
+  // trust only). Keyed on the slug; the fetcher reads the live client internally.
+  const [bondedNpubs, setBondedNpubs] = useState<string[]>([]);
+  useEffect(() => {
+    setBondedNpubs([]);
+    if (!fetchCommunityBonds || !state.community) return;
+    let cancelled = false;
+    fetchCommunityBonds(state.community)
+      .then((bonds) => { if (!cancelled) setBondedNpubs(bondedArbitersForCommunity(bonds)); })
+      .catch(() => { /* fail-soft — roster+device trust carries provenance */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.community]);
+
   // v3.5 pool integrity (C1+C7) — consent-layer assessment, shared by the
   // provenance banner and the performer's vote gate. All client-side: a wrong
   // answer here warns (or under-warns), never strands. Memoized on the state
   // object (every reducer apply produces a fresh one) because the roster read
   // re-verifies a Schnorr signature — too heavy for timer-driven re-renders.
   const { arbiterProv, arbiterAssignment, selfRostered, feeGateUnmet } = useMemo(() => {
-    const sources = getTrustedArbiterPoolSources({ community: state.community });
-    const trusted = [...new Set([...sources.rosterArbiters, ...sources.deviceTrusted])];
+    // Bonded arbiters (S3) are a chain-verified trust source — fold them in so a
+    // seated bonded arbiter reads green, not "unrecognized". bondedNpubs is
+    // fetched below; empty until it arrives (fails soft to roster+device).
+    const sources = getTrustedArbiterPoolSources({ community: state.community, bondedPool: bondedNpubs });
+    const trusted = [...new Set([...sources.rosterArbiters, ...sources.deviceTrusted, ...sources.bondedArbiters])];
     const prov = classifyArbiterProvenance(state.communityArbiters, trusted);
     // Assignment is judged on the LOCK-committed arbiter only. Pre-LOCK there
     // is nothing committed (the preview above is computed honestly by THIS
@@ -463,6 +460,7 @@ export function TradeDetail({
         : null,
       buyerPubkey: state.participants[Role.BUYER],
       sellerPubkey: state.participants[Role.SELLER],
+      bondedArbiters: state.bondedArbiters,
     });
     // Stake-holding identities only — a steward who also arbitrates in their
     // own community is the trust anchor, not a conflict (see classifySelfRoster).
@@ -486,7 +484,7 @@ export function TradeDetail({
         distinctAuthorityVerified: prov.verified && !rostered,
       }),
     };
-  }, [state]);
+  }, [state, bondedNpubs]);
   const votePrompt = decideVotePrompt(state, pubkey, participants);
   const winner = getWinner(state);
   const iAmWinner = samePubkey(winner?.pubkey, pubkey);
@@ -494,13 +492,18 @@ export function TradeDetail({
     state.status === EscrowStatus.CLAIMED &&
     !!claimBlockedReason &&
     /reissue|consumed|settle/i.test(claimBlockedReason);
-  // R3-1b: a CLAIMED trade with a payout-journal record means the payout was
-  // already sent (submitted/settled) — the trade just hasn't flipped to
+  // R3-1b: a CLAIMED trade with a SENT payout record (submitted/settled)
+  // means the payout already went out — the trade just hasn't flipped to
   // COMPLETED yet (the background re-attach is confirming it). Show a
   // "confirming" terminal instead of an active RETRY-CLAIM invite, and never
   // sit on a permanent "Claim already sent — retrying" line.
+  // V7: an `intent` record is NOT evidence a payment exists (pre-send
+  // breadcrumb) — RETRY CLAIM stays live; the retry's own top guard
+  // reconciles by escrow before any re-pay.
+  const payoutRecordStatus = getPayoutRecord(state.id)?.status;
   const payoutConfirming =
-    state.status === EscrowStatus.CLAIMED && !claimRetryBlocked && !!getPayoutRecord(state.id);
+    state.status === EscrowStatus.CLAIMED && !claimRetryBlocked
+    && (payoutRecordStatus === "submitted" || payoutRecordStatus === "settled");
   const statusKey = claimRetryBlocked ? "CLAIM_FAILED" : state.status;
   const s = STATUS[statusKey] || STATUS.CREATED;
 
@@ -1705,31 +1708,60 @@ export function TradeDetail({
             const amtLabel = `${fmtSats(state.amountMsats)} sats`;
             const releaseRecipientName = (releaseWinner === "seller" ? dealSellerName : dealBuyerName)
               ?? (releaseWinner === "seller" ? "the seller" : "the buyer");
-            const refundRecipientName = (refundWinner === "seller" ? dealSellerName : dealBuyerName)
-              ?? (refundWinner === "seller" ? "the seller" : "the buyer");
+            // When the refund lands back on the VIEWER (e.g. the seller casting
+            // the second vote on their own refund), name them "you" — "refund to
+            // the seller" reads oddly when you ARE the seller.
+            const refundToSelf = !isArbiter
+              && voteRole === (refundWinner === "seller" ? Role.SELLER : Role.BUYER);
+            const refundRecipientName = refundToSelf
+              ? "you"
+              : ((refundWinner === "seller" ? dealSellerName : dealBuyerName)
+                ?? (refundWinner === "seller" ? "the seller" : "the buyer"));
             // Armed (second-tap) confirm copy names who gets paid + the amount.
             // The performer's risky release keeps its louder acknowledge wording.
-            const releaseConfirm = performRisk
-              ? `${performRisk.ack} — tap again to confirm`
-              : performerVerb
-                ? `Tap again — confirm & release ${amtLabel}`
-                : `Tap again — pay ${releaseRecipientName} ${amtLabel}`;
+            // Exchange/CBP: the FIAT payer's release IS "I sent the fiat" — their
+            // confirm must name the FIAT they're attesting to (not the sats), so the
+            // double-tap reads "you're sure you sent X?" rather than the seller's
+            // release-the-sats wording. Falls back to the sats copy when no fiat.
+            const fiatPayerSending = voteRole === fiatPayerRole && !!checkoutFiatLabel;
+            const releaseConfirm = fiatPayerSending
+              ? `Tap again — confirm you sent ${checkoutFiatLabel}`
+              : performRisk
+                ? `${performRisk.ack} — tap again to confirm`
+                : performerVerb
+                  ? `Tap again — confirm & release ${amtLabel}`
+                  : `Tap again — pay ${releaseRecipientName} ${amtLabel}`;
             const refundConfirm = `Tap again — refund ${amtLabel} to ${refundRecipientName}`;
             // Focused armed-state action line (the eyebrow says "tap again"; this
             // says only WHERE the sats go) — kept short so it centers cleanly
             // instead of wrapping an orphan word. The full sentence still rides
             // the aria-label (releaseConfirm/refundConfirm) for screen readers.
-            const releaseArmedAction = performRisk
-              ? performRisk.ack
-              : performerVerb
-                ? `Release ${amtLabel}`
-                : `Pay ${releaseRecipientName} ${amtLabel}`;
+            const releaseArmedAction = fiatPayerSending
+              ? `Confirm you sent ${checkoutFiatLabel}`
+              : performRisk
+                ? performRisk.ack
+                : performerVerb
+                  ? `Release ${amtLabel}`
+                  : `Pay ${releaseRecipientName} ${amtLabel}`;
             const refundArmedAction = `Refund ${amtLabel} to ${refundRecipientName}`;
             // Refund reason chips for the double-gate (parties only — the arbiter
             // rules, it isn't asked "why"). Picking one sends it as the user's own
             // chat message AND casts the refund. Display-only: the reason rides the
             // existing kind:38108 chat, no reducer/wire change.
-            const reasonList = (!isArbiter && showRefund) ? refundReasons(state.category, state.fulfillment, voteRole) : [];
+            //
+            // The reason belongs to whoever INITIATES the refund — the party who
+            // was meant to act and backed out. When your counterparty has ALREADY
+            // voted refund, you're just confirming a mutual refund to get your OWN
+            // sats back: no "why?" (it's redundant, and asks the wrong person) —
+            // you still get the plain double-tap confirm ("refund X to you"), so
+            // an empty reasonList closes the picker (refundPickerOpen below). A
+            // genuine dispute (they voted the OTHER way — release) KEEPS the picker,
+            // because your reason is then a contested claim the arbiter needs.
+            // Vertical-independent: cleans up Exchange/Marketplace the same way.
+            const otherPrincipalRole = voteRole === Role.BUYER ? Role.SELLER : Role.BUYER;
+            const counterpartyAlreadyRefunded = state.votes[otherPrincipalRole] === Outcome.REFUND;
+            const reasonList = (!isArbiter && showRefund && !counterpartyAlreadyRefunded)
+              ? refundReasons(state.category, state.fulfillment, voteRole) : [];
             const reasonChips = (onChoose: (reason: string) => void) => (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {reasonList.map(reason => (
@@ -3654,21 +3686,16 @@ export function TradeDetail({
                   <code style={{ flex: 1, color: T.text, fontSize: 10, fontFamily: T.mono, wordBreak: "break-all", background: T.border, padding: "6px 8px", borderRadius: 6, userSelect: "all", WebkitUserSelect: "all" }}>
                     {state.id}
                   </code>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      copyTextRobust(state.id);
-                      setIdCopied(true);
-                      setTimeout(() => setIdCopied(false), 1500);
-                    }}
+                  <CopyButton
+                    value={state.id}
+                    label="COPY"
+                    copiedLabel="COPIED ✓"
                     style={{
                       background: T.accent, border: "none", borderRadius: 6, color: "#fff",
                       cursor: "pointer", fontFamily: T.mono, fontSize: 10, fontWeight: 700,
                       padding: "7px 10px", whiteSpace: "nowrap",
                     }}
-                  >
-                    {idCopied ? "COPIED ✓" : "COPY"}
-                  </button>
+                  />
                 </div>
               </div>
             )}

@@ -46,27 +46,37 @@ export function SimModePill() {
   if (!on) return null;
 
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      style={{
-        position: "fixed",
-        top: 0, left: 0, right: 0,
-        zIndex: 10_000,
-        background: T.red,
-        color: "#fff",
-        fontFamily: T.mono,
-        fontSize: 11,
-        fontWeight: 700,
-        letterSpacing: 1.5,
-        textAlign: "center",
-        padding: "6px 12px",
-        boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-        pointerEvents: "none",
-      }}
-    >
-      ▲ SIM MODE — no real sats, no real federation
-    </div>
+    <>
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          position: "fixed",
+          top: 0, left: 0, right: 0,
+          zIndex: 10_000,
+          background: T.red,
+          color: "#fff",
+          fontFamily: T.mono,
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: 1.5,
+          textAlign: "center",
+          padding: "6px 12px",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+          pointerEvents: "none",
+        }}
+      >
+        ▲ SIM MODE — no real sats, no real federation
+      </div>
+      {/* In-flow spacer that reserves the fixed pill's height so the app header
+          isn't clipped underneath it. Deliberately a plain-height element rather
+          than an inline paddingTop on the shell: the shell's `paddingTop` (an
+          env() calc) was being dropped by React's style reconciliation on the
+          frequently re-rendering main shell (verified in-browser — the header
+          rendered at top:0 under the banner). A spacer applies reliably. Height
+          matches the pill. */}
+      <div aria-hidden="true" style={{ height: SIM_PILL_HEIGHT, flexShrink: 0 }} />
+    </>
   );
 }
 

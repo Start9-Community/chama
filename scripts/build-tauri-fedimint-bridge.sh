@@ -31,3 +31,17 @@ fi
 
 install -m 0755 "$SRC" "$DEST"
 echo "Tauri sidecar ready: $DEST"
+
+# DEV CONVENIENCE: `tauri dev` spawns the sidecar from target/debug/ (Tauri
+# copies the externalBin there only when it REBUILDS the app), while
+# dev-instance.sh overrides beforeDevCommand and skips the sidecar step. So a
+# bridge source edit + `npm run tauri:sidecar` used to leave the dev instances
+# on the STALE debug copy (rebuild, relaunch, and /health still reported the
+# old api_version — a confusing dead end). Refresh the dev spawn path too when
+# it exists, so this script is the single "get my bridge changes live" command
+# for BOTH dev and packaged. Cmd+Q + relaunch the instances to pick it up.
+DEV_DEST="$ROOT_DIR/src-tauri/target/debug/chama-fedimint-bridge$EXT"
+if [[ -f "$DEV_DEST" ]]; then
+  install -m 0755 "$SRC" "$DEV_DEST"
+  echo "Dev sidecar refreshed: $DEV_DEST (Cmd+Q + relaunch dev instances to pick up)"
+fi

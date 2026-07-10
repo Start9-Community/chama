@@ -259,6 +259,13 @@ export interface CreatePayload {
   expirySeconds: number;
   /** Community arbiter pool — all pubkeys that receive the arbiter SSS share */
   communityArbiters?: string[];
+  /** 2B prefer-bonded: the FUNDED bonded subset (⊆ communityArbiters), resolved by
+   *  the creator at publish time (the reducer is pure and can't fetch bonds).
+   *  Stamped into CREATE so every client replays the SAME prefer-bonded seat; the
+   *  JOIN gate accepts BOTH this and the legacy pick, so a mixed-version client
+   *  never rejects a valid arbiter. Absent on all historical CREATEs ⇒ legacy
+   *  pick only (byte-identical to pre-2B). */
+  bondedArbiters?: string[];
   // v0.1.72 federation gates — payload fields ───────────────────────────
   /** Federation prefix (first 10 chars of an OOB ecash probe). Locker
    *  captures via FedimintClient.probeFederation() at create time.
@@ -765,6 +772,9 @@ export interface EscrowState {
 
   /** Community arbiter pool — backup arbiters who also receive the SSS share */
   communityArbiters: string[];
+  /** 2B prefer-bonded: funded bonded subset stamped at CREATE (⊆ communityArbiters).
+   *  Read with `?? []`; absent on pre-2B trades. Drives pickPreferredArbiter. */
+  bondedArbiters?: string[];
 
   /** Subscription metadata (null for non-subscription escrows) */
   subscription: SubscriptionMeta | null;

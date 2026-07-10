@@ -476,23 +476,16 @@ export function communityForInvite(invite: string | null | undefined): Community
  *  ChamaBar exposes the backing federation name for users who want detail. */
 export const DEFAULT_COMMUNITY_SLUG = "us-blf";
 
-/** Pre-seeded entries that should appear in the picker (excludes
- *  hiddenFromPicker entries). Custom communities get appended on top
- *  by callers via getCustomCommunities(). */
-export function getPickerCommunities(): Community[] {
-  return COMMUNITY_REGISTRY.filter(c => !c.hiddenFromPicker);
-}
-
-/** All picker communities whose primary (`country`) or spanned
- *  (`countries`) ISO 3166-1 alpha-2 code matches `code`. Returns 0, 1, or
- *  many — e.g. Kenya → [Afribit, Bitsacco], US → [BLF, GBF]. The full-world
- *  globe/country picker uses this to resolve a tapped country to its
+/** Registry communities (excluding hiddenFromPicker) whose primary (`country`)
+ *  or spanned (`countries`) ISO 3166-1 alpha-2 code matches `code`. Returns 0,
+ *  1, or many — e.g. Kenya → [Afribit, Bitsacco], US → [BLF, GBF]. The
+ *  full-world country picker uses this to resolve a tapped country to its
  *  Chama(s); 0 results means "no Chama here yet" (soft-landing / request),
  *  >1 means a disambiguation step keyed on `disambiguator`. */
 export function getCommunitiesByCountry(code: string): Community[] {
   const cc = code.toUpperCase();
-  return getPickerCommunities().filter(
-    c => c.country === cc || c.countries.includes(cc),
+  return COMMUNITY_REGISTRY.filter(
+    c => !c.hiddenFromPicker && (c.country === cc || c.countries.includes(cc)),
   );
 }
 

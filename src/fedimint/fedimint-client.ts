@@ -33,6 +33,16 @@ import type { ChamaOperationMeta } from "../payments/sats-trace.js";
 import { expectedFederationIdForInvite } from "./federation-config.js";
 import { withMintLock } from "./mint-mutex.js";
 
+/** V7 reconcile-by-escrow verdict. `none` is a POSITIVE "no matching payment
+ *  exists" (the scan reached ops older than `sinceMs`); `unknown` means the
+ *  scan failed / was unavailable / couldn't prove completeness — callers
+ *  must refuse to re-pay on it. `operationId` rides along on
+ *  settled/refunded/inflight so the caller can adopt it for re-attach. */
+export type PayOutcomeByEscrowResult = {
+  outcome: "settled" | "refunded" | "inflight" | "none" | "unknown";
+  operationId?: string;
+};
+
 export interface OnchainInfo {
   network: string;
   finalityDelay: number;
@@ -94,6 +104,17 @@ export interface IFedimintWallet {
   mint: {
     /** Spend notes from wallet — returns OOB ecash string */
     spendNotes(amountMsats: number, meta?: ChamaOperationMeta): Promise<string>;
+    /** #37 lock crash-safety: spend with an explicit try_cancel_after
+     *  horizon and surface the spend operation id. Lock spends must
+     *  outlive any trade + dispute (the client-side auto-cancel would
+     *  otherwise hollow out a long-running escrow); default spends keep
+     *  the SDK's short horizons. Optional — wallets that omit it fall
+     *  back to `spendNotes` (default horizon, no operation id). */
+    spendNotesDetailed?(
+      amountMsats: number,
+      opts: { tryCancelAfterSecs?: number },
+      meta?: ChamaOperationMeta,
+    ): Promise<{ notes: string; operationId?: string }>;
     /** Redeem OOB ecash notes into wallet */
     redeemEcash(oobNotes: string, meta?: ChamaOperationMeta): Promise<string | void>;
     /** Parse OOB notes to inspect amount without redeeming */
@@ -119,6 +140,11 @@ export interface IFedimintWallet {
      *  and report its terminal outcome without paying again. Optional —
      *  mock/native wallets may omit it. */
     awaitPayOutcome?(operationId: string): Promise<"settled" | "refunded" | "unknown">;
+    /** V7 reconcile-by-escrow: resolve the outgoing payment(s) stamped with
+     *  this escrow's `chama_escrow_id` in the fedimint operation log —
+     *  durable in the client DB, so it survives restarts that lost the
+     *  operationId. Optional — mock wallets may omit it (⇒ "unknown"). */
+    payOutcomeByEscrow?(escrowId: string, sinceMs?: number): Promise<PayOutcomeByEscrowResult>;
   };
 
   /** Optional native wallet-module on-chain peg-in/peg-out support.
@@ -162,6 +188,20 @@ export interface EscrowLockBundle {
   sellerReceivesMsats: number;
   arbiterFeeMsats: number;
 }
+
+/**
+ * #37: try_cancel_after horizon for LOCK spends, in seconds (90 days).
+ *
+ * fedimint OOB spends carry a CLIENT-SIDE auto-cancel: after this window
+ * the spender's own client refunds the notes to itself. The SDK defaults
+ * (browser 1 day, native bridge 7 days) are SHORTER than a disputed
+ * trade's life — past them a healthy-looking LOCKED escrow silently
+ * hollows out and the winner's claim fails as already-spent. Lock spends
+ * therefore pass this explicit long horizon; crash recovery no longer
+ * leans on the auto-cancel (the pending-native-locks stash re-absorbs
+ * within minutes of the next boot instead).
+ */
+export const LOCK_SPEND_TRY_CANCEL_SECS = 90 * 24 * 60 * 60;
 
 
 // [$$] money instrumentation v0.1.71b
@@ -961,6 +1001,18 @@ export class FedimintClient {
     return wallet.lightning.awaitPayOutcome(operationId);
   }
 
+  /** V7 reconcile-by-escrow: scan the operation log for outgoing payments
+   *  stamped with this escrow id. "unknown" when the wallet adapter can't
+   *  scan — callers refuse to re-pay and retry the reconcile later. */
+  async payOutcomeByEscrow(
+    escrowId: string,
+    sinceMs?: number,
+  ): Promise<PayOutcomeByEscrowResult> {
+    const wallet = this.requireWallet();
+    if (!wallet.lightning.payOutcomeByEscrow) return { outcome: "unknown" };
+    return wallet.lightning.payOutcomeByEscrow(escrowId, sinceMs);
+  }
+
   async getOnchainInfo(): Promise<OnchainInfo> {
     return this.requireOnchainWallet().getInfo();
   }
@@ -1040,57 +1092,120 @@ export class FedimintClient {
     if (sellerReceivesMsats <= 0) {
       throw new Error("Arbiter fee exceeds total amount — seller would receive nothing");
     }
+    void wallet; // presence check above; the composed calls re-require it
 
+    // #37: composed from the two crash-safety-aware halves so every lock
+    // spend gets the long try_cancel horizon. The BRIDGE calls the halves
+    // directly (it stashes the notes between them); this composition stays
+    // for tests/back-compat callers.
+    const { oobNotes } = await this.spendNotesForLock(totalMsats, meta);
+    return this.buildEscrowLockBundle(oobNotes, totalMsats, fees);
+  }
+
+  /**
+   * #37 lock crash-safety, half 1: spend the lock amount and SURFACE the
+   * raw OOB notes (+ operation id when the wallet provides one) so the
+   * caller can persist them BEFORE the LOCK publish. Uses the 90-day
+   * try_cancel horizon (LOCK_SPEND_TRY_CANCEL_SECS) — the SDK defaults are
+   * shorter than a disputed trade's life and would hollow out the escrow.
+   */
+  async spendNotesForLock(
+    totalMsats: number,
+    meta?: ChamaOperationMeta,
+    /** #37: invoked SYNCHRONOUSLY the moment the wallet's spend resolves —
+     *  before any diagnostics await — so the caller can persist the bearer
+     *  notes with a zero-await gap. A reload during the money-debug reads
+     *  below must find the notes already stashed. */
+    onSpent?: (oobNotes: string, operationId?: string) => void,
+  ): Promise<{ oobNotes: string; operationId?: string }> {
+    const wallet = this.requireWallet();
     // INVARIANT(mint-mutex): the Fund spend serializes on the cross-tab
     // mint lock (C12) — a boot-drain redeem or a second tab's spend
     // cannot overlap this spendNotes on the shared OPFS wallet. The
     // locked section calls the raw wallet only (no nesting).
-    return withMintLock("fund-spend", () =>
-      this.createEscrowLockLocked(wallet, totalMsats, arbiterFeeMsats, sellerReceivesMsats, meta)
-    );
+    return withMintLock("fund-spend", async () => {
+      // [$$] LOCK-IN — entering the spend. Diagnostics reads are gated on
+      // mlogEnabled(): they are extra awaits in the window where the notes
+      // exist only in memory, so they must not run for every user (F12).
+      const debugMoney = mlogEnabled();
+      let _lockBalBefore: number | undefined;
+      if (debugMoney) {
+        try { _lockBalBefore = await wallet.balance.getBalance(); } catch {}
+        mlog("LOCK-IN", {
+          fed: this._federationId,
+          totalMsats,
+          balanceBefore: _lockBalBefore,
+        });
+      }
+
+      // Step 1: Spend the full amount as ecash notes. Prefer the detailed
+      // spend (explicit long horizon + operation id); wallets that omit it
+      // fall back to the plain spend (SDK-default horizon, no id).
+      let oobNotes: string;
+      let operationId: string | undefined;
+      if (wallet.mint.spendNotesDetailed) {
+        const detailed = await wallet.mint.spendNotesDetailed(
+          totalMsats,
+          { tryCancelAfterSecs: LOCK_SPEND_TRY_CANCEL_SECS },
+          meta,
+        );
+        oobNotes = detailed.notes;
+        operationId = detailed.operationId;
+      } else {
+        oobNotes = await wallet.mint.spendNotes(totalMsats, meta);
+      }
+
+      // Crash guard FIRST — synchronous, before any further await.
+      onSpent?.(oobNotes, operationId);
+
+      if (debugMoney) {
+        // [$$] LOCK-SPEND — what spendNotes actually returned
+        let _spentParsed: number | undefined;
+        try {
+          const _p = await wallet.mint.parseNotes(oobNotes);
+          _spentParsed = _p.total_amount;
+        } catch {}
+        let _lockBalAfter: number | undefined;
+        try { _lockBalAfter = await wallet.balance.getBalance(); } catch {}
+        mlog("LOCK-SPEND", {
+          fed: this._federationId,
+          requestedMsats: totalMsats,
+          oobNotesLen: oobNotes.length,
+          operationId,
+          parsedTotalMsats: _spentParsed,
+          delta: _spentParsed !== undefined ? _spentParsed - totalMsats : undefined,
+          balanceAfter: _lockBalAfter,
+          balanceDelta: (_lockBalBefore !== undefined && _lockBalAfter !== undefined)
+            ? _lockBalAfter - _lockBalBefore
+            : undefined,
+        });
+      }
+
+      return { oobNotes, operationId };
+    });
   }
 
-  /** Body of createEscrowLock, run while holding the mint lock. */
-  private async createEscrowLockLocked(
-    wallet: IFedimintWallet,
+  /**
+   * #37 lock crash-safety, half 2: hash + SSS-split already-spent notes
+   * into the lock bundle. Pure w.r.t. the wallet (no spend, no mint lock).
+   * Unlike `createEscrowLockFromNotes` (the Fedi path) this does NOT
+   * require the parsed note total to equal `totalMsats` exactly — the
+   * browser SDK's spend can legitimately overpay by denomination, and the
+   * bundle's fee fields intentionally carry the REQUESTED amounts, byte-
+   * matching the pre-#37 behavior.
+   */
+  async buildEscrowLockBundle(
+    oobNotes: string,
     totalMsats: number,
-    arbiterFeeMsats: number,
-    sellerReceivesMsats: number,
-    meta?: ChamaOperationMeta,
+    fees: {
+      arbiterFeeMsats: number;
+    },
   ): Promise<EscrowLockBundle> {
-    // [$$] LOCK-IN — entering the spend
-    let _lockBalBefore: number | undefined;
-    try { _lockBalBefore = await wallet.balance.getBalance(); } catch {}
-    mlog("LOCK-IN", {
-      fed: this._federationId,
-      totalMsats,
-      arbiterFeeMsats,
-      sellerReceivesMsats,
-      balanceBefore: _lockBalBefore,
-    });
-
-    // Step 1: Spend the full amount as ecash notes
-    const oobNotes = await wallet.mint.spendNotes(totalMsats, meta);
-
-    // [$$] LOCK-SPEND — what spendNotes actually returned
-    let _spentParsed: number | undefined;
-    try {
-      const _p = await wallet.mint.parseNotes(oobNotes);
-      _spentParsed = _p.total_amount;
-    } catch {}
-    let _lockBalAfter: number | undefined;
-    try { _lockBalAfter = await wallet.balance.getBalance(); } catch {}
-    mlog("LOCK-SPEND", {
-      fed: this._federationId,
-      requestedMsats: totalMsats,
-      oobNotesLen: oobNotes.length,
-      parsedTotalMsats: _spentParsed,
-      delta: _spentParsed !== undefined ? _spentParsed - totalMsats : undefined,
-      balanceAfter: _lockBalAfter,
-      balanceDelta: (_lockBalBefore !== undefined && _lockBalAfter !== undefined)
-        ? _lockBalAfter - _lockBalBefore
-        : undefined,
-    });
+    const arbiterFeeMsats = fees.arbiterFeeMsats;
+    const sellerReceivesMsats = totalMsats - arbiterFeeMsats;
+    if (sellerReceivesMsats <= 0) {
+      throw new Error("Arbiter fee exceeds total amount — seller would receive nothing");
+    }
 
     // Step 2: Hash the notes for verification
     const notesHash = await hashNotes(oobNotes);

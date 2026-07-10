@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import { T } from "../theme.js";
+import { CopyButton } from "../components/CopyButton.js";
 import { isTauriRuntime } from "../sign-in-environment.js";
 import { validateRecoveryKeyInput } from "../../escrow-engine/nsec-signer.js";
 
@@ -47,20 +48,7 @@ export function NsecLogin({
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [inputError, setInputError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const autoSubmittedKeyRef = useRef<string | null>(null);
-  const copyResetRef = useRef<number | null>(null);
-
-  // Copy the generated key with a brief "Copied ✓" confirmation — the
-  // reassurance that the most important string in the app actually made it to
-  // the clipboard.
-  const handleCopyKey = () => {
-    if (!generatedNsec) return;
-    navigator.clipboard?.writeText(generatedNsec);
-    setCopied(true);
-    if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
-    copyResetRef.current = window.setTimeout(() => setCopied(false), 1800);
-  };
 
   const handleGenerate = async () => {
     setMode("create");
@@ -333,19 +321,19 @@ export function NsecLogin({
             {generatedNsec}
           </div>
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <button
-              onClick={handleCopyKey}
+            <CopyButton
+              value={generatedNsec ?? ""}
+              disabled={!generatedNsec}
+              label="Copy key"
+              copiedLabel="Copied ✓"
               style={{
                 padding: "9px 14px", flexShrink: 0,
-                background: copied ? T.greenDim : T.surface,
-                border: `1px solid ${copied ? T.green : T.borderHi}`,
-                borderRadius: T.rs, color: copied ? T.green : T.text,
+                background: T.surface, border: `1px solid ${T.borderHi}`,
+                borderRadius: T.rs, color: T.text,
                 fontFamily: T.sans, fontSize: 12, fontWeight: 700,
-                cursor: "pointer", transition: "all 0.15s",
+                cursor: "pointer",
               }}
-            >
-              {copied ? "Copied ✓" : "Copy key"}
-            </button>
+            />
             <label style={{
               display: "flex", alignItems: "center", gap: 8,
               color: T.text, fontSize: 13, fontFamily: T.sans, fontWeight: 600,

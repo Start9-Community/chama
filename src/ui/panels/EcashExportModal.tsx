@@ -16,6 +16,7 @@
 import { useState } from "react";
 import { T } from "../theme.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
+import { CopyButton } from "../components/CopyButton.js";
 import { QRCode } from "../QRCode.js";
 import {
   clearEcashExport,
@@ -66,7 +67,6 @@ export function EcashExportModal({
     preset?.amountMsats ?? stashed?.amountMsats ?? balanceMsats
   );
   const [error, setError] = useState<string>("");
-  const [copied, setCopied] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
 
   const sats = Math.floor(Math.max(0, balanceMsats) / 1000);
@@ -214,24 +214,16 @@ export function EcashExportModal({
             </div>
 
             <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <button
-                onClick={() => {
-                  try {
-                    navigator.clipboard?.writeText(notes);
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 1500);
-                  } catch { /* clipboard unavailable — QR + on-screen string remain */ }
-                }}
+              <CopyButton
+                value={notes}
+                label="Copy ecash"
+                copiedLabel="✓ Copied"
                 style={{
                   flex: 1, padding: "11px 12px", borderRadius: T.rs,
-                  background: copied ? T.greenDim : T.accent,
-                  border: `1px solid ${copied ? T.green + "66" : T.accent}`,
-                  color: copied ? T.green : "#000",
+                  background: T.accent, border: `1px solid ${T.accent}`, color: "#000",
                   fontFamily: T.mono, fontSize: 12, fontWeight: 800, cursor: "pointer",
                 }}
-              >
-                {copied ? "✓ Copied" : "Copy ecash"}
-              </button>
+              />
             </div>
 
             <button

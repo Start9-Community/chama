@@ -2042,3 +2042,320 @@ and Cash App are interchangeable LUD-16 endpoints.
 **Status:** Decided (2026-06-26, uncommitted). Implementation tracked in BACKLOG
 ("US fiat off-ramp via a fiat-converting Lightning Address"). Not gated on 4.1;
 sequence after it.
+
+---
+
+## 2026-06-27 — "Continuous service" feedback: prepaid subscription is built; open-ended Patreon deferred
+
+**Context:** The first trader asked, unprompted, for "something provided
+continuously" — naming three examples in one breath: "on-request beats," monthly
+"beatbox lessons," and a "Nostr Patreon" for ongoing support, saying they'd use
+Chama as such if it existed. This re-validates a feature already designed
+(PHILOSOPHY §2.6 merchant graduation + principle #7) and ~built at the protocol
+layer — and surfaces that the trader conflated three different mechanisms.
+
+**The three-way split (the key disentangling):**
+- **On-request / commissions** ("a beat when I want one," commission artwork) —
+  repeat *one-off* trades, not recurring at all. Reuses the existing Marketplace
+  **service** fulfillment type + storefront-per-npub. Lightest lift, near-zero
+  new protocol.
+- **Fixed-term subscription** ("monthly lessons for a season") — the feature
+  already built: `SUBSCRIBE` / `PERIOD_RELEASE` / `handleSubscribe` in
+  escrow-client + state-machine, the `canOfferSubscription` gate, extension
+  kinds 38109-38110 designed. **Prepaid-and-released:** the buyer escrows the
+  whole term up front (`totalPeriods × periodAmount === amount`, enforced) and
+  each period releases as delivered. Remaining work is UI + the gate reveal; the
+  Ratings-primitive blocker BACKLOG cited is stale (cleared 2026-06-08).
+- **Open-ended Patreon** ("pay forever, cancel anytime") — the only one that
+  fights the architecture.
+
+**Decision:**
+1. **Reaffirm prepaid-and-released as THE recurring model.** It fits "the wallet
+   is dead — sats exist only in escrow" (#6) and the reputation-gated-trust
+   thesis (#7): the subscriber's whole term is escrowed and disputable per
+   period — a *stronger* promise than Patreon, not a lesser one. UX must say
+   "prepay a season, released as delivered / renewable fixed terms," never
+   "pay-as-you-go forever."
+2. **Surface the built subscription feature** behind `canOfferSubscription` —
+   sequence it now that a real graduated-track seller is asking. UI only.
+3. **Ship commissions cheaply** via the service type + storefront-per-npub.
+4. **Defer open-ended recurring.** True pull-recurring would need NWC budgets
+   (subscriber authorizes "up to X/month to this npub"; already flagged in
+   BACKLOG's NWC follow-up), which reintroduces a *standing authorization* — an
+   idle-balance-adjacent capability that rubs against #6. Not built until that
+   ethos tension is resolved on purpose; this entry is the placeholder.
+
+**Implications:** No code this session — capture only (BACKLOG items updated:
+recurring-unlock blocker marked cleared + field-validated; new on-request /
+commission item). The first-trader ask is itself the signal the graduation gate
+was designed to answer — earned authority showing up in the wild on day one.
+
+**Status:** Decided (2026-06-27, capture-only). Build sequencing tracked in
+BACKLOG; open-ended/NWC recurring parked pending an explicit ethos decision.
+
+---
+
+## 2026-07-01 — Stage-2 bond-custody wire: two new kinds, encrypt the descriptor, ceremony on the Me tab
+
+Stage 2 of the multisig bond wiring adds the off-chain coordination layer — a
+`BondCustody` store + NIP-44 descriptor/PSBT transport + the bonding ceremony.
+Three wire/UX questions were genuinely open (surfaced by CC, decided by Jetty on
+the verifier chat's recommendation). **Load-bearing invariant across all three:**
+Stage-2 security rests on the keystone re-fetching the kind-38132 attestations
+LIVE and rebuilding — the wire descriptor is NEVER trusted for keys/address.
+
+**Decision:**
+1. **Allocate Nostr kinds 38133 (descriptor) + 38134 (PSBT) — distinct
+   replaceability.** 38133 = parameterized-replaceable, one CURRENT descriptor per
+   bond (`d=bondId`, newest-wins, like 38130/38132). 38134 = the co-sign
+   artifacts, keyed `d=bondId` PER AUTHOR so the owner's proposal + each
+   custodian's partial are three distinct addressable events that never clobber
+   (queryable via `authors:[trio] + #d:[bondId]` — no `#e`-filter widening of the
+   shared relay type; the on-chain tx is the permanent record). *Reasoning:* the
+   3813x band is Chama's governance/bond namespace, 38133/38134 are collision-free,
+   and two kinds cleanly separate the replaceable descriptor from the append
+   co-sign set. Both recorded in the `bonds.ts` kind-allocation ledger.
+2. **Encrypt the descriptor to the trio (NIP-44), not plaintext — and the bondId
+   is OPAQUE, never address-derived.** *Reasoning:* this is a PRIVACY call, not a
+   security one — the keystone never trusts the wire descriptor (it re-fetches
+   38132 live + recomputes), so plaintext-vs-encrypt changes nothing about safety.
+   Encrypting removes a permanent, queryable `npub → BTC-address → amount`
+   deanonymization index off the relays. The `d`/`p` tags stay clear for routing;
+   only the content is NIP-44'd — which FORCES an opaque bondId (`bond_<random>`),
+   because an address-derived id would leak the funding address straight back out
+   in the clear `d`-tag and defeat the encryption. Public proof-of-backing
+   (Phase 2B) is a separate, deliberate, minimal disclosure — not now.
+3. **The "Post Your Bond" ceremony lives on the Me tab (cabinet-only), gated +
+   default-off, built to relocate to the Dashboard.** Behind `useCabinetMembership()`
+   + a `SHOW_BOND_CEREMONY` flag (default false). *Reasoning:* the Dashboard is the
+   bond's designed long-term home (stats / ratings / standing / bond) but is still
+   a placeholder, so Me — where a user manages their own identity/standing — is the
+   natural interim home and a clean stepping-stone. Kept OFF the Browse/Create trade
+   flow (arbiter-only, dormant) and OFF the arbiter application form (posting a bond
+   is standing-management, not applying).
+
+**Implications:** Stage 2 stays fund-safe and behind the funding boundary (the
+ceremony stops at showing the recomputed funding address; funding + LOCK + the live
+co-sign are Stage 3, Jetty's hard stop). `BONDS_ENFORCED` stays false; the
+test-cabinet seam stays DEV-only. The verifier chat independently confirmed the
+built A/B/C core honors decisions 1+2 (opaque bondId, encrypted content,
+`verifyReceivedDescriptor` rebuilds from live-fetched 38132, store recompute-on-load
+tamper gate); CC's own adversarial pass on the store+transport is the second gate.
+
+**Status:** Decided (2026-07-01, Jetty on verifier recommendation). Kinds +
+encryption + opaque-bondId built in Sub-steps A/B/C (predeploy green, typecheck
+clean); ceremony (Sub-steps D/E/F) pending CC's adversarial results.
+
+---
+
+## 2026-07-01 — Verticals: cut Lending, add "Work" + Community Pool Sats (CPS)
+
+Direction capture (not built). Lending was believed to be the global-south flagship; the
+intuition to cut it is right, and the principle underneath also picks the replacements.
+
+**The principle:** Chama's escrow/arbiter/reputation machinery solves *simultaneous-exchange*
+trust ("will the counterparty deliver NOW"), not *future-promise* trust ("will they repay
+LATER"). Every vertical that works is the former (exchange, bill-pay, goods, work). Lending is
+the latter — once the money disburses the machinery has nothing to grip, which is why every
+P2P lending system needs collateral, KYC/legal recourse, or a tight real-world social graph.
+The graph is exactly what makes REAL chamas' lending work; Chama-the-app is pseudonymous +
+global and lacks it by design, so "enforce repayment without going social-hard" is structurally
+impossible. Collateral/LTV reintroduces liquidations that harm the exact global-south users
+(BTC dips → seize their BTC); "keep it stable" = stablecoins/custody = a different, non-Chama
+product.
+
+**Decision:**
+1. **Cut Lending** as a vertical (gut-check any usage/default data first). Crack the door only
+   for a future *community-internal* form (a real chama with the social graph) — a v3 nicety,
+   not a category.
+2. **"Work"** — elevate services/labor to a first-class vertical, named simply **Work**. Small
+   discrete jobs (fix / build / tutor / translate / deliver): poster funds escrow → worker
+   submits proof → poster releases (arbiter on dispute). Purest escrow fit, ~zero new machinery,
+   huge informal-economy TAM, and the escrow IS the recourse — the exact "get paid reliably"
+   pain lending never solved. Scope = small jobs, NOT recruiting/large offers. "Work" beats
+   "Jobs/Gigs" (dignity + universality) and "social work" (too cozy).
+3. **Community Pool Sats (CPS)** — the true "chama" unlock: >1 npub pool sats toward ONE fixed,
+   transparent **destination** (a merchant/store LUD-16, or a specific address), released when
+   the goal is met, refunded all-or-nothing if not. ⭐ The **destination-lock** is the whole
+   insight — the sats are earmarked to a real good and CANNOT be redirected to the requester's
+   discretionary wallet, which is what makes it *purchase-assistance / purposed remittance*, not
+   begging, and is exactly the trust problem escrow CAN solve. CPS is **lending's INTENT (help
+   someone afford a thing) delivered via escrow's STRENGTH (destination-locked, simultaneous,
+   disputable) instead of lending's fatal weakness (future repayment).** Reuses the existing
+   LUD-16 payout rail (Tando/ChapSmart/DestinationPicker) + escrow + ratings.
+
+**Reverse-lending anti-abuse:** where lending screened the *borrower's* repayment, CPS screens
+the *requester's genuineness*. (a) skin-in-the-game — requester pre-locks a % of the goal (e.g.
+50%); (b) ratings on the requester + on "did the help materialize"; (c) tier caps (a newcomer
+asks small; climbs by fulfilling genuine, destination-verified requests — the mirror of
+lending's tiers). **⚠ CENTRAL hard problem to design BEFORE building: destination collusion** —
+a requester colluding with a sock-puppet "merchant" LUD-16 they control turns the pool back into
+free cash. So CPS must lean on VERIFIED merchant destinations (a rated storefront), donor
+confirmation of receipt, and caps to bound the blast radius. This is CPS's analogue of lending's
+enforcement problem — but escrow-to-destination shrinks it enormously vs. lending's total
+absence of recourse.
+
+**⭐ The anchor when we build this — the TRIANGLE OF STAKES (the real collusion fix):** capping the
+requester's front-% isn't what closes the hole — it's that the **MERCHANT is a third stakeholder.**
+Route the payout to a *registered* merchant (bootstrap: reuse an offramp's merchant registry, e.g.
+`pay.chapsmart.com` — registering is a real process = a vetting signal, and the payout lands in a
+**KYC'd mobile-money account** = a real identity + recourse). Then a scam needs a registered
+merchant *willing to burn their registration and rating* — not just a throwaway lud16. So the
+defense is three independent stakes, and capping any one leaves the other two: **requester**
+(front-% by tier + rating), **merchant** (registration + rating + KYC'd payout), **donors**
+(bounded, all-or-nothing refundable). The durable vetting oracle is Chama's OWN merchant reputation
+(a fulfilled-order track record) — ChapSmart-registration is the cold-start, region-locked to where
+they operate, NOT the endgame. A merchant-landing-page-as-free-bond is fine defense-in-depth but
+weak alone (a cheap page is forgeable) — never the gate. Front-% tiers (Jetty): newbie ≥60% / medium
+50% / OG 30%, ALL paying a verified merchant. **Base demand is the mundane universal case** — a
+group splitting/pooling ONE bill (restaurant, family need), cash/mobile-money today; stranger-help
+is the viral upside, and the single-payer merchant-rail is the lower-risk proven-demand hedge under
+the whole thing.
+
+**Escrow structure:** CPS is bounded / all-or-nothing (Kickstarter-shaped): fund X toward
+destination D by deadline T; each donor's contribution is an INDEPENDENT escrow bound to the
+goal, released together on success or refunded on miss. This SIDESTEPS the escrow complexity of
+a recurring savings-ROSCA (long-lived escrow + dynamic add/remove membership) — the deadline
+keeps escrow duration short (Fedimint-friendly), and independent per-donor escrows avoid a
+shared mutable multi-party lock. The savings-ROSCA (monthly save-and-release) is the hard-mode
+one and is explicitly NOT the plan.
+
+**Alignment:** CPS digitizes harambee / susu-for-a-purchase (collective contribution toward a
+member's need) non-custodially — the chama heritage done right (collective *purpose*, not
+loans); a structured, trust-minimized "help a pleb buy a thing." Perfect global-south fit.
+⭐ Note (corrected): the LUD-16 offramp underneath is itself a **POS-less merchant-acceptance
+rail** — a global-south merchant's phone-number-lud16 makes them payable worldwide with local
+cash in hand (no terminal / acquiring bank / BTCPay; a leapfrog, not a catch-up, like mobile
+money over the bank branch). So it DOES replace the MERCHANT-side POS stack; what it does NOT
+replace is the offramp PROVIDER — the *trusted settlement layer*, so the rail is only as wide
+as offramp coverage. CPS is the many-payer layer on that same endpoint (see PHILOSOPHY §2.10).
+
+**Implications:** No code this session — capture only. BACKLOG updated (Work + CPS under Product
+Expansion; Lending scratched). PHILOSOPHY §2.10 records the escrow-fit principle. Open design
+before CPS ships: destination verification, sybil/farming resistance, the all-or-nothing refund
+path (fund-safety-grade), the tier model.
+
+**Status:** Direction captured (2026-07-01). Work = near-term elevation of existing
+services/commission surfaces; CPS = designed-next vertical (needs the anti-collusion design
+first). Lending cut pending a data gut-check.
+
+## 2026-07-03 — Private community federations over Nostr (ultra-private chamas) + the cross-fed lockdown
+
+**Decision (direction captured):** let a user privately share a **federation invite** with *their
+community* over Nostr — a **NIP-44-encrypted event `#p`-tagged to the chosen members** (the exact
+pattern the bond descriptor already uses), so a group can spin up or adopt their own Fedimint and
+hand it peer-to-peer to exactly the people they choose. It never hits a public index, never touches
+other Chama clients. Aligns with (and privately extends) the emerging **NIP-87** ecash-mint-
+discoverability draft (public kind 38173 = fedimint announcement, 38172 = cashu, 38000 = recommend);
+our variant is the *encrypted, scoped* one — the cypherpunk half NIP-87 leaves open.
+
+**⭐ LOCKED (Jetty, 2026-07-03) — a private community fed is a self-contained economy; fed-switching
+INSIDE it is disabled, by design, not by limitation.** The "cross-fed trading is hard" caveat is a
+**non-issue**: nobody in a private, trust-scoped fed wants to switch out — the boundary *is* the
+privacy + trust model. So a private fed must **completely lock down** fed-switching for its members
+(no switch-out surface; the fed is the whole world for that group). This is a feature: it's what
+makes the group's economy sovereign and its privacy airtight.
+
+**Why it's on-ethos (not scope creep):** "chama" *means* a community savings/economic group; a
+group running its own fed is Fedimint's own thesis (community self-custody by people who know their
+guardians — strictly *safer* than discovering unknown public feds). It reuses everything we have:
+multi-fed support + `federation-invites.ts`, NIP-44 envelopes, and the new peg-out rail.
+
+**Recruitment thesis (Jetty):** over time this may be the **best new-user on-ramp** — you join
+Chama because a friend hands you their community's private fed, not because you found a public
+marketplace. Trust travels through the invite. Private community feds could become the primary
+top-of-funnel, with the public marketplace as the outer ring.
+
+**Status:** direction + the cross-fed lockdown LOCKED; no code this session. Brief:
+`design/mockups/chama-private-community-feds-brief.md`. Open design before build: the encrypted-
+invite kind + "join from invite" surface, the hard fed-switch lockdown for private-fed members, and
+how trades/CPS scope cleanly to the single fed.
+
+## 2026-07-03 — New vertical: a group SAVINGS feature (individual custody + social read-only)
+
+**Decision (on-ethos, LOCKED as a designed-next vertical; UI name = "Stack"):** a
+private group savings surface where friends each keep sats **in their own ecash** and see each
+other's *progress* read-only (NIP-44 encrypted, opt-in), then **graduate on-chain privately** (the
+peg-out rail) when the stack is meaningful. "A community wallet with individual rights" (Jetty).
+
+**⭐ The distinction that makes it clean — and different from CPS:** this is **individual custody +
+social visibility**, NOT a pooled pot. CPS = the *shared* pot (group-owned sats toward one goal);
+this = *personal* stacks side-by-side with a shared window. They're complementary halves of what a
+chama actually is: the shared treasury and everyone's own stack. Keeping them conceptually separate
+is the whole point — no shared mutable custody here, so it never inherits CPS's pooling complexity.
+
+**Why it's on-ethos, not a wallet-scope-creep:** "chama" *means* a savings group — this is the app
+living up to its name. It's **escrow-ethos-clean**: nobody holds anyone else's money, so there's no
+future-promise trust (the exact line that killed Lending — this stays on the right side of it). It
+reuses everything: ecash (the stack), NIP-44 (the private read-only share), peg-out (graduate to
+self-custody — the "move it on-chain when the time is right" moment), and a private community fed as
+the natural container (a savings circle basically *is* a private-fed group).
+
+**Design guardrails (Jetty + verifier):**
+- **Read-only + opt-in + small-sats framing.** Default to sharing *progress/streak* ("stacked 8
+  weeks running"), not a raw balance — reframes it from "watch my net worth" to "watch us build the
+  habit" (safer + more motivating). Visibility is per-person and opt-in.
+- **Chat: skip or keep thin/optional.** People have their own comms; don't reinvent messaging.
+- **Same app, not a separate repo.** Shares the fed stack, NIP-44, peg-out, the name, and — most
+  importantly — the community; a separate app would fork the userbase and duplicate the stack.
+- **Timing:** designed-next vertical alongside Work + CPS; POST-launch, not a pre-launch distraction.
+
+**Status:** concept LOCKED (2026-07-03). No code. BACKLOG updated under Product Expansion.
+
+**⭐ UI NAMES LOCKED (Jetty, 2026-07-03) — short labels that fit a small UI (the CBP lesson):**
+the three post-launch verticals are **Work** (services/labor — already locked), **Chip In**
+(the pooling/crowdfund feature, formerly "Collaborative Payment Splitting" / Community Pool Sats /
+CPS — the shared pot toward one destination), and **Stack** (the group savings feature — individual
+custody + social read-only). Long internal names may persist in docs; the *UI* uses Work / Chip In /
+Stack.
+
+## 2026-07-03 — ⭐ BOND MODEL SEALED: single-key timelock COMMITMENT (Tier 0.1); ladder retired
+
+**The pivot.** CC's adversarial pass (confirmed independently by the verifier) proved the OG-cabinet
+2-of-3 is self-dealing: three people share one keyset, so **any two control all three bonds** (return
+their own, steal the third's — our own Stage-3a Row 4 proved that spend on Mutinynet), the §11.1 MAD
+story is **cryptographically false** (colluders recover their own bonds, lose nothing), and strand
+doubles as an extortion lever. No app code can fix a script — a dishonest signer just hand-signs.
+Reasoning to the root with Jetty landed on a **different, better design**, not a patch.
+
+**SEALED — v1 bond = a single-key TIMELOCK COMMITMENT.** Each arbiter locks **their OWN sats to their
+OWN key until term-end T** — one Taproot leaf (`<T> CLTV DROP <ownerKey> CHECKSIG`). No cabinet, no
+2-of-3, no custody, no descriptor / inbox / co-sign. **Collusion-impossible by construction** (there
+is no shared custody to collude over — nobody but the owner ever holds a key to their own bond). A
+chama can run with **ONE arbiter**: the coordination barrier drops to zero (a bootstrapping unlock for
+places with few bitcoiners); the capital commitment stays — that *is* the signal.
+
+**What it deliberately gives up (sealed honestly — no second MAD overclaim):** no slashing, no
+seizure, no victim-compensation *from the bond* (the owner always reclaims at T). The deterrent is
+**locked capital (illiquidity) + reputation + non-renewal + trade caps.** It deters a reputation-
+caring arbiter completely; it does NOT stop a burn-the-identity scammer — reputation only bites those
+who want a future. This is the *right* trade for the philosophy: 99% happy path, arbiters paid to nail
+the 1% fast and get publicly rated; the bond was never meant to be a seizure pool, it's a **public,
+costly, honest signal**.
+
+**⭐ GOLD — "bonded" is NOT binary; it's HOW MUCH, for HOW LONG (Jetty).** A tiny short bond is a weak
+signal; a large long one is strong. The market + ratings price it — bonded is a *magnitude*, not a
+badge. **Terms should be deliberately LONG:** normies are high-time-preference, so a long lock weighs
+on an arbiter's mind (they want their sats back and can't claw them early — "time feels so far away
+when you lock"), which is precisely the honesty filter. **It is very hard to be a low-time-preference
+lurking bad actor.** Ratings self-promote the truth: traders (esp. for big trades) gravitate to the
+best-ranked, longest-standing arbiters. The genesis arbiter (Jetty) bonds the **most, for the
+longest**, to lead by example. Reputation built over time = the longest chain of honest arbiters.
+
+**Cabinet's two jobs, separated:** (a) bond custody = **DELETED** (it was the collusion hole); (b) a
+*pool* of arbiters for coverage/redundancy = a separate OPERATIONAL choice, **not required** by the
+bond. Allow one arbiter; don't force more.
+
+**Ladder retired.** 0.2 (≥5 cabinets) ❌, 0.3 (external key on a live multisig) ❌ (belonged to the
+dropped model — a live external key can't give trustless slashing), Tier 1 (oracles) ❌, Tier 3 (CTV,
+not on mainnet) → parked as a zero-cost Mutinynet curiosity for later. **Only Tier 2 kept as the
+optional FUTURE upgrade:** commitment + *trustless slashing* (best of both worlds) via an **open
+STRANGER ceremony** — participants presign the only allowed futures (return-to-owner, slash-to-pool),
+then **delete their keys** (zero ongoing power, so strangers are ideal — the more diverse, the surer
+one deleted honestly). Added ONLY IF reputation ever proves too soft; heavy, careful implementation.
+
+**Immediate:** the false MAD ceremony copy is REMOVED (`BondCeremonyModal.tsx` TrustCopy, interim
+honest copy + `TODO(commitment-bond)`). **Invariant:** no real-sats OG bond funds until the single-key
+timelock ships. **Next:** build the one-leaf timelock bond, prove it on Mutinynet (a "spend-before-T →
+REJECTED" harness row), then the test-sats 3-npub e2e over the new leaf. Brief:
+`chama-bond-collusion-closure-brief.md` (the ladder + why we walked around it).

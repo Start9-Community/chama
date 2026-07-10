@@ -1,6 +1,7 @@
 import { useState, useEffect, lazy, Suspense, type WheelEvent } from "react";
 import { T, inputStyle } from "../theme.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
+import { CopyButton } from "../components/CopyButton.js";
 import { isSimModeOn, setSimMode } from "../../sim/simMode.js";
 import { makeLightningInvoiceQrPayload } from "../../payments/lightning-qr.js";
 
@@ -124,9 +125,6 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
     finally { setBusy(false); }
   };
 
-  const copyText = (text: string) => {
-    navigator.clipboard?.writeText(text).catch(() => {});
-  };
   const diagnostics = err ? extractChamaDiagnostics(err) : null;
   const nativeBridgeUnavailable = !!err &&
     /native_fedimint_bridge_unavailable|Native Fedimint bridge is enabled but unreachable/i.test(err);
@@ -282,7 +280,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
               Do not fund this invoice with real sats.
             </div>
           )}
-          <button onClick={() => copyText(invoice)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.accentDim, border: `1px solid ${T.accent}44`, color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>Copy invoice</button>
+          <CopyButton value={invoice} label="Copy invoice" copiedLabel="✓ Copied" style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.accentDim, border: `1px solid ${T.accent}44`, color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }} />
           <button onClick={() => {
             setInvoice(null);
             setBalanceAtInvoice(null);
@@ -323,7 +321,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
         {tab === "send" && ecashOutput && (<>
           <div style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, marginBottom: 8, letterSpacing: 1, textAlign: "center" }}>ECASH NOTES — COPY AND SEND TO RECIPIENT</div>
           <div style={{ padding: 8, marginBottom: 12, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 8, color: T.text, wordBreak: "break-all", maxHeight: 100, overflowY: "auto" }}>{ecashOutput}</div>
-          <button onClick={() => copyText(ecashOutput)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.amberDim, border: `1px solid ${T.amber}44`, color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>Copy ecash notes</button>
+          <CopyButton value={ecashOutput} label="Copy ecash notes" copiedLabel="✓ Copied" style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.amberDim, border: `1px solid ${T.amber}44`, color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }} />
           <button onClick={() => setEcashOutput(null)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Done</button>
         </>)}
 
@@ -338,12 +336,12 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
                 : err}
             </div>
             {diagnostics && (
-              <button
-                onClick={() => copyText(diagnostics)}
+              <CopyButton
+                value={diagnostics}
+                label="Copy Fedimint diagnostics"
+                copiedLabel="✓ Copied"
                 style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}44`, color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginTop: 8 }}
-              >
-                Copy Fedimint diagnostics
-              </button>
+              />
             )}
             {gatewayTrustError && !nativeBridgeUnavailable && !isSimModeOn() && (
               <button

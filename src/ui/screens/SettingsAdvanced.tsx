@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import { type FedimintState } from "../../hooks/useEscrow.js";
 import { T, inputStyle } from "../theme.js";
+import { CopyButton } from "../components/CopyButton.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { isPowerUserModeOn, setPowerUserMode } from "../powerUserMode.js";
 import { SwitchFederationPanel } from "../panels/SwitchFederationPanel.js";
@@ -770,7 +771,6 @@ function NwcPermissionCard({
 // the user copies/QRs them on purpose.
 function RecoveryPhraseCard() {
   const [revealed, setRevealed] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [showQr, setShowQr] = useState(false);
   const words = getCachedSeedWords();
   const phrase = words ? words.join(" ") : "";
@@ -850,24 +850,16 @@ function RecoveryPhraseCard() {
           )}
 
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <button
-              onClick={() => {
-                try {
-                  navigator.clipboard?.writeText(phrase);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1500);
-                } catch { /* clipboard unavailable — words are on screen to transcribe */ }
-              }}
+            <CopyButton
+              value={phrase}
+              label="Copy"
+              copiedLabel="✓ Copied"
               style={{
                 flex: 1, padding: "9px 12px", borderRadius: T.rs,
-                background: copied ? T.greenDim : T.surface,
-                border: `1px solid ${copied ? T.green + "66" : T.border}`,
-                color: copied ? T.green : T.muted,
+                background: T.surface, border: `1px solid ${T.border}`, color: T.muted,
                 fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
               }}
-            >
-              {copied ? "✓ Copied" : "Copy"}
-            </button>
+            />
             <button
               onClick={() => setShowQr((v) => !v)}
               style={{
@@ -910,7 +902,6 @@ function NsecRevealCard() {
   const [origin, setOrigin] = useState<string | null>(null);
   const [nsec, setNsec] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [showQr, setShowQr] = useState(false);
 
   useEffect(() => {
@@ -1004,24 +995,17 @@ function NsecRevealCard() {
           )}
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button
-              onClick={() => {
-                try {
-                  if (nsec) navigator.clipboard?.writeText(nsec);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1500);
-                } catch { /* clipboard unavailable — key is on screen */ }
-              }}
+            <CopyButton
+              value={nsec ?? ""}
+              disabled={!nsec}
+              label="Copy"
+              copiedLabel="✓ Copied"
               style={{
                 flex: 1, padding: "9px 12px", borderRadius: T.rs,
-                background: copied ? T.greenDim : T.surface,
-                border: `1px solid ${copied ? T.green + "66" : T.border}`,
-                color: copied ? T.green : T.muted,
+                background: T.surface, border: `1px solid ${T.border}`, color: T.muted,
                 fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
               }}
-            >
-              {copied ? "✓ Copied" : "Copy"}
-            </button>
+            />
             <button
               onClick={() => setShowQr((v) => !v)}
               style={{
@@ -1244,7 +1228,6 @@ function FediWeblnProbeCard() {
   const [report, setReport] = useState<string | null>(null);
   const [weblnResult, setWeblnResult] = useState<string | null>(null);
   const [communities, setCommunities] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   const run = () => {
     const w = window as unknown as Record<string, any>;
@@ -1401,29 +1384,20 @@ function FediWeblnProbeCard() {
         </div>
       )}
       {(report || communities) && (
-        <button
-          onClick={() => {
-            try {
-              const parts = [
-                report,
-                weblnResult ? `webln: ${weblnResult}` : "",
-                communities ? `--- communities ---\n${communities}` : "",
-              ].filter(Boolean);
-              navigator.clipboard?.writeText(parts.join("\n\n"));
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            } catch {}
-          }}
+        <CopyButton
+          value={[
+            report,
+            weblnResult ? `webln: ${weblnResult}` : "",
+            communities ? `--- communities ---\n${communities}` : "",
+          ].filter(Boolean).join("\n\n")}
+          label="Copy readout"
+          copiedLabel="✓ Copied"
           style={{
             width: "100%", padding: "9px 12px", borderRadius: T.rs,
-            background: copied ? T.greenDim : T.surface,
-            border: `1px solid ${copied ? T.green + "66" : T.border}`,
-            color: copied ? T.green : T.muted,
+            background: T.surface, border: `1px solid ${T.border}`, color: T.muted,
             fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
           }}
-        >
-          {copied ? "✓ Copied" : "Copy readout"}
-        </button>
+        />
       )}
     </div>
   );
@@ -1709,7 +1683,6 @@ function DiscoveryDiagnosticCard({
   const [idProbe, setIdProbe] = useState<FetchLegDiag | null>(null);
   const [idBusy, setIdBusy] = useState(false);
   const [idError, setIdError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   // Reflect auto-runs (connect + relay-growth), not just button presses.
   useEffect(() => {
@@ -1806,14 +1779,6 @@ function DiscoveryDiagnosticCard({
     }
     return lines.join("\n");
   })();
-
-  const copyReadout = () => {
-    try {
-      navigator.clipboard?.writeText(readoutText);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch { /* clipboard unavailable — readout is on screen */ }
-  };
 
   return (
     <div style={{
@@ -1943,18 +1908,16 @@ function DiscoveryDiagnosticCard({
         {idProbe && <LegBlock leg={idProbe} />}
       </div>
 
-      <button
-        onClick={copyReadout}
+      <CopyButton
+        value={readoutText}
+        label="Copy readout"
+        copiedLabel="✓ Copied"
         style={{
           width: "100%", padding: "9px 12px", borderRadius: T.rs,
-          background: copied ? T.greenDim : T.surface,
-          border: `1px solid ${copied ? T.green + "66" : T.border}`,
-          color: copied ? T.green : T.muted,
+          background: T.surface, border: `1px solid ${T.border}`, color: T.muted,
           fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
         }}
-      >
-        {copied ? "✓ Copied" : "Copy readout"}
-      </button>
+      />
     </div>
   );
 }

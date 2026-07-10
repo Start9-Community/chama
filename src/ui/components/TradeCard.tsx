@@ -8,8 +8,9 @@ import {
   getJoinHoldRemainingSeconds,
 } from "../../escrow-engine/types.js";
 import { getCommunityBySlug, flagEmojiForCountry } from "../../communities/registry.js";
-import { pickArbiterFromPool } from "../../arbiters/pool.js";
+import { pickPreferredArbiter } from "../../arbiters/pool.js";
 import { T, CAT_ICON, ROLE_COLOR, ROLE_ICON, STATUS, TRINITY_RING_ORDER, fmtSats } from "../theme.js";
+import { copyTextRobust } from "./CopyButton.js";
 import { listingPremiumLine } from "../listing-metrics.js";
 import { unreadChatForTrade } from "../../chat/unread.js";
 import { billTypeDisplay } from "../../communities/bill-types.js";
@@ -164,7 +165,7 @@ export function TradeCard({
   const previewArbiterPk = state.status === EscrowStatus.CREATED
     && !participants[Role.ARBITER]
     && state.communityArbiters.length > 0
-    ? (pickArbiterFromPool(state.communityArbiters, state.id, [
+    ? (pickPreferredArbiter(state.communityArbiters, state.bondedArbiters, state.id, [
         participants[Role.BUYER],
         participants[Role.SELLER],
       ]) ?? null)
@@ -253,7 +254,7 @@ export function TradeCard({
               <span style={{ fontSize: 11, lineHeight: 1 }}>{CAT_ICON[state.category] || "📦"}</span>
               {shortCategoryLabel(state.category)}
             </span>
-            {billTypeChip && (
+            {billTypeChip && billTypeChip.label !== state.description && (
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 4,
                 fontSize: 10, padding: "3px 8px", borderRadius: 999,
@@ -386,6 +387,7 @@ export function TradeCard({
           )}
 
           <TradeIdLine id={state.id} />
+          <TradeTimeLine createdAt={state.createdAt} />
 
           {sellerContextLine && (
             <div style={{
@@ -530,11 +532,9 @@ function TradeIdLine({ id }: { id: string }) {
     <div
       onClick={(e) => {
         e.stopPropagation();
-        try {
-          navigator.clipboard?.writeText(id);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        } catch { /* clipboard unavailable — display still serves the audit */ }
+        copyTextRobust(id); // robust in Tauri/Capacitor webviews (execCommand fallback)
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
       }}
       title="Tap to copy trade ID"
       style={{
@@ -551,6 +551,27 @@ function TradeIdLine({ id }: { id: string }) {
         {id}
       </span>
       <span aria-hidden="true" style={{ flexShrink: 0, opacity: 0.6 }}>⧉</span>
+    </div>
+  );
+}
+
+/** Compact created date+time under the trade ID. History auditing needs a
+ *  "when did this happen" anchor to correlate with wallet/LN records; a listing's
+ *  age is useful in Browse too. createdAt is Unix SECONDS; guard the 0/absent case. */
+function TradeTimeLine({ createdAt }: { createdAt: number }) {
+  if (!createdAt || createdAt <= 0) return null;
+  const when = new Date(createdAt * 1000).toLocaleString(undefined, {
+    month: "short", day: "numeric", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+  // Prominent by request: date+time is the second-most-regarded field after
+  // price for auditing history, so give it real weight (not a 9px whisper).
+  return (
+    <div style={{
+      marginTop: -4, marginBottom: 10,
+      color: T.text, fontFamily: T.mono, fontSize: 12, fontWeight: 600, lineHeight: 1.4,
+    }}>
+      {when}
     </div>
   );
 }

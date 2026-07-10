@@ -13,14 +13,15 @@
 //      between (2) and (3) confirming.
 //
 // In that window the sats have already left Fedi but no LOCK exists — the
-// bearer token is orphaned. Native (createEscrowLock) is immune: it spends
-// and SSS-splits atomically inside the SDK. The Fedi path spends first and
-// locks second, so it needs the same crash-safety the CLAIM path got in
-// v0.1.68 — only mirrored. The CLAIM stash REDEEMS its notes into the
-// wallet; this stash RE-ABSORBS its notes back into Fedi via
-// `receiveFediEcash`. The recover actions differ and both are money-
-// critical, so the two stores are kept strictly separate: a bug in funding
-// recovery can never reach the claim-payout store.
+// bearer token is orphaned. (#37 correction: the SDK-wallet lock paths —
+// native sidecar + browser WASM — were NEVER immune; their spend→publish
+// window is guarded by the SIBLING store src/fedimint/pending-native-locks.ts.
+// This store stays Fedi-ONLY.) The Fedi path spends first and locks second,
+// so it needs the same crash-safety the CLAIM path got in v0.1.68 — only
+// mirrored. The CLAIM stash REDEEMS its notes into the wallet; this stash
+// RE-ABSORBS its notes back into Fedi via `receiveFediEcash`. The recover
+// actions differ and all are money-critical, so the stores are kept
+// strictly separate: a bug in one lane's recovery can never reach another.
 //
 // ── When an entry is written / cleared ────────────────────────────────────
 //

@@ -1,0 +1,30 @@
+# Caddyfile (ORIGIN terminates TLS). Copy to a live Caddyfile and adapt per vhost.
+# Pick ONE cert strategy (Gate A).
+
+# ── Option 1: DNS-01 via Njalla (recommended) ─────────────────────────────
+# Build Caddy with the module first:
+#   go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+#   xcaddy build --with github.com/caddy-dns/njalla
+#   # replace /usr/bin/caddy with the result; set NJALLA_API_TOKEN in the caddy service env
+{
+    email <your-acme-email>
+    acme_dns njalla {env.NJALLA_API_TOKEN}
+}
+
+example.com, www.example.com {
+    root * /var/www/example.com
+    encode gzip
+    # php_fastcgi unix//run/php/php-fpm.sock     # PHP
+    # reverse_proxy 127.0.0.1:3000               # Node/Python app
+    file_server
+}
+
+# ── Option 2: reuse OLD's certs (no token) ────────────────────────────────
+# Copy /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem onto the origin,
+# pin them per site, switch to HTTP-01 renewal AFTER cutover.
+#
+# example.com, www.example.com {
+#     tls /etc/ssl/chama/example.com/fullchain.pem /etc/ssl/chama/example.com/privkey.pem
+#     root * /var/www/example.com
+#     file_server
+# }

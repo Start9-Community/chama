@@ -46,6 +46,13 @@ export interface TrustedArbiterPoolOptions {
    *  not freeze on capacity drift; consent-layer, never a strand). No-op in
    *  Phase 1: ships BONDS_ENFORCED=false and no prod caller passes it yet. */
   capacity?: PoolCapacityContext | null;
+  /** Bond → arbiter enrollment (chama-bond-arbiter-enrollment-brief.md, S1/S3):
+   *  chain-verified 38135 bonded arbiters for this community, ADDITIVELY unioned
+   *  into the pool. Permissionless — the bond IS the trust, so a bonded npub is
+   *  assignable AND recognized in provenance wherever this is supplied. The
+   *  caller resolves it (bondedArbitersForCommunity(await fetchCommunityBonds)).
+   *  Additive only: it can grow the pool, never shrink it. Absent ⇒ unchanged. */
+  bondedPool?: readonly string[];
 }
 
 function normalizePubkey(value: string): string | null {
@@ -76,6 +83,98 @@ function splitConfiguredPubkeys(raw: string | undefined | null): string[] {
 export const BLF_OFFICIAL_ARBITERS = unique(
   splitConfiguredPubkeys(BLF_OFFICIAL_ARBITER_NPUBS.join(","))
 );
+
+/** The custody cabinet as HEX pubkeys (the engine deals in hex, not npub). This
+ *  is the authoritative set the Phase-2A bond keystone gates on: a bond's two
+ *  custodians MUST both be in here or the LOCK is refused (DESIGN-arbiter-economy
+ *  §13.2 — otherwise an owner names sock-puppet custodians and self-returns,
+ *  defeating the strand). Derived from the registry-pinned BLF_CABINET_NPUBS, so
+ *  it is a hardcoded build constant identical in every client → the keystone
+ *  check replays identically everywhere (consensus-safe). */
+export const BLF_CABINET_PUBKEYS = unique(
+  splitConfiguredPubkeys(BLF_CABINET_NPUBS.join(","))
+);
+
+/** The verified custody cabinet (hex pubkeys) for a community, or null if it has
+ *  no seeded cabinet. Only BLF has one in Phase 2A; bonds are a BLF construct.
+ *  Pure + deterministic (registry-pinned constant), so the bond keystone is
+ *  consensus-safe wherever it runs. Generalizes to per-community cabinets later. */
+// ── DEV/TEST-ONLY test-cabinet seam (§12.2 plumbing rig) ─────────────────────
+// The §12.2 rig drives the full lock→strand→restore loop with THREE self-controlled
+// keys. But the production keystone gates on BLF_CABINET_PUBKEYS, which would reject
+// self-keys. This seam lets a DEV/TEST run install a test cabinet so the plumbing
+// can be exercised — WITHOUT weakening the real keystone:
+//   • It is consulted by cabinetPubkeysForCommunity ONLY behind `testCabinetAllowed()`,
+//     which is true ONLY in a dev build (import.meta.env.DEV — statically false in a
+//     production bundle, tree-shaken dead) or a Node test runner (typeof process is
+//     `undefined` in a browser production bundle, so that arm is dead in prod too).
+//   • It also requires an explicit install. A production browser bundle never reaches
+//     the install path and never sets a test cabinet, so the real cabinet always wins.
+//   • Defense in depth: BONDS_ENFORCED is false, and a test-cabinet bond published to
+//     real relays is REJECTED by every production client (which uses the real cabinet),
+//     so it can never masquerade as a backed bond.
+let __testCabinet: readonly string[] | null = null;
+
+function testCabinetAllowed(): boolean {
+  try { if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) return true; } catch { /* not a vite runtime */ }
+  // Node test runner: `process` is undefined in a browser production bundle, so this
+  // whole arm is dead code in prod. We additionally require NODE_ENV !== production.
+  try {
+    const p = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+    if (p && p.env && p.env.NODE_ENV !== "production") return true;
+  } catch { /* no-op */ }
+  return false;
+}
+
+/** DEV/TEST-ONLY: install (or clear, with null) a test custody cabinet for the
+ *  §12.2 plumbing rig. NO-OP / never consulted in a production build (see
+ *  testCabinetAllowed). Pubkeys are lowercased to match the engine's canonical
+ *  hex. The rig MUST clear it (install(null)) when done. */
+export function __installTestCabinet(pubkeys: readonly string[] | null): void {
+  __testCabinet = pubkeys && pubkeys.length > 0
+    ? pubkeys.map((p) => p.trim().toLowerCase())
+    : null;
+}
+
+export function cabinetPubkeysForCommunity(_community?: string | null): readonly string[] | null {
+  // DEV/TEST-ONLY override for the §12.2 rig — gated on testCabinetAllowed() so a
+  // production bundle never honors it (the branch is dead). Never weakens the real
+  // keystone: in prod this is unreachable and BLF_CABINET_PUBKEYS always wins.
+  if (__testCabinet && testCabinetAllowed()) return __testCabinet;
+  // Phase 2A: BLF is the only seeded cabinet. The bond's community is BLF by
+  // construction (the ceremony only mints BLF bonds), so we return the BLF
+  // cabinet for any bond. When other feds seat cabinets, branch on `_community`.
+  return BLF_CABINET_PUBKEYS.length > 0 ? BLF_CABINET_PUBKEYS : null;
+}
+
+/** Display names for the seeded cabinet, PARALLEL to BLF_CABINET_PUBKEYS order
+ *  (the npubs decode to hex in the same order; unique() preserves it). Used so a
+ *  bond ceremony reads as a personal trust ("held by Chapsmart & Graysatoshi"),
+ *  not an abstract 2-of-3. */
+export const BLF_CABINET_NAMES = ["Bitcrazy", "Chapsmart", "Graysatoshi"];
+
+/** A cabinet member's display name (hex pubkey in), or a short-hex fallback. */
+export function cabinetDisplayName(pubkey: string): string {
+  const idx = BLF_CABINET_PUBKEYS.indexOf(pubkey.trim().toLowerCase());
+  const name = idx >= 0 ? BLF_CABINET_NAMES[idx] : undefined;
+  return name ?? `${pubkey.slice(0, 8)}…`;
+}
+
+/** True if `pubkey` (hex) is a current custody-cabinet member for the community.
+ *  Honors the DEV/TEST seam via cabinetPubkeysForCommunity (dead in prod). */
+export function isCabinetMember(pubkey: string | null | undefined, community?: string | null): boolean {
+  if (!pubkey) return false;
+  const cabinet = cabinetPubkeysForCommunity(community);
+  return !!cabinet && cabinet.includes(pubkey.trim().toLowerCase());
+}
+
+/** The OTHER cabinet members (the two custodians) for a given bond owner — the
+ *  peers who hold the other two seats of the owner's 2-of-3. */
+export function cabinetPeersFor(ownerPubkey: string, community?: string | null): string[] {
+  const cabinet = cabinetPubkeysForCommunity(community) ?? [];
+  const owner = ownerPubkey.trim().toLowerCase();
+  return cabinet.filter((pk) => pk !== owner);
+}
 
 function communityEnvKey(community: string | null | undefined): string | null {
   if (!community) return null;
@@ -142,6 +241,7 @@ export function getTrustedArbiterPool(options: TrustedArbiterPoolOptions = {}): 
   const pool = unique([
     ...sources.rosterArbiters,
     ...sources.deviceTrusted,
+    ...sources.bondedArbiters,
   ])
     .filter((pk) => !excluded.has(pk));
 
@@ -166,6 +266,9 @@ export interface TrustedArbiterPoolSources {
   rosterArbiters: string[];
   /** Signer of the winning roster event; null when no verifiable roster. */
   rosterSigner: string | null;
+  /** Chain-verified 38135 bonded arbiters (permissionless, injected by the
+   *  caller). A distinct trust authority: the bond, not a vouch. */
+  bondedArbiters: string[];
 }
 
 export function getTrustedArbiterPoolSources(
@@ -180,6 +283,7 @@ export function getTrustedArbiterPoolSources(
     ]),
     rosterArbiters: roster.arbiters,
     rosterSigner: roster.signer,
+    bondedArbiters: unique(splitConfiguredPubkeys((options.bondedPool ?? []).join(","))),
   };
 }
 
@@ -315,6 +419,30 @@ export function pickArbiterFromPool(
   return candidates[idx];
 }
 
+/**
+ * 2B prefer-bonded assignment. Picks deterministically from the FUNDED bonded
+ * subset (∩ pool, minus exclusions) when non-empty, else falls back to the
+ * legacy `pickArbiterFromPool`. Pure + replay-identical given the STAMPED
+ * `bondedArbiters` set (never a live fetch), so every client replaying the same
+ * CREATE computes the same seat. The reducer JOIN gate accepts BOTH this pick
+ * AND the legacy pick, so a mixed-version client never rejects a valid arbiter
+ * (see state-machine handleJoin). Empty/undefined bonded ⇒ identical to legacy.
+ */
+export function pickPreferredArbiter(
+  pool: string[],
+  bondedArbiters: readonly string[] | null | undefined,
+  escrowId: string,
+  excludePubkeys: Array<string | null | undefined> = [],
+): string | undefined {
+  const poolSet = new Set(pool.map((pk) => pk.toLowerCase()));
+  const bondedInPool = (bondedArbiters ?? []).filter((pk) => poolSet.has(pk.toLowerCase()));
+  if (bondedInPool.length > 0) {
+    const preferred = pickArbiterFromPool(bondedInPool, escrowId, excludePubkeys);
+    if (preferred) return preferred;
+  }
+  return pickArbiterFromPool(pool, escrowId, excludePubkeys);
+}
+
 // ── Arbiter assignment integrity (v3.5 — C1, consent layer) ────────────────
 //
 // INVARIANT(arbiter-assignment) — consent-enforced. Membership (provenance,
@@ -363,6 +491,9 @@ export function classifyArbiterAssignment(params: {
   committedArbiter: string | null | undefined;
   buyerPubkey?: string | null;
   sellerPubkey?: string | null;
+  /** 2B: the trade's stamped bonded subset (state.bondedArbiters). When present,
+   *  a bonded-preferred seat is ALSO accepted as "as-assigned" (4th basis). */
+  bondedArbiters?: readonly string[] | null;
 }): ArbiterAssignment {
   const pool = [...params.pool];
   const committed = params.committedArbiter
@@ -375,6 +506,10 @@ export function classifyArbiterAssignment(params: {
     pool[0],
     pickArbiterFromPool(pool, params.escrowId),
     pickArbiterFromPool(pool, params.escrowId, [params.buyerPubkey, params.sellerPubkey]),
+    // 2B (v0.x): a bonded-preferred seat is also "as-assigned". Uses the STAMPED
+    // bonded set; when it's absent/empty this equals the v0.7.2 pick above, so no
+    // new basis appears on pre-2B trades.
+    pickPreferredArbiter(pool, params.bondedArbiters, params.escrowId, [params.buyerPubkey, params.sellerPubkey]),
   ];
   const accepted = unique(
     bases

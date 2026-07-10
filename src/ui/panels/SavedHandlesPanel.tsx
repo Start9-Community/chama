@@ -170,15 +170,22 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
   const [editingNetworkHandleId, setEditingNetworkHandleId] = useState<string | null>(null);
   const [handleNetworkQuery, setHandleNetworkQuery] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [banksOpen, setBanksOpen] = useState<boolean>(false);
 
   const refresh = () => {
     setHandles(listSavedHandles());
   };
 
-  const localAvailableRails = railsForCommunity(communitySlug)
-    .filter(r => r.key !== PHONE_NUMBER_RAIL);
-  const searchableAvailableRails = searchableRailsForCommunity(communitySlug)
-    .filter(r => r.key !== PHONE_NUMBER_RAIL);
+  // Phone-shaped rails (M-Pesa, Tigo Pesa, Airtel Money…) live in the phone
+  // section above as network tags — keep them OUT of "Banks & apps" so the same
+  // network never shows up in both places. Uses the SAME predicate that fills
+  // the phone tags, so the two sections can never overlap.
+  const phoneShapedKeys = new Set(
+    phoneNetworksForCommunity(communitySlug, { includeSearchable: true }).map(r => r.key),
+  );
+  const isBankOrApp = (r: Rail) => r.key !== PHONE_NUMBER_RAIL && !phoneShapedKeys.has(r.key);
+  const localAvailableRails = railsForCommunity(communitySlug).filter(isBankOrApp);
+  const searchableAvailableRails = searchableRailsForCommunity(communitySlug).filter(isBankOrApp);
   const availableRails = railQuery.trim() ? searchableAvailableRails : localAvailableRails;
   const methodResults = filterRails(availableRails, railQuery).slice(0, MAX_METHOD_RESULTS);
   const selectedRail = getRailByKey(addRail);
@@ -553,20 +560,38 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
         padding: 14,
         marginBottom: 18,
       }}>
-        <div style={{
-          fontSize: 10, fontWeight: 800, color: T.accent,
-          fontFamily: T.mono, letterSpacing: 1,
-          textTransform: "uppercase", marginBottom: 5,
-        }}>
-          App, bank, or wallet ID
-        </div>
-        <div style={{
-          fontSize: 11, color: T.muted, fontFamily: T.sans,
-          lineHeight: 1.45, marginBottom: 10,
-        }}>
-          Search a mobile-friendly payment method, then save the ID people need
-          to send you fiat.
-        </div>
+        <button
+          onClick={() => setBanksOpen(o => !o)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 12, width: "100%", background: "none", border: "none",
+            padding: 0, cursor: "pointer", textAlign: "left" as const,
+          }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{
+              fontSize: 10, fontWeight: 800, color: T.accent,
+              fontFamily: T.mono, letterSpacing: 1,
+              textTransform: "uppercase",
+            }}>
+              Banks &amp; apps
+            </div>
+            <div style={{
+              fontSize: 11, color: T.muted, fontFamily: T.sans,
+              lineHeight: 1.4, marginTop: 3,
+            }}>
+              Cards, PayPal, Zelle, bank transfer, UPI, Pix — mostly Western.
+            </div>
+          </div>
+          <span style={{
+            color: T.muted, fontSize: 13, fontFamily: T.mono, flexShrink: 0,
+            transform: banksOpen ? "rotate(90deg)" : "none",
+            transition: "transform 0.15s ease",
+          }}>▸</span>
+        </button>
+
+        {banksOpen && (
+        <div style={{ marginTop: 12, animation: "fadeIn 0.18s ease" }}>
         <input
           value={railQuery}
           onChange={e => {
@@ -575,7 +600,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
             setAddValue("");
             setError(null);
           }}
-          placeholder="Search M-Pesa, UPI, Pix, bank transfer..."
+          placeholder="Search PayPal, UPI, Pix, bank transfer..."
           style={{ ...inputStyle, marginBottom: 8 }}
         />
         <div style={{ display: "grid", gap: 6, marginBottom: selectedRail ? 12 : 0 }}>
@@ -670,6 +695,8 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
               </button>
             </div>
           </div>
+        )}
+        </div>
         )}
       </div>
 

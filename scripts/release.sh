@@ -111,18 +111,20 @@ else
 fi
 
 # ── Deploy SSH key resolution ──────────────────────────────────────────
-# Override the private key used by `scp` to push dist/* to
-# satoshimarket.app. Defaults to ~/.ssh/.id_satoshi_market for the
-# original maintainer; any other user (or any CI environment that
-# inherits this script) should export CHAMA_DEPLOY_KEY beforehand
-# pointing at their own deploy key. Keeping the path out of the
-# committed bytes (no hardcoded "id_satoshi_market" in the deploy
-# command) means a third party who reads the script doesn't learn the
-# exact filename to look for on the maintainer's box.
-CHAMA_DEPLOY_KEY="${CHAMA_DEPLOY_KEY:-$HOME/.ssh/.id_satoshi_market}"
-if [ ! -f "$CHAMA_DEPLOY_KEY" ] && [ "${RELEASE_MODE:-bump}" != "current" ] && [ "${DEPLOY:-1}" = "1" ]; then
-  echo "❌ Deploy key not found at: $CHAMA_DEPLOY_KEY"
-  echo "   Set CHAMA_DEPLOY_KEY=/path/to/key (or pass --no-deploy)."
+# Deploy target + key come from the ENVIRONMENT so nothing about the box
+# (key filename, host) lives in committed bytes. Set these in your shell
+# (~/.zshrc) or a gitignored migration/deploy.env — never here:
+#   export CHAMA_DEPLOY_KEY=~/.ssh/id_chama
+#   export CHAMA_DEPLOY_HOST=satoshi@getchama.app   # optional; default below
+# (Migrated off the satoshimarket.app box → getchama.app, 2026-06.)
+CHAMA_DEPLOY_KEY="${CHAMA_DEPLOY_KEY:-}"
+CHAMA_DEPLOY_HOST="${CHAMA_DEPLOY_HOST:-satoshi@getchama.app}"
+if [ "${DEPLOY:-1}" = "1" ] && { [ -z "$CHAMA_DEPLOY_KEY" ] || [ ! -f "$CHAMA_DEPLOY_KEY" ]; }; then
+  echo "❌ Deploy key not set or not found: '${CHAMA_DEPLOY_KEY:-<empty>}'"
+  echo "   Set it in your shell (never in the repo), then re-run:"
+  echo "     export CHAMA_DEPLOY_KEY=~/.ssh/id_chama"
+  echo "   Deploy host: ${CHAMA_DEPLOY_HOST:-satoshi@getchama.app}  (override via CHAMA_DEPLOY_HOST)."
+  echo "   Or pass --no-deploy to skip the web push."
   exit 1
 fi
 
@@ -263,7 +265,7 @@ if [ "$RELEASE_MODE" = "deploy-live" ]; then
 
   echo "🚀 Deploying origin/main@$COMMIT_SHA as v$NEW_VERSION..."
   npx cap sync android
-  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* satoshi@satoshimarket.app:~/chama-dist/
+  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* "$CHAMA_DEPLOY_HOST:~/chama-dist/"
 
   echo "✅ Deployed v$NEW_VERSION from origin/main@$COMMIT_SHA"
   exit 0
@@ -318,7 +320,7 @@ if [ "$RELEASE_MODE" = "current" ]; then
   fi
 
   npx cap sync android
-  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* satoshi@satoshimarket.app:~/chama-dist/
+  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* "$CHAMA_DEPLOY_HOST:~/chama-dist/"
 
   echo "✅ Deployed v$NEW_VERSION"
   exit 0
@@ -426,6 +428,6 @@ if [ "$DEPLOY" = "0" ]; then
 fi
 
 npx cap sync android
-scp -r -i "$CHAMA_DEPLOY_KEY" dist/* satoshi@satoshimarket.app:~/chama-dist/
+scp -r -i "$CHAMA_DEPLOY_KEY" dist/* "$CHAMA_DEPLOY_HOST:~/chama-dist/"
 
 echo "✅ Deployed v$NEW_VERSION"

@@ -148,6 +148,12 @@ type RealMintTransaction = {
 
 type RealTransaction = RealLightningTransaction | RealMintTransaction | Record<string, unknown>;
 
+/** V7 reconcile-by-escrow scan window (newest-first). A payment being
+ *  reconciled was dispatched around its journal record's lifetime, so it
+ *  sits among the newest ops; a sub-limit page proves the scan saw
+ *  EVERYTHING (⇒ "none" is trustworthy). */
+const PAY_RECONCILE_SCAN_LIMIT = 200;
+
 interface RealLightningService {
   createInvoice(
     amountMsats: number,
@@ -1802,6 +1808,29 @@ export function adaptRealWallet(
         const result = await real.mint.spendNotes(amountMsats, undefined, false, meta ?? {});
         return result.notes;
       },
+      // #37 lock crash-safety: lock spends pass an explicit long
+      // tryCancelAfter (the SDK default is 1 DAY — shorter than a disputed
+      // trade's life, so the spender's own client would auto-refund and
+      // hollow out a live escrow) and surface the operation id for the
+      // pending-native-locks stash.
+      async spendNotesDetailed(
+        amountMsats: number,
+        opts: { tryCancelAfterSecs?: number },
+        meta?: ChamaOperationMeta,
+      ) {
+        const result = await real.mint.spendNotes(
+          amountMsats,
+          typeof opts.tryCancelAfterSecs === "number"
+            ? Math.floor(opts.tryCancelAfterSecs)
+            : undefined,
+          false,
+          meta ?? {},
+        );
+        return {
+          notes: result.notes,
+          operationId: result.operation_id ? String(result.operation_id) : undefined,
+        };
+      },
       async redeemEcash(oobNotes: string, meta?: ChamaOperationMeta) {
         // v1.2.2 claim-hang fix: coalesce concurrent redeems for the
         // same notes. See comment on inFlightMintReissuesByNotes above.
@@ -1992,6 +2021,67 @@ export function adaptRealWallet(
           if (after === "refunded" || e?.code === LN_PAY_REFUNDED) return "refunded" as const;
           return "unknown" as const;
         }
+      },
+
+      // V7 reconcile-by-escrow, browser lane. payInvoice above stamps our
+      // ChamaOperationMeta (incl. chama_escrow_id) as the pay op's
+      // extra_meta, which fedimint persists in the operation log — the
+      // durable op↔escrow map. Scan recent LN sends, match on the stamp,
+      // classify each match from the log. Fund-safety: "none" is returned
+      // ONLY when the scan provably saw the complete window and every op in
+      // it was readable — anything less is "unknown" (refuse re-pay).
+      async payOutcomeByEscrow(escrowId: string, _sinceMs?: number) {
+        const listTransactions = real.federation.listTransactions;
+        const getOperation = real.federation.getOperation;
+        if (typeof listTransactions !== "function" || typeof getOperation !== "function") {
+          return { outcome: "unknown" as const };
+        }
+        let txs: RealTransaction[];
+        try {
+          txs = await listTransactions.call(real.federation, PAY_RECONCILE_SCAN_LIMIT);
+        } catch (e) {
+          console.warn("[chama] payOutcomeByEscrow: listTransactions failed", e);
+          return { outcome: "unknown" as const };
+        }
+        // A full page means older ops exist beyond the window — an empty
+        // match can't prove "no payment ever existed" then.
+        const windowComplete = txs.length < PAY_RECONCILE_SCAN_LIMIT;
+        let scanBlind = false;
+        const matches: string[] = [];
+        for (const tx of txs) {
+          const rec = recordOf(tx);
+          if (rec?.kind !== "ln" || rec?.type !== "send") continue;
+          const operationId = typeof rec.operationId === "string" ? rec.operationId : null;
+          if (!operationId) { scanBlind = true; continue; }
+          try {
+            const log = await getOperation.call(real.federation, operationId);
+            const operation = recordOf(log);
+            const extra = recordOf(recordOf(operation?.meta)?.extra_meta);
+            if (extra?.chama_escrow_id === escrowId) matches.push(operationId);
+          } catch {
+            // An unreadable op COULD be the match — the scan is blind.
+            scanBlind = true;
+          }
+        }
+        if (matches.length === 0) {
+          return windowComplete && !scanBlind
+            ? { outcome: "none" as const }
+            : { outcome: "unknown" as const };
+        }
+        // Classify every match; aggregate fund-safest-first: any settled ⇒
+        // settled (a payment for this escrow WAS paid); else any
+        // non-terminal/unreadable ⇒ inflight (a payment exists — refuse
+        // re-pay, carry its id for re-attach); else all refunded ⇒ refunded.
+        let inflightOp: string | undefined;
+        let refundedOp: string | undefined;
+        for (const operationId of matches) {
+          const outcome = await getPayOperationOutcome(real, operationId);
+          if (outcome === "settled") return { outcome: "settled" as const, operationId };
+          if (outcome === "refunded") refundedOp = operationId;
+          else inflightOp = operationId; // pending or unreadable ⇒ live payment
+        }
+        if (inflightOp) return { outcome: "inflight" as const, operationId: inflightOp };
+        return { outcome: "refunded" as const, operationId: refundedOp };
       },
     },
 

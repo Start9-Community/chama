@@ -39,6 +39,7 @@
 
 import {
   EscrowStatus,
+  TRULY_TERMINAL_STATES,
   EscrowEventKind,
   Role,
   Outcome,
@@ -122,7 +123,6 @@ import {
   WEST_AFRICA_COUNTRY_CODES,
   getCommunityBySlug,
   communityForInvite,
-  getPickerCommunities,
   getCustomCommunities,
   getCustomCommunityBySlug,
   addCustomCommunity,
@@ -133,10 +133,6 @@ import {
   getUserCommunitySlug,
   getUserCommunitySlugRaw,
   setUserCommunitySlug,
-  setPendingCommunitySelection,
-  getPendingCommunitySelection,
-  clearPendingCommunitySelection,
-  applyPendingCommunitySelection,
   COMMUNITY_STORAGE_KEY,
 } from "../communities/storage.js";
 import { defaultCurrencyForCommunity } from "../communities/currency.js";
@@ -289,6 +285,29 @@ import {
   isKenyaPayoutContext,
 } from "../payments/tando-offramp.js";
 import {
+  CHAPSMART_LNADDRESS_DOMAIN,
+  normalizeTanzanianMsisdn,
+  isValidTanzanianMsisdn,
+  buildChapsmartLightningAddress,
+  formatTanzanianMsisdnDisplay,
+  isChapsmartLightningAddress,
+  chapsmartMsisdnFromAddress,
+  isTanzaniaPayoutContext,
+} from "../payments/chapsmart-offramp.js";
+import {
+  CHAPSMART_ONRAMP_ENABLED,
+  CHAPSMART_MPESA_AGENT_NUMBER,
+  CHAPSMART_TARGET_TOLERANCE,
+  CHAPSMART_SEND_SATS_TOLERANCE,
+  isChapsmartOnrampContext,
+  chapsmartMpesaPaySteps,
+  normalizeMpesaConfirmationCode,
+  quoteMatchesTargetSats,
+  estimateTzsForTargetSats,
+  getBuyQuoteForSats,
+  type ChapsmartBuyQuote,
+} from "../payments/chapsmart-onramp.js";
+import {
   STRIKE_LNADDRESS_DOMAIN,
   STRIKE_CASH_HINT,
   normalizeStrikeUsername,
@@ -356,6 +375,28 @@ import {
   HIGH_VALUE_CONSENT_MSATS,
   pickArbiterFromPool as pickArbiterFromPoolV35,
 } from "../arbiters/pool.js";
+import * as btcMs from "@scure/btc-signer";
+import { base64 as msBase64 } from "@scure/base";
+import { hexToBytes as msHexToBytes, bytesToHex as msBytesToHex } from "@noble/hashes/utils.js";
+import {
+  buildBondMultisig, recomputeAddress, buildReturnPsbt, coSignPsbt,
+  combineAndFinalize, verifyReturnPsbt, SIGNET as MS_NET, MAINNET as MS_MAINNET, type BondUtxo,
+} from "../bond-multisig/multisig.js";
+import { findBondFundingUtxos, esploraOutspend, esploraRecommendedFeeRate, defaultEsploraBase, defaultMinConfs, type EsploraFetch } from "../bond-multisig/fund-watcher.js";
+import {
+  buildCommitmentBond, recomputeCommitmentAddress, buildReclaimTx, buildTimelockLeaf,
+  estimateReclaimVsize, estimateReclaimFeeSats, deriveBondSigningKey as deriveCommitmentKey,
+  bip86BondPath, MIN_COMMITMENT_TERM_BLOCKS, DEFAULT_RECLAIM_FEE_RATE,
+} from "../bond-multisig/commitment-bond.js";
+import {
+  buildBondAnnouncementEvent, parseBondAnnouncementEvent, verifyBondAnnouncement,
+  selectLatestAnnouncements, groupLatestAnnouncementsByCommunity, type VerifiedBond,
+} from "../bond-multisig/bond-announcement.js";
+import { computeChamaLiveness, formatLivenessReadout, bondedArbitersForCommunity } from "../arbiters/live-chama.js";
+import {
+  serializeCommitment, deserializeCommitment, type CommitmentRecord,
+  upsertCommitmentBond, getCommitmentBond, newBondId as newCommitmentBondId,
+} from "../bond-multisig/commitment-store.js";
 import {
   AMBIENT_ARBITER_FEE_BPS,
   DISPUTE_ARBITER_FEE_BPS,
@@ -515,6 +556,12 @@ import {
   selectLatestBond,
 } from "../arbiters/bonds.js";
 import {
+  VICTIM_ATTESTATION_KIND,
+  buildVictimAttestationEvent,
+  parseVictimAttestationEvent,
+  selectLatestAttestation,
+} from "../arbiters/victim-attestation.js";
+import {
   UNBONDED_FLOOR_MSATS,
   BONDS_ENFORCED,
   getArbiterBond,
@@ -525,6 +572,7 @@ import {
   exposureTier,
   selectOverCapacityArbiters,
   assignablePool,
+  assignableBondedArbiters,
 } from "../arbiters/exposure.js";
 import { notificationForTransition, chatNotificationFor } from "../notifications/trade-notifications.js";
 import { catchUpPrev, readSeenStatus, recordSeenStatus } from "../notifications/notify-service.js";
@@ -616,6 +664,7 @@ function createEvent(opts: {
   parent?: string;
   claimedQuantity?: number;
   arbiterFeeMsats?: number;
+  bondedArbiters?: string[];
 } = {}): ParsedEscrowEvent<CreatePayload> {
   return makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
     type: "escrow:create",
@@ -633,6 +682,7 @@ function createEvent(opts: {
     paymentMethods: ["Zelle", "CashApp"],
     expirySeconds: 86400,
     communityArbiters: opts.communityArbiters,
+    bondedArbiters: opts.bondedArbiters,
     items: opts.items,
     ...(opts.stock !== undefined ? { stock: opts.stock } : {}),
     ...(opts.parent !== undefined ? { parent: opts.parent } : {}),
@@ -2510,6 +2560,495 @@ console.log("\n── v2.9 expiry-exploit: performance contest ──");
     "v2.9: marketplace — the BUYER (locker) voting RELEASE is NOT a contest");
 }
 
+// ── 5b-BONDMS. Bitcoin multisig bond custody (cryptographic no-self-return) ────
+// The new custody primitive: a Taproot m-of-n (default 2-of-3 over owner+2
+// custodians). Owner is 1 key → Bitcoin consensus (not our code) forbids an
+// owner-alone spend. The ⭐ custodian checklist (verifyReturnPsbt) is the real
+// security layer — it kills blind-cosign self-reclaim. Offline (library) proof of
+// the attack matrix; the on-chain signet broadcast is the supervised gate.
+console.log("\n── Bond custody: Bitcoin Taproot multisig (@scure/btc-signer) ──");
+{
+  const priv = [0, 1, 2, 3, 4].map(() => btcMs.utils.randomPrivateKeyBytes());
+  const xonly = priv.map((p) => btcMs.utils.pubSchnorr(p));
+  const [OWNER, CUSTA, CUSTB] = [0, 1, 2];
+  const bond = buildBondMultisig(2, 3, [xonly[OWNER], xonly[CUSTA], xonly[CUSTB]], MS_NET);
+  assert(bond.address.startsWith("tb1p"), "multisig: 2-of-3 builds a Taproot address");
+  assert(recomputeAddress(2, 3, [xonly[OWNER], xonly[CUSTA], xonly[CUSTB]], MS_NET) === bond.address,
+    "multisig: recomputeAddress is deterministic (verify-don't-trust the wire)");
+
+  const utxo: BondUtxo = { txid: "aa".repeat(32), index: 0, amountSats: 100_000n };
+  const ownerAddr = btcMs.p2tr(xonly[OWNER], undefined, MS_NET).address as string;
+  const secretAddr = btcMs.p2tr(xonly[3], undefined, MS_NET).address as string;
+  const psbt = buildReturnPsbt({ bond, utxo, ownerReturnAddress: ownerAddr, feeSats: 500n, network: MS_NET });
+
+  const canFinalize = (psbts: string[]) => { try { return combineAndFinalize(psbts, MS_NET).length > 0; } catch { return false; } };
+  const sOwner = coSignPsbt(psbt, priv[OWNER], MS_NET);
+  assert(canFinalize([coSignPsbt(sOwner, priv[CUSTA], MS_NET)]),
+    "multisig RETURN: owner→custA sequential co-sign over the wire → finalizes to a valid tx");
+  assert(!canFinalize([sOwner]),
+    "⭐ multisig: owner ALONE (1-of-3) cannot finalize — cryptographic no-self-return");
+  assert(canFinalize([coSignPsbt(coSignPsbt(psbt, priv[CUSTA], MS_NET), priv[CUSTB], MS_NET)]),
+    "multisig: custA+custB (no owner) finalizes — cabinet can return / restore");
+
+  // ⭐ The custodian checklist — the real enforcement layer.
+  const expect = { bond, utxo, ownerReturnAddress: ownerAddr, maxFeeSats: 2_000n, network: MS_NET };
+  assert(verifyReturnPsbt(psbt, expect).ok, "checklist: a legit return-to-owner PSBT passes");
+  assert(!verifyReturnPsbt(buildReturnPsbt({ bond, utxo, ownerReturnAddress: secretAddr, feeSats: 500n, network: MS_NET }), expect).ok,
+    "⭐ checklist REJECTS a spend to a non-owner address — blind-cosign self-reclaim dies");
+  assert(!verifyReturnPsbt(buildReturnPsbt({ bond, utxo, ownerReturnAddress: ownerAddr, feeSats: 90_000n, network: MS_NET }), expect).ok,
+    "checklist REJECTS an inflated fee (grief)");
+  assert(!verifyReturnPsbt(psbt, { ...expect, utxo: { ...utxo, txid: "bb".repeat(32) } }).ok,
+    "checklist REJECTS a wrong input UTXO");
+  {
+    const spend = btcMs.p2tr(msHexToBytes("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"),
+      btcMs.p2tr_ms(2, [xonly[OWNER], xonly[CUSTA], xonly[CUSTB]]) as never, MS_NET);
+    const evil = new btcMs.Transaction();
+    evil.addInput({ txid: msHexToBytes(utxo.txid), index: 0, witnessUtxo: { script: spend.script, amount: utxo.amountSats }, ...spend });
+    evil.addOutputAddress(ownerAddr, 50_000n, MS_NET);
+    evil.addOutputAddress(secretAddr, 49_000n, MS_NET); // siphon
+    assert(!verifyReturnPsbt(msBase64.encode(evil.toPSBT()), expect).ok, "checklist REJECTS an extra (siphon) output");
+
+    const sh = new btcMs.Transaction();
+    sh.addInput({ txid: msHexToBytes(utxo.txid), index: 0, witnessUtxo: { script: spend.script, amount: utxo.amountSats }, ...spend, sighashType: 0x83 });
+    sh.addOutputAddress(ownerAddr, 90_000n, MS_NET);
+    assert(!verifyReturnPsbt(msBase64.encode(sh.toPSBT()), expect).ok, "checklist REJECTS a non-DEFAULT (blank-check ANYONECANPAY|SINGLE) sighash");
+  }
+
+  // m/n parameterization is real: 3-of-5 needs 3, not 2.
+  const bond5 = buildBondMultisig(3, 5, xonly, MS_NET);
+  assert(bond5.address.startsWith("tb1p"), "multisig: 3-of-5 builds (parameterized m/n)");
+  const p5 = buildReturnPsbt({ bond: bond5, utxo, ownerReturnAddress: ownerAddr, feeSats: 500n, network: MS_NET });
+  assert(!canFinalize([coSignPsbt(coSignPsbt(p5, priv[0], MS_NET), priv[1], MS_NET)]),
+    "multisig 3-of-5: two signatures do NOT meet threshold (parameterization isn't theater)");
+  assert(canFinalize([coSignPsbt(coSignPsbt(coSignPsbt(p5, priv[0], MS_NET), priv[1], MS_NET), priv[2], MS_NET)]),
+    "multisig 3-of-5: three signatures finalize");
+}
+
+// ── 5b-BONDFUND. Funding watcher (the commitment bond's deposit scanner) ───────
+// findBondFundingUtxos is the live path: EVERY confirmed deposit at the bond
+// address (any amount — the arbiter's own sats; more is a bigger bond), each with
+// its REAL scriptPubKey read off the funding tx. The minConfs depth gate must
+// NEVER silently drop a deposit it can't measure ("I funded it, nothing shows" is
+// the worse failure). esploraOutspend is the reclaim-recovery probe: the leaf is
+// owner-key-only, so a spend of a bond UTXO can only BE the owner's reclaim.
+console.log("\n── Bond funding watcher (commitment deposits + outspend recovery) ──");
+{
+  const owner = btcMs.utils.pubSchnorr(btcMs.utils.randomPrivateKeyBytes());
+  const bond = buildCommitmentBond(owner, 900_000, MS_NET);
+  const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  const scriptHex = hex(bond.script);
+  const T1 = "cd".repeat(32), T2 = "ce".repeat(32);
+
+  const fake = (utxos: any[], opts: { tip?: number | "fail"; badScriptFor?: string } = {}): EsploraFetch => async (path: string) => {
+    if (path.endsWith("/utxo")) return utxos;
+    if (path === "/blocks/tip/height") { if (opts.tip === "fail") throw new Error("tip down"); return opts.tip ?? 800_010; }
+    if (path.startsWith("/tx/")) {
+      const txid = path.split("/")[2];
+      return { vout: [{ scriptpubkey: opts.badScriptFor === txid ? "zz" : scriptHex }, { scriptpubkey: scriptHex }] };
+    }
+    return null;
+  };
+
+  // Finds EVERY confirmed deposit, any amount, each with its real script.
+  const two = await findBondFundingUtxos({ address: bond.address, fetchJson: fake([
+    { txid: T1, vout: 0, value: 20_000, status: { confirmed: true } },
+    { txid: T2, vout: 1, value: 5_000, status: { confirmed: true } },
+  ]) });
+  assert(two.length === 2 && two[0].utxo.amountSats === 20_000n && two[1].utxo.amountSats === 5_000n,
+    "⭐ bondfund: finds ALL confirmed deposits of ANY amount (multi-UTXO funding)");
+  assert(two.every((f) => hex(f.fundingScript) === scriptHex), "bondfund: each deposit carries its REAL on-chain script");
+
+  // Unconfirmed deposits are ignored; none yet → [] (keep polling).
+  assert((await findBondFundingUtxos({ address: bond.address, fetchJson: fake([{ txid: T1, vout: 0, value: 1_000, status: { confirmed: false } }]) })).length === 0,
+    "bondfund: an UNCONFIRMED deposit is ignored");
+  assert((await findBondFundingUtxos({ address: bond.address, fetchJson: fake([]) })).length === 0, "bondfund: no deposit yet → empty");
+
+  // Depth gate: a KNOWN-too-shallow deposit is rejected (reorg safety)…
+  const shallow = await findBondFundingUtxos({ address: bond.address, minConfs: 6, fetchJson: fake([
+    { txid: T1, vout: 0, value: 20_000, status: { confirmed: true, block_height: 800_008 } }, // depth 3 at tip 800_010
+  ]) });
+  assert(shallow.length === 0, "⭐ bondfund: minConfs REJECTS a known too-shallow deposit (reorg safety)");
+  // …but a deposit whose depth CANNOT be measured is kept, and so is the whole
+  // confirmed set when the tip fetch itself fails — never silently drop.
+  assert((await findBondFundingUtxos({ address: bond.address, minConfs: 6, fetchJson: fake([
+    { txid: T1, vout: 0, value: 20_000, status: { confirmed: true } },
+  ]) })).length === 1, "⭐ bondfund: a confirmed deposit with no measurable depth is KEPT");
+  assert((await findBondFundingUtxos({ address: bond.address, minConfs: 6, fetchJson: fake([
+    { txid: T1, vout: 0, value: 20_000, status: { confirmed: true, block_height: 800_008 } },
+  ], { tip: "fail" }) })).length === 1, "⭐ bondfund: a failed tip fetch keeps the confirmed set");
+
+  // A deposit whose funding tx yields no valid script is skipped; the rest survive.
+  const partial = await findBondFundingUtxos({ address: bond.address, fetchJson: fake([
+    { txid: T1, vout: 0, value: 20_000, status: { confirmed: true } },
+    { txid: T2, vout: 0, value: 9_000, status: { confirmed: true } },
+  ], { badScriptFor: T2 }) });
+  assert(partial.length === 1 && partial[0].utxo.txid === T1, "bondfund: a deposit with an unreadable script is skipped, the rest survive");
+
+  // esploraOutspend — the reclaim-recovery probe.
+  const outspendFake = (resp: any): EsploraFetch => async () => resp;
+  const spent = await esploraOutspend(outspendFake({ spent: true, txid: T2 }), T1, 0);
+  assert(spent.spent === true && spent.txid === T2, "bondfund: outspend reports the spending txid (lost-state reclaim recovery)");
+  const unspent = await esploraOutspend(outspendFake({ spent: false }), T1, 0);
+  assert(unspent.spent === false && unspent.txid === undefined, "bondfund: outspend reports unspent");
+  let outspendThrew = false;
+  try { await esploraOutspend(outspendFake(null), T1, 0); } catch { outspendThrew = true; }
+  assert(outspendThrew, "bondfund: a malformed outspend response throws (never a silent 'unspent')");
+}
+
+// ── 5b-BONDCLTV. Single-key TIMELOCK COMMITMENT bond (the sealed v1 model) ─────
+// The bond is now an arbiter's OWN sats, timelocked to their OWN key until T — one
+// Taproot leaf, one signer, collusion-impossible by construction. Unit-level: the
+// address is deterministic, a valid reclaim (nLockTime = T) finalizes to a
+// broadcastable single-sig tx, and an early reclaim (nLockTime < T) still BUILDS
+// (it's the consensus-invalid tx the network rejects — proven on Mutinynet, not here).
+console.log("\n── Bond commitment (single-key CLTV timelock) ──");
+{
+  const owner = (() => { const bp = btcMs.utils.randomPrivateKeyBytes(); return { bp, x: btcMs.utils.pubSchnorr(bp) }; })();
+  const T = 800_000;
+  const bond = buildCommitmentBond(owner.x, T, MS_NET);
+  assert(bond.address.startsWith("tb1p"), "bondcltv: builds a taproot address");
+  assert(recomputeCommitmentAddress(owner.x, T, MS_NET) === bond.address, "⭐ bondcltv: address is deterministic (recompute-don't-trust)");
+  assert(recomputeCommitmentAddress(owner.x, T + 1, MS_NET) !== bond.address, "bondcltv: a different term → a different address");
+  const other = btcMs.utils.pubSchnorr(btcMs.utils.randomPrivateKeyBytes());
+  assert(recomputeCommitmentAddress(other, T, MS_NET) !== bond.address, "bondcltv: a different owner key → a different address");
+
+  // The leaf really is <T> CLTV DROP <key> CHECKSIG.
+  const leafHex = [...buildTimelockLeaf(owner.x, T)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assert(leafHex.includes("b17520") && leafHex.endsWith("ac"), "bondcltv: leaf = <T> CHECKLOCKTIMEVERIFY(b1) DROP(75) <key>(20…) CHECKSIG(ac)");
+
+  const utxo = { txid: "cc".repeat(32), index: 0, amountSats: 50_000n };
+  const dest = btcMs.p2tr(owner.x, undefined, MS_NET).address as string;
+
+  // Valid reclaim: nLockTime = T, owner-signed, one-sig witness.
+  const rawValid = buildReclaimTx({ bond, utxos: [utxo], ownerPriv: owner.bp, destination: dest, feeSats: 500n });
+  const decoded = btcMs.Transaction.fromRaw(msHexToBytes(rawValid));
+  assert(decoded.lockTime === T, "bondcltv: valid reclaim carries nLockTime = T");
+  assert(decoded.getInput(0).sequence === 0xfffffffe, "bondcltv: input sequence enables nLockTime (0xfffffffe)");
+  const w = decoded.getInput(0).finalScriptWitness!;
+  assert(w.length === 3 && w[0].length === 64, "⭐ bondcltv: witness = [ownerSig(64), leaf, controlBlock] — one signer, no cabinet");
+
+  // Early reclaim: nLockTime < T still BUILDS (it's the tx the network rejects on CLTV).
+  const rawEarly = buildReclaimTx({ bond, utxos: [utxo], ownerPriv: owner.bp, destination: dest, feeSats: 500n, txLockTime: T - 1 });
+  assert(btcMs.Transaction.fromRaw(msHexToBytes(rawEarly)).lockTime === T - 1, "⭐ bondcltv: an EARLY reclaim (nLockTime<T) builds — the consensus-invalid tx Mutinynet rejects");
+  assert(rawEarly !== rawValid, "bondcltv: early and valid reclaims differ only by the locktime commitment");
+
+  // ⭐ Multi-UTXO sweep: fund the address twice → reclaim spends BOTH inputs to one
+  // output (this is what fixes "I sent 2 UTXOs and nothing showed"). Accept any amount.
+  const u1 = { txid: "11".repeat(32), index: 0, amountSats: 30_000n };
+  const u2 = { txid: "22".repeat(32), index: 1, amountSats: 12_345n };
+  const rawSweep = buildReclaimTx({ bond, utxos: [u1, u2], ownerPriv: owner.bp, destination: dest, feeSats: 500n });
+  const sweep = btcMs.Transaction.fromRaw(msHexToBytes(rawSweep));
+  assert(sweep.inputsLength === 2, "⭐ bondcltv: multi-UTXO reclaim sweeps BOTH inputs");
+  assert(sweep.getOutput(0).amount === 30_000n + 12_345n - 500n, "bondcltv: sweep output = sum(utxos) − fee (any amount accepted)");
+
+  // ⭐ INVARIANT 3 (owner-only), the static half: the control block is exactly 33
+  // bytes — [parity|leafver] + the 32-byte internal key, NO merkle path — so the
+  // executed leaf IS the whole tree (there is no other leaf), and the internal key
+  // is the BIP341 NUMS point (no known discrete log → the key-path can never sign).
+  const cb = w[2];
+  assert(cb.length === 33, "⭐ bondcltv: control block = 33 bytes — SINGLE leaf, no hidden sibling script");
+  assert(msBytesToHex(cb.subarray(1)) === "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "⭐ bondcltv: internal key is the BIP341 NUMS point — the key-path is unspendable");
+
+  // ⭐ INVARIANT 3, the signing half: a WRONG private key cannot produce a reclaim
+  // witness at all (@scure refuses to sign a leaf whose pubkey it doesn't hold).
+  let wrongKeyThrew = false;
+  try {
+    buildReclaimTx({ bond, utxos: [utxo], ownerPriv: btcMs.utils.randomPrivateKeyBytes(), destination: dest, feeSats: 500n });
+  } catch { wrongKeyThrew = true; }
+  assert(wrongKeyThrew, "⭐ bondcltv: a non-owner key cannot build a reclaim witness (owner-only by construction)");
+
+  // ⭐ Fee estimator is BYTE-EXACT: a BIP340 sig is always 64 bytes (SIGHASH_DEFAULT
+  // appends none), so the predicted vsize must equal the real built tx's vsize for
+  // every sweep width. This is what makes the size-based fee trustworthy.
+  for (let n = 1; n <= 4; n++) {
+    const utxos = Array.from({ length: n }, (_, i) => ({ txid: (10 + i).toString(16).repeat(64), index: i, amountSats: 25_000n }));
+    const raw = buildReclaimTx({ bond, utxos, ownerPriv: owner.bp, destination: dest, feeSats: 600n });
+    const actual = btcMs.Transaction.fromRaw(msHexToBytes(raw)).vsize;
+    assert(estimateReclaimVsize(bond, n) === actual, `⭐ bondcltv: estimateReclaimVsize(${n} inputs) is byte-exact (${actual} vB)`);
+  }
+  assert(estimateReclaimFeeSats(bond, 1) === 300n, "bondcltv: 1-input fee keeps the 300-sat floor (what single-UTXO reclaims always paid)");
+  const fee4 = estimateReclaimFeeSats(bond, 4);
+  assert(fee4 > 300n && fee4 >= BigInt(estimateReclaimVsize(bond, 4)) * 2n,
+    "bondcltv: a 4-input sweep fee scales with size (≥ 2 sat/vB)");
+  assert(BigInt(estimateReclaimVsize(bond, 4)) > 300n,
+    "⭐ bondcltv: the old flat 300-sat fee was BELOW 1 sat/vB on a 4-input sweep (unrelayable) — size-based fees fix a real bug");
+
+  // Dust guard: a fee that leaves the output below the P2TR dust floor throws
+  // (an unrelayable reclaim must fail loudly at build time, not at broadcast).
+  let dustThrew = false;
+  try {
+    buildReclaimTx({ bond, utxos: [{ txid: "33".repeat(32), index: 0, amountSats: 700n }], ownerPriv: owner.bp, destination: dest, feeSats: 500n });
+  } catch { dustThrew = true; }
+  assert(dustThrew, "bondcltv: a reclaim whose output would be dust (<330 sats) refuses to build");
+
+  // ⭐ Derivation pin: the bond key derives to this exact x-only key for the
+  // reference mnemonic (BIP86 m/86'/1'/0'/0/0). A funded bond's address embeds this
+  // derivation — if it EVER drifts, real locked sats become unreachable. Golden.
+  const MN_REF = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+  const dk = deriveCommitmentKey(MN_REF, { network: MS_NET });
+  assert(dk.path === "m/86'/1'/0'/0/0" && msBytesToHex(dk.xonly) === "55355ca83c973f1d97ce0e3843c85d78905af16b4dc531bc488e57212d230116",
+    "⭐ bondcltv: bond-key derivation is pinned (golden vector) — funded bonds stay reclaimable");
+
+  // ⭐ PER-BOND ADDRESS: a fresh index gives a distinct key → a distinct address, so
+  // two bonds NEVER share an address (no commingled UTXOs) even at the SAME term.
+  const k0 = deriveCommitmentKey(MN_REF, { network: MS_NET, index: 0 });
+  const k1 = deriveCommitmentKey(MN_REF, { network: MS_NET, index: 1 });
+  assert(k0.path === "m/86'/1'/0'/0/0" && k1.path === "m/86'/1'/0'/0/1", "bondcltv: index selects the BIP86 address index");
+  assert(msBytesToHex(k0.xonly) === msBytesToHex(dk.xonly), "bondcltv: index 0 == the default (legacy bonds unchanged)");
+  assert(msBytesToHex(k0.xonly) !== msBytesToHex(k1.xonly), "bondcltv: a different index → a different bond key");
+  const sameTerm = 900_000;
+  const addr0 = buildCommitmentBond(k0.xonly, sameTerm, MS_NET).address;
+  const addr1 = buildCommitmentBond(k1.xonly, sameTerm, MS_NET).address;
+  assert(addr0 !== addr1, "⭐ bondcltv: two bonds at the SAME term but different index → DIFFERENT addresses (no commingling)");
+}
+
+// ── MAINNET BOND CONFIG (v5.0 real-money flip guard) ─────────────────────────
+// Guards against an accidental revert to signet/testnet — which would derive tb1
+// addresses (wrong-network funds) and read the wrong Esplora. Real Bitcoin.
+console.log("\n── MAINNET BOND CONFIG (v5.0 real-money flip guard) ──");
+{
+  const MNEMONIC = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+  assert(MS_MAINNET !== MS_NET, "mainnet: MAINNET network object is distinct from SIGNET");
+  const fk = deriveCommitmentKey(MNEMONIC, { network: MS_MAINNET, index: 0 });
+  const mainnetBond = buildCommitmentBond(fk.xonly, 900_000, MS_MAINNET);
+  assert(mainnetBond.address.startsWith("bc1"), `mainnet: a bond builds a bc1 (mainnet) Taproot address, not tb1 (got ${mainnetBond.address.slice(0, 6)}…)`);
+  const signetBond = buildCommitmentBond(fk.xonly, 900_000, MS_NET);
+  assert(signetBond.address.startsWith("tb1"), "mainnet: the signet builder still yields tb1 (network param honored, not hardcoded)");
+  assert(bip86BondPath(MS_MAINNET) === "m/86'/0'/0'/0/0", `mainnet: BIP86 path uses coin 0 (got ${bip86BondPath(MS_MAINNET)})`);
+  assert(bip86BondPath(MS_NET) === "m/86'/1'/0'/0/0", "mainnet: signet BIP86 path still uses coin 1");
+  assert(defaultMinConfs(MS_MAINNET) === 1, `mainnet: bond funding needs 1 conf — Jetty's call (got ${defaultMinConfs(MS_MAINNET)})`);
+  assert(defaultEsploraBase(MS_MAINNET).includes("mempool.space"), `mainnet: Esplora base is mempool.space (got ${defaultEsploraBase(MS_MAINNET)})`);
+  assert(!defaultEsploraBase(MS_MAINNET).includes("mutinynet"), "mainnet: Esplora base is NOT mutinynet");
+  assert(MIN_COMMITMENT_TERM_BLOCKS === 144, `mainnet: minimum term is 144 blocks (~1 day) (got ${MIN_COMMITMENT_TERM_BLOCKS})`);
+}
+
+// ── RECLAIM FEE RATE (dynamic mempool estimate) ──────────────────────────────
+console.log("\n── RECLAIM FEE RATE (dynamic mempool estimate) ──");
+{
+  const feeJson = (fees: any): EsploraFetch => async (path: string) => {
+    if (path === "/v1/fees/recommended") return fees;
+    throw new Error(`unexpected path ${path}`);
+  };
+  const r1 = await esploraRecommendedFeeRate(feeJson({ hourFee: 8, halfHourFee: 12, fastestFee: 20 }), { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
+  assert(r1 === 8n, `reclaim-fee: targets the ~1h tier (got ${r1})`);
+  const r2 = await esploraRecommendedFeeRate(feeJson({ hourFee: 1, halfHourFee: 1 }), { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
+  assert(r2 === DEFAULT_RECLAIM_FEE_RATE, `reclaim-fee: a sub-floor rate is floored to the flat default (got ${r2})`);
+  const r3 = await esploraRecommendedFeeRate(feeJson({ hourFee: 5000 }), { floorPerVb: DEFAULT_RECLAIM_FEE_RATE, capPerVb: 100n });
+  assert(r3 === 100n, `reclaim-fee: a fee-spike rate is capped (got ${r3})`);
+  const r4 = await esploraRecommendedFeeRate((async () => { throw new Error("esplora down"); }) as EsploraFetch, { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
+  assert(r4 === DEFAULT_RECLAIM_FEE_RATE, `reclaim-fee: an unreachable Esplora falls back to the flat floor — never blocks a reclaim (got ${r4})`);
+  const r5 = await esploraRecommendedFeeRate(feeJson({ garbage: true }), { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
+  assert(r5 === DEFAULT_RECLAIM_FEE_RATE, "reclaim-fee: a malformed fee response falls back to the floor");
+  // The dynamic rate flows into the size-based fee (higher rate → higher fee).
+  const feeBond = buildCommitmentBond(deriveCommitmentKey("legal winner thank year wave sausage worth useful legal winner thank yellow", { network: MS_MAINNET }).xonly, 900_000, MS_MAINNET);
+  assert(estimateReclaimFeeSats(feeBond, 3, 20n) > estimateReclaimFeeSats(feeBond, 3, 2n), "reclaim-fee: a higher rate yields a higher reclaim fee (rate flows through)");
+}
+
+// ── 5b-BONDCOMMIT. Commitment store (serialize round-trip + recompute-on-load gate) ─
+// The store is a convenience cache, adversarial-on-read: deserialize REBUILDS the
+// address from (ownerXonly, lockUntil, network) and rejects a record whose stored
+// address doesn't reproduce. Pure (no localStorage) — the security-critical path.
+console.log("\n── Commitment store (round-trip + tamper gate) ──");
+{
+  const bp = btcMs.utils.randomPrivateKeyBytes();
+  const x = btcMs.utils.pubSchnorr(bp);
+  const bond = buildCommitmentBond(x, 810_000, MS_NET);
+  const rec: CommitmentRecord = {
+    bondId: "bond_cmt_1", bond, amountSats: 21_000n, phase: "locked",
+    utxos: [{ txid: "ee".repeat(32), index: 0, amountSats: 21_000n }], createdAt: 1_900_000_000,
+  };
+  const s = serializeCommitment(rec);
+  const back = deserializeCommitment(s);
+  assert(back !== null && back.bond.address === bond.address, "bondcommit: address round-trips");
+  assert(back !== null && back.amountSats === 21_000n, "⭐ bondcommit: amountSats round-trips as an exact bigint");
+  assert(back !== null && back.utxos?.[0]?.amountSats === 21_000n && back.phase === "locked", "bondcommit: utxos + phase round-trip");
+  assert(back !== null && back.bond.lockUntil === 810_000, "bondcommit: lockUntil round-trips");
+  // ⭐ tamper gate: a stored address that doesn't recompute is rejected.
+  assert(deserializeCommitment({ ...s, address: bond.address.slice(0, -3) + "xyz" }) === null, "⭐ bondcommit: a tampered stored address (≠ recomputed) is rejected on load");
+  // A different lockUntil in the stored fields → the address no longer matches → reject.
+  assert(deserializeCommitment({ ...s, lockUntil: 810_001 }) === null, "⭐ bondcommit: a mutated lockUntil (address no longer reproduces) is rejected");
+  assert(deserializeCommitment({ ...s, amountSats: "-1" }) === null, "bondcommit: a non-decimal/negative amount is rejected");
+  // A tampered ownerXonly (address no longer reproduces from the stored key) rejects.
+  assert(deserializeCommitment({ ...s, ownerXonly: "00".repeat(32) }) === null,
+    "⭐ bondcommit: a swapped ownerXonly (address no longer reproduces) is rejected");
+  // reclaimTxid survives the round-trip (the receipt of a finished bond).
+  const done = deserializeCommitment(serializeCommitment({ ...rec, phase: "reclaimed", reclaimTxid: "ff".repeat(32) }));
+  assert(done?.phase === "reclaimed" && done?.reclaimTxid === "ff".repeat(32), "bondcommit: reclaimTxid round-trips");
+  // ⭐ keyIndex round-trips (reclaim re-derives the right key); a legacy record → index 0.
+  assert(deserializeCommitment(serializeCommitment({ ...rec, keyIndex: 7 }))?.keyIndex === 7, "bondcommit: keyIndex round-trips (per-bond derivation index)");
+  assert(deserializeCommitment(s)?.keyIndex === 0, "bondcommit: a legacy record (no keyIndex) defaults to index 0");
+
+  // ── Store lifecycle (localStorage-backed, scoped like the app) ───────────────
+  (globalThis as any).localStorage.clear();
+  setLocalStorageUserScope("npub_commitment_store_test");
+  const bid = newCommitmentBondId();
+  assert(/^bond_/.test(bid) && !bid.includes(bond.address), "bondcommit: newBondId is opaque (never embeds the address)");
+  upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "created", createdAt: 1_900_000_000 });
+  assert(getCommitmentBond(bid)?.phase === "created", "bondcommit: upsert + get persists a CREATED bond");
+  // Advance to locked with one UTXO…
+  upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "locked", utxos: rec.utxos, createdAt: 1_900_000_000 });
+  assert(getCommitmentBond(bid)?.phase === "locked", "bondcommit: upsert advances created→locked");
+  // …an equal-rank re-save WITHOUT utxos carries the funded set forward (never-regress)…
+  upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "locked", createdAt: 1_900_000_000 });
+  assert(getCommitmentBond(bid)?.utxos?.length === 1, "⭐ bondcommit: an equal-rank upsert carries the funded UTXOs forward");
+  // …and a stale downgrade is refused after reclaim.
+  upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "reclaimed", reclaimTxid: "aa".repeat(32), createdAt: 1_900_000_000 });
+  upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "locked", utxos: rec.utxos, createdAt: 1_900_000_000 });
+  const final = getCommitmentBond(bid);
+  assert(final?.phase === "reclaimed" && final?.reclaimTxid === "aa".repeat(32),
+    "⭐ bondcommit: a stale LOCKED upsert cannot downgrade a RECLAIMED bond (phase-monotonic)");
+  (globalThis as any).localStorage.clear();
+  setLocalStorageUserScope(null);
+}
+
+// ── 5b-BONDANN. Commitment-bond ANNOUNCEMENT (kind 38135, chain-verifiable) ────
+// The public, PROVABLE advertisement of a commitment bond (the live-chama liveness
+// source). Two security properties: signer-authoritative (no announcing another's
+// bond) + recompute-don't-trust (verify rebuilds the address locally + reads it
+// on-chain; a lie in the wire address/amount can't survive).
+console.log("\n── Bond announcement (kind 38135, chain-verifiable) ──");
+{
+  const sk = generateSecretKey();
+  const npub = getPublicKey(sk);
+  const bp = btcMs.utils.randomPrivateKeyBytes();
+  const ownerXonly = btcMs.utils.pubSchnorr(bp);
+  const T = 820_000;
+  const bond = buildCommitmentBond(ownerXonly, T, MS_NET);
+  const community = "tz-tzs";
+  const hexOf = (b: Uint8Array) => [...b].map((n) => n.toString(16).padStart(2, "0")).join("");
+
+  const signed = finalizeEvent(buildBondAnnouncementEvent({
+    pubkey: npub, community, ownerXonly, lockUntil: T, amountSats: 50_000n, network: MS_NET, address: bond.address,
+  }), sk) as unknown as NostrEvent;
+  const parsed = parseBondAnnouncementEvent(signed);
+  assert(parsed !== null && parsed.npub === npub && parsed.lockUntil === T && parsed.claimedSats === 50_000n && parsed.community === community,
+    "bondann: build→sign→parse round-trips");
+
+  // ⭐ signer-authoritative: a payload npub that disagrees with the signer is rejected
+  // (verifyEvent overridden true to isolate the npub check from the broken signature).
+  const spoof = { ...signed, content: JSON.stringify({ ...JSON.parse(signed.content), npub: getPublicKey(generateSecretKey()) }) } as NostrEvent;
+  assert(parseBondAnnouncementEvent(spoof, { verifyEvent: () => true }) === null,
+    "⭐ bondann: a payload npub ≠ signer is rejected (no announcing another's bond)");
+
+  // A fake Esplora that funds the RECOMPUTED address (50k confirmed).
+  const scriptHex = hexOf(bond.script);
+  const fakeEsplora = (addr: string): EsploraFetch => async (path: string) => {
+    if (path === `/address/${addr}/utxo`) return [{ txid: "aa".repeat(32), vout: 0, value: 50_000, status: { confirmed: true } }];
+    if (path.startsWith("/tx/")) return { vout: [{ scriptpubkey: scriptHex }] };
+    return null;
+  };
+
+  // ⭐ recompute-don't-trust: verify rebuilds the address + reads it on-chain.
+  const v = await verifyBondAnnouncement(parsed!, { network: MS_NET, fetchJson: fakeEsplora(bond.address), tipHeight: 800_000 });
+  assert(v !== null && v.funded && v.actualSats === 50_000n && v.address === bond.address && v.active,
+    "⭐ bondann: verify recomputes the address + reads it on-chain (funded, active)");
+
+  // ⭐ a tampered WIRE address is ignored — verify trusts only the recompute.
+  const v2 = await verifyBondAnnouncement({ ...parsed!, address: "tb1pTOTALLYWRONG" }, { network: MS_NET, fetchJson: fakeEsplora(bond.address), tipHeight: 800_000 });
+  assert(v2 !== null && v2.funded && v2.address === bond.address,
+    "⭐ bondann: a tampered wire address is IGNORED — verify uses the recomputed address");
+
+  // A wrong ownerXonly recomputes a DIFFERENT address → the fake (keyed to the real one)
+  // has nothing there → not funded (a fabricated key can't borrow a real bond's deposit).
+  const wrongX = hexOf(btcMs.utils.pubSchnorr(btcMs.utils.randomPrivateKeyBytes()));
+  const v3 = await verifyBondAnnouncement({ ...parsed!, ownerXonly: wrongX }, { network: MS_NET, fetchJson: fakeEsplora(bond.address), tipHeight: 800_000 });
+  assert(v3 !== null && !v3.funded, "bondann: a wrong ownerXonly recomputes a different address → not funded");
+
+  // network-domain mismatch → rejected outright.
+  assert((await verifyBondAnnouncement({ ...parsed!, network: "mainnet" }, { network: MS_NET, fetchJson: fakeEsplora(bond.address) })) === null,
+    "bondann: a network-domain mismatch is rejected");
+
+  // active flips off once the tip reaches the term.
+  const vExpired = await verifyBondAnnouncement(parsed!, { network: MS_NET, fetchJson: fakeEsplora(bond.address), tipHeight: T + 1 });
+  assert(vExpired !== null && !vExpired.active, "bondann: active=false once tip ≥ lockUntil");
+
+  // selectLatest: newest-wins per arbiter.
+  const older = finalizeEvent(buildBondAnnouncementEvent({ pubkey: npub, community, ownerXonly, lockUntil: T, amountSats: 10_000n, network: MS_NET, address: bond.address, createdAt: 1000 }), sk) as unknown as NostrEvent;
+  const newer = finalizeEvent(buildBondAnnouncementEvent({ pubkey: npub, community, ownerXonly, lockUntil: T, amountSats: 90_000n, network: MS_NET, address: bond.address, createdAt: 2000 }), sk) as unknown as NostrEvent;
+  const latest = selectLatestAnnouncements([older, newer]);
+  assert(latest.length === 1 && latest[0].claimedSats === 90_000n, "bondann: selectLatest → one per arbiter, newest wins");
+
+  // ── groupLatest (the BATCHED no-#d list read) ──────────────────────────────
+  // Keys (npub, community): an arbiter bonded in TWO chamas must appear in both
+  // groups — exactly what per-npub selectLatest would collapse.
+  const sk2 = generateSecretKey();
+  const npub2 = getPublicKey(sk2);
+  const annOf = (key: Uint8Array, c: string, sats: bigint, createdAt: number) =>
+    finalizeEvent(buildBondAnnouncementEvent({
+      pubkey: getPublicKey(key), community: c, ownerXonly, lockUntil: T,
+      amountSats: sats, network: MS_NET, address: bond.address, createdAt,
+    }), key) as unknown as NostrEvent;
+  const grouped = groupLatestAnnouncementsByCommunity([
+    annOf(sk, "tz-tzs", 10_000n, 1000),   // superseded ↓
+    annOf(sk, "tz-tzs", 70_000n, 2000),   // newest for (npub, tz-tzs)
+    annOf(sk, "ke-kes", 20_000n, 1500),   // SAME arbiter, second community
+    annOf(sk2, "tz-tzs", 30_000n, 1200),  // second arbiter, first community
+    // Broken sig → dropped. JSON round-trip first: finalizeEvent stamps
+    // nostr-tools' verifiedSymbol on the object and a {...spread} would COPY it,
+    // short-circuiting verifyEvent to true — a wire event (what a relay actually
+    // hands us) is plain JSON and carries no such symbol.
+    { ...JSON.parse(JSON.stringify(annOf(sk2, "ke-kes", 1n, 900))), sig: "00".repeat(64) } as NostrEvent,
+  ]);
+  assert(grouped.size === 2, "bondann: groupLatest groups by community");
+  assert(grouped.get("tz-tzs")?.length === 2,
+    "bondann: two distinct arbiters in one community both survive grouping");
+  assert(grouped.get("tz-tzs")?.find((a) => a.npub === npub)?.claimedSats === 70_000n,
+    "bondann: groupLatest is newest-wins per (arbiter, community)");
+  assert(grouped.get("ke-kes")?.length === 1 && grouped.get("ke-kes")?.[0]?.npub === npub,
+    "⭐ bondann: an arbiter bonded in TWO chamas counts in both (per-npub collapse avoided) and a broken-sig event is dropped");
+}
+
+// ── 5b-LIVECHAMA. Liveness score (coverage × commitment × reputation) ──────────
+// Pure composite over chain-verified bonds + ratings. Only FUNDED + ACTIVE bonds
+// count; more arbiters / bigger×longer bonds / better ratings → higher score.
+console.log("\n── Live-chama liveness score ──");
+{
+  const npubA = "a".repeat(64), npubB = "b".repeat(64), npubC = "c".repeat(64), npubD = "d".repeat(64);
+  const mk = (npub: string, sats: number, lockUntil: number, funded = true, active = true): VerifiedBond =>
+    ({ npub, community: "tz-tzs", address: `addr_${npub.slice(0, 6)}`, lockUntil, actualSats: BigInt(sats), claimedSats: BigInt(sats), funded, active });
+  const noRatings = new Map<string, { count: number; positive: number; negative: number }>();
+  const tip = 800_000;
+
+  const empty = computeChamaLiveness("tz-tzs", [], noRatings, tip);
+  assert(!empty.isLive && empty.arbiterCount === 0 && empty.score === 0, "livechama: no bonds → not live, score 0");
+  assert(formatLivenessReadout(empty).includes("No bonded arbiters"), "livechama: empty readout invites the first arbiter");
+
+  const one = computeChamaLiveness("tz-tzs", [mk(npubA, 50_000, 830_000)], noRatings, tip);
+  assert(one.isLive && one.arbiterCount === 1 && one.totalBondSats === 50_000n && one.score > 0, "livechama: one funded active bond → live");
+
+  // ⭐ unfunded + expired bonds are excluded from liveness.
+  const mixed = computeChamaLiveness("tz-tzs", [mk(npubA, 50_000, 830_000), mk(npubB, 99_999, 830_000, false), mk(npubC, 99_999, 830_000, true, false)], noRatings, tip);
+  assert(mixed.arbiterCount === 1 && mixed.totalBondSats === 50_000n, "⭐ livechama: unfunded + expired bonds are excluded");
+
+  const three = computeChamaLiveness("tz-tzs", [mk(npubA, 50_000, 830_000), mk(npubB, 50_000, 830_000), mk(npubD, 50_000, 830_000)], noRatings, tip);
+  assert(three.arbiterCount === 3 && three.score > one.score, "livechama: more bonded arbiters → higher score");
+
+  const big = computeChamaLiveness("tz-tzs", [mk(npubA, 5_000_000, 900_000)], noRatings, tip);
+  assert(big.bondWeightSatBlocks > one.bondWeightSatBlocks && big.score > one.score, "⭐ livechama: bigger × longer bond → higher score (how much × how long)");
+
+  const rated = computeChamaLiveness("tz-tzs", [mk(npubA, 50_000, 830_000)], new Map([[npubA, { count: 20, positive: 20, negative: 0 }]]), tip);
+  assert(rated.ratings.positiveRate === 1 && rated.score > one.score, "livechama: strong ratings lift the score");
+
+  const dup = computeChamaLiveness("tz-tzs", [mk(npubA, 10_000, 830_000), mk(npubA, 80_000, 830_000)], noRatings, tip);
+  assert(dup.arbiterCount === 1 && dup.totalBondSats === 80_000n, "livechama: two bonds for one arbiter → counted once (biggest)");
+
+  const ro = formatLivenessReadout(rated, 2880); // signet ~2880 blocks/day
+  assert(/^1 arbiter · 100% · ~\d+-day bond/.test(ro), "livechama: readout formats 'N arbiters · X% · ~D-day bonds'");
+
+  // ── bonded → arbiter enrollment (S1 primitive) ──────────────────────────────
+  const enrolled = bondedArbitersForCommunity([
+    mk(npubA, 50_000, 830_000),
+    mk(npubA, 10_000, 830_000),          // same npub → once
+    mk(npubB, 50_000, 830_000, false),   // unfunded → excluded
+    mk(npubC, 50_000, 830_000, true, false), // expired → excluded
+    mk(npubD, 50_000, 830_000),
+  ]);
+  assert(enrolled.length === 2 && enrolled.includes(npubA) && enrolled.includes(npubD),
+    "⭐ bonded-arbiters: funded+active distinct npubs enroll; unfunded/expired/dupes don't");
+  assert(bondedArbitersForCommunity([]).length === 0, "bonded-arbiters: no bonds → nobody enrolled");
+}
+
 // ── 5b-v3.3. Consensus invariants — C2 + C11 (INVARIANTS.md) ──────────────
 // Coordinated release v3.3. C1 (the LOCK deterministic-assignment gate) was
 // PULLED: a naive recompute rejects genuine pre-v0.7.2 (no-exclusion builder)
@@ -3648,6 +4187,19 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
   assert(getTrustedArbiterPool({ community: "ke-kes-bitsacco" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
     "Kenya KES/Bitsacco carries the bootstrap official arbiter pool");
 
+  // Bond → arbiter enrollment (S3 foundation): an injected bondedPool ADDITIVELY
+  // unions chain-verified bonded arbiters into the pool; absent ⇒ unchanged.
+  {
+    const BONDED = "dd".repeat(32);
+    const withBond = getTrustedArbiterPool({ community: "us-blf", bondedPool: [BONDED] });
+    assert(withBond.includes(BONDED) && BLF_OFFICIAL_ARBITERS.every((pk) => withBond.includes(pk)),
+      "⭐ bondedPool: a bonded arbiter joins the pool additively (roster/cabinet kept)");
+    assert(getTrustedArbiterPool({ community: "us-blf" }).join(",") === BLF_OFFICIAL_ARBITERS.join(","),
+      "bondedPool: absent ⇒ pool unchanged (dormant seam)");
+    assert(!getTrustedArbiterPool({ community: "us-blf", bondedPool: [BONDED], excludePubkeys: [BONDED] }).includes(BONDED),
+      "bondedPool: a bonded arbiter who is a trade party is still excluded");
+  }
+
   // ── v2.3: arbiter provenance — close the "arbiter door" ────────────────
   console.log("\n── ARBITER PROVENANCE (v2.3) ──");
   {
@@ -3985,7 +4537,7 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "ke-kes-bitsacco disambiguator surfaces the Bitsacco backing route");
 
   // Picker filter excludes hiddenFromPicker entries
-  const picker = getPickerCommunities();
+  const picker = COMMUNITY_REGISTRY.filter(c => !c.hiddenFromPicker);
   assert(picker.length === 55,
     "Picker shows GBF, Fedi-approved wallet services, South Africa, two Kenya routes, plus every East/West/Central Africa country Chama (Global/BLF now hidden — it's the L3 backup, not a place you pick)");
   assert(picker[0]?.slug !== "us-blf",
@@ -4216,8 +4768,8 @@ console.log("\n── PERMISSIONLESS COMMUNITY ADDITION ──");
 
   // Picker integration — custom entries don't appear in pre-seed picker by default
   // (picker callers compose: pre-seed + custom themselves)
-  assert(getPickerCommunities().every(c => c.notes !== "user-added"),
-    "getPickerCommunities returns only pre-seeds");
+  assert(COMMUNITY_REGISTRY.filter(c => !c.hiddenFromPicker).every(c => c.notes !== "user-added"),
+    "registry (non-hidden) returns only pre-seeds");
 }
 
 // ── 14c. PRE-LOGIN SHELL creatorPubkey STAMPING (v2.7) ───────────────────
@@ -6415,6 +6967,10 @@ import {
   findActiveTrade,
   shouldShowRecoveryBanner,
   identifyStrandedEcashSource,
+  summarizePendingPayoutsForUi,
+  selectPayoutReattachTargets,
+  strandedSourceExplainsBalance,
+  PENDING_PAYOUT_SUPPRESS_MAX_MS,
   decideListingTapEffect,
   shouldShowOnBrowse,
   listingMatchesActiveRoute,
@@ -6423,7 +6979,7 @@ import {
   MAIN_SURFACE_RECOVERY_MIN_SATS,
   activeCommittedMsats,
 } from "../ui/decisions.js";
-import { pickArbiterFromPool } from "../arbiters/pool.js";
+import { pickArbiterFromPool, pickPreferredArbiter } from "../arbiters/pool.js";
 // BP_FEDERATION_INVITE / BLF_FEDERATION_INVITE already imported above
 // from federation-config (which re-exports from federation-invites).
 
@@ -7391,8 +7947,9 @@ console.log("\n── Fedi Mini-App ecash funding path ──");
   // ── 29f. Fedi fund-and-lock recovery (fund-loss guard) ──────────────────
 //
 // The Fedi funding path spends ecash OUT of Fedi, then locks it — two steps
-// with the bearer notes living only in a JS variable between them (native is
-// immune; createEscrowLock spends + SSS-splits atomically). These tests prove
+// with the bearer notes living only in a JS variable between them (#37: the
+// SDK-wallet paths have the SAME window, guarded by the sibling
+// pending-native-locks stash — see block 29g). These tests prove
 // the spend is committed ONLY on a confirmed LOCK-with-our-notesHash, and is
 // re-absorbed back into Fedi on every other exit: abort, amount mismatch,
 // publish failure, a racing tab's foreign LOCK, and a reload/crash (boot
@@ -7595,6 +8152,471 @@ console.log("\n── Fedi fund-and-lock recovery (fund-loss guard) ──");
       clearAllPendingFundings();
     }
   }
+}
+
+  // ── 29g. Native/SDK-wallet lock crash-safety (#37) ──────────────────────
+//
+// bridge.lockAndPublish spends ecash then publishes the LOCK as a second
+// await; a reload between them used to strand the notes with NOTHING
+// persisted (and the RecoveryBanner then advised draining a live trade).
+// The pending-native-locks stash persists the lock lifecycle
+// (intent → spent → publish-attempted → cleared-on-confirmed) and boot
+// recovery settles entries via a FAIL-CLOSED decision table that only ever
+// RE-ABSORBS (reissue-to-self) — never re-publishes a LOCK (a rebuilt or
+// replayed second LOCK permanently poisons the trade chain's replay).
+console.log("\n── Native lock crash-safety: pending-native-locks (#37) ──");
+{
+  const {
+    PENDING_NATIVE_LOCKS_KEY,
+    MAX_NATIVE_LOCK_DRAIN_ATTEMPTS,
+    NATIVE_LOCK_INTENT_TTL_MS,
+    NATIVE_LOCK_SUPPRESS_MAX_MS,
+    assertNativeLockStashWritable,
+    stashNativeLockIntent,
+    upgradeNativeLockToSpent,
+    markNativeLockPublishAttempted,
+    clearPendingNativeLock,
+    clearPendingNativeLockIfIntent,
+    getPendingNativeLock,
+    listPendingNativeLocks,
+    clearAllPendingNativeLocks,
+    recoverPendingNativeLock,
+    drainPendingNativeLocks,
+    summarizeNativeLocksForUi,
+    withNativeLockFlow,
+  } = await import("../fedimint/pending-native-locks.js");
+  void PENDING_NATIVE_LOCKS_KEY;
+
+  const FED = "fed_native_1";
+  const NOTES = "native-oob-notes";
+  const AMOUNT = 21_000;
+
+  /** Fake recovery deps. `state` shapes the loadEscrow answer; hashNotes
+   *  mirrors the 29f convention so "our" committed hash is sha256(NOTES). */
+  function makeDeps(over: Record<string, any> = {}) {
+    const calls = { redeem: [] as string[], loads: 0 };
+    const deps: any = {
+      loadEscrow: async () => { calls.loads++; return over.state ?? null; },
+      getConnectedRelayCount: () => over.relays ?? 3,
+      redeemNotes: async (n: string) => {
+        calls.redeem.push(n);
+        if (over.redeemError) throw over.redeemError;
+      },
+      currentFederationId: () => over.fed ?? FED,
+      hashNotes: async (n: string) => `sha256(${n})`,
+      ...(over.now ? { now: over.now } : {}),
+    };
+    return { deps, calls };
+  }
+  const createdState = (lockHash: string | null) =>
+    ({ status: lockHash ? "locked" : "created", lock: { notesHash: lockHash } }) as any;
+
+  // 1. Lifecycle: intent → spent → publish-attempted → clear.
+  {
+    clearAllPendingNativeLocks();
+    assertNativeLockStashWritable(); // must not throw under the stub
+    stashNativeLockIntent({ escrowId: "t1", amountMsats: AMOUNT, federationId: FED });
+    let e = getPendingNativeLock("t1")!;
+    assert(e.stage === "intent" && e.amountMsats === AMOUNT && e.federationId === FED,
+      "native-lock lifecycle: intent entry written with amount + fed");
+    const intentCreatedAt = e.createdAt;
+    upgradeNativeLockToSpent({
+      escrowId: "t1", oobNotes: NOTES, amountMsats: AMOUNT,
+      federationId: FED, operationId: "op1", spendTimeoutSecs: 7_776_000,
+    });
+    e = getPendingNativeLock("t1")!;
+    assert(e.stage === "spent" && e.oobNotes === NOTES && e.operationId === "op1",
+      "native-lock lifecycle: spent upgrade persists the notes + operation id");
+    assert(e.createdAt === intentCreatedAt,
+      "native-lock lifecycle: spent upgrade preserves the intent's createdAt");
+    markNativeLockPublishAttempted("t1");
+    assert(getPendingNativeLock("t1")!.stage === "publish-attempted",
+      "native-lock lifecycle: publish-attempted marker sticks");
+    clearPendingNativeLock("t1");
+    assert(getPendingNativeLock("t1") === null && listPendingNativeLocks().length === 0,
+      "native-lock lifecycle: clear removes the entry");
+  }
+
+  // 2. Bearer-note invariants: no clobber, no downgrade, intent-only clear.
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "t2", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    let threw = false;
+    try {
+      upgradeNativeLockToSpent({ escrowId: "t2", oobNotes: "DIFFERENT-notes", amountMsats: AMOUNT, federationId: FED });
+    } catch { threw = true; }
+    assert(threw, "native-lock invariant: refusing to overwrite different live notes THROWS");
+    stashNativeLockIntent({ escrowId: "t2", amountMsats: AMOUNT, federationId: FED });
+    assert(getPendingNativeLock("t2")!.stage === "spent" && getPendingNativeLock("t2")!.oobNotes === NOTES,
+      "native-lock invariant: an intent write never downgrades a notes-carrying entry");
+    clearPendingNativeLockIfIntent("t2");
+    assert(getPendingNativeLock("t2") !== null,
+      "native-lock invariant: intent-only clear leaves a spent entry untouched");
+    clearAllPendingNativeLocks();
+    stashNativeLockIntent({ escrowId: "t2i", amountMsats: AMOUNT, federationId: FED });
+    clearPendingNativeLockIfIntent("t2i");
+    assert(getPendingNativeLock("t2i") === null,
+      "native-lock invariant: intent-only clear removes a genuine intent");
+  }
+
+  // 3. Decision table — LOCK committed with OUR notes ⇒ clear only, never re-absorb.
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "t3", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    markNativeLockPublishAttempted("t3");
+    const { deps, calls } = makeDeps({ state: createdState(`sha256(${NOTES})`) });
+    const outcome = await recoverPendingNativeLock(getPendingNativeLock("t3")!, deps);
+    assert(outcome === "cleared-committed",
+      "native-lock recovery: committed-with-our-hash resolves cleared-committed");
+    assert(calls.redeem.length === 0,
+      "native-lock recovery: NEVER re-absorbs notes a live LOCK committed");
+    assert(getPendingNativeLock("t3") === null,
+      "native-lock recovery: committed entry is cleared");
+  }
+
+  // 4. Decision table — a DIFFERENT lock owns the chain ⇒ our notes re-absorb.
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "t4", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    markNativeLockPublishAttempted("t4");
+    const { deps, calls } = makeDeps({ state: createdState("sha256(other-notes)") });
+    const outcome = await recoverPendingNativeLock(getPendingNativeLock("t4")!, deps);
+    assert(outcome === "reabsorbed" && calls.redeem[0] === NOTES,
+      "native-lock recovery: different-hash lock re-absorbs OUR notes");
+    assert(getPendingNativeLock("t4") === null,
+      "native-lock recovery: re-absorbed entry is cleared");
+  }
+
+  // 5. Decision table — CREATED, stage spent (publish never started) ⇒ re-absorb.
+  //    CREATED, stage publish-attempted ⇒ re-absorb ONLY on a healthy relay read.
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "t5", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    const spentDeps = makeDeps({ state: createdState(null) });
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t5")!, spentDeps.deps) === "reabsorbed",
+      "native-lock recovery: CREATED + spent (provably unpublished) re-absorbs");
+
+    upgradeNativeLockToSpent({ escrowId: "t5b", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    markNativeLockPublishAttempted("t5b");
+    const degraded = makeDeps({ state: createdState(null), relays: 1 });
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t5b")!, degraded.deps) === "kept",
+      "native-lock recovery: publish-attempted + degraded relays is KEPT (a hidden LOCK could exist)");
+    assert(degraded.calls.redeem.length === 0,
+      "native-lock recovery: degraded-read keep performs no redeem");
+    const healthy = makeDeps({ state: createdState(null), relays: 2 });
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t5b")!, healthy.deps) === "reabsorbed",
+      "native-lock recovery: publish-attempted + healthy quorum read re-absorbs");
+  }
+
+  // 6. Fail-closed: unknown trade state / wrong fed ⇒ keep, touch nothing.
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "t6", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    const unknown = makeDeps({ state: null });
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t6")!, unknown.deps) === "kept",
+      "native-lock recovery: loadEscrow null (unknown) is KEPT — v0.1.76 unknown ⇒ refuse");
+    assert(unknown.calls.redeem.length === 0, "native-lock recovery: unknown-state keep never redeems");
+    const wrongFed = makeDeps({ state: createdState(null), fed: "some_other_fed" });
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t6")!, wrongFed.deps) === "kept",
+      "native-lock recovery: federation mismatch is KEPT (notes only exist on their minting fed)");
+    assert(wrongFed.calls.loads === 0 && wrongFed.calls.redeem.length === 0,
+      "native-lock recovery: fed-mismatch keep does no relay read and no redeem");
+    assert(getPendingNativeLock("t6")!.attempts === 0,
+      "native-lock recovery: fail-closed keeps don't burn the retry budget");
+  }
+
+  // 7. Already-spent on a funding re-absorb = our own auto-refund landed ⇒
+  //    notes positively dead, entry cleared (NOT the claim path's alarm).
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "t7", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    const err: any = new Error("notes already spent by the federation");
+    err.code = "ALREADY_SPENT_UNCONFIRMED";
+    const { deps } = makeDeps({ state: createdState(null), redeemError: err });
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t7")!, deps) === "cleared-dead-notes",
+      "native-lock recovery: already-spent (no lock of ours) clears as dead notes");
+    assert(getPendingNativeLock("t7") === null,
+      "native-lock recovery: dead-notes entry is cleared");
+  }
+
+  // 8. Transient redeem failures: attempts bump, entry kept; the cap stops
+  //    boot churn; a user-initiated retry (ignoreAttemptCap) still runs.
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "t8", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    const failing = makeDeps({ state: createdState(null), redeemError: new Error("federation unreachable") });
+    for (let i = 0; i < MAX_NATIVE_LOCK_DRAIN_ATTEMPTS; i++) {
+      const out = await recoverPendingNativeLock(getPendingNativeLock("t8")!, failing.deps);
+      assert(out === "kept", `native-lock recovery: transient failure ${i + 1} keeps the entry`);
+    }
+    assert(getPendingNativeLock("t8")!.attempts === MAX_NATIVE_LOCK_DRAIN_ATTEMPTS,
+      "native-lock recovery: each transient failure bumps attempts");
+    const capped = makeDeps({ state: createdState(null) });
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t8")!, capped.deps) === "kept"
+      && capped.calls.redeem.length === 0,
+      "native-lock recovery: attempt cap stops the boot drain from churning");
+    const userRetry = makeDeps({ state: createdState(null) });
+    assert(
+      await recoverPendingNativeLock(getPendingNativeLock("t8")!, userRetry.deps, { ignoreAttemptCap: true })
+        === "reabsorbed",
+      "native-lock recovery: a user-initiated retry bypasses the cap and recovers");
+  }
+
+  // 9. Intent entries: kept while fresh, aged out past the TTL.
+  {
+    clearAllPendingNativeLocks();
+    stashNativeLockIntent({ escrowId: "t9", amountMsats: AMOUNT, federationId: FED });
+    const fresh = makeDeps({});
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t9")!, fresh.deps) === "kept",
+      "native-lock recovery: a fresh intent is kept (attribution + resume)");
+    const late = makeDeps({ now: () => Date.now() + NATIVE_LOCK_INTENT_TTL_MS + 1 });
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t9")!, late.deps) === "cleared-stale-intent",
+      "native-lock recovery: a stale intent ages out");
+    assert(getPendingNativeLock("t9") === null, "native-lock recovery: aged intent is cleared");
+  }
+
+  // 9b. Re-absorb story-loss fix: a successful re-absorb ALWAYS leaves a
+  //     funding breadcrumb (so the balance reads as calm "funds returned",
+  //     not the generic alarm), and downgrades to a FRESH intent (the
+  //     Finish-lock resume card) when the trade is still lockable — else
+  //     clears (nothing to re-lock). NOTE: these use the REAL uppercase
+  //     EscrowStatus.CREATED; the createdState() helper's lowercase "created"
+  //     never matched it, so the earlier decision-table cases all hit the
+  //     terminal/clear path (proving no regression there).
+  {
+    const lockableState = (over: Record<string, any> = {}) =>
+      ({ status: EscrowStatus.CREATED, lock: { notesHash: null }, expiresAt: 0, ...over }) as any;
+    function makeReabsorbDeps(state: any, now?: () => number) {
+      const calls = { redeem: [] as string[], residue: [] as any[] };
+      const deps: any = {
+        loadEscrow: async () => state,
+        getConnectedRelayCount: () => 3,
+        redeemNotes: async (n: string) => { calls.redeem.push(n); },
+        currentFederationId: () => FED,
+        hashNotes: async (n: string) => `sha256(${n})`,
+        recordReabsorbedResidue: (input: any) => { calls.residue.push(input); },
+        ...(now ? { now } : {}),
+      };
+      return { deps, calls };
+    }
+
+    // (a) still lockable (CREATED, no deadline) → downgrade to fresh intent.
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "rb1", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    markNativeLockPublishAttempted("rb1");
+    {
+      const { deps, calls } = makeReabsorbDeps(lockableState());
+      const out = await recoverPendingNativeLock(getPendingNativeLock("rb1")!, deps);
+      assert(out === "reabsorbed" && calls.redeem[0] === NOTES,
+        "reabsorb (lockable): re-absorbs the notes back to the wallet");
+      const e = getPendingNativeLock("rb1");
+      assert(!!e && e.stage === "intent" && !e.oobNotes && e.amountMsats === AMOUNT,
+        "reabsorb (lockable): entry downgraded to a FRESH intent (Finish-lock card persists)");
+      assert(calls.residue.length === 1 && calls.residue[0].escrowId === "rb1"
+        && calls.residue[0].amountMsats === AMOUNT,
+        "reabsorb (lockable): funding breadcrumb recorded");
+    }
+
+    // (b) past deadline → terminal: cleared, breadcrumb STILL recorded.
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "rb2", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    {
+      const nowMs = 10_000_000;
+      const expired = lockableState({ expiresAt: Math.floor(nowMs / 1000) - 60 });
+      const { deps, calls } = makeReabsorbDeps(expired, () => nowMs);
+      const out = await recoverPendingNativeLock(getPendingNativeLock("rb2")!, deps);
+      assert(out === "reabsorbed" && getPendingNativeLock("rb2") === null,
+        "reabsorb (past deadline): terminal → entry cleared (nothing to re-lock)");
+      assert(calls.residue.length === 1,
+        "reabsorb (past deadline): breadcrumb still recorded (honest funds-returned banner)");
+    }
+
+    // (c) EXPIRED status → terminal: cleared, breadcrumb recorded (the repro).
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "rb3", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    {
+      const { deps, calls } = makeReabsorbDeps(
+        { status: EscrowStatus.EXPIRED, lock: { notesHash: null }, expiresAt: 0 });
+      const out = await recoverPendingNativeLock(getPendingNativeLock("rb3")!, deps);
+      assert(out === "reabsorbed" && getPendingNativeLock("rb3") === null,
+        "reabsorb (EXPIRED): terminal → entry cleared");
+      assert(calls.residue.length === 1, "reabsorb (EXPIRED): breadcrumb recorded");
+    }
+
+    // (d) the downgraded intent drives the Finish-lock resume via summarize.
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "rb4", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    {
+      const { deps } = makeReabsorbDeps(lockableState());
+      await recoverPendingNativeLock(getPendingNativeLock("rb4")!, deps);
+      const summary = summarizeNativeLocksForUi(listPendingNativeLocks(), Date.now(), {
+        currentFederationId: FED, balanceMsats: AMOUNT,
+      });
+      assert(summary.suppressRecovery && summary.resume?.escrowId === "rb4",
+        "reabsorb (lockable): the downgraded intent drives the Finish-lock resume card");
+    }
+
+    // (e) identity guard: a successor attempt (different notes) since the
+    //     drain snapshot must NOT be clobbered by the downgrade.
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "rb5", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    {
+      const snapshot = getPendingNativeLock("rb5")!;
+      // A fresh attempt replaces the entry with DIFFERENT notes before the
+      // (stale-snapshot) recovery finishes.
+      clearAllPendingNativeLocks();
+      upgradeNativeLockToSpent({ escrowId: "rb5", oobNotes: "successor-notes", amountMsats: AMOUNT, federationId: FED });
+      const { deps } = makeReabsorbDeps(lockableState());
+      await recoverPendingNativeLock(snapshot, deps);
+      const e = getPendingNativeLock("rb5");
+      assert(!!e && e.stage === "spent" && e.oobNotes === "successor-notes",
+        "reabsorb (identity guard): a successor attempt's live notes are never clobbered by the downgrade");
+    }
+  }
+
+  // 10. Boot drain: settles every entry, reports the split; concurrent
+  //     drains CHAIN (a fed-switch re-drain with fresh deps must not be
+  //     swallowed by a still-running earlier drain) and the second pass
+  //     finds nothing left to do.
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "d1", oobNotes: "notes-d1", amountMsats: AMOUNT, federationId: FED });
+    upgradeNativeLockToSpent({ escrowId: "d2", oobNotes: "notes-d2", amountMsats: AMOUNT, federationId: FED });
+    markNativeLockPublishAttempted("d2");
+    const { deps } = makeDeps({ state: createdState(null) });
+    const p1 = drainPendingNativeLocks(deps);
+    const p2 = drainPendingNativeLocks(deps);
+    const [summary1, summary2] = await Promise.all([p1, p2]);
+    assert(summary1.reabsorbed === 2 && summary1.stillPending === 0,
+      "native-lock drain: settles every recoverable entry");
+    assert(summary2.attempted === 0,
+      "native-lock drain: the chained second drain finds the stash already settled");
+    assert(listPendingNativeLocks().length === 0, "native-lock drain: stash empty after full recovery");
+  }
+
+  // 10b. Per-escrow flow mutex: recovery cannot interleave with a held
+  //      lock flow for the same trade (the hollow-escrow race, F7/F11).
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "mx", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
+    const order: string[] = [];
+    let releaseFlow!: () => void;
+    const flowHeld = new Promise<void>((r) => { releaseFlow = r; });
+    // Simulate a live lock flow holding the trade's critical section.
+    const flow = withNativeLockFlow("mx", async () => {
+      order.push("flow-start");
+      await flowHeld;
+      order.push("flow-end");
+    });
+    // A concurrent drain must queue behind it, not re-absorb mid-flow.
+    const { deps, calls } = makeDeps({ state: createdState(null) });
+    const drain = drainPendingNativeLocks(deps);
+    await new Promise((r) => setTimeout(r, 20));
+    assert(calls.redeem.length === 0 && order.join(",") === "flow-start",
+      "native-lock mutex: recovery waits while a lock flow holds the trade");
+    releaseFlow();
+    await flow;
+    const summary = await drain;
+    assert(order[0] === "flow-start" && order[1] === "flow-end",
+      "native-lock mutex: the flow completed before recovery ran");
+    assert(summary.reabsorbed === 1,
+      "native-lock mutex: recovery proceeds after the flow releases");
+  }
+
+  // 10c. Stale-snapshot protection: a drain that raced an inline settle
+  //      must not delete a SUCCESSOR entry holding fresh live notes (F15).
+  {
+    clearAllPendingNativeLocks();
+    upgradeNativeLockToSpent({ escrowId: "ss", oobNotes: "old-notes", amountMsats: AMOUNT, federationId: FED });
+    const stale = getPendingNativeLock("ss")!;
+    // Concurrent flow settles the old entry and stashes a NEW attempt.
+    clearPendingNativeLock("ss");
+    upgradeNativeLockToSpent({ escrowId: "ss", oobNotes: "new-live-notes", amountMsats: AMOUNT, federationId: FED });
+    // The racing recover still holds the STALE snapshot; its redeem reports
+    // the old notes dead — the clear must not touch the successor.
+    const err: any = new Error("already spent");
+    const { deps } = makeDeps({ state: createdState(null), redeemError: err });
+    await recoverPendingNativeLock(stale, deps);
+    const live = getPendingNativeLock("ss");
+    assert(live !== null && live.oobNotes === "new-live-notes",
+      "native-lock stale-snapshot: a dead-notes clear never deletes a successor entry's live notes");
+  }
+
+  // 11. UI summary: active entries suppress the drain surfaces + name the
+  //     resume target; exhausted entries flip to the calm stuck card;
+  //     stale intents stop suppressing.
+  {
+    const nowMs = Date.now();
+    const mk = (over: Record<string, any>) => ({
+      escrowId: "x", stage: "spent", oobNotes: NOTES, amountMsats: AMOUNT,
+      federationId: FED, createdAt: nowMs, attempts: 0, ...over,
+    }) as any;
+    const empty = summarizeNativeLocksForUi([], nowMs);
+    assert(!empty.suppressRecovery && empty.resume === null && empty.stuck.length === 0,
+      "native-lock summary: empty stash suppresses nothing");
+    const active = summarizeNativeLocksForUi([mk({ escrowId: "a" })], nowMs);
+    assert(active.suppressRecovery && active.resume?.escrowId === "a",
+      "native-lock summary: a live entry suppresses the drain surfaces + names the resume target");
+    const exhausted = summarizeNativeLocksForUi(
+      [mk({ escrowId: "b", attempts: MAX_NATIVE_LOCK_DRAIN_ATTEMPTS })], nowMs);
+    assert(!exhausted.suppressRecovery && exhausted.stuck.length === 1,
+      "native-lock summary: attempt-exhausted entries stop suppressing and go to the calm card");
+    const staleIntent = summarizeNativeLocksForUi(
+      [mk({ escrowId: "c", stage: "intent", oobNotes: undefined, createdAt: nowMs - NATIVE_LOCK_INTENT_TTL_MS - 1 })],
+      nowMs);
+    assert(!staleIntent.suppressRecovery,
+      "native-lock summary: a stale intent no longer suppresses");
+    const freshIntent = summarizeNativeLocksForUi(
+      [mk({ escrowId: "d", stage: "intent", oobNotes: undefined })], nowMs);
+    assert(freshIntent.suppressRecovery && freshIntent.resume?.escrowId === "d",
+      "native-lock summary: a fresh intent suppresses + resumes (the W1 reload case)");
+    const newest = summarizeNativeLocksForUi(
+      [mk({ escrowId: "old", createdAt: nowMs - 5000 }), mk({ escrowId: "new", createdAt: nowMs })], nowMs);
+    assert(newest.resume?.escrowId === "new",
+      "native-lock summary: the newest actionable entry is the resume target");
+
+    // Bounded suppression hardening (review F1/F9/F14/F17):
+    const fedMismatch = summarizeNativeLocksForUi(
+      [mk({ escrowId: "fm" })], nowMs, { currentFederationId: "some_other_fed" });
+    assert(!fedMismatch.suppressRecovery && fedMismatch.stuck.length === 1,
+      "native-lock summary: an other-fed entry stops suppressing (it can't explain THIS fed's balance) and surfaces calmly");
+    const fedMatch = summarizeNativeLocksForUi(
+      [mk({ escrowId: "fmk" })], nowMs, { currentFederationId: FED });
+    assert(fedMatch.suppressRecovery && fedMatch.resume?.escrowId === "fmk",
+      "native-lock summary: a same-fed entry still suppresses + resumes");
+    const aged = summarizeNativeLocksForUi(
+      [mk({ escrowId: "ag", createdAt: nowMs - NATIVE_LOCK_SUPPRESS_MAX_MS - 1 })], nowMs);
+    assert(!aged.suppressRecovery && aged.stuck.length === 1,
+      "native-lock summary: suppression is hard-bounded by age even when attempts never accrue");
+    const brokeIntent = summarizeNativeLocksForUi(
+      [mk({ escrowId: "bi", stage: "intent", oobNotes: undefined })], nowMs, { balanceMsats: AMOUNT - 1 });
+    assert(!brokeIntent.suppressRecovery && brokeIntent.resume === null,
+      "native-lock summary: an intent the balance can't satisfy tells no story (cancelled/failed funding)");
+    const fundedIntent = summarizeNativeLocksForUi(
+      [mk({ escrowId: "fi", stage: "intent", oobNotes: undefined })], nowMs, { balanceMsats: AMOUNT });
+    assert(fundedIntent.suppressRecovery && fundedIntent.resume?.escrowId === "fi",
+      "native-lock summary: an intent the balance covers is the W1 resume story");
+  }
+
+  // 12. The recovery surfaces honor the suppressor (banner + ChamaBar).
+  {
+    const { shouldShowRecoveryBanner, decideChamaBarLabel } = await import("../ui/decisions.js");
+    const base = { balanceMsats: 50_000_000, hasAnyActiveEscrow: false };
+    assert(shouldShowRecoveryBanner(base) === true,
+      "native-lock suppressor: banner baseline still fires on unexplained balance");
+    assert(shouldShowRecoveryBanner({ ...base, hasPendingNativeLock: true }) === false,
+      "native-lock suppressor: banner suppressed while a pending lock owns the balance");
+    const bar = decideChamaBarLabel({ balanceMsats: 50_000_000, hasActiveBuyerSellerCommitment: false });
+    assert(bar.kind === "stranded",
+      "native-lock suppressor: ChamaBar baseline still reads stranded");
+    const barSuppressed = decideChamaBarLabel({
+      balanceMsats: 50_000_000, hasActiveBuyerSellerCommitment: false, hasPendingNativeLock: true,
+    });
+    assert(barSuppressed.kind === "ready",
+      "native-lock suppressor: ChamaBar stranded pill suppressed while a pending lock exists");
+  }
+
+  clearAllPendingNativeLocks();
 }
 
   {
@@ -7902,68 +8924,20 @@ console.log("\n── per-npub localStorage scoping ──");
   (globalThis as any).localStorage.clear();
 }
 
-// ── 31a. deferred onboarding community selection (v3.5.1 leak fix) ───────
+// ── 31a. RETIRED (v4.3): deferred onboarding community selection ─────────
 //
-// The globe picker runs before a signer is known. The old flow wrote the
-// legacy global COMMUNITY_STORAGE_KEY directly, so the first npub to connect
-// claimed it and fresh/secondary npubs on the same browser raced to the BLF
-// default ("landed on different federations"). v3.5.1 stashes the pick under
-// its OWN key and commits it to the connecting npub's scope
-// (applyPendingCommunitySelection), clearing the stash so it can't leak to a
-// later npub.
-console.log("\n── deferred onboarding community selection ──");
+// The v3.5.1 pre-signer pick stash (chama_pending_community) died with the
+// auth-first reorder: the globe picker now runs POST-connect and writes the
+// npub scope directly (handleSelectCommunity), so there is nothing to defer
+// and nothing to leak — the leak-fix machinery this block exercised was
+// deleted from communities/storage.ts. One assertion survives from the old
+// block because it tests federation-config, not the stash:
+console.log("\n── community-blind federation fallback ──");
 {
   (globalThis as any).localStorage.clear();
   setLocalStorageUserScope(null);
 
-  // Pre-signer pick lands in the dedicated stash, NOT the legacy global key.
-  setPendingCommunitySelection("us-gbf");
-  assert(getPendingCommunitySelection() === "us-gbf",
-    "Pre-signer pick is readable from the pending stash");
-  assert((globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY) === null,
-    "Deferred pick does NOT write the legacy global community key");
-
-  // Unknown stashed slugs resolve to null (don't flow onward).
-  setPendingCommunitySelection("xx-not-a-real-slug");
-  assert(getPendingCommunitySelection() === null,
-    "Unknown stashed slug resolves to null");
-  setPendingCommunitySelection("us-gbf");
-
-  // Connect: commit the pick to THIS npub's scope, clear the stash.
-  setLocalStorageUserScope("npub_defer_alice");
-  applyPendingCommunitySelection();
-  assert(getUserCommunitySlugRaw() === "us-gbf",
-    "Connecting npub gets the deferred pick committed to its scope");
-  assert(getPendingCommunitySelection() === null,
-    "Stash is cleared after commit");
-  assert((globalThis as any).localStorage.getItem(COMMUNITY_STORAGE_KEY) === null,
-    "No legacy global community key is left behind");
-
-  // The leak fix: a fresh second npub does NOT inherit the first npub's pick.
-  setLocalStorageUserScope("npub_defer_bob");
-  applyPendingCommunitySelection(); // no stash → no-op
-  assert(getUserCommunitySlugRaw() === null,
-    "Fresh npub does not inherit the prior npub's deferred pick (no leak)");
-
-  // A returning npub re-picking on the globe overrides its stored choice
-  // (matches the old claim-legacy overwrite semantics).
-  setUserCommunitySlug("ke-kes");
-  assert(getUserCommunitySlugRaw() === "ke-kes", "Returning npub has a stored choice");
-  setLocalStorageUserScope(null);
-  setPendingCommunitySelection("sn-cfa");
-  setLocalStorageUserScope("npub_defer_bob");
-  applyPendingCommunitySelection();
-  assert(getUserCommunitySlugRaw() === "sn-cfa",
-    "Re-pick on the globe overrides the npub's stored choice");
-
-  // The "Change" affordance drops the stash without committing it.
-  setLocalStorageUserScope(null);
-  setPendingCommunitySelection("za-zar");
-  clearPendingCommunitySelection();
-  assert(getPendingCommunitySelection() === null,
-    "Change drops the pending pick without committing");
-
-  // Community-blind fallback also lands on BLF now (federation-config.ts:87).
+  // Community-blind fallback lands on BLF (federation-config.ts:87).
   assert(getFederationInvite() === BLF_FEDERATION_INVITE,
     "Community-blind getFederationInvite falls back to BLF (no custom)");
 
@@ -8581,6 +9555,139 @@ console.log("\n── pickArbiterFromPool ──");
   }
 }
 
+// ── 31d-3b. 2B prefer-bonded arbiter assignment (consensus-safe) ─────────
+//
+// Prefer a FUNDED bonded arbiter, stamped into CREATE. The JOIN gate accepts
+// BOTH the bonded-preferred pick AND the legacy pick, so a mixed-version replay
+// never diverges on ARBITER_NOT_ASSIGNED. Absent bonded ⇒ byte-identical to the
+// pre-2B single-pick gate. Front-run defense (only the computed picks pass) holds.
+console.log("\n── 2B prefer-bonded ──");
+{
+  const THIRD = "ff".repeat(32);
+  const POOL = [ARBITER_PK, ARBITER2_PK, THIRD];
+
+  // pickPreferredArbiter — the pure pick.
+  assert(
+    pickPreferredArbiter(POOL, [ARBITER2_PK], "any-id") === ARBITER2_PK,
+    "Prefers the sole bonded arbiter",
+  );
+  assert(
+    pickPreferredArbiter(POOL, [], "escrow-xyz") === pickArbiterFromPool(POOL, "escrow-xyz"),
+    "Empty bonded ⇒ legacy pick (byte-identical)",
+  );
+  assert(
+    pickPreferredArbiter(POOL, undefined, "escrow-xyz") === pickArbiterFromPool(POOL, "escrow-xyz"),
+    "Undefined bonded ⇒ legacy pick",
+  );
+  assert(
+    pickPreferredArbiter(POOL, ["9a".repeat(32)], "escrow-xyz") === pickArbiterFromPool(POOL, "escrow-xyz"),
+    "Bonded arbiter not in pool ⇒ ignored, legacy pick",
+  );
+  assert(
+    pickPreferredArbiter(POOL, [ARBITER2_PK], "escrow-xyz", [ARBITER2_PK]) ===
+      pickArbiterFromPool(POOL, "escrow-xyz", [ARBITER2_PK]),
+    "Bonded arbiter excluded (is a party) ⇒ legacy fallback, never strands",
+  );
+
+  // Reducer JOIN gate — accept-both, front-run still blocked.
+  const create = createEvent({ communityArbiters: POOL, bondedArbiters: [ARBITER2_PK] });
+  const r1 = applyEvent(null, create);
+  if (assertOk(r1, "CREATE with bondedArbiters applies") && r1.ok) {
+    const st = r1.state;
+    assert(
+      (st.bondedArbiters ?? []).join(",") === ARBITER2_PK,
+      "bondedArbiters round-trips onto state (the stamped consensus anchor)",
+    );
+    const excl = [st.participants[Role.BUYER], st.participants[Role.SELLER]];
+    const legacy = pickArbiterFromPool(st.communityArbiters, st.id, excl);
+    const preferred = pickPreferredArbiter(st.communityArbiters, st.bondedArbiters, st.id, excl);
+    assert(preferred === ARBITER2_PK, "seat prefers the bonded arbiter");
+    assertOk(
+      applyEvent(st, joinEvent(Role.ARBITER, preferred!, create.raw.id)),
+      "bonded-preferred arbiter JOIN accepted",
+    );
+    if (legacy && legacy !== preferred) {
+      assertOk(
+        applyEvent(st, joinEvent(Role.ARBITER, legacy, create.raw.id)),
+        "legacy-pick arbiter JOIN ALSO accepted (mixed-client safe, no divergence)",
+      );
+    }
+    const intruder = POOL.find((pk) => pk !== legacy && pk !== preferred);
+    if (intruder) {
+      assertErr(
+        applyEvent(st, joinEvent(Role.ARBITER, intruder, create.raw.id)),
+        "ARBITER_NOT_ASSIGNED",
+        "a non-pick pool member is still blocked (front-run defense holds)",
+      );
+    }
+  }
+
+  // ⭐ The core no-divergence property, made DETERMINISTIC. The harness reuses
+  // one escrow id (so the hash pick is fixed); construct the divergent case
+  // directly by stamping a bond on a pool member that ISN'T the legacy pick,
+  // then prove a JOIN by EITHER the bonded seat OR the legacy seat is accepted —
+  // a new client (seats bonded) and an old client (seats legacy) never fork on
+  // ARBITER_NOT_ASSIGNED. (state.bondedArbiters is what the reducer reads.)
+  {
+    const c = createEvent({ communityArbiters: POOL });
+    const r = applyEvent(null, c);
+    if (assertOk(r, "divergent-case CREATE applies") && r.ok) {
+      const excl = [r.state.participants[Role.BUYER], r.state.participants[Role.SELLER]];
+      const lg = pickArbiterFromPool(r.state.communityArbiters, r.state.id, excl)!;
+      const bondedChoice = POOL.find((pk) => pk !== lg && !excl.includes(pk))!;
+      const s = { ...r.state, bondedArbiters: [bondedChoice] };
+      const pf = pickPreferredArbiter(s.communityArbiters, s.bondedArbiters, s.id, excl)!;
+      assert(pf === bondedChoice && pf !== lg, "constructed a divergent case: bonded pick ≠ legacy pick");
+      assertOk(applyEvent(s, joinEvent(Role.ARBITER, pf, c.raw.id)),
+        "divergent: bonded-preferred (new-client) JOIN accepted");
+      assertOk(applyEvent(s, joinEvent(Role.ARBITER, lg, c.raw.id)),
+        "divergent: legacy-pick (old-client) JOIN ALSO accepted — no chain fork");
+    }
+  }
+
+  // Backward-compat: no bonded stamp ⇒ gate accepts exactly the legacy pick.
+  const createLegacy = createEvent({ communityArbiters: POOL });
+  const rL = applyEvent(null, createLegacy);
+  if (assertOk(rL, "CREATE without bondedArbiters applies (pre-2B shape)") && rL.ok) {
+    const st = rL.state;
+    assert((st.bondedArbiters ?? []).length === 0, "no bonded stamp ⇒ empty bondedArbiters");
+    const excl = [st.participants[Role.BUYER], st.participants[Role.SELLER]];
+    const legacy = pickArbiterFromPool(st.communityArbiters, st.id, excl)!;
+    assertOk(
+      applyEvent(st, joinEvent(Role.ARBITER, legacy, createLegacy.raw.id)),
+      "legacy pick JOIN accepted on a pre-2B trade (unchanged)",
+    );
+    const intruder = POOL.find((pk) => pk !== legacy);
+    if (intruder) {
+      assertErr(
+        applyEvent(st, joinEvent(Role.ARBITER, intruder, createLegacy.raw.id)),
+        "ARBITER_NOT_ASSIGNED",
+        "non-pick still blocked on a pre-2B trade",
+      );
+    }
+  }
+
+  // C1 classify — a bonded-preferred seat is as-assigned; a non-basis seat is off.
+  {
+    const ID = "escrow-2b-c1";
+    const preferred = pickPreferredArbiter(POOL, [ARBITER2_PK], ID, [BUYER_PK, SELLER_PK])!;
+    assert(
+      classifyArbiterAssignment({
+        pool: POOL, escrowId: ID, committedArbiter: preferred,
+        buyerPubkey: BUYER_PK, sellerPubkey: SELLER_PK, bondedArbiters: [ARBITER2_PK],
+      }).status === "as-assigned",
+      "C1: bonded-preferred seat reads as-assigned",
+    );
+    assert(
+      classifyArbiterAssignment({
+        pool: POOL, escrowId: ID, committedArbiter: "99".repeat(32),
+        buyerPubkey: BUYER_PK, sellerPubkey: SELLER_PK, bondedArbiters: [ARBITER2_PK],
+      }).status === "off-assignment",
+      "C1: a non-basis (hand-seated) arbiter still reads off-assignment",
+    );
+  }
+}
+
 // ── 31d-4. Arbiter fee policy constants (v0.9.2) ────────────────────────
 //
 // These constants pin the v1 social contract without changing claim
@@ -8811,6 +9918,254 @@ console.log("\n── shouldShowRecoveryBanner + identifyStrandedEcashSource ─
   });
   assert(mostRecent?.escrowId === "newer",
     "Most recent CLAIM by timestamp wins");
+}
+
+// ── 31e2. Pending claim payouts (stranded-payout recovery) ──────────────
+//
+// The claim-side analog of #37's pending-native-locks summary: a
+// CLAIMED-not-COMPLETED trade the user won explains the wallet balance
+// (the claimed ecash whose outbound payout never finished), so the
+// drain-shaped recovery surfaces suppress and the calm "Finish your
+// payout" card takes over. Bounded: other-fed trades and week-old claims
+// stop suppressing. Plus the banner attribution honesty rule: a trade
+// card must never front a sweep its amount can't explain.
+console.log("\n── PENDING CLAIM PAYOUTS (stranded-payout recovery) ──");
+{
+  const me = "me_pubkey_pp01";
+  const other = "other_pubkey_pp02";
+  const arb = "arb_pubkey_pp03";
+  const FED_A = "a".repeat(64);
+  const FED_B = "b".repeat(64);
+
+  const escrow = (overrides: Partial<EscrowState>): EscrowState => ({
+    id: "pp-id",
+    status: EscrowStatus.CLAIMED,
+    description: "sell sats for KES",
+    amountMsats: 1_570_000_000,
+    category: "p2p-trade",
+    fulfillment: "service",
+    community: "sn-cfa",
+    mintUrl: BLF_FEDERATION_INVITE,
+    participants: { buyer: me, seller: other, arbiter: arb },
+    initiator: { pubkey: me, role: Role.BUYER },
+    communityArbiters: [],
+    subscription: null,
+    votes: {},
+    resolvedOutcome: null,
+    resolvedMajority: null,
+    fees: { platformBps: 50, platformPubkey: me, arbiterFeeMsats: 0 },
+    expiresAt: 0,
+    createdAt: 1000,
+    eventChain: [],
+    chatMessages: [],
+    lock: { handle: null },
+    ...overrides,
+  } as EscrowState);
+
+  const mkEvent = (
+    kind: EscrowEventKind,
+    pubkey: string,
+    timestamp: number,
+    payload: unknown = {},
+  ) => ({
+    raw: {} as any,
+    payload: payload as any,
+    escrowId: "pp-id",
+    prevEventId: null,
+    kind,
+    pubkey,
+    timestamp,
+  });
+
+  const CLAIM_AT = 5_000; // Unix seconds
+  const NOW_MS = CLAIM_AT * 1000 + 60_000; // one minute after the claim
+  const noRecord = () => null;
+
+  // finish: CLAIMED + my CLAIM + no journal record + balance covers →
+  // an actionable "finish your payout" story that suppresses the drain.
+  const claimed = escrow({
+    eventChain: [mkEvent(EscrowEventKind.CLAIM, me, CLAIM_AT)] as any,
+  });
+  const finish = summarizePendingPayoutsForUi({
+    escrows: [claimed], userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 2_462_000_000, nowMs: NOW_MS,
+  });
+  assert(finish.suppressRecovery === true,
+    "CLAIMED + my CLAIM + no record + balance covers → suppress the drain surfaces");
+  assert(finish.card?.kind === "finish",
+    "No journal record → the card invites finishing the payout (RETRY CLAIM path)");
+  assert(finish.card?.amountMsats === 1_570_000_000,
+    "The card carries the trade amount, not the wallet balance");
+
+  // Balance can't hold the claim (claim-pending: redeem never landed) →
+  // no false "your sats are back" story; nothing suppresses.
+  const short = summarizePendingPayoutsForUi({
+    escrows: [claimed], userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 100_000_000, nowMs: NOW_MS,
+  });
+  assert(short.suppressRecovery === false && short.card === null,
+    "Balance below the claim amount → no finish entry (no false story)");
+
+  // submitted journal record → "confirming" even at balance 0 (the sats
+  // may be with the gateway; reattach resolves the truth).
+  const confirming = summarizePendingPayoutsForUi({
+    escrows: [claimed], userPubkey: me,
+    getPayoutRecord: () => ({ status: "submitted" as const }),
+    balanceMsats: 0, nowMs: NOW_MS,
+  });
+  assert(confirming.card?.kind === "confirming",
+    "Submitted payout record → confirming card (never invites a re-pay)");
+
+  // V7: an intent record is NOT evidence a payment exists — it reads
+  // exactly like no record: the balance-gated "finish" bucket.
+  const intentRec = summarizePendingPayoutsForUi({
+    escrows: [claimed], userPubkey: me,
+    getPayoutRecord: () => ({ status: "intent" as const }),
+    balanceMsats: 2_462_000_000, nowMs: NOW_MS,
+  });
+  assert(intentRec.card?.kind === "finish",
+    "Intent payout record → finish card (pre-send breadcrumb, not a sent payout)");
+
+  // settled record → the payout went out; nothing to card or suppress.
+  const settled = summarizePendingPayoutsForUi({
+    escrows: [claimed], userPubkey: me,
+    getPayoutRecord: () => ({ status: "settled" as const }),
+    balanceMsats: 2_462_000_000, nowMs: NOW_MS,
+  });
+  assert(settled.suppressRecovery === false && settled.entries.length === 0,
+    "Settled payout record → no entry (the reattach sweep publishes COMPLETE)");
+
+  // COMPLETED trade → residue is the generic-residue story, not a payout
+  // to finish.
+  const completed = summarizePendingPayoutsForUi({
+    escrows: [escrow({
+      status: EscrowStatus.COMPLETED,
+      eventChain: [mkEvent(EscrowEventKind.CLAIM, me, CLAIM_AT)] as any,
+    })],
+    userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 2_462_000_000, nowMs: NOW_MS,
+  });
+  assert(completed.suppressRecovery === false,
+    "COMPLETED trade → no pending-payout entry");
+
+  // Someone else's CLAIM → not my payout to finish.
+  const otherWon = summarizePendingPayoutsForUi({
+    escrows: [escrow({
+      eventChain: [mkEvent(EscrowEventKind.CLAIM, other, CLAIM_AT)] as any,
+    })],
+    userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 2_462_000_000, nowMs: NOW_MS,
+  });
+  assert(otherWon.suppressRecovery === false,
+    "CLAIM signed by someone else → no entry (not my claim residue)");
+
+  // Suppression is BOUNDED: a claim older than the horizon stops hiding
+  // the recovery banner (the drain is safe on settled claim residue —
+  // escalation, not harm).
+  const aged = summarizePendingPayoutsForUi({
+    escrows: [claimed], userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 2_462_000_000,
+    nowMs: CLAIM_AT * 1000 + PENDING_PAYOUT_SUPPRESS_MAX_MS + 1,
+  });
+  assert(aged.suppressRecovery === false,
+    "Claim older than PENDING_PAYOUT_SUPPRESS_MAX_MS → stops suppressing (bounded)");
+
+  // Fed context: a trade stamped with a DIFFERENT fed can't explain THIS
+  // fed's balance; same-fed and legacy unstamped trades pass through.
+  const stamped = (fed: string) => escrow({
+    eventChain: [
+      mkEvent(EscrowEventKind.CREATE, other, 1_000, { fed }),
+      mkEvent(EscrowEventKind.CLAIM, me, CLAIM_AT),
+    ] as any,
+  });
+  const otherFed = summarizePendingPayoutsForUi({
+    escrows: [stamped(FED_B)], userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 2_462_000_000, nowMs: NOW_MS, currentFederationId: FED_A,
+  });
+  assert(otherFed.suppressRecovery === false,
+    "Other-fed trade → no entry (can't explain this fed's balance)");
+  const sameFed = summarizePendingPayoutsForUi({
+    escrows: [stamped(FED_A)], userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 2_462_000_000, nowMs: NOW_MS, currentFederationId: FED_A,
+  });
+  assert(sameFed.suppressRecovery === true,
+    "Same-fed stamped trade → entry passes the fed gate");
+  const unstamped = summarizePendingPayoutsForUi({
+    escrows: [claimed], userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 2_462_000_000, nowMs: NOW_MS, currentFederationId: FED_A,
+  });
+  assert(unstamped.suppressRecovery === true,
+    "Legacy unstamped trade → passes the fed gate (warn-and-allow doctrine)");
+
+  // Newest claim fronts the card.
+  const older = escrow({
+    id: "pp-old",
+    eventChain: [mkEvent(EscrowEventKind.CLAIM, me, CLAIM_AT - 1_000)] as any,
+  });
+  const newest = summarizePendingPayoutsForUi({
+    escrows: [older, claimed], userPubkey: me, getPayoutRecord: noRecord,
+    balanceMsats: 4_000_000_000, nowMs: NOW_MS,
+  });
+  assert(newest.card?.escrowId === "pp-id" && newest.entries.length === 2,
+    "Multiple pending payouts → newest claim fronts the card, all listed");
+
+  // The suppressor plumbs through the recovery banner + ChamaBar pill.
+  assert(
+    shouldShowRecoveryBanner({
+      balanceMsats: 2_462_000_000,
+      hasAnyActiveEscrow: false,
+      hasPendingClaimPayout: true,
+    }) === false,
+    "hasPendingClaimPayout suppresses the recovery banner",
+  );
+  assert(
+    decideChamaBarLabel({
+      balanceMsats: 2_462_000_000,
+      hasActiveBuyerSellerCommitment: false,
+      hasPendingClaimPayout: true,
+    }).kind === "ready",
+    "hasPendingClaimPayout suppresses the stranded ChamaBar pill",
+  );
+
+  // Boot-sweep targets: any CLAIMED trade I won holding a journal record
+  // (submitted OR settled) — reattach is structurally re-pay-free.
+  const records: Record<string, { status: "submitted" | "settled" }> = {
+    "pp-id": { status: "submitted" },
+    "pp-done": { status: "settled" },
+    // Records exist for these too — the skips below must be proven by
+    // status/ownership, not by a missing record.
+    "pp-completed": { status: "submitted" },
+    "pp-theirs": { status: "submitted" },
+  };
+  const getRec = (id: string) => records[id] ?? null;
+  const targets = selectPayoutReattachTargets({
+    escrows: [
+      claimed,                                          // submitted → target
+      escrow({ id: "pp-done",
+        eventChain: [mkEvent(EscrowEventKind.CLAIM, me, CLAIM_AT)] as any }), // settled → target
+      escrow({ id: "pp-norec",
+        eventChain: [mkEvent(EscrowEventKind.CLAIM, me, CLAIM_AT)] as any }), // no record → skip
+      escrow({ id: "pp-completed", status: EscrowStatus.COMPLETED,
+        eventChain: [mkEvent(EscrowEventKind.CLAIM, me, CLAIM_AT)] as any }), // COMPLETED → skip
+      escrow({ id: "pp-theirs",
+        eventChain: [mkEvent(EscrowEventKind.CLAIM, other, CLAIM_AT)] as any }), // not mine → skip
+    ],
+    userPubkey: me,
+    getPayoutRecord: getRec,
+  });
+  assert(targets.length === 2 && targets.includes("pp-id") && targets.includes("pp-done"),
+    "Reattach targets = CLAIMED trades I won that hold a journal record");
+
+  // Attribution honesty: the banner card only names a claim whose amount
+  // explains the balance. ₿1,570 must never front a ₿2,462 sweep.
+  assert(strandedSourceExplainsBalance(1_570_000_000, 1_570_000_000) === true,
+    "Balance == trade amount → card is honest");
+  assert(strandedSourceExplainsBalance(1_570_000_000, 1_580_000_000) === true,
+    "Small overage (denomination/fee dust) → card still honest");
+  assert(strandedSourceExplainsBalance(1_570_000_000, 2_462_000_000) === false,
+    "₿2,462 balance vs ₿1,570 trade → card dropped (generic residue copy)");
+  assert(strandedSourceExplainsBalance(1_570_000_000, 900_000_000) === true,
+    "Balance below the trade amount → still honestly 'from this trade'");
 }
 
 // ── 31f. sats trace provenance ──────────────────────────────────────────
@@ -12728,6 +14083,252 @@ console.log("\n── PAYOUT DOUBLE-PAY GUARD (3.5.1) ──");
   }
 }
 
+// ── 40c. V7 — PRE-SEND INTENT + RECONCILE-BY-ESCROW ─────────────────────
+//
+// Closes the last double-pay window: the app dying BETWEEN the bridge
+// committing a payment and the journal write left an EMPTY journal, so a
+// retry re-paid. Now (1) an `intent` record is written BEFORE payInvoice,
+// and (2) a retry over an intent (or a submitted record that lost its
+// operationId) reconciles BY ESCROW against the fedimint operation log
+// (payments carry chama_escrow_id in extra_meta). Fund-safety asymmetry:
+// "none" (scan-complete, no payment) clears an INTENT and pays fresh, but
+// for a SUBMITTED record it stays unknown⇒refuse (the gateway accepted a
+// payment; an empty scan is blindness, not proof of absence).
+console.log("\n── V7 PRE-SEND INTENT + RECONCILE-BY-ESCROW ──");
+{
+  type Rec = {
+    status: "intent" | "submitted" | "settled";
+    operationId?: string;
+    createdAt?: number;
+  } | null;
+  function makeJournal(seed?: Exclude<Rec, null>) {
+    let record: Rec = seed ? { ...seed } : null;
+    return {
+      get current(): Rec { return record; },
+      getPayoutRecord: (_id: string): Rec => record,
+      recordPayoutIntent: (input: { escrowId: string; amountMsats?: number }) => {
+        if (record?.status === "settled" || record?.status === "submitted") return;
+        record = { status: "intent", createdAt: record?.createdAt ?? 5_000_000 };
+      },
+      recordPayoutSubmitted: (input: { escrowId: string; operationId?: string }) => {
+        if (record?.status === "settled") return;
+        record = { status: "submitted", operationId: input.operationId ?? record?.operationId };
+      },
+      markPayoutSettled: (_id: string, operationId?: string) => {
+        record = { status: "settled", operationId: operationId ?? record?.operationId };
+      },
+      clearPayoutRecord: (_id: string) => { record = null; },
+    };
+  }
+  const balances = (arr: number[]) => {
+    let i = 0;
+    return async () => arr[Math.min(i++, arr.length - 1)];
+  };
+  const baseOpts = (journal: ReturnType<typeof makeJournal>) => ({
+    saveAfter: false,
+    claimAndRedeem: async () => ({}),
+    getPayoutRecord: journal.getPayoutRecord,
+    recordPayoutIntent: journal.recordPayoutIntent,
+    recordPayoutSubmitted: journal.recordPayoutSubmitted,
+    markPayoutSettled: journal.markPayoutSettled,
+    clearPayoutRecord: journal.clearPayoutRecord,
+    addOrTouchLightningHandle: () => {},
+    onPhase: () => {},
+    sleep: async () => {},
+    now: () => 0,
+    confirmTimeoutMs: 1_000,
+    pollIntervalMs: 100,
+  });
+
+  // ── THE V7 load-bearing unit: the intent record exists BEFORE the
+  //    payment is dispatched, and success upgrades it to settled ─────────
+  {
+    const journal = makeJournal();
+    const captured: { atPayTime: Rec } = { atPayTime: null };
+    const terminal = await runClaimAndPayout({
+      ...baseOpts(journal),
+      escrowId: "esc_v7_presend",
+      bolt11: "lnbc100n1pv7presend",
+      expectedDeltaMsats: 100_000,
+      getBalance: balances([0, 100_000, 100_000]),
+      completeClaim: async () => {},
+      payInvoice: async () => {
+        captured.atPayTime = journal.current;
+        return "op_v7_new";
+      },
+    });
+    assert(terminal.kind === "done", "V7 pre-send: happy path still ends done");
+    assert(captured.atPayTime?.status === "intent",
+      "V7 LOAD-BEARING: the intent record is PERSISTED before payInvoice dispatches");
+    assert(journal.current?.status === "settled" && journal.current?.operationId === "op_v7_new",
+      "V7 pre-send: success upgrades intent → settled with the new operationId");
+  }
+
+  // ── Crash aftermath: intent + reconcile says SETTLED → done, zero pays,
+  //    COMPLETE published (the exact double-pay this closes) ─────────────
+  {
+    const journal = makeJournal({ status: "intent", createdAt: 5_000_000 });
+    let payCalls = 0, claimCalls = 0, completeCalls = 0;
+    let seenSince: number | undefined;
+    const terminal = await runClaimAndPayout({
+      ...baseOpts(journal),
+      escrowId: "esc_v7_settled",
+      bolt11: "lnbc100n1pv7settled",
+      expectedDeltaMsats: 100_000,
+      getBalance: balances([0]),
+      claimAndRedeem: async () => { claimCalls++; return {}; },
+      completeClaim: async () => { completeCalls++; },
+      payInvoice: async () => { payCalls++; },
+      payOutcomeByEscrow: async (_id, sinceMs) => {
+        seenSince = sinceMs;
+        return { outcome: "settled" as const, operationId: "op_v7_found" };
+      },
+    });
+    assert(terminal.kind === "done",
+      "intent + reconcile settled → done (crash-mid-pay retry resolves, never re-pays)");
+    assert(payCalls === 0 && claimCalls === 0,
+      "intent + reconcile settled: NO second payment, no re-claim");
+    assert(completeCalls === 1,
+      "intent + reconcile settled: COMPLETE published");
+    assert(journal.current?.status === "settled" && journal.current?.operationId === "op_v7_found",
+      "intent + reconcile settled: record upgraded with the FOUND operationId");
+    assert(seenSince === 5_000_000 - 60 * 60 * 1000,
+      "reconcile scan bounded to the intent's createdAt minus the margin");
+  }
+
+  // ── intent + reconcile NONE → payment provably never existed: record
+  //    cleared, pays fresh exactly once ───────────────────────────────────
+  {
+    const journal = makeJournal({ status: "intent", createdAt: 5_000_000 });
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      ...baseOpts(journal),
+      escrowId: "esc_v7_none",
+      bolt11: "lnbc100n1pv7none",
+      expectedDeltaMsats: 100_000,
+      getBalance: balances([0, 100_000, 100_000]),
+      completeClaim: async () => {},
+      payInvoice: async () => { payCalls++; return "op_v7_fresh"; },
+      payOutcomeByEscrow: async () => ({ outcome: "none" as const }),
+    });
+    assert(terminal.kind === "done" && payCalls === 1,
+      "intent + reconcile none → pays fresh exactly once (crash was pre-send)");
+    assert(journal.current?.status === "settled",
+      "intent + reconcile none: fresh payment journaled settled");
+  }
+
+  // ── intent + reconcile INFLIGHT → adopt the found operationId, refuse ──
+  {
+    const journal = makeJournal({ status: "intent", createdAt: 5_000_000 });
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      ...baseOpts(journal),
+      escrowId: "esc_v7_inflight",
+      bolt11: "lnbc100n1pv7inflight",
+      expectedDeltaMsats: 100_000,
+      getBalance: balances([0]),
+      payInvoice: async () => { payCalls++; },
+      payOutcomeByEscrow: async () => ({ outcome: "inflight" as const, operationId: "op_v7_live" }),
+    });
+    assert(terminal.kind === "payout-confirming" && payCalls === 0,
+      "intent + reconcile inflight → payout-confirming, never re-pays");
+    assert(journal.current?.status === "submitted" && journal.current?.operationId === "op_v7_live",
+      "intent + reconcile inflight: upgraded to submitted with the live payment's id");
+  }
+
+  // ── intent + reconcile UNKNOWN (or no reconcile dep) → refuse for now,
+  //    record kept so the boot sweep retries the reconcile later ─────────
+  {
+    const journal = makeJournal({ status: "intent", createdAt: 5_000_000 });
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      ...baseOpts(journal),
+      escrowId: "esc_v7_unknown",
+      bolt11: "lnbc100n1pv7unknown",
+      expectedDeltaMsats: 100_000,
+      getBalance: balances([0]),
+      payInvoice: async () => { payCalls++; },
+      payOutcomeByEscrow: async () => ({ outcome: "unknown" as const }),
+    });
+    assert(terminal.kind === "payout-confirming" && payCalls === 0,
+      "intent + reconcile unknown → refuse-for-now (payout-confirming), no re-pay");
+    assert(journal.current?.status === "intent",
+      "intent + reconcile unknown: record kept for the next reconcile attempt");
+  }
+  {
+    const journal = makeJournal({ status: "intent", createdAt: 5_000_000 });
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      ...baseOpts(journal),
+      escrowId: "esc_v7_nodep",
+      bolt11: "lnbc100n1pv7nodep",
+      expectedDeltaMsats: 100_000,
+      getBalance: balances([0]),
+      payInvoice: async () => { payCalls++; },
+      // payOutcomeByEscrow deliberately absent.
+    });
+    assert(terminal.kind === "payout-confirming" && payCalls === 0,
+      "intent + NO reconcile dep → fund-safe refuse (never a blind re-pay)");
+  }
+
+  // ── V6 residue: submitted WITHOUT operationId reconciles by escrow ─────
+  {
+    const journal = makeJournal({ status: "submitted", createdAt: 5_000_000 });
+    let payCalls = 0, completeCalls = 0;
+    const terminal = await runClaimAndPayout({
+      ...baseOpts(journal),
+      escrowId: "esc_v7_v6residue",
+      bolt11: "lnbc100n1pv7v6res",
+      expectedDeltaMsats: 100_000,
+      getBalance: balances([0]),
+      completeClaim: async () => { completeCalls++; },
+      payInvoice: async () => { payCalls++; },
+      payOutcomeByEscrow: async () => ({ outcome: "settled" as const, operationId: "op_v7_v6" }),
+    });
+    assert(terminal.kind === "done" && payCalls === 0 && completeCalls === 1,
+      "submitted-without-opId + reconcile settled → done (stuck-confirming resolves, V6)");
+  }
+
+  // ── The asymmetry: submitted + reconcile NONE stays refused ────────────
+  {
+    const journal = makeJournal({ status: "submitted", createdAt: 5_000_000 });
+    let payCalls = 0;
+    const terminal = await runClaimAndPayout({
+      ...baseOpts(journal),
+      escrowId: "esc_v7_asym",
+      bolt11: "lnbc100n1pv7asym",
+      expectedDeltaMsats: 100_000,
+      getBalance: balances([0]),
+      payInvoice: async () => { payCalls++; },
+      payOutcomeByEscrow: async () => ({ outcome: "none" as const }),
+    });
+    assert(terminal.kind === "payout-confirming" && payCalls === 0,
+      "submitted + reconcile none → STILL refused (a blind scan must not license re-pay)");
+    assert(journal.current?.status === "submitted",
+      "submitted + reconcile none: record kept");
+  }
+
+  // ── Real journal module: intent upgrade semantics ──────────────────────
+  {
+    const journalMod = await import("../payments/payout-journal.js");
+    (globalThis as any).localStorage.clear();
+    journalMod.recordPayoutIntent({ escrowId: "esc_v7_real", amountMsats: 42_000 });
+    assert(journalMod.getPayoutRecord("esc_v7_real")?.status === "intent",
+      "real journal: recordPayoutIntent persists an intent record");
+    journalMod.recordPayoutSubmitted({ escrowId: "esc_v7_real", operationId: "op_r1" });
+    assert(journalMod.getPayoutRecord("esc_v7_real")?.status === "submitted",
+      "real journal: intent upgrades to submitted");
+    journalMod.recordPayoutIntent({ escrowId: "esc_v7_real" });
+    assert(journalMod.getPayoutRecord("esc_v7_real")?.status === "submitted",
+      "real journal: a retry's pre-send intent NEVER downgrades submitted");
+    journalMod.markPayoutSettled("esc_v7_real", "op_r1");
+    journalMod.recordPayoutIntent({ escrowId: "esc_v7_real" });
+    assert(journalMod.getPayoutRecord("esc_v7_real")?.status === "settled",
+      "real journal: a retry's pre-send intent NEVER downgrades settled");
+    journalMod.clearAllPayoutRecords();
+  }
+}
+
 // ── PAYOUT JOURNAL FAIL-CLOSED (v4.0.0) ──────────────────────────────────
 // saveJournal must FAIL LOUD on a storage write error (quota / private mode /
 // disabled) so the orchestrator never proceeds with an unpersisted guard; a
@@ -13131,6 +14732,128 @@ console.log("\n── RUN RECOVERY PAYOUT ──");
         "recovery without escrowId → done (guard inert)");
       assert(payCalls === 1,
         "recovery without escrowId: payInvoice called normally");
+    }
+
+    // ── Stale-key detection (the Recover → false-green → banner no-op loop) ──
+    // A SETTLED record while the wallet still holds a MATERIAL balance can
+    // only mean the key was inherited from an older trade whose payout
+    // already went out — the drain must proceed KEYLESS, not lie "done".
+
+    // Stale settled key + material balance → actually pays (keyless), and
+    // never touches the old trade's settled record.
+    {
+      const journal = makeJournal({ status: "settled", operationId: "op_done" });
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_stale_settled",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; return "op_new"; },
+        getBalance: async () => 2_462_000, // 2,462 sats still in the wallet
+        traceContext: { escrowId: "rec_dp_stale" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "done",
+        "stale settled key + material balance → drains and reaches done");
+      assert(payCalls === 1,
+        "stale settled key: payInvoice IS called (no more false-green no-op)");
+      assert(journal.calls.settled === 0
+        && journal.current?.status === "settled" && journal.current?.operationId === "op_done",
+        "stale settled key: keyless drain never rewrites the old trade's record");
+    }
+
+    // Settled key + balance actually drained (re-tap-after-success race) →
+    // fund-safe short-circuit preserved, nothing sent.
+    {
+      const journal = makeJournal({ status: "settled", operationId: "op_done" });
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_settled_drained",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; },
+        getBalance: async () => 15_000, // 15-sat fee-reserve dust left
+        traceContext: { escrowId: "rec_dp_drained" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "done" && payCalls === 0,
+        "settled key + sub-material balance → short-circuit stays (genuine retry-after-success)");
+    }
+
+    // Settled key + unreadable balance → unknown ⇒ keep the fund-safe
+    // short-circuit (never pay on an unverifiable staleness claim).
+    {
+      const journal = makeJournal({ status: "settled", operationId: "op_done" });
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_settled_noread",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; },
+        getBalance: async () => { throw new Error("fed unreachable"); },
+        traceContext: { escrowId: "rec_dp_noread" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "done" && payCalls === 0,
+        "settled key + unreadable balance → unknown ⇒ fund-safe short-circuit kept");
+    }
+
+    // V7: an intent-keyed drain drops to keyless — the claim flow's
+    // reconcile-by-escrow owns intent records; recovery must neither trip
+    // on nor overwrite them.
+    {
+      let payCalls = 0, reads = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_intent",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; return "op_keyless"; },
+        traceContext: { escrowId: "rec_dp_intent" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: (_id) => { reads++; return { status: "intent" as const }; },
+        recordPayoutSubmitted: () => { throw new Error("must not journal a keyless drain"); },
+        markPayoutSettled: () => { throw new Error("must not settle a claim-flow intent"); },
+        clearPayoutRecord: () => { throw new Error("must not clear a claim-flow intent"); },
+      });
+      assert(terminal.kind === "done" && payCalls === 1 && reads === 1,
+        "recovery over a claim-flow intent → drains keyless (pays; never touches the record)");
+    }
+
+    // Stale submitted key whose re-attach reports settled + material balance
+    // → old record upgraded to settled, then the drain proceeds keyless.
+    {
+      const journal = makeJournal({ status: "submitted", operationId: "op_x" });
+      let payCalls = 0;
+      const terminal = await runRecoveryPayout({
+        bolt11: "lnbc100n1prec_stale_reattach",
+        saveAfter: false,
+        payInvoice: async () => { payCalls++; return "op_new2"; },
+        awaitPayoutOutcome: async () => "settled",
+        getBalance: async () => 2_462_000,
+        traceContext: { escrowId: "rec_dp_stale2" },
+        addOrTouchLightningHandle: () => {},
+        onPhase: () => {},
+        getPayoutRecord: journal.getPayoutRecord,
+        recordPayoutSubmitted: journal.recordPayoutSubmitted,
+        markPayoutSettled: journal.markPayoutSettled,
+        clearPayoutRecord: journal.clearPayoutRecord,
+      });
+      assert(terminal.kind === "done" && payCalls === 1,
+        "stale reattach-settled key + material balance → old record closed, drain still pays");
+      assert(journal.current?.status === "settled" && journal.current?.operationId === "op_x",
+        "stale reattach: the OLD payout's record is marked settled with its own operationId");
     }
   }
 }
@@ -14406,11 +16129,102 @@ console.log("\n── CHAPSMART PAYOUT PROFILE + ADAPTER ──");
   assert(!isChapsmartPayoutEligible({ homeCommunity: "ke-kes", fiatCurrency: "KES" }),
     "Chapsmart hidden for non-Tanzania/non-TZS context");
 
-  // v1.2.4: the createChapsmartPayoutInvoice API integration is gone
-  // (Chapsmart now lives in external-swap-registry.ts as a redirect).
-  // The adapter-level tests that used to live here have been deleted;
-  // the unified registry's tests below cover Chapsmart's presence
-  // alongside every other external swap provider.
+  // v1.2.4: the createChapsmartPayoutInvoice API integration is gone.
+  // ChapSmart is now a NATIVE LUD-16 M-Pesa offramp (chapsmart-offramp.ts +
+  // the ClaimPayoutModal ChapsmartMpesaPicker), no longer a registry redirect.
+}
+
+// ── CHAPSMART ON-RAMP ("Fund with M-Pesa", fiat-funded escrow) ───────────
+//
+// ChapSmart as an alternate payer of the funding BOLT11 (brief:
+// chama-chapsmart-fiat-funding-brief.md, CONFIRMED 2026-07-08 section).
+// The escrow money-path is untouched — these tests cover the pure quote
+// math (exact-sats target inside ChapSmart's ±2% send-sats tolerance),
+// the confirmation-code normalizer, the payment-steps copy, and the
+// context gate (Tanzania-only, Exchange excluded).
+console.log("\n── CHAPSMART ON-RAMP (fund with M-Pesa) ──");
+{
+  // Dormant until the proxy + API key exist: flag ships OFF.
+  assert(CHAPSMART_ONRAMP_ENABLED === false,
+    "ChapSmart on-ramp flag ships OFF (proxy + API key not deployed yet)");
+  assert(CHAPSMART_TARGET_TOLERANCE < CHAPSMART_SEND_SATS_TOLERANCE,
+    "Our quote-acceptance tolerance leaves margin inside ChapSmart's ±2%");
+
+  // Context gate: Tanzania contexts qualify, Exchange never does.
+  assert(isChapsmartOnrampContext({ tradeCommunity: "tz-tzs", tradeCategory: "marketplace" }),
+    "On-ramp offered for a Tanzanian marketplace trade");
+  assert(isChapsmartOnrampContext({ fiatCurrency: "TZS", tradeCategory: "bill-pay" }),
+    "On-ramp offered for a TZS bill-pay trade");
+  assert(!isChapsmartOnrampContext({ tradeCommunity: "tz-tzs", tradeCategory: "p2p-trade" }),
+    "Exchange excluded even in Tanzania — Exchange IS the P2P on-ramp");
+  assert(!isChapsmartOnrampContext({ homeCommunity: "ke-kes", fiatCurrency: "KES", tradeCategory: "marketplace" }),
+    "On-ramp hidden outside Tanzania context");
+
+  // Confirmation-code normalizer: SMS codes, loose on paste noise.
+  assert(normalizeMpesaConfirmationCode(" xkr4 mpt9qzn ") === "XKR4MPT9QZN",
+    "M-Pesa code normalizer strips spaces and uppercases");
+  assert(normalizeMpesaConfirmationCode("XKR4MPT9QZN") === "XKR4MPT9QZN",
+    "Canonical 11-char code accepted verbatim");
+  assert(normalizeMpesaConfirmationCode("abc") === null,
+    "Too-short paste rejected before any network call");
+  assert(normalizeMpesaConfirmationCode("lnbc1notacode00000000") === null,
+    "Overlong paste (e.g. an invoice fragment) rejected");
+  assert(normalizeMpesaConfirmationCode("XKR4-MPT9") === null,
+    "Symbols rejected — codes are pure alphanumeric");
+
+  // Payment steps: the Kutoa-Pesa agent flow with the EXACT quoted TZS.
+  const steps = chapsmartMpesaPaySteps(25_500);
+  assert(steps.length === 6, "Six Kutoa-Pesa steps (USSD → confirm)");
+  assert(steps.some((s) => s.sw.includes(CHAPSMART_MPESA_AGENT_NUMBER)),
+    "Steps carry the ChapSmart agent number");
+  assert(steps.some((s) => s.sw.includes("25,500")),
+    "Steps carry the exact quoted TZS amount, formatted");
+
+  // Exact-sats quote math.
+  assert(estimateTzsForTargetSats(1301, 10_000, 4337) === Math.round((1301 * 10_000) / 4337),
+    "TZS estimate is the rate-scaled rounding of the reference quote");
+  assert(quoteMatchesTargetSats(1301, 1301), "Exact quote matches");
+  assert(quoteMatchesTargetSats(1290, 1301), "Sub-tolerance deviation matches");
+  assert(!quoteMatchesTargetSats(1200, 1301), "Out-of-tolerance quote rejected");
+  assert(!quoteMatchesTargetSats(0, 1301) && !quoteMatchesTargetSats(1301, NaN),
+    "Degenerate quote/target never matches");
+
+  // Convergence: probe learns the rate, second quote lands on target.
+  const RATE = 0.4337; // sats per TZS
+  const mkFetcher = (drift = 0) => {
+    let calls = 0;
+    const fetchQuote = async ({ amountTZS }: { amountTZS: number; accountNumber: string }): Promise<ChapsmartBuyQuote> => {
+      calls++;
+      const effRate = RATE * (1 + drift * (calls - 1));
+      return {
+        quoteId: `q${calls}`,
+        amountTZS,
+        calculatedSats: Math.round(amountTZS * effRate),
+      };
+    };
+    return { fetchQuote, count: () => calls };
+  };
+
+  const stable = mkFetcher(0);
+  const q = await getBuyQuoteForSats({
+    targetSats: 12_345, accountNumber: "acct", fetchQuote: stable.fetchQuote,
+  });
+  assert(stable.count() === 2,
+    "Stable rate converges in two calls (probe + estimate)");
+  assert(quoteMatchesTargetSats(q.calculatedSats, 12_345),
+    "Returned quote's sats sit within the acceptance tolerance of the invoice");
+  assert(q.amountTZS === estimateTzsForTargetSats(12_345, 10_000, Math.round(10_000 * RATE)),
+    "User pays the TZS estimated from the probe rate");
+
+  // A violently moving price (8% per quote) never converges → honest throw.
+  let threw = false;
+  try {
+    await getBuyQuoteForSats({
+      targetSats: 12_345, accountNumber: "acct",
+      fetchQuote: mkFetcher(0.08).fetchQuote, maxAttempts: 3,
+    });
+  } catch { threw = true; }
+  assert(threw, "Non-converging quotes throw instead of returning an off-target quote");
 }
 
 console.log("\n── BANXAAS PAYOUT HANDOFF ──");
@@ -14454,25 +16268,27 @@ console.log("\n── BANXAAS PAYOUT HANDOFF ──");
 // ── EXTERNAL SWAP REGISTRY (offramp-only redirects) ──────────────────────
 //
 // Day-1 fiat-ramps decision (2026-06-24): the registry hosts Banxaas,
-// Chapsmart, Bitika, and Bitzed as OFFRAMP-only guided-redirect providers,
+// Bitika, and Bitzed as OFFRAMP-only guided-redirect providers,
 // surfaced POST-CLAIM only. There is no `bidirectional` field and no
-// pre-LOCK call site any more. Minmo was removed (too much friction) and
-// Tando was promoted out of the registry into a native LUD-16 M-Pesa
-// offramp (see tando-offramp.ts). This block verifies the registry's
+// pre-LOCK call site any more. Minmo was removed (too much friction); Tando
+// (tando-offramp.ts) and ChapSmart (chapsmart-offramp.ts) were both promoted
+// out of the registry into native LUD-16 M-Pesa offramps. This block verifies the registry's
 // resolution + sort behaviour; the picker component relies on it.
 console.log("\n── EXTERNAL SWAP REGISTRY (offramp-only) ──");
 {
   // Registry coverage — every offramp-redirect provider.
   const providerIds = new Set(EXTERNAL_SWAP_PROVIDERS.map((p) => p.id));
-  for (const expectedId of ["banxaas", "chapsmart", "bitika", "bitzed"]) {
+  for (const expectedId of ["banxaas", "bitika", "bitzed"]) {
     assert(providerIds.has(expectedId as any),
       `Registry covers ${expectedId}`);
   }
-  // Minmo removed entirely; Tando is now native (not a redirect entry).
+  // Minmo removed entirely; Tando + ChapSmart are now native (not redirect entries).
   assert(!providerIds.has("minmo" as any),
     "Minmo is removed from the registry");
   assert(!providerIds.has("tando" as any),
     "Tando is no longer a registry redirect (native LUD-16 offramp instead)");
+  assert(!providerIds.has("chapsmart" as any),
+    "ChapSmart is no longer a registry redirect (graduated to native LUD-16 offramp)");
 
   // Banxaas keeps the recommended highlight so it tops its market; nothing
   // is bidirectional any more (offramp-only, post-CLAIM).
@@ -14481,11 +16297,10 @@ console.log("\n── EXTERNAL SWAP REGISTRY (offramp-only) ──");
     "Only Banxaas is marked recommended today");
 
   // Single-country trade contexts resolve to the right provider(s).
+  // Tanzania now has NO external redirect — ChapSmart is a native LUD-16 offramp.
   const tz = getExternalSwapsForContext({ tradeCommunity: "tz-tzs" });
-  assert(tz.length === 1 && tz[0].provider.id === "chapsmart",
-    "Tanzania trade resolves to Chapsmart");
-  assert(tz[0].reason === "trade-community",
-    "Tanzania resolution reason is trade-community");
+  assert(tz.length === 0,
+    "Tanzania has no external redirect (ChapSmart is a native LUD-16 offramp)");
 
   const sn = getExternalSwapsForContext({ tradeCommunity: "sn-cfa" });
   assert(sn.length === 1 && sn[0].provider.id === "banxaas" && sn[0].provider.status === "enabled",
@@ -14532,18 +16347,27 @@ console.log("\n── EXTERNAL SWAP REGISTRY (offramp-only) ──");
   const empty = getExternalSwapsForContext({});
   assert(empty.length === 0,
     "Empty context surfaces no providers");
+  // Country-scoping: when the trade carries its own community, the trade's
+  // country is authoritative — a Kenyan-home user cashing out a Cameroon trade
+  // sees only the Cameroon (Banxaas) redirect, never a home-country Bitika leak.
+  const foreignTrade = getExternalSwapsForContext({ homeCommunity: "ke-kes", tradeCommunity: "cm-xaf", fiatCurrency: "XAF" });
+  assert(foreignTrade.every((m) => m.reason === "trade-community"),
+    "A trade with its own community surfaces only trade-community matches (no home/currency leak)");
+  assert(!foreignTrade.some((m) => m.provider.id === "bitika"),
+    "Kenyan-home user does NOT see the Bitika (Kenya) redirect on a Cameroon trade");
 
   // Reason priority dominates sort order: trade-community beats
   // home-community beats fiat-currency. In a mixed context, the
   // more-specific reason always wins regardless of which provider
   // is recommended.
+  // (ke-kes home → Bitika, non-recommended; XOF fiat → Banxaas, recommended.)
   const mixed = getExternalSwapsForContext({
-    homeCommunity: "tz-tzs",
+    homeCommunity: "ke-kes",
     fiatCurrency: "XOF",
   });
   assert(mixed.length >= 2,
     "Mixed context returns multiple providers");
-  assert(mixed[0].provider.id === "chapsmart" && mixed[0].reason === "home-community",
+  assert(mixed[0].provider.id === "bitika" && mixed[0].reason === "home-community",
     "Home-community match beats fiat-currency match even when the latter is the recommended provider");
 
   // Recommended floats WITHIN a tier. fiat-currency KES has only Bitika
@@ -14655,6 +16479,97 @@ console.log("\n── TANDO NATIVE M-PESA OFFRAMP ──");
     "Non-Kenya context is not eligible for Tando");
   assert(!isKenyaPayoutContext({}),
     "Empty context is not eligible for Tando");
+  // Country-scoping: the TRADE is authoritative. A Kenyan-home user cashing out
+  // a foreign (Cameroon/XAF) trade must NOT see M-Pesa — it's unusable there.
+  assert(!isKenyaPayoutContext({ homeCommunity: "ke-kes", tradeCommunity: "cm-xaf", fiatCurrency: "XAF" }),
+    "Kenyan home does NOT leak M-Pesa onto a Cameroon (XAF) trade");
+  assert(isKenyaPayoutContext({ homeCommunity: "ke-kes" }),
+    "Kenyan home with no trade context still offers M-Pesa (context-less fallback)");
+}
+
+// ChapSmart is Tando's Tanzanian mirror: `<phone>@chapsmart.com` is a live,
+// verified LUD-16 Lightning Address, so the claim flow pays it through the same
+// payout path (sats → TZS on Vodacom M-Pesa). These tests cover the pure
+// phone↔address layer (chapsmart-offramp.ts) the ClaimPayoutModal picker depends on.
+console.log("\n── CHAPSMART NATIVE M-PESA OFFRAMP (Tanzania) ──");
+{
+  assert(CHAPSMART_LNADDRESS_DOMAIN === "chapsmart.com",
+    "ChapSmart Lightning-Address host is chapsmart.com (apex, matches the live endpoint)");
+
+  // MSISDN normalization accepts the common Tanzanian input shapes and
+  // canonicalizes to 255 + 9 national digits (Vodacom M-Pesa).
+  assert(normalizeTanzanianMsisdn("0740034110") === "255740034110",
+    "Local 07… form normalizes to 2557…");
+  assert(normalizeTanzanianMsisdn("255740034110") === "255740034110",
+    "Full MSISDN passes through");
+  assert(normalizeTanzanianMsisdn("+255 740 034 110") === "255740034110",
+    "Leading + and spaces are stripped");
+  assert(normalizeTanzanianMsisdn("740034110") === "255740034110",
+    "Bare national significant number is accepted");
+  assert(normalizeTanzanianMsisdn("0740-034-110") === "255740034110",
+    "Dashes are stripped");
+  assert(normalizeTanzanianMsisdn("0754111222") === "255754111222" &&
+    normalizeTanzanianMsisdn("0761222333") === "255761222333" &&
+    normalizeTanzanianMsisdn("0798333444") === "255798333444",
+    "All Vodacom prefixes (74/75/76/79) are accepted");
+
+  // Rejects non-Vodacom / malformed input (fail fast, before a network call).
+  assert(normalizeTanzanianMsisdn("0712345678") === null,
+    "Non-Vodacom prefix (71… Airtel/Tigo) is rejected");
+  assert(normalizeTanzanianMsisdn("0773456789") === null,
+    "77… (non-Vodacom) is rejected");
+  assert(normalizeTanzanianMsisdn("074003411") === null,
+    "Too-short numbers are rejected");
+  assert(normalizeTanzanianMsisdn("07400341100") === null,
+    "Too-long numbers are rejected");
+  assert(normalizeTanzanianMsisdn("0740 03A 110") === null,
+    "Non-digit characters are rejected");
+  assert(normalizeTanzanianMsisdn("") === null && normalizeTanzanianMsisdn("   ") === null,
+    "Empty / whitespace is rejected");
+  assert(isValidTanzanianMsisdn("0740034110") && !isValidTanzanianMsisdn("nope"),
+    "isValidTanzanianMsisdn mirrors normalize");
+
+  // Address building + round-trip.
+  assert(buildChapsmartLightningAddress("0740034110") === "255740034110@chapsmart.com",
+    "buildChapsmartLightningAddress forms <msisdn>@chapsmart.com");
+  assert(buildChapsmartLightningAddress("not a phone") === null,
+    "buildChapsmartLightningAddress returns null for invalid input");
+  assert(isChapsmartLightningAddress("255740034110@chapsmart.com"),
+    "isChapsmartLightningAddress recognizes ChapSmart addresses");
+  assert(isChapsmartLightningAddress("255740034110@CHAPSMART.COM"),
+    "isChapsmartLightningAddress is case-insensitive");
+  assert(!isChapsmartLightningAddress("254712345678@bitcoin.co.ke"),
+    "isChapsmartLightningAddress rejects Tando (non-ChapSmart) addresses");
+  assert(chapsmartMsisdnFromAddress("255740034110@chapsmart.com") === "255740034110",
+    "chapsmartMsisdnFromAddress recovers the MSISDN");
+  assert(chapsmartMsisdnFromAddress("alice@getchama.app") === null,
+    "chapsmartMsisdnFromAddress returns null for non-ChapSmart addresses");
+
+  // Display format is the familiar local 0XXX XXX XXX form.
+  assert(formatTanzanianMsisdnDisplay("255740034110") === "0740 034 110",
+    "formatTanzanianMsisdnDisplay renders the local 0XXX XXX XXX form");
+
+  // The ChapSmart address survives the payout-destinations normalizer (lowercased).
+  const csAddr = buildChapsmartLightningAddress("0740034110")!;
+  assert(csAddr === csAddr.toLowerCase() && isChapsmartLightningAddress(csAddr),
+    "ChapSmart address is already lowercase and stays recognizable when stored");
+
+  // Tanzania context detection — gates the native ChapSmart option, and is
+  // mutually exclusive with the Kenya (Tando) context.
+  assert(isTanzaniaPayoutContext({ tradeCommunity: "tz-tzs" }),
+    "tz-tzs trade community is a Tanzania payout context");
+  assert(isTanzaniaPayoutContext({ fiatCurrency: "tzs" }),
+    "TZS fiat currency (any case) is a Tanzania payout context");
+  assert(!isTanzaniaPayoutContext({ tradeCommunity: "ke-kes", fiatCurrency: "KES" }),
+    "A Kenya context is not eligible for ChapSmart");
+  assert(!isTanzaniaPayoutContext({}),
+    "Empty context is not eligible for ChapSmart");
+  // Country-scoping mirror: a TZ-home user cashing out a foreign trade must not
+  // see M-Pesa; home stays a context-less fallback only.
+  assert(!isTanzaniaPayoutContext({ homeCommunity: "tz-tzs", tradeCommunity: "cm-xaf", fiatCurrency: "XAF" }),
+    "Tanzanian home does NOT leak M-Pesa onto a Cameroon (XAF) trade");
+  assert(isTanzaniaPayoutContext({ homeCommunity: "tz-tzs" }),
+    "Tanzanian home with no trade context still offers M-Pesa (context-less fallback)");
 }
 
 // Strike is the US mirror of Tando: `<username>@strike.me` is a real LUD-16
@@ -17526,6 +19441,77 @@ console.log("\n── BOND 38130: declaration event (UNBACKED Phase 1) ──");
     "getArbiterBond resolves the current in-term bond");
 }
 
+// ── VICTIM ATTESTATION 38131: the §11.8 restorative-strand "made whole" seam ──
+// A SEAM, never an auto-trigger: the victim signs that a slashed arbiter remediated
+// them; the cabinet REFERENCES it to weigh casting a withheld bond return. Capital
+// only — it restores no standing. The signer IS the victim (authoritative), so the
+// remediated arbiter cannot forge it and the cabinet cannot fabricate it.
+console.log("\n── VICTIM ATTESTATION 38131: restorative-strand made-whole seam ──");
+{
+  const NOW = 1_900_000_000;
+  const victimSk = generateSecretKey();
+  const victimPk = getPublicKey(victimSk);
+  const arbSk = generateSecretKey();
+  const arbPk = getPublicKey(arbSk);
+
+  const vKind: number = VICTIM_ATTESTATION_KIND;
+  assert(vKind === 38131, "victim-attestation kind is 38131");
+  assert(vKind !== Number(ARBITER_BOND_KIND) && vKind !== 38120 && vKind !== 38121,
+    "38131 stays clear of bond/roster/application kinds");
+
+  // Build → sign → parse round-trip: the signer is the victim.
+  const signed = finalizeEvent(buildVictimAttestationEvent({
+    victim: victimPk, arbiter: arbPk, escrowId: "trade_abc", amountMsats: 250_000, createdAt: NOW,
+  }), victimSk) as unknown as NostrEvent;
+  const parsed = parseVictimAttestationEvent(signed);
+  assert(!!parsed && parsed.victim === victimPk && parsed.arbiter === arbPk
+    && parsed.escrowId === "trade_abc" && parsed.amountMsats === 250_000,
+    "a signed attestation parses + verifies; the signer is the victim, referencing the remediated arbiter");
+
+  // Tamper the amount → verification fails (explicit field copy — nostr-tools stamps
+  // a per-object 'verified' symbol that a spread would carry and mask the tamper).
+  const tampered = {
+    kind: signed.kind, created_at: signed.created_at, tags: signed.tags,
+    pubkey: signed.pubkey, id: signed.id, sig: signed.sig,
+    content: signed.content.replace("250000", "999000"),
+  } as unknown as NostrEvent;
+  assert(parseVictimAttestationEvent(tampered) === null, "a tampered attestation fails verification");
+
+  // The remediated arbiter cannot sign their OWN made-whole (arbiter === victim).
+  const selfSigned = finalizeEvent(buildVictimAttestationEvent({
+    victim: arbPk, arbiter: victimPk, escrowId: "trade_abc", amountMsats: 1, createdAt: NOW,
+  }), arbSk) as unknown as NostrEvent;
+  // Re-point the payload arbiter to the signer to simulate self-attestation; parse must reject.
+  const selfAttest = {
+    kind: selfSigned.kind, created_at: selfSigned.created_at, tags: selfSigned.tags,
+    pubkey: arbPk, id: selfSigned.id, sig: selfSigned.sig,
+    content: JSON.stringify({ type: "chama:victim-made-whole", arbiter: arbPk, escrowId: "trade_abc", amountMsats: 1 }),
+  } as unknown as NostrEvent;
+  assert(parseVictimAttestationEvent(selfAttest) === null,
+    "a self-attestation (arbiter signs their own made-whole) is rejected — only the victim's key produces the signal");
+
+  // build() refuses a non-positive amount and a victim≡arbiter at construction.
+  let threw = false;
+  try { buildVictimAttestationEvent({ victim: victimPk, arbiter: arbPk, escrowId: "x", amountMsats: 0 }); }
+  catch { threw = true; }
+  assert(threw, "build refuses a non-positive made-whole amount");
+
+  // selectLatestAttestation: newest for (arbiter, escrow) wins; wrong escrow ignored.
+  const older = finalizeEvent(buildVictimAttestationEvent({
+    victim: victimPk, arbiter: arbPk, escrowId: "trade_abc", amountMsats: 100_000, createdAt: NOW,
+  }), victimSk) as unknown as NostrEvent;
+  const newer = finalizeEvent(buildVictimAttestationEvent({
+    victim: victimPk, arbiter: arbPk, escrowId: "trade_abc", amountMsats: 300_000, createdAt: NOW + 50,
+  }), victimSk) as unknown as NostrEvent;
+  const otherTrade = finalizeEvent(buildVictimAttestationEvent({
+    victim: victimPk, arbiter: arbPk, escrowId: "trade_zzz", amountMsats: 900_000, createdAt: NOW + 99,
+  }), victimSk) as unknown as NostrEvent;
+  assert(selectLatestAttestation(arbPk, "trade_abc", [older, newer, otherTrade])?.amountMsats === 300_000,
+    "newest attestation for (arbiter, escrow) wins; the other-escrow attestation is ignored");
+  assert(selectLatestAttestation(arbPk, "trade_none", [older, newer]) === null,
+    "selectLatestAttestation returns only the queried escrow's attestation (it never compels a heal — informational only)");
+}
+
 console.log("\n── EXPOSURE LEDGER (§8): floor, caps, tiers, consent gate ──");
 {
   const ARB = ARBITER_PK; // "cc"*32 — a 64-hex test key
@@ -17584,6 +19570,24 @@ console.log("\n── EXPOSURE LEDGER (§8): floor, caps, tiers, consent gate �
   assert(liveCapacity(bond(150_000_000), [openA, openB]) === 30_000_000,
     "liveCapacity = bond − Σ(open) = 150M − 120M = 30M");
   assert(liveCapacity(null, [openA]) === -60_000_000, "liveCapacity with no bond is negative by the open exposure");
+
+  // ⭐ S4 bridge — assignableBondedArbiters selects by the 38135 commitment bond
+  // amount (actualSats in SATS → ×1000 msats). openA/openB (60M each) seat ARB.
+  {
+    const bonds = [{ npub: ARB, actualSats: 150_000n }, { npub: ARBITER2_PK, actualSats: 30_000n }];
+    const big = assignableBondedArbiters({ bonds, tradeMsats: 40_000_000, allTrades: [] });
+    assert(big.includes(ARB) && !big.includes(ARBITER2_PK),
+      "⭐ assignableBondedArbiters: per-trade cap selects by 38135 bond amount (ARB 150k covers 40k, ARBITER2 30k covers but < the trade? no — 40k>30k ⇒ dropped)");
+    const tinyOk = assignableBondedArbiters({ bonds, tradeMsats: UNBONDED_FLOOR_MSATS - 1, allTrades: [] });
+    assert(tinyOk.includes(ARB) && tinyOk.includes(ARBITER2_PK),
+      "assignableBondedArbiters: a sub-floor trade needs no bond — all bonded arbiters qualify");
+    const combo = assignableBondedArbiters({ bonds: [{ npub: ARB, actualSats: 150_000n }], tradeMsats: 40_000_000, allTrades: [openA, openB] });
+    assert(!combo.includes(ARB),
+      "⭐ assignableBondedArbiters: aggregate cap — Σ(open 120M) + 40M > 150M bond drops ARB (combination of trades)");
+    const reseat = assignableBondedArbiters({ bonds: [{ npub: ARB, actualSats: 150_000n }], tradeMsats: 60_000_000, allTrades: [openA, openB], excludeTradeId: "t-A" });
+    assert(reseat.includes(ARB),
+      "assignableBondedArbiters: excludeTradeId frees the subject trade's slot so an already-seated arbiter re-qualifies");
+  }
 
   // Tier bands (§L) — Gold ≥ 1M sats pinned.
   assert(exposureTier(99_999_999) === "Bronze", "tier: < 100k sats is Bronze");
@@ -17756,6 +19760,128 @@ console.log("\n── TRADEVIEW UX: trade-progress display helpers ──");
     "cancel → '✖ Trade cancelled'");
   assert(eventToSystemBubble(mkEvent("escrow:join", { role: Role.BUYER }), ctxMkt) === null,
     "join is not surfaced in the living feed (timeline only)");
+}
+
+// ── DURABLE TRADE INDEX (loss-proof My Trades) ──────────────────────────
+//
+// The index remembers a compact record of every trade the user is a party
+// to, from the updateEscrow chokepoint — so history survives relay eviction
+// / a chain that can't rehydrate. Verify: only parties indexed, status never
+// regresses, createdAt preserved, archived = index-minus-loaded, eviction cap.
+console.log("\n── DURABLE TRADE INDEX ──");
+{
+  const tradeIdx = await import("../escrow-engine/trade-index.js");
+  const { setLocalStorageUserScope } = await import("../storage/user-scope.js");
+  setLocalStorageUserScope("npub_trade_index_test");
+  (globalThis as any).localStorage.clear();
+
+  const me = "me_pubkey_ti01";
+  const other = "other_pubkey_ti02";
+  const mk = (over: Partial<EscrowState>): EscrowState => ({
+    id: "ti-1", status: EscrowStatus.CREATED, description: "sell sats",
+    amountMsats: 2_000_000, category: "p2p-trade", fulfillment: "service",
+    community: "tz-tzs", mintUrl: "fed1x",
+    participants: { buyer: other, seller: me, arbiter: "arb" },
+    initiator: { pubkey: me, role: Role.SELLER },
+    communityArbiters: [], subscription: null, votes: {},
+    resolvedOutcome: null, resolvedMajority: null,
+    fees: { platformBps: 50, platformPubkey: me, arbiterFeeMsats: 0 },
+    expiresAt: 0, createdAt: 5000, eventChain: [], chatMessages: [], lock: { handle: null },
+    ...over,
+  } as EscrowState);
+
+  // Only parties get indexed.
+  assert(tradeIdx.deriveTradeIndexEntry(mk({}), me, 1000)?.role === Role.SELLER,
+    "trade-index: the user's role (seller) is derived");
+  assert(tradeIdx.deriveTradeIndexEntry(mk({}), "stranger_pubkey", 1000) === null,
+    "trade-index: a non-party trade is NOT indexed");
+  assert(tradeIdx.deriveTradeIndexEntry(mk({}), me, 1000)?.counterparty === other,
+    "trade-index: counterparty is the other party");
+
+  // Record + list.
+  tradeIdx.recordTradeToIndex(mk({ id: "ti-a", createdAt: 5000 }), me, 1000);
+  tradeIdx.recordTradeToIndex(mk({ id: "ti-b", createdAt: 9000 }), me, 2000);
+  const listed = tradeIdx.listTradeIndex();
+  assert(listed.length === 2 && listed[0].id === "ti-b",
+    "trade-index: lists all, newest createdAt first");
+
+  // Status never regresses; createdAt preserved.
+  tradeIdx.recordTradeToIndex(mk({ id: "ti-a", status: EscrowStatus.COMPLETED, createdAt: 5000 }), me, 3000);
+  tradeIdx.recordTradeToIndex(mk({ id: "ti-a", status: EscrowStatus.CREATED, createdAt: 0 }), me, 4000);
+  const a = tradeIdx.listTradeIndex().find(e => e.id === "ti-a")!;
+  assert(a.lastStatus === EscrowStatus.COMPLETED,
+    "trade-index: a stale CREATED replay never regresses a COMPLETED status");
+  assert(a.createdAt === 5000,
+    "trade-index: original createdAt preserved across a 0-createdAt replay");
+
+  // Terminal-from-early is accepted (EXPIRED from CREATED).
+  tradeIdx.recordTradeToIndex(mk({ id: "ti-c", status: EscrowStatus.CREATED, createdAt: 100 }), me, 5000);
+  tradeIdx.recordTradeToIndex(mk({ id: "ti-c", status: EscrowStatus.EXPIRED, createdAt: 100 }), me, 6000);
+  assert(tradeIdx.listTradeIndex().find(e => e.id === "ti-c")!.lastStatus === EscrowStatus.EXPIRED,
+    "trade-index: EXPIRED (terminal) is accepted over CREATED");
+
+  // Archived = index entries whose id isn't loaded.
+  const archived = tradeIdx.archivedTradeEntries(["ti-a"]);
+  assert(archived.every(e => e.id !== "ti-a") && archived.some(e => e.id === "ti-b"),
+    "trade-index: archivedTradeEntries excludes loaded ids, keeps the rest");
+
+  // Forget drops it.
+  tradeIdx.removeTradeFromIndex("ti-b");
+  assert(!tradeIdx.listTradeIndex().some(e => e.id === "ti-b"),
+    "trade-index: removeTradeFromIndex drops the entry");
+
+  (globalThis as any).localStorage.clear();
+  setLocalStorageUserScope(null);
+}
+
+// ── DURABLE ESCROW-EVENT CACHE (pure logic) ─────────────────────────────
+//
+// The IndexedDB layer no-ops in Node (no indexedDB); verify the pure merge +
+// eviction logic that makes the cache loss-proof AND bounded: dedup by id,
+// and evict-OLDEST-TERMINAL-first so a full cache never drops a live trade
+// before a done one.
+console.log("\n── DURABLE ESCROW-EVENT CACHE ──");
+{
+  const cache = await import("../escrow-engine/escrow-event-cache.js");
+
+  // dedup by id, first occurrence wins, order preserved.
+  const ev = (id: string) => ({ id, kind: 38100, pubkey: "p", created_at: 1, tags: [], content: "", sig: "s" }) as any;
+  const deduped = cache.dedupEventsById([ev("a"), ev("b"), ev("a"), ev("c"), ev("b")]);
+  assert(deduped.map((e: any) => e.id).join(",") === "a,b,c",
+    "event-cache: dedupEventsById keeps first occurrence, preserves order");
+  assert(cache.dedupEventsById([{ id: 123 } as any, ev("x")]).length === 1,
+    "event-cache: dedup skips malformed (non-string id) events");
+
+  // terminal classification (UI-terminal = evict-eligible).
+  assert(cache.isEvictableTerminal(EscrowStatus.COMPLETED)
+    && cache.isEvictableTerminal(EscrowStatus.EXPIRED)
+    && cache.isEvictableTerminal(EscrowStatus.CANCELLED),
+    "event-cache: COMPLETED/EXPIRED/CANCELLED are evict-eligible terminals");
+  assert(!cache.isEvictableTerminal(EscrowStatus.LOCKED)
+    && !cache.isEvictableTerminal(EscrowStatus.CREATED),
+    "event-cache: live trades (LOCKED/CREATED) are NOT evict-eligible");
+
+  // Under cap → no evictions.
+  assert(cache.selectEvictions(
+    [{ escrowId: "a", terminal: true, updatedAt: 1 }], 5).length === 0,
+    "event-cache: under cap → nothing evicted");
+
+  // Over cap → oldest TERMINAL first; live trades kept even if older.
+  const metas = [
+    { escrowId: "live-old", terminal: false, updatedAt: 1 },
+    { escrowId: "term-old", terminal: true, updatedAt: 2 },
+    { escrowId: "term-new", terminal: true, updatedAt: 9 },
+    { escrowId: "live-new", terminal: false, updatedAt: 10 },
+  ];
+  const evict1 = cache.selectEvictions(metas, 3);
+  assert(evict1.length === 1 && evict1[0] === "term-old",
+    "event-cache: over cap by 1 → evicts the OLDEST terminal, spares live trades");
+  const evict2 = cache.selectEvictions(metas, 2);
+  assert(evict2.join(",") === "term-old,term-new",
+    "event-cache: evicts terminals oldest-first before touching any live trade");
+  const evict3 = cache.selectEvictions(metas, 1);
+  assert(evict3.join(",") === "term-old,term-new,live-old",
+    "event-cache: only after ALL terminals are gone does it evict the oldest live trade");
 }
 
 // ══════════════════════════════════════════════════════════════════════════

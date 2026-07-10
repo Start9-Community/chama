@@ -49,16 +49,31 @@ import {
 /** localStorage key. Versioned so we can migrate the payload shape later. */
 export const PAYOUT_JOURNAL_KEY = "chama_payout_journal_v1";
 
+/** V7 reconcile-by-escrow scan bound: look back to the journal record's
+ *  createdAt minus this margin. The payment (if any) was dispatched AFTER
+ *  the record was written, so a scan reaching past that point proves a
+ *  "none" verdict is complete — with an hour of slack for clock skew
+ *  between the JS clock and the fedimint op-log's creation_time. */
+export const PAY_RECONCILE_SINCE_MARGIN_MS = 60 * 60 * 1000;
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
+ * intent    — V7: the orchestrator is ABOUT to dispatch a payout (written
+ *   pre-send, after the writability probe). If the app dies mid-pay, this
+ *   record survives where the old journal had nothing — the retry then
+ *   reconciles BY ESCROW (the payment itself carries `chama_escrow_id` in
+ *   fedimint's operation log) instead of blindly re-paying. An intent is
+ *   NOT evidence a payment exists: readers must never render it as
+ *   "payout sent" (TradeDetail keeps RETRY CLAIM live; the pending-payout
+ *   summary treats it like no record).
  * submitted — the gateway accepted a payout for this escrow (an operationId
  *   exists) but settlement is not yet CONFIRMED. Blocks re-pay. The true
  *   outcome is resolved by re-attaching to `operationId`.
  * settled   — the payout reached a `success{preimage}` terminal. Blocks
  *   re-pay permanently; a retry is a no-op that just completes the claim.
  */
-export type PayoutStatus = "submitted" | "settled";
+export type PayoutStatus = "intent" | "submitted" | "settled";
 
 export interface PayoutRecord {
   /** Escrow ID this payout belongs to (journal key). */
@@ -128,6 +143,30 @@ export function assertPayoutJournalWritable(): void {
 /** The payout record for an escrow, or null if none has been submitted. */
 export function getPayoutRecord(escrowId: string): PayoutRecord | null {
   return loadJournal()[escrowId] ?? null;
+}
+
+/**
+ * V7 pre-send intent: record that a payout dispatch is IMMINENT for this
+ * escrow, BEFORE payInvoice is called. Success/inflight/definite-failure
+ * paths upgrade or clear it; a crash in between leaves it for the
+ * reconcile-by-escrow guard. Never downgrades submitted/settled (a retry's
+ * pre-send write must not erase a prior attempt's evidence).
+ */
+export function recordPayoutIntent(input: {
+  escrowId: string;
+  amountMsats?: number;
+}): void {
+  const journal = loadJournal();
+  const existing = journal[input.escrowId];
+  if (existing?.status === "settled" || existing?.status === "submitted") return;
+  journal[input.escrowId] = {
+    escrowId: input.escrowId,
+    status: "intent",
+    amountMsats: input.amountMsats ?? existing?.amountMsats,
+    createdAt: existing?.createdAt ?? Date.now(),
+  };
+  saveJournal(journal);
+  console.info(`[claim-trace] payout-intent escrowId=${input.escrowId}`);
 }
 
 /**

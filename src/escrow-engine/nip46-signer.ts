@@ -33,9 +33,13 @@ const STORAGE_LOCAL_KEY = "chama_nip46_local_key";
 const STORAGE_BUNKER_URI = "chama_nip46_bunker_uri";
 const STORAGE_USER_PUBKEY = "chama_nip46_user_pubkey";
 
-// NIP-46 relays for communication
+// NIP-46 relays for communication. The rendezvous relay just brokers ephemeral
+// kind-24133 messages between this client and the remote signer (Amber/nsecBunker);
+// both sides connect to a shared relay. relay.chama.community (our khatru relay)
+// now serves this role — it allowlists 24133 as an ephemeral broadcast.
 const NIP46_RELAYS = [
-  "wss://relay.satoshimarket.app",  // Our own relay — only relay needed for NIP-46
+  "wss://relay.chama.community",     // Chama's own relay (khatru) — the NIP-46 home
+  "wss://relay.satoshimarket.app",   // transitional fallback — drop once the old 1984 box is decommissioned
 ];
 
 const NIP46_CONNECT_TIMEOUT_MS = 90_000;

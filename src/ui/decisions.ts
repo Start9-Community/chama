@@ -12,7 +12,7 @@
 
 import {
   getCommunityBySlug,
-  getPickerCommunities,
+  communityForInvite,
   DEFAULT_COMMUNITY_SLUG,
 } from "../communities/registry.js";
 import {
@@ -286,9 +286,7 @@ function inferCommunitySlugForInvite(invite: string | null): string | null {
     return DEFAULT_COMMUNITY_SLUG;
   }
 
-  return [...getPickerCommunities()]
-    .find((community) => community.federationInvite === trimmed)
-    ?.slug ?? null;
+  return communityForInvite(trimmed)?.slug ?? null;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -714,6 +712,16 @@ export function decideChamaBarLabel(opts: {
    *  are all unchanged. Optional/defaulted falsy → production is
    *  byte-identical. */
   simModeOn?: boolean;
+  /** #37: same suppressor as shouldShowRecoveryBanner — the stranded pill
+   *  one-taps into the drain modal, which must not fire while the balance
+   *  belongs to a recoverable lock attempt. Only the stranded branch is
+   *  skipped. Optional/defaulted falsy → byte-identical. */
+  hasPendingNativeLock?: boolean;
+  /** Stranded-payout recovery: same suppressor as shouldShowRecoveryBanner
+   *  — while an unfinished claim payout explains the balance, the stranded
+   *  pill must not offer the drain. Only the stranded branch is skipped.
+   *  Optional/defaulted falsy → byte-identical. */
+  hasPendingClaimPayout?: boolean;
 }): ChamaBarLabel {
   if (opts.bootProbeState === "failed") return { kind: "unreachable" };
   const activeTradeCount = Math.max(1, opts.activeTradeCount ?? 1);
@@ -724,7 +732,13 @@ export function decideChamaBarLabel(opts: {
   // enough to explain a wallet balance: no money has moved yet.
   const committedSats = Math.floor((opts.activeCommittedMsats ?? 0) / 1000);
   if (committedSats > 0) return { kind: "in-trade", sats: committedSats, activeTradeCount };
-  if (!opts.simModeOn && sats > 0 && sats >= MAIN_SURFACE_RECOVERY_MIN_SATS) return { kind: "stranded", sats };
+  if (
+    !opts.simModeOn &&
+    !opts.hasPendingNativeLock &&
+    !opts.hasPendingClaimPayout &&
+    sats > 0 &&
+    sats >= MAIN_SURFACE_RECOVERY_MIN_SATS
+  ) return { kind: "stranded", sats };
   return { kind: "ready" };
 }
 
@@ -787,6 +801,23 @@ export function shouldShowRecoveryBanner(inputs: {
    *  intentional and fake, so the banner must never fire on them.
    *  Optional/defaulted falsy → the production path stays byte-identical. */
   simModeOn?: boolean;
+  /** #37: true while the pending-native-locks stash holds an actionable
+   *  entry (a lock attempt mid-recovery, or a fresh funding intent). The
+   *  balance then belongs to a KNOWN trade whose correct next step is
+   *  "finish the lock" — the drain banner would advise abandoning a live
+   *  trade at a fee. Bounded upstream (summarizeNativeLocksForUi): stale
+   *  intents and attempt-exhausted entries stop suppressing. Optional/
+   *  defaulted falsy → existing callers byte-identical. */
+  hasPendingNativeLock?: boolean;
+  /** Stranded-payout recovery: true while a CLAIMED trade the user won
+   *  still owes its outbound payout (summarizePendingPayoutsForUi). The
+   *  balance then belongs to a KNOWN claim whose correct next step is
+   *  "finish the payout" (the trade's own guarded RETRY CLAIM) — not the
+   *  generic drain alarm. Bounded upstream: entries age out after
+   *  PENDING_PAYOUT_SUPPRESS_MAX_MS so unrelated stranded balance can't
+   *  hide forever. Optional/defaulted falsy → existing callers
+   *  byte-identical. */
+  hasPendingClaimPayout?: boolean;
 }): boolean {
   if (inputs.simModeOn) return false;
   if (!hasMainSurfaceRecoveryBalance(inputs.balanceMsats)) return false;
@@ -794,6 +825,8 @@ export function shouldShowRecoveryBanner(inputs: {
   if (hasActiveEscrow) return false;
   if (inputs.fundingInProgress) return false;
   if (inputs.claimPayoutInProgress) return false;
+  if (inputs.hasPendingNativeLock) return false;
+  if (inputs.hasPendingClaimPayout) return false;
   return true;
 }
 
@@ -857,6 +890,187 @@ export function identifyStrandedEcashSource(inputs: {
     amountMsats: e.amountMsats,
     description: e.description,
   };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Pending claim payouts (stranded-payout recovery — the claim-side analog
+// of #37's pending-native-locks summary)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// In P2P Exchange the winner CLAIMs the sats into their own wallet and the
+// orchestrator immediately pays them out; COMPLETE is deferred until the
+// payout actually sends (claim-and-payout.ts). So a CLAIMED-not-COMPLETED
+// trade the user won means the claimed ecash is (or should be) sitting in
+// the wallet with an outbound payout still owed. That balance is EXPLAINED
+// — the correct next step is the trade's own guarded RETRY CLAIM, not the
+// generic drain alarm. Without this summary the recovery banner fired the
+// instant a trade settled+claimed (activeCommittedMsats counts only
+// LOCKED/APPROVED) and mis-attributed the sweep to the single most-recent
+// CLAIM regardless of amount.
+//
+// Bounded suppression, mirroring summarizeNativeLocksForUi (#37 F1/F14/F17):
+//   • other-fed trades never suppress (they can't explain THIS fed's balance)
+//   • entries age out after PENDING_PAYOUT_SUPPRESS_MAX_MS — after that the
+//     banner story resumes. That escalation is SAFE here: the trade is
+//     settled and no live escrow backs the claimed balance, so the drain
+//     merely completes the stalled payout (opposite of the #37 harmful case).
+//   • a "finish" entry only speaks when the balance could actually hold the
+//     claim (a claim-pending trade whose redeem never landed tells no false
+//     "your sats are back" story — though opening the trade is still the
+//     correct action there too, via the retry's cover check).
+
+export interface PendingClaimPayout {
+  escrowId: string;
+  /** Trade amount (msats) — what the claim credited to the wallet. */
+  amountMsats: number;
+  /** Trade description for the card. */
+  description: string;
+  /** finish     — no payout-journal record: the payout was never sent or
+   *               definitively failed. The trade's RETRY CLAIM (double-pay
+   *               guarded) is the correct, safe next step.
+   *  confirming — journal `submitted`: a payout is in flight / unknown.
+   *               reattachPayout resolves it; never invite a re-pay. */
+  kind: "finish" | "confirming";
+  /** Timestamp (Unix seconds) of the user's latest CLAIM on the trade. */
+  claimAtSec: number;
+}
+
+export interface PendingPayoutUiSummary {
+  /** Suppress the drain-shaped recovery surfaces while an actionable
+   *  finish/confirming story exists (bounded — see module comment). */
+  suppressRecovery: boolean;
+  /** The entry the "Finish your payout" card should show (newest), or null. */
+  card: PendingClaimPayout | null;
+  entries: PendingClaimPayout[];
+}
+
+/** Suppression age bound: after this, an unfinished payout stops hiding the
+ *  recovery banner (same doctrine + horizon as #37's
+ *  NATIVE_LOCK_SUPPRESS_MAX_MS — suppression must be bounded so unrelated
+ *  stranded balance can't stay invisible forever). */
+export const PENDING_PAYOUT_SUPPRESS_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Latest CLAIM event the user signed on this escrow (Unix seconds), or
+ *  null when the user never claimed it (not the winner). */
+function latestUserClaimAtSec(e: EscrowState, userPubkey: string): number | null {
+  let latest: number | null = null;
+  for (const evt of e.eventChain) {
+    if (evt.kind === EscrowEventKind.CLAIM && evt.pubkey === userPubkey) {
+      if (latest === null || evt.timestamp > latest) latest = evt.timestamp;
+    }
+  }
+  return latest;
+}
+
+/** The trade's stamped federation id (CREATE payload `fed`), normalized.
+ *  Same read App's browse matcher uses; null for legacy/unstamped trades. */
+function escrowFedId(e: EscrowState): string | null {
+  const fed = (e.eventChain[0]?.payload as { fed?: string } | undefined)?.fed;
+  return normalizeFedId(fed ?? null);
+}
+
+export function summarizePendingPayoutsForUi(inputs: {
+  escrows: Iterable<EscrowState>;
+  userPubkey: string;
+  /** Bound to payments/payout-journal getPayoutRecord by the caller —
+   *  kept as an input so this stays pure/testable. V7: an `intent` record
+   *  (pre-send breadcrumb, payment may never have been dispatched) is
+   *  treated exactly like NO record — the "finish" bucket, balance-gated;
+   *  the claim retry's own guard reconciles by escrow before re-paying. */
+  getPayoutRecord: (escrowId: string) => { status: "intent" | "submitted" | "settled" } | null;
+  balanceMsats: number;
+  nowMs: number;
+  /** The wallet's CURRENT federation. When provided, trades stamped with a
+   *  different fed neither suppress nor card — their claim can't explain
+   *  THIS fed's balance. Unstamped (legacy) trades pass through. */
+  currentFederationId?: string | null;
+}): PendingPayoutUiSummary {
+  const entries: PendingClaimPayout[] = [];
+  const currentFed = normalizeFedId(inputs.currentFederationId ?? null);
+  for (const e of inputs.escrows) {
+    // CLAIMED only: COMPLETED means the payout confirmed (or a prior
+    // reattach short-circuited) — leftover balance after COMPLETED is the
+    // generic-residue story, not a payout to finish.
+    if (e.status !== EscrowStatus.CLAIMED) continue;
+    const claimAtSec = latestUserClaimAtSec(e, inputs.userPubkey);
+    if (claimAtSec === null) continue;
+    const tradeFed = escrowFedId(e);
+    if (currentFed && tradeFed && tradeFed !== currentFed) continue;
+    if (inputs.nowMs - claimAtSec * 1000 > PENDING_PAYOUT_SUPPRESS_MAX_MS) continue;
+    const record = inputs.getPayoutRecord(e.id);
+    // settled ⇒ the payout went out and the sats left the wallet; the
+    // reattach sweep publishes the missing COMPLETE. Nothing to card,
+    // nothing to suppress.
+    if (record?.status === "settled") continue;
+    if (record?.status === "submitted") {
+      // In flight / unknown outcome. No balance gate: if it settles the
+      // balance drains (card resolves via reattach); if it refunded, the
+      // returned sats are exactly what this entry explains.
+      entries.push({
+        escrowId: e.id,
+        amountMsats: e.amountMsats,
+        description: e.description,
+        kind: "confirming",
+        claimAtSec,
+      });
+      continue;
+    }
+    // No record: payout never sent, or definitively failed (the journal
+    // clears on confirmed failure so RETRY CLAIM stays live). Only speak
+    // when the balance could actually hold the claim.
+    if (inputs.balanceMsats >= e.amountMsats) {
+      entries.push({
+        escrowId: e.id,
+        amountMsats: e.amountMsats,
+        description: e.description,
+        kind: "finish",
+        claimAtSec,
+      });
+    }
+  }
+  entries.sort((a, b) => b.claimAtSec - a.claimAtSec);
+  return {
+    suppressRecovery: entries.length > 0,
+    card: entries[0] ?? null,
+    entries,
+  };
+}
+
+/** CLAIMED trades the user won that hold ANY payout-journal record
+ *  (submitted OR settled). Each is a safe reattachPayout target: reattach
+ *  only re-attaches to the existing operationId / publishes the missing
+ *  COMPLETE — it structurally never re-pays. The boot sweep runs these so
+ *  a stuck "payout confirming" resolves without the user re-opening the
+ *  trade (the V6 symptom). No age bound: reconciling an old record is
+ *  always correct. */
+export function selectPayoutReattachTargets(inputs: {
+  escrows: Iterable<EscrowState>;
+  userPubkey: string;
+  getPayoutRecord: (escrowId: string) => { status: "intent" | "submitted" | "settled" } | null;
+}): string[] {
+  const targets: string[] = [];
+  for (const e of inputs.escrows) {
+    if (e.status !== EscrowStatus.CLAIMED) continue;
+    if (latestUserClaimAtSec(e, inputs.userPubkey) === null) continue;
+    if (!inputs.getPayoutRecord(e.id)) continue;
+    targets.push(e.id);
+  }
+  return targets;
+}
+
+/** Attribution honesty for the recovery banner's trade identity card: the
+ *  named claim explains the sweep only when the balance doesn't materially
+ *  EXCEED the trade amount (2% + 50-sat tolerance for lock
+ *  overpay-by-denomination and fee dust). A ₿1,570 card must never front a
+ *  ₿2,462 sweep — when other residue is mixed in, the banner drops the
+ *  card and says "residual balance" instead. One-sided by design: a balance
+ *  SMALLER than the claim (partial recovery, post-payout reserve dust) is
+ *  still honestly "from this trade". */
+export function strandedSourceExplainsBalance(
+  amountMsats: number,
+  balanceMsats: number,
+): boolean {
+  return balanceMsats <= amountMsats * 1.02 + 50_000;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
