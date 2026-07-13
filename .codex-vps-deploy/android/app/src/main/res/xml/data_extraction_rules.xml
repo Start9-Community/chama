@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SECURITY: Block both cloud backup and device-to-device transfer for the
+  app's data directory. Chama stores the Fedimint seed (mnemonic-derived
+  Bitcoin keys) and decrypted escrow state in its private data dir; the
+  default backup behaviour would copy that to Google Drive on Android 11+
+  devices that opted into auto-backup, putting custody of user funds into
+  Google's hands. We also opt out of D2D transfer (Android 12+) so an
+  attacker with brief physical access cannot Quick Share the seed to a
+  device they control.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

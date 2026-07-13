@@ -63,6 +63,8 @@ export interface ExternalSwapProvider {
   recommended?: boolean;
   /** One-line user-facing blurb shown in the picker card. */
   blurb?: string;
+  /** i18n key for the blurb; when set, render sites show t(blurbKey). */
+  blurbKey?: string;
 }
 
 // ── Providers ─────────────────────────────────────────────────────────────
@@ -92,6 +94,7 @@ export const EXTERNAL_SWAP_PROVIDERS: readonly ExternalSwapProvider[] = [
     status: "enabled",
     recommended: true,
     blurb: "Cash out to XOF mobile money via Banxaas.",
+    blurbKey: "claim.swapBlurbBanxaas",
   },
   {
     id: "banxaas",

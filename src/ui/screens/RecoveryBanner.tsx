@@ -22,6 +22,7 @@
 // fallback when no CLAIM is found.
 
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { displayCounterpartyName, type StrandedEcashSource } from "../decisions.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { Role } from "../../escrow-engine/types.js";
@@ -68,6 +69,7 @@ export function RecoveryBanner({
    *  + amount are always honest. Only rendered in fundsReturned mode. */
   fundingTrade?: { escrowId: string; description: string; amountMsats: number } | null;
 }) {
+  const { t } = useT();
   const totalSats = Math.floor(balanceMsats / 1000);
   const recoverableSats = maxLightningPayoutSats(balanceMsats);
   const reserveSats = lightningPayoutReserveSats(balanceMsats);
@@ -77,15 +79,15 @@ export function RecoveryBanner({
         fetchKind0Enabled,
         kind0Name: null, // v0.2.1 wires the fetcher
       })
-    : "an unknown counterparty";
+    : t("recovery.unknownCounterparty");
 
   const headline = fundsReturned
-    ? "Your funding came back to your wallet"
+    ? t("recovery.headlineFundsReturned")
     : source
-      ? `Your trade with ${counterpartyName} didn't finish cleanly`
+      ? t("recovery.headlineTradeWith", { name: counterpartyName })
       : genericResidue
-        ? "You have leftover sats from earlier trades"
-        : "Your last trade didn't finish cleanly";
+        ? t("recovery.headlineLeftoverSats")
+        : t("recovery.headlineLastTrade");
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -116,7 +118,7 @@ export function RecoveryBanner({
               animation: "pulse 2s ease-in-out infinite",
             }} />
           )}
-          {fundsReturned ? "↩ Funds returned" : "⚠ Trade needs attention"}
+          {fundsReturned ? t("recovery.fundsReturnedTag") : t("recovery.tradeNeedsAttention")}
         </div>
 
         <div style={{
@@ -131,28 +133,28 @@ export function RecoveryBanner({
           lineHeight: 1.55, marginBottom: 16,
         }}>
           {fundsReturned ? (
-            <>A trade you funded didn't complete, so your{" "}
+            <>{t("recovery.fundsReturnedBody1")}{" "}
             <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-            came back to your wallet — safe and yours. Send{" "}
+            {t("recovery.fundsReturnedBody2")}{" "}
             <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-            to your Lightning address
+            {t("recovery.fundsReturnedBody3")}
             {reserveSats > 0 && (
-              <>{" "}(about{" "}
+              <>{" "}{t("recovery.fundsReturnedReserveBefore")}{" "}
                 <BitcoinAmount sats={reserveSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-                stays for fees)</>
+                {t("recovery.fundsReturnedReserveAfter")}</>
             )}
-            , or just leave them here.</>
+            {t("recovery.fundsReturnedBody4")}</>
           ) : (
             <>
               <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-              are still in your local Chama.{" "}
+              {t("recovery.strandedBody1")}{" "}
               <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-              can be sent to your Lightning address now
+              {t("recovery.strandedBody2")}
               {reserveSats > 0 && (
                 <>
-                  , with about{" "}
+                  {t("recovery.strandedReserveBefore")}{" "}
                   <BitcoinAmount sats={reserveSats} size={13} gap={4} glyphScale={1.22} color={T.text} glyphColor={T.muted} />{" "}
-                  kept for Lightning fees
+                  {t("recovery.strandedReserveAfter")}
                 </>
               )}
               .
@@ -173,7 +175,7 @@ export function RecoveryBanner({
               fontSize: 9, color: T.muted, fontFamily: T.mono,
               letterSpacing: 1, marginBottom: 8,
             }}>
-              FUNDED TRADE
+              {t("recovery.fundedTradeLabel")}
             </div>
             <div style={{
               fontFamily: T.mono, fontSize: 11, color: T.muted,
@@ -187,7 +189,7 @@ export function RecoveryBanner({
               </div>
             )}
             <div style={{ fontSize: 12, color: T.muted, fontFamily: T.mono }}>
-              You funded{" "}
+              {t("recovery.youFunded")}{" "}
               <span style={{ color: T.accent, fontWeight: 700 }}>
                 <BitcoinAmount msats={fundingTrade.amountMsats} size={12} gap={4} glyphScale={1.18} />
               </span>
@@ -206,7 +208,7 @@ export function RecoveryBanner({
               fontSize: 9, color: T.muted, fontFamily: T.mono,
               letterSpacing: 1, marginBottom: 8,
             }}>
-              TRADE
+              {t("recovery.tradeLabel")}
             </div>
             <div style={{
               fontFamily: T.mono, fontSize: 11, color: T.muted,
@@ -222,10 +224,10 @@ export function RecoveryBanner({
             <div style={{
               fontSize: 12, color: T.muted, fontFamily: T.mono,
             }}>
-              Your role: <span style={{ color: T.text }}>
-                {source.role === Role.BUYER ? "Buyer"
-                  : source.role === Role.SELLER ? "Seller"
-                  : "Arbiter"}
+              {t("recovery.yourRole")} <span style={{ color: T.text }}>
+                {source.role === Role.BUYER ? t("recovery.roleBuyer")
+                  : source.role === Role.SELLER ? t("recovery.roleSeller")
+                  : t("recovery.roleArbiter")}
               </span>
               {" · "}
               <span style={{ color: T.accent, fontWeight: 700 }}>
@@ -245,14 +247,14 @@ export function RecoveryBanner({
             cursor: "pointer", letterSpacing: 0.5,
           }}
         >
-          ⚡ Recover <BitcoinAmount sats={recoverableSats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /> →
+          {t("recovery.recoverCta")} <BitcoinAmount sats={recoverableSats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /> →
         </button>
 
         <div style={{
           textAlign: "center", marginTop: 10,
           fontSize: 9, color: T.muted, fontFamily: T.mono,
         }}>
-          Sats land at your Lightning address · Chama keeps your local wallet empty
+          {t("recovery.satsLandFooter")}
         </div>
       </div>
 
@@ -265,7 +267,7 @@ export function RecoveryBanner({
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         opacity: 0.5, lineHeight: 1.5,
       }}>
-        You can keep using Chama. Recovering just clears unexplained sats out of OPFS.
+        {t("recovery.keepUsingFooter")}
       </div>
     </div>
   );

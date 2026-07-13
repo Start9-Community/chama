@@ -160,10 +160,23 @@ import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
 // ── Arbiter bond (sealed v1: single-key timelock COMMITMENT) ──────────────────
 import * as btcSigner from "@scure/btc-signer";
 import { findBondFundingUtxos, esploraFetcher, defaultEsploraBase, defaultMinConfs, esploraTipHeight, esploraBroadcast, esploraOutspend, esploraRecommendedFeeRate } from "../bond-multisig/fund-watcher.js";
-import { buildCommitmentBond, buildReclaimTx, deriveBondSigningKey, estimateReclaimFeeSats, MIN_COMMITMENT_TERM_BLOCKS, DEFAULT_RECLAIM_FEE_RATE } from "../bond-multisig/commitment-bond.js";
+import {
+  buildCommitmentBond,
+  buildReclaimTx,
+  buildKeyPathSweepTx,
+  deriveBondSigningKey,
+  estimateReclaimFeeSats,
+  estimateKeyPathSweepFeeSats,
+  resolveReclaimDestination,
+  MIN_COMMITMENT_TERM_BLOCKS,
+  DEFAULT_RECLAIM_FEE_RATE,
+  type CommitmentReclaimDestination,
+  type ReclaimDestinationChoice,
+} from "../bond-multisig/commitment-bond.js";
 import { buildBondAnnouncementEvent, selectLatestAnnouncements, groupLatestAnnouncementsByCommunity, verifyBondAnnouncement, ARBITER_BOND_ANNOUNCEMENT_KIND, type VerifiedBond } from "../bond-multisig/bond-announcement.js";
-import { getCommitmentBond, upsertCommitmentBond, listCommitmentBonds, newBondId } from "../bond-multisig/commitment-store.js";
+import { getCommitmentBond, upsertCommitmentBond, listCommitmentBonds, newBondId, reconstructBondRecord } from "../bond-multisig/commitment-store.js";
 import { MAINNET as BOND_NETWORK } from "../bond-multisig/multisig.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import { computeChamaLiveness, type ChamaLiveness, type RatingSummary as LivenessRatingSummary } from "../arbiters/live-chama.js";
 import {
   getPayoutRecord,
@@ -248,6 +261,19 @@ function readSubstitutionGraceOverride(): number | null {
   }
 }
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
+import {
+  computeArbiterPremium,
+  PREMIUM_SPEND_TRY_CANCEL_SECS,
+} from "../arbiters/arbiter-premium.js";
+import {
+  hasPremiumOutboxRecord,
+  recordPremiumSending,
+  recordPremiumPaid,
+  clearPremiumSending,
+  isEarningSettled,
+  recordEarningRedeemed,
+  recordEarningAttemptFailed,
+} from "../arbiters/arbiter-earnings.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
   minimumAtomicFundingMessage,
@@ -680,6 +706,14 @@ export interface UseEscrowActions {
   /** R3-1b: re-attach to a submitted payout and complete the trade if it
    *  settled (no re-pay). For re-opening a trade stuck on CLAIMED. */
   reattachPayout: (escrowId: string) => Promise<void>;
+  /** Task #53 E1: pay my 0.25% arbiter-insurance premium on a COMPLETED
+   *  trade with a bonded seated arbiter. Idempotent (durable outbox
+   *  record, V7-style pre-spend intent), respects the decline record;
+   *  sim/testnet no-op. Fail-soft — never throws. */
+  payArbiterPremium: (escrowId: string) => Promise<void>;
+  /** Task #53 E1 arbiter side: decrypt + redeem any premium notes on this
+   *  trade addressed to me; records the earnings ledger. Fail-soft. */
+  redeemArbiterPremiums: (escrowId: string) => Promise<void>;
   /** Release a subscription period */
   releasePeriod: (escrowId: string, periodIndex: number) => Promise<EscrowState>;
   /** Send a chat message */
@@ -836,13 +870,33 @@ export interface UseEscrowActions {
    *  is the authority: a too-early attempt is rejected by the network and surfaced
    *  calmly. Recovers an already-swept bond (lost state / other device) by adopting
    *  the on-chain spend as the reclaim. */
-  reclaimCommitmentBond: (bondId: string) => Promise<{ txid: string; alreadyReclaimed?: boolean }>;
+  reclaimCommitmentBond: (bondId: string, destination?: ReclaimDestinationChoice) => Promise<{
+    txid: string;
+    alreadyReclaimed?: boolean;
+    creditedToChama?: boolean;
+    creditOperationId?: string;
+    returnAddress?: string;
+    destinationAddress?: string;
+    reclaimDestination?: CommitmentReclaimDestination;
+  }>;
+  /** Sweep an already-reclaimed bond's plain on-chain return UTXO into Chama's
+   *  Fedimint wallet so it becomes visible in the balance. */
+  creditReclaimedCommitmentBond: (bondId: string) => Promise<{
+    txid: string;
+    operationId?: string;
+    amountSats?: bigint;
+    alreadyCredited?: boolean;
+  }>;
   /** Current chain tip height (for the locked screen's live unlock countdown). */
   getBondChainTip: () => Promise<number>;
   /** Announce a funded+locked bond to a community (kind 38135) so its liveness is
    *  publicly computable + chain-verifiable. The event is signed by the arbiter's
    *  Nostr key; verification recomputes the address + reads it on-chain. */
   publishBondAnnouncement: (bondId: string, community: string) => Promise<{ community: string; address: string }>;
+  /** Cross-device bond recovery: rebuild local bond records from the user's own
+   *  kind-38135 announcements + seed, so a bond posted on one device shows + reclaims
+   *  on another with the same npub. Returns how many were newly recovered. */
+  recoverMyBonds: () => Promise<{ recovered: number }>;
   /** Fetch every arbiter's current bond announcement for a community, chain-verified
    *  (the data source for the live-chama liveness score). */
   fetchCommunityBonds: (community: string) => Promise<VerifiedBond[]>;
@@ -3586,6 +3640,126 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
   }, []);
 
+  const watchBondOnchainCredit = (operationId: string, bondId?: string) => {
+    const fedimint = fedimintRef.current;
+    if (!fedimint || !operationId) return;
+    void fedimint.awaitOnchainDeposit(operationId)
+      .then(() => {
+        // The peg-in confirmed and the ecash is now spendable — stamp the record
+        // so the ceremony flips from "on their way" to "landed" (durable across
+        // reloads; the balance refresh reflects the new sats).
+        if (bondId) {
+          const rec = getCommitmentBond(bondId);
+          if (rec && !rec.creditConfirmedAt) {
+            upsertCommitmentBond({ ...rec, creditConfirmedAt: Date.now() });
+          }
+        }
+        return refreshBalanceRef.current?.();
+      })
+      .catch((error) => {
+        console.warn("[chama] bond onchain credit watcher failed:", error);
+      });
+  };
+
+  // ── Arbiter premium (task #53 E1) ─────────────────────────────────────
+  // Payer side: spend a whole-sat OOB note (14-day try_cancel horizon —
+  // an absent arbiter auto-refunds us) and publish it as kind 38113 on
+  // the trade's channel, encrypted to the arbiter. Fund-safety mirrors
+  // V7: the "sending" intent is written BEFORE the spend, so a crash in
+  // the spend→publish gap blocks a re-spend (the stranded note refunds
+  // itself); only a spend that never happened clears the intent.
+  const payArbiterPremiumAction = async (escrowId: string): Promise<void> => {
+    if (isSimModeOn() || isTestnetMode()) return;
+    const fedimint = fedimintRef.current;
+    if (!fedimint) return;
+    let client: EscrowClient;
+    try { client = requireClient(); } catch { return; }
+    const state = client.getState(escrowId);
+    if (!state || state.status !== EscrowStatus.COMPLETED) return;
+    let pubkey: string;
+    try { pubkey = await client.getPubkey(); } catch { return; }
+    const decision = computeArbiterPremium(state, pubkey);
+    if (!decision.payable) return;
+    // Durable idempotence + the decline preference: any record blocks.
+    if (hasPremiumOutboxRecord(escrowId)) return;
+    recordPremiumSending(escrowId, decision.amountMsats);
+    let spent: { oobNotes: string; operationId?: string };
+    try {
+      spent = await fedimint.spendNotesWithHorizon(
+        decision.amountMsats,
+        PREMIUM_SPEND_TRY_CANCEL_SECS,
+        buildChamaOperationMeta({
+          flow: "arbiter-premium",
+          escrowId,
+          amountMsats: decision.amountMsats,
+        }),
+      );
+    } catch (e) {
+      // No money moved — clear the intent so a later sweep can retry.
+      clearPremiumSending(escrowId);
+      console.warn("[chama] arbiter premium: spend failed:", e);
+      return;
+    }
+    try {
+      await client.sendPremium(escrowId, {
+        amountSats: decision.amountSats,
+        oobNotes: spent.oobNotes,
+        noteKind: "ambient",
+      });
+    } catch (e) {
+      // Spent but unpublished: KEEP the "sending" record (re-spend guard);
+      // the note auto-refunds to us at the horizon. Never re-pay here.
+      console.warn("[chama] arbiter premium: publish failed (note auto-refunds):", e);
+      return;
+    }
+    recordPremiumPaid(escrowId, decision.amountMsats, spent.operationId);
+    refreshBalanceRef.current?.().catch(() => {});
+  };
+
+  // Arbiter side: scan the trade's premium notes for ones addressed to me
+  // that the ledger hasn't settled, decrypt, redeem, record. A redeem
+  // failure bumps an attempt counter (capped — a note the payer's horizon
+  // already refunded must not be retried forever).
+  const redeemArbiterPremiumsAction = async (escrowId: string): Promise<void> => {
+    if (isSimModeOn() || isTestnetMode()) return;
+    const fedimint = fedimintRef.current;
+    if (!fedimint) return;
+    let client: EscrowClient;
+    try { client = requireClient(); } catch { return; }
+    const state = client.getState(escrowId);
+    if (!state) return;
+    let pubkey: string;
+    try { pubkey = await client.getPubkey(); } catch { return; }
+    const arbiter = state.participants[Role.ARBITER];
+    if (!arbiter || arbiter.toLowerCase() !== pubkey.toLowerCase()) return;
+    let redeemedAny = false;
+    for (const ev of state.premiumNotes ?? []) {
+      if (isEarningSettled(ev.raw.id)) continue;
+      const body = await client.decryptPremiumBody(ev);
+      const base = {
+        eventId: ev.raw.id,
+        escrowId,
+        payer: ev.raw.pubkey,
+        noteKind: ev.payload.noteKind,
+      };
+      if (!body || body.escrowId !== escrowId) {
+        // Not for me / malformed — count toward give-up so it stops retrying.
+        recordEarningAttemptFailed({ ...base, amountMsats: 0 });
+        continue;
+      }
+      const amountMsats = Math.floor(body.amountSats) * 1000;
+      try {
+        await fedimint.redeemWithRetry(body.oobNotes);
+        recordEarningRedeemed({ ...base, amountMsats });
+        redeemedAny = true;
+      } catch (e) {
+        recordEarningAttemptFailed({ ...base, amountMsats });
+        console.warn("[chama] arbiter premium: redeem failed:", e);
+      }
+    }
+    if (redeemedAny) refreshBalanceRef.current?.().catch(() => {});
+  };
+
   // ── Return ──────────────────────────────────────────────────────────────
 
   const actions: UseEscrowActions = {
@@ -3605,6 +3779,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     claimAndRedeem: claimAndRedeemAction,
     claimAndPayout: claimAndPayoutAction,
     reattachPayout: reattachPayoutAction,
+    payArbiterPremium: payArbiterPremiumAction,
+    redeemArbiterPremiums: redeemArbiterPremiumsAction,
     sendChat,
     cancel: cancelAction,
     loadEscrow,
@@ -3713,10 +3889,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const locked = upsertCommitmentBond({ ...rec, phase: "locked", utxos, amountSats: total });
       return { locked: true, txid: locked.utxos?.[0]?.txid, lockedSats: total, deposits: utxos.length };
     },
-    reclaimCommitmentBond: async (bondId: string) => {
+    reclaimCommitmentBond: async (bondId: string, destinationChoice: ReclaimDestinationChoice = { kind: "chama" }) => {
       const rec = getCommitmentBond(bondId);
       if (!rec) throw new Error("Unknown bond.");
-      if (rec.phase === "reclaimed" && rec.reclaimTxid) return { txid: rec.reclaimTxid, alreadyReclaimed: true };
+      if (rec.phase === "reclaimed" && rec.reclaimTxid) {
+        if (rec.creditOperationId) watchBondOnchainCredit(rec.creditOperationId, bondId);
+        return {
+          txid: rec.reclaimTxid,
+          alreadyReclaimed: true,
+          creditedToChama: !!rec.creditTxid,
+          ...(rec.creditOperationId ? { creditOperationId: rec.creditOperationId } : {}),
+          ...(rec.reclaimDestination ? { reclaimDestination: rec.reclaimDestination, destinationAddress: rec.reclaimDestination.address } : {}),
+          ...(rec.reclaimDestination?.actual === "bond-key" ? { returnAddress: rec.reclaimDestination.address } : {}),
+        };
+      }
       const client = clientRef.current;
       const signer = signerRef.current;
       if (!client || !signer) throw new Error("Reconnect to reclaim — your bonded sats are safe on-chain either way.");
@@ -3764,7 +3950,68 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // floored at the flat default so an unreachable Esplora still relays + confirms.
       const feeRate = await esploraRecommendedFeeRate(fetchJson, { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
       const feeSats = estimateReclaimFeeSats(rec.bond, utxos.length, feeRate);
-      const rawTx = buildReclaimTx({ bond: rec.bond, utxos, ownerPriv: priv, destination: reclaimAddress, feeSats });
+      const total = utxos.reduce((s, u) => s + u.amountSats, 0n);
+      let reclaimDestination: CommitmentReclaimDestination;
+      let creditOperationId: string | undefined;
+      let pendingCreditOperationId: string | undefined;
+      let chamaDepositAddress: string | null = null;
+      let fallbackReason = "Chama is not available right now; reclaimed to the bond key instead.";
+
+      if (destinationChoice.kind === "chama") {
+        const fedimint = fedimintRef.current;
+        if (fedimint && fedimint.isInitialized() && fedimint.isJoined()) {
+          try {
+            const onchainInfo = await fedimint.getOnchainInfo();
+            const minimumDepositSats = BigInt(Math.max(
+              1,
+              Math.trunc(onchainInfo.minimumDepositSats || onchainInfo.pegInFeeSats + 1),
+            ));
+            const outputSats = total - feeSats;
+            if (outputSats >= minimumDepositSats) {
+              const deposit = await fedimint.createOnchainDepositAddress(
+                buildChamaOperationMeta({ flow: "bond_reclaim", reason: bondId }),
+              );
+              chamaDepositAddress = deposit.address;
+              pendingCreditOperationId = deposit.operationId;
+            } else {
+              fallbackReason = `Reclaim output is below the federation deposit minimum (${outputSats.toString()} sats < ${minimumDepositSats.toString()} sats); reclaimed to the bond key instead.`;
+            }
+          } catch (error) {
+            console.warn("[chama] Falling back to self-custody bond reclaim address:", error);
+            fallbackReason = "Chama deposit was unavailable; reclaimed to the bond key instead.";
+          }
+        }
+        const resolved = resolveReclaimDestination({
+          choice: destinationChoice,
+          bondKeyAddress: reclaimAddress,
+          network: BOND_NETWORK,
+          chamaDepositAddress,
+          fallbackReason,
+        });
+        if (!resolved.ok) throw new Error(resolved.message);
+        reclaimDestination = resolved.destination;
+        if (reclaimDestination.actual === "chama") creditOperationId = pendingCreditOperationId;
+      } else {
+        const resolved = resolveReclaimDestination({
+          choice: destinationChoice,
+          bondKeyAddress: reclaimAddress,
+          network: BOND_NETWORK,
+        });
+        if (!resolved.ok) throw new Error(resolved.message);
+        reclaimDestination = resolved.destination;
+      }
+
+      if (reclaimDestination.actual === "chama" && !creditOperationId) {
+        reclaimDestination = {
+          requested: "chama",
+          actual: "bond-key",
+          address: reclaimAddress,
+          fallbackReason: "Chama deposit was unavailable; reclaimed to the bond key instead.",
+        };
+      }
+      const creditedToChama = reclaimDestination.actual === "chama";
+      const destination = reclaimDestination.address;
+      const rawTx = buildReclaimTx({ bond: rec.bond, utxos, ownerPriv: priv, destination, feeSats });
       let txid: string;
       try {
         txid = await esploraBroadcast(base, rawTx);
@@ -3783,8 +4030,116 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         }
         throw e;
       }
-      upsertCommitmentBond({ ...rec, phase: "reclaimed", utxos, reclaimTxid: txid });
-      return { txid };
+      upsertCommitmentBond({
+        ...rec,
+        phase: "reclaimed",
+        utxos,
+        reclaimTxid: txid,
+        reclaimDestination,
+        ...(creditedToChama ? { creditTxid: txid } : {}),
+        ...(creditOperationId ? { creditOperationId } : {}),
+      });
+      if (creditOperationId) watchBondOnchainCredit(creditOperationId, bondId);
+      return {
+        txid,
+        creditedToChama,
+        ...(creditOperationId ? { creditOperationId } : {}),
+        destinationAddress: destination,
+        reclaimDestination,
+        ...(reclaimDestination.actual === "bond-key" ? { returnAddress: reclaimAddress } : {}),
+      };
+    },
+    creditReclaimedCommitmentBond: async (bondId: string) => {
+      const rec = getCommitmentBond(bondId);
+      if (!rec) throw new Error("Unknown bond.");
+      if (!rec.reclaimTxid) throw new Error("Reclaim the bond first, then credit it to Chama.");
+      if (rec.creditTxid) {
+        if (rec.creditOperationId) watchBondOnchainCredit(rec.creditOperationId, bondId);
+        return {
+          txid: rec.creditTxid,
+          ...(rec.creditOperationId ? { operationId: rec.creditOperationId } : {}),
+          alreadyCredited: true,
+        };
+      }
+      if (rec.reclaimDestination && rec.reclaimDestination.actual !== "bond-key") {
+        throw new Error("This bond was not reclaimed to the Chama-controlled bond key, so Chama cannot sweep it.");
+      }
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Reconnect to credit your reclaimed bond.");
+      const fedimint = fedimintRef.current;
+      if (!fedimint || !fedimint.isInitialized() || !fedimint.isJoined()) {
+        markFedimintWalletNotReady();
+        throw new Error(FEDIMINT_WALLET_NOT_READY);
+      }
+      const base = defaultEsploraBase(BOND_NETWORK);
+      const fetchJson = esploraFetcher(base);
+      const words = await getOrCreateSeed(client, signer);
+      const { priv, xonly } = deriveBondSigningKey(words.join(" "), { network: BOND_NETWORK, index: rec.keyIndex ?? 0 });
+      if (xonly.length !== rec.bond.ownerXonly.length || !xonly.every((b, i) => b === rec.bond.ownerXonly[i])) {
+        throw new Error("Bond key mismatch — cannot credit reclaimed sats (unexpected seed or key index).");
+      }
+      const returnAddress = btcSigner.p2tr(xonly, undefined, BOND_NETWORK).address as string;
+      const found = await findBondFundingUtxos({
+        address: returnAddress,
+        fetchJson,
+        minConfs: defaultMinConfs(BOND_NETWORK),
+      });
+      const utxos = found.map((f) => f.utxo);
+      if (utxos.length === 0) {
+        const out = await esploraOutspend(fetchJson, rec.reclaimTxid, 0).catch(() => null);
+        if (out?.spent && out.txid) {
+          upsertCommitmentBond({ ...rec, phase: "reclaimed", creditTxid: out.txid });
+          return { txid: out.txid, alreadyCredited: true };
+        }
+        throw new Error("No reclaimed sats are confirmed at the return address yet. Wait for the reclaim to confirm, then try again.");
+      }
+      const feeRate = await esploraRecommendedFeeRate(fetchJson, { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
+      const feeSats = estimateKeyPathSweepFeeSats(utxos.length, feeRate);
+      const total = utxos.reduce((s, u) => s + u.amountSats, 0n);
+      const sendSats = total - feeSats;
+      const onchainInfo = await fedimint.getOnchainInfo();
+      const minimumDepositSats = BigInt(Math.max(
+        1,
+        Math.trunc(onchainInfo.minimumDepositSats || onchainInfo.pegInFeeSats + 1),
+      ));
+      if (sendSats < minimumDepositSats) {
+        throw new Error(`Reclaimed amount is too small to credit to Chama after fees (${sendSats.toString()} sats < ${minimumDepositSats.toString()} sats minimum).`);
+      }
+      const deposit = await fedimint.createOnchainDepositAddress(
+        buildChamaOperationMeta({ flow: "bond_credit", reason: bondId }),
+      );
+      const rawTx = buildKeyPathSweepTx({
+        ownerXonly: xonly,
+        utxos,
+        ownerPriv: priv,
+        destination: deposit.address,
+        feeSats,
+        network: BOND_NETWORK,
+      });
+      let txid: string;
+      try {
+        txid = await esploraBroadcast(base, rawTx);
+      } catch (e: any) {
+        const msg = e?.message ?? "";
+        if (/missingorspent|already.*(mempool|chain|known)|txn-already/i.test(msg)) {
+          const out = await esploraOutspend(fetchJson, utxos[0].txid, utxos[0].index).catch(() => null);
+          if (out?.spent && out.txid) {
+            upsertCommitmentBond({ ...rec, phase: "reclaimed", creditTxid: out.txid, creditOperationId: deposit.operationId });
+            watchBondOnchainCredit(deposit.operationId, bondId);
+            return { txid: out.txid, operationId: deposit.operationId, amountSats: sendSats, alreadyCredited: true };
+          }
+        }
+        throw e;
+      }
+      upsertCommitmentBond({
+        ...rec,
+        phase: "reclaimed",
+        creditTxid: txid,
+        creditOperationId: deposit.operationId,
+      });
+      watchBondOnchainCredit(deposit.operationId, bondId);
+      return { txid, operationId: deposit.operationId, amountSats: sendSats };
     },
     getBondChainTip: async () => esploraTipHeight(esploraFetcher(defaultEsploraBase(BOND_NETWORK))),
     publishBondAnnouncement: async (bondId: string, community: string) => {
@@ -3803,6 +4158,44 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const signed = await signer.signEvent(unsigned as any);
       await client.publishRaw(signed);
       return { community, address: rec.bond.address };
+    },
+    recoverMyBonds: async () => {
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Not connected");
+      const myPubkey = await signer.getPublicKey();
+      const words = await getOrCreateSeed(client, signer);
+      const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
+      const events = await client.queryOnce(
+        { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], authors: [myPubkey] } as any, 6_000,
+      );
+      const minConfs = defaultMinConfs(BOND_NETWORK);
+      const parsed = selectLatestAnnouncements(events as any).filter((a: any) => a.npub === myPubkey);
+      const have = new Set(listCommitmentBonds().map((b) => b.bond.address));
+      let recovered = 0;
+      for (const a of parsed) {
+        if (have.has(a.address)) continue;
+        // Live-bond funds sit at the CLTV address; reclaimed-not-yet-swept funds sit at
+        // the bond-KEY address (the reclaim destination). Check both so a reclaimed bond
+        // also recovers → its "credit to Chama" sweep button surfaces on this device.
+        let bondKeyAddress: string;
+        try { bondKeyAddress = btcSigner.p2tr(hexToBytes(a.ownerXonly), undefined, BOND_NETWORK).address as string; }
+        catch { continue; }
+        const [bondUtxos, bondKeyUtxos] = await Promise.all([
+          findBondFundingUtxos({ address: a.address, fetchJson, minConfs }).then((f) => f.map((x) => x.utxo)).catch(() => []),
+          findBondFundingUtxos({ address: bondKeyAddress, fetchJson, minConfs }).then((f) => f.map((x) => x.utxo)).catch(() => []),
+        ]);
+        const rec = reconstructBondRecord({
+          ownerXonlyHex: a.ownerXonly, lockUntil: a.lockUntil, claimedSats: a.claimedSats,
+          announcedAddress: a.address, seedWords: words.join(" "), network: BOND_NETWORK,
+          bondUtxos, bondKeyUtxos, createdAt: a.createdAt,
+        });
+        if (!rec) continue;
+        upsertCommitmentBond(rec);
+        have.add(a.address);
+        recovered++;
+      }
+      return { recovered };
     },
     fetchCommunityBonds: async (community: string) => {
       const client = clientRef.current;

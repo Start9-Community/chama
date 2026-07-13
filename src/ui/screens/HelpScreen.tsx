@@ -14,6 +14,7 @@ import { T } from "../theme.js";
 import { FAQ_INTRO, FAQ_SECTIONS, FAQ_GLOSSARY, FAQ_HELP, type FaqItem } from "../content/faq.js";
 import { isTauriRuntime } from "../sign-in-environment.js";
 import { openExternalUrl } from "../open-url.js";
+import { useT } from "../../i18n/index.js";
 
 // v4.1 B (#16): under Tauri an `<a target="_blank">` is a silent no-op, so the
 // footer links were dead on desktop/APK. Keep the anchor (browser middle-click /
@@ -27,6 +28,7 @@ function openHelpLink(e: MouseEvent<HTMLAnchorElement>, url: string): void {
 }
 
 export function HelpScreen({ onBack }: { onBack: () => void }) {
+  const { t } = useT();
   const [open, setOpen] = useState<string | null>(null);
   const toggle = (key: string) => setOpen(cur => (cur === key ? null : key));
 
@@ -86,7 +88,7 @@ export function HelpScreen({ onBack }: { onBack: () => void }) {
     <div style={{ maxWidth: 520, margin: "0 auto", padding: "4px 2px", paddingBottom: "calc(72px + env(safe-area-inset-bottom, 0px))" }}>
       {/* Header — stays full (it's navigation; the back button must never recede). */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-        <button onClick={onBack} aria-label="Back" style={{
+        <button onClick={onBack} aria-label={t("help.back")} style={{
           width: 38, height: 38, flex: "0 0 auto", borderRadius: 999,
           background: T.surface, border: `1px solid ${T.border}`, color: T.text,
           fontFamily: T.sans, fontSize: 20, fontWeight: 700, cursor: "pointer",
@@ -94,10 +96,10 @@ export function HelpScreen({ onBack }: { onBack: () => void }) {
         }}>←</button>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: T.mono, fontSize: 9.5, fontWeight: 700, letterSpacing: 1.1, color: T.accent, textTransform: "uppercase", marginBottom: 2 }}>
-            Help &amp; FAQ
+            {t("help.helpFaq")}
           </div>
           <div style={{ fontFamily: T.sans, fontSize: 18, fontWeight: 800, color: T.text }}>
-            How Chama works
+            {t("help.howChamaWorks")}
           </div>
         </div>
       </div>
@@ -160,7 +162,7 @@ export function HelpScreen({ onBack }: { onBack: () => void }) {
 
       {/* Mini-glossary */}
       <div style={{ marginBottom: 18, ...recede(focusMode) }}>
-        <div style={sectionLabel}>Mini-glossary</div>
+        <div style={sectionLabel}>{t("help.miniGlossary")}</div>
         <div style={{ ...cardWrap, padding: "6px 14px" }}>
           {FAQ_GLOSSARY.map((g, i) => (
             <div key={g.term} style={{ padding: "9px 0", borderBottom: i < FAQ_GLOSSARY.length - 1 ? `1px solid ${T.border}` : "none" }}>
@@ -178,15 +180,15 @@ export function HelpScreen({ onBack }: { onBack: () => void }) {
         ...recede(focusMode),
       }}>
         <div style={{ fontFamily: T.sans, fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 10 }}>
-          Still need a hand?
+          {t("help.stillNeedHand")}
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
           <a href={`https://${FAQ_HELP.app}`} target="_blank" rel="noopener noreferrer" onClick={(e) => openHelpLink(e, `https://${FAQ_HELP.app}`)} style={linkChip}>🌐 {FAQ_HELP.app}</a>
           <a href={FAQ_HELP.zapstore} target="_blank" rel="noopener noreferrer" onClick={(e) => openHelpLink(e, FAQ_HELP.zapstore)} style={linkChip}>📦 Zapstore</a>
-          <a href={FAQ_HELP.njump} target="_blank" rel="noopener noreferrer" onClick={(e) => openHelpLink(e, FAQ_HELP.njump)} style={linkChip}>⚡ Follow on Nostr</a>
+          <a href={FAQ_HELP.njump} target="_blank" rel="noopener noreferrer" onClick={(e) => openHelpLink(e, FAQ_HELP.njump)} style={linkChip}>⚡ {t("help.followOnNostr")}</a>
         </div>
         <div style={{ fontFamily: T.sans, fontSize: 11, color: T.muted, marginTop: 12, lineHeight: 1.5 }}>
-          Trade with your community. Trust the math, not a middleman. ⚡🌍
+          {t("help.tagline")}
         </div>
       </div>
     </div>

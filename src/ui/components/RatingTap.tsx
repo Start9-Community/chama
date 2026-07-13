@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import type { RatingThumb } from "../../reputation/ratings.js";
 
 export function RatingTap({
@@ -26,6 +27,7 @@ export function RatingTap({
    *  doubled rule against the adjacent deal-slot card's own border. */
   leading?: boolean;
 }) {
+  const { t } = useT();
   const [tapped, setTapped] = useState<RatingThumb | undefined>(undefined);
   const [pending, setPending] = useState<RatingThumb | null>(null);
   const [failed, setFailed] = useState(false);
@@ -65,7 +67,7 @@ export function RatingTap({
       <div style={wrap}>
         <span style={{ fontSize: 14 }}>{shown === "up" ? "👍" : "👎"}</span>
         <span style={{ fontSize: 11, fontFamily: T.mono, color: T.muted }}>
-          Thanks — your rating is in.
+          {t("me.ratingThanks")}
         </span>
       </div>
     );
@@ -86,12 +88,12 @@ export function RatingTap({
   return (
     <div style={wrap}>
       <span style={{ fontSize: 11, fontFamily: T.mono, color: failed ? T.red : T.muted }}>
-        {failed ? "Couldn't publish — tap to retry" : "How was your counterparty?"}
+        {failed ? t("me.ratingPublishFailed") : t("me.ratingPrompt")}
       </span>
-      <button aria-label="thumbs up" disabled={!!pending} onClick={() => tap("up")} style={pill("up", T.green)}>
+      <button aria-label={t("me.thumbsUpAria")} disabled={!!pending} onClick={() => tap("up")} style={pill("up", T.green)}>
         👍
       </button>
-      <button aria-label="thumbs down" disabled={!!pending} onClick={() => tap("down")} style={pill("down", T.amber)}>
+      <button aria-label={t("me.thumbsDownAria")} disabled={!!pending} onClick={() => tap("down")} style={pill("down", T.amber)}>
         👎
       </button>
     </div>

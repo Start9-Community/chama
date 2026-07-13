@@ -25,6 +25,7 @@ import {
 import { getCommunityBySlug, type Community } from "../../communities/registry.js";
 import type { ChamaBarLabel } from "../decisions.js";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 
 export function ChamaBar({
@@ -61,12 +62,13 @@ export function ChamaBar({
    *  fallback federation. */
   communitySlug?: string | null;
 }) {
+  const { t } = useT();
   let displayName: string;
   const community = communitySlug ? getCommunityBySlug(communitySlug) : null;
   if (!fedimint.joined) {
     displayName = community
       ? communityChamaBarLabel(community)
-      : fedimint.busy ? "Connecting..." : "Choose your Chama";
+      : fedimint.busy ? t("common.connecting") : t("recovery.barChooseChama");
   } else {
     const matched = fedimint.federationId
       ? CURATED_PRESETS.find((p) => p.federationId === fedimint.federationId)
@@ -76,7 +78,7 @@ export function ChamaBar({
     } else if (matched) {
       displayName = matched.name;
     } else if (fedimint.federationId) {
-      displayName = "External route";
+      displayName = t("recovery.barExternalRoute");
     } else {
       displayName = fedimint.federationName;
     }
@@ -96,7 +98,7 @@ export function ChamaBar({
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div
-          title={healthFailed ? "Chama unreachable — receives will be refused" : undefined}
+          title={healthFailed ? t("recovery.barUnreachableTitle") : undefined}
           style={{
             width: 8, height: 8, borderRadius: "50%",
             background: dotColor,
@@ -133,7 +135,7 @@ export function ChamaBar({
           color: T.muted, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
           cursor: "pointer",
         }}>
-          Reconnect
+          {t("recovery.barReconnect")}
         </button>
       )}
     </div>
@@ -156,6 +158,7 @@ function ChamaBarLabelPill({
    *  as the not-joined Reconnect button). */
   onTapUnreachable: () => void;
 }) {
+  const { t } = useT();
   if (label.kind === "unreachable") {
     // v0.3.1 Phase 3: federation joined but unreachable (boot probe
     // failed). Single Reconnect surface across the app — TradeDetail
@@ -171,7 +174,7 @@ function ChamaBarLabelPill({
           letterSpacing: 0.3, whiteSpace: "nowrap", cursor: "pointer",
         }}
       >
-        ⚠ Chama unreachable · Reconnect →
+        {t("recovery.barUnreachableCta")}
       </button>
     );
   }
@@ -181,7 +184,7 @@ function ChamaBarLabelPill({
         fontSize: 10, color: T.muted, fontFamily: T.mono,
         letterSpacing: 0.3,
       }}>
-        Chama: ready
+        {t("recovery.barReady")}
       </span>
     );
   }
@@ -189,8 +192,8 @@ function ChamaBarLabelPill({
     // v0.6.5 plural-aware copy: multiple concurrent trades are allowed,
     // so the pill aggregates count + total in-escrow sats.
     const tradeCopy = label.activeTradeCount === 1
-      ? "1 active trade"
-      : `${label.activeTradeCount.toLocaleString()} active trades`;
+      ? t("recovery.activeTradeOne")
+      : t("recovery.activeTradeMany", { count: label.activeTradeCount.toLocaleString() });
     return (
       <span style={{
         padding: "5px 12px", borderRadius: 20,
@@ -198,7 +201,7 @@ function ChamaBarLabelPill({
         color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 700,
         letterSpacing: 0.3, whiteSpace: "nowrap",
       }}>
-        ⚡ {tradeCopy} · <BitcoinAmount sats={label.sats} size={10} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> in escrow
+        {t("recovery.barInTradeBefore", { trades: tradeCopy })} <BitcoinAmount sats={label.sats} size={10} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> {t("recovery.barInTradeAfter")}
       </span>
     );
   }
@@ -213,7 +216,7 @@ function ChamaBarLabelPill({
         letterSpacing: 0.3, whiteSpace: "nowrap", cursor: "pointer",
       }}
     >
-      ⚠ Recover <BitcoinAmount sats={label.sats} size={10} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> →
+      {t("recovery.barRecoverCta")} <BitcoinAmount sats={label.sats} size={10} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> →
     </button>
   );
 }

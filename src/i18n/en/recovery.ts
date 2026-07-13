@@ -1,0 +1,110 @@
+// i18n namespace "recovery" — money-safety surfaces (RecoveryBanner,
+// PendingLockCard, PendingPayoutCard, DestroyEcashConfirmModal,
+// EcashExportModal, ChamaBar). ⚠ This copy was tuned calm-vs-alarm — the
+// English here must stay byte-identical to the shipped v5 wording.
+export const recovery: Record<string, string> = {
+  "recovery.aBalance": "a balance",
+  "recovery.activeTradeMany": "{count} active trades",
+  "recovery.activeTradeOne": "1 active trade",
+  "recovery.barChooseChama": "Choose your Chama",
+  "recovery.barExternalRoute": "External route",
+  "recovery.barInTradeAfter": "in escrow",
+  "recovery.barInTradeBefore": "⚡ {trades} ·",
+  "recovery.barReady": "Chama: ready",
+  "recovery.barReconnect": "Reconnect",
+  "recovery.barRecoverCta": "⚠ Recover",
+  "recovery.barUnreachableCta": "⚠ Chama unreachable · Reconnect →",
+  "recovery.barUnreachableTitle": "Chama unreachable — receives will be refused",
+  "recovery.bearerWarning":
+    "Fedimint ecash is bearer cash — once your local Chama is wiped, those sats cannot be recovered from this device.",
+  "recovery.cancelKeepChama": "Cancel — keep my Chama",
+  "recovery.exportClearConfirm":
+    "Sure? Chama will forget this note — tap again only if it's saved",
+  "recovery.exportClearCta": "I've imported it — clear",
+  "recovery.exportCopyCta": "Copy ecash",
+  "recovery.exportErrorTitle": "Couldn't generate the note",
+  "recovery.exportGenerateCta": "Generate ecash note",
+  "recovery.exportGenerateError":
+    "Couldn't generate the ecash note. Your sats are safe in your Chama.",
+  "recovery.exportHeadline": "WITHDRAW AS ECASH · NO LN FEES",
+  "recovery.exportIntroAfter":
+    "— with no Lightning fees. Perfect for dust that costs more to move over Lightning than it's worth.",
+  "recovery.exportIntroBefore":
+    "Turn your balance into a Fedimint ecash note you can import into Fedi — or any Fedimint wallet on",
+  "recovery.exportKeepPending": "Keep it pending — I'll finish later",
+  "recovery.exportMinting": "MINTING YOUR ECASH NOTE…",
+  "recovery.exportReadyBody":
+    "✓ Fedimint ecash · {federation}. Import this into Fedi or any Fedimint wallet on {federation}. Save it now — it's bearer money.",
+  "recovery.exportWarnAfter":
+    "your sats. The moment you generate it, your balance leaves your Chama and lives only in that string. Save it before closing — Chama keeps a copy under \"pending ecash export\" until you confirm you've imported it. It only works on {federation}, not Cashu wallets.",
+  "recovery.exportWarnBefore": "⚠ The note",
+  "recovery.exportWarnIs": "is",
+  "recovery.finishLockCta": "Finish lock →",
+  "recovery.finishLockTag": "⏸ Finish locking your trade",
+  "recovery.finishPayoutCta": "Finish payout →",
+  "recovery.finishPayoutTag": "⚡ Finish your payout",
+  "recovery.finishing": "Finishing…",
+  "recovery.fundedTradeLabel": "FUNDED TRADE",
+  "recovery.fundsAtRiskTag": "⚠ FUNDS AT RISK",
+  "recovery.fundsReturnedBody1": "A trade you funded didn't complete, so your",
+  "recovery.fundsReturnedBody2": "came back to your wallet — safe and yours. Send",
+  "recovery.fundsReturnedBody3": "to your Lightning address",
+  "recovery.fundsReturnedBody4": ", or just leave them here.",
+  "recovery.fundsReturnedReserveAfter": "stays for fees)",
+  "recovery.fundsReturnedReserveBefore": "(about",
+  "recovery.fundsReturnedTag": "↩ Funds returned",
+  "recovery.guardNote":
+    "This guard is based on local wallet balance, not trade history.",
+  "recovery.headlineFundsReturned": "Your funding came back to your wallet",
+  "recovery.headlineLastTrade": "Your last trade didn't finish cleanly",
+  "recovery.headlineLeftoverSats": "You have leftover sats from earlier trades",
+  "recovery.headlineTradeWith": "Your trade with {name} didn't finish cleanly",
+  "recovery.keepUsingFooter":
+    "You can keep using Chama. Recovering just clears unexplained sats out of OPFS.",
+  "recovery.lockFooter":
+    "Recovery is automatic and fee-free — nothing is sent over Lightning.",
+  "recovery.lockIntentAfter": "puts your sats in escrow.",
+  "recovery.lockIntentBefore":
+    "You were funding this trade when the app closed. Pick up where you left off — locking",
+  "recovery.lockSpentAfter": "are safe — finish the lock to put them in escrow.",
+  "recovery.lockSpentBefore":
+    "Your last session ended before the lock finished. Your",
+  "recovery.openTrade": "Open trade",
+  "recovery.openTradeCta": "Open trade →",
+  "recovery.payoutConfirmingAfter":
+    "was sent and is confirming. Chama checks automatically — don't claim again; watch your destination wallet.",
+  "recovery.payoutConfirmingBefore": "Your payout of",
+  "recovery.payoutConfirmingTag": "⏳ Payout confirming",
+  "recovery.payoutFinishAfter":
+    "are in your wallet, but the payout to your address didn't finish. Open the trade to send them where you want.",
+  "recovery.payoutFinishBefore": "You won this trade — your",
+  "recovery.payoutFooter":
+    "Retrying is safe — Chama never pays the same trade out twice.",
+  "recovery.pendingLockNote":
+    "These sats belong to a trade you were locking on this Chama. Finish that lock (or let recovery complete) before switching.",
+  "recovery.recoverCta": "⚡ Recover",
+  "recovery.recoverSwitchAfter": "and switch →",
+  "recovery.recoverSwitchBefore": "⚡ Recover",
+  "recovery.recoverableBalanceFallback": "your recoverable balance",
+  "recovery.reservedAfter": "are reserved for Lightning fees.",
+  "recovery.reservedBefore": "About",
+  "recovery.roleArbiter": "Arbiter",
+  "recovery.roleBuyer": "Buyer",
+  "recovery.roleSeller": "Seller",
+  "recovery.satsLandFooter":
+    "Sats land at your Lightning address · Chama keeps your local wallet empty",
+  "recovery.strandedBody1": "are still in your local Chama.",
+  "recovery.strandedBody2": "can be sent to your Lightning address now",
+  "recovery.strandedReserveAfter": "kept for Lightning fees",
+  "recovery.strandedReserveBefore": ", with about",
+  "recovery.switchBody1": "Switching to",
+  "recovery.switchBody2": "will move you to a different Chama. Your local wallet has",
+  "recovery.switchBody3": "on this Chama;",
+  "recovery.switchBody4": "can be recovered to your Lightning wallet first.",
+  "recovery.tradeLabel": "TRADE",
+  "recovery.tradeNeedsAttention": "⚠ Trade needs attention",
+  "recovery.tryAgain": "Try again",
+  "recovery.unknownCounterparty": "an unknown counterparty",
+  "recovery.youFunded": "You funded",
+  "recovery.yourRole": "Your role:",
+};

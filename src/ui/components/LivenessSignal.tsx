@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { HelpTip } from "./HelpTip.js";
 import { formatLivenessReadout, type ChamaLiveness } from "../../arbiters/live-chama.js";
 
@@ -63,10 +64,11 @@ const THIN_SCORE = 45;
  *  healthy score fills green; empty is neutral grey. Never red — thin coverage
  *  is an opening, not a failure. */
 export function LivenessMeter({ score }: { score: number }) {
+  const { t } = useT();
   const filled = Math.max(0, Math.min(SEGMENTS, Math.round((score / 100) * SEGMENTS)));
   const color = filled >= 3 ? T.green : filled >= 1 ? T.amber : T.muted;
   return (
-    <div role="img" aria-label={`Liveness ${Math.round(score)} of 100`} style={{ display: "flex", gap: 3 }}>
+    <div role="img" aria-label={t("bond.livenessAria", { score: Math.round(score) })} style={{ display: "flex", gap: 3 }}>
       {Array.from({ length: SEGMENTS }).map((_, i) => (
         <span key={i} style={{
           flex: 1, height: 8, borderRadius: 2,
@@ -91,12 +93,13 @@ export interface LivenessSignalProps {
 
 /** The full signal block: label + "?" + meter + honest readout + thin nudge. */
 export function LivenessSignal({ liveness, loading, blocksPerDay = 144, onBecomeArbiter }: LivenessSignalProps) {
+  const { t } = useT();
   const thin = !liveness || liveness.arbiterCount <= 1 || liveness.score < THIN_SCORE;
   const readout = loading
-    ? "checking who's bonded here…"
+    ? t("bond.livenessChecking")
     : liveness
       ? formatLivenessReadout(liveness, blocksPerDay)
-      : "liveness lights up once you're in";
+      : t("bond.livenessUnknown");
 
   return (
     <div style={{
@@ -105,12 +108,10 @@ export function LivenessSignal({ liveness, loading, blocksPerDay = 144, onBecome
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 8 }}>
         <span style={{ fontFamily: T.mono, fontSize: 9.5, fontWeight: 800, letterSpacing: 1, color: T.muted, textTransform: "uppercase" }}>
-          How live is this chama
+          {t("bond.livenessHeading")}
         </span>
-        <HelpTip title="WHAT MAKES A CHAMA LIVE" label="What makes a chama live?">
-          Bonded arbiters who show up, get rated, and lock their own sats for the long
-          haul — that’s liveness. It’s earned from the ground up, not handed out. Thin
-          here? That’s an opening: bond, get rated, and be the reason it’s live.
+        <HelpTip title={t("bond.livenessTipTitle")} label={t("bond.livenessTipLabel")}>
+          {t("bond.livenessTipBody")}
         </HelpTip>
       </div>
 
@@ -132,11 +133,11 @@ export function LivenessSignal({ liveness, loading, blocksPerDay = 144, onBecome
                 fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
               }}
             >
-              This chama needs arbiters — become one <span style={{ fontSize: 13, lineHeight: 1 }}>→</span>
+              {t("bond.needsArbitersCta")} <span style={{ fontSize: 13, lineHeight: 1 }}>→</span>
             </button>
           ) : (
             <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.accent, lineHeight: 1.5 }}>
-              This chama needs arbiters — an opening for whoever bonds first.
+              {t("bond.needsArbitersInfo")}
             </div>
           )}
         </div>

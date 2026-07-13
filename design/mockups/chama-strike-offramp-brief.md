@@ -61,11 +61,10 @@ Strike is **lighter** than Tando — the username IS the address, so there's no 
    (or pastes `user@strike.me`); Chama forms `<username>@strike.me` and routes it through the
    **existing** `resolveLightningAddressToInvoice` payout path. Released escrow sats pay it → Strike
    delivers USD (if the user set receive = Cash; see #3).
-3. **One-time Cash hint (LOAD-BEARING).** A Strike LN address delivers as **bitcoin** unless the user
-   flips **Profile → Bitcoin → Receive currency → Cash**. Chama **cannot** set this for them. Show a
-   one-time, dismissible inline note: *"To receive dollars, set Strike's receive currency to Cash
-   (Profile → Bitcoin → Receive currency). Otherwise you'll receive bitcoin."* Never block the pay —
-   receiving sats is still a valid outcome.
+3. **Cash receive confirmation (LOAD-BEARING).** A Strike LN address can deliver as **bitcoin** unless
+   the user flips **Account → Bitcoin settings → Receive currency → Cash**. Chama **cannot** set this
+   for them. Show a guided inline note and require an explicit confirmation before sending: *"Strike
+   is set to receive passive Lightning payments as Cash."*
 4. **Pre-resolve** `.well-known/lnurlp/<username>` (via the existing path) to validate the address and
    read `minSendable`/`maxSendable`; clear error if the claim amount is out of bounds (Strike's
    receive limits surface here).
@@ -74,9 +73,9 @@ Strike is **lighter** than Tando — the username IS the address, so there's no 
 6. **Save via the EXISTING saved-payout-destinations store** — a Strike address is a Lightning Address
    (`user@strike.me`), so it lives in the same store as Tando and every other destination, NOT a new
    store. Friendly label ("Strike · user") if the store takes one; dedupe by address.
-7. **Username-entry UI lives in the Claim modal ONLY** (Tando precedent) — the saved address still
-   appears one-tap in Recovery's picker, and a user can paste `user@strike.me` into Recovery's
-   Lightning-Address field manually. Right v1 scope.
+7. **Username-entry UI lives in the Claim modal ONLY** (Tando precedent) — the saved address pre-fills
+   the Strike picker, and a user can paste `user@strike.me` into Recovery's Lightning-Address field
+   manually. Right v1 scope.
 8. Rides the **journal / double-pay guard automatically** — same `payInvoice` path, no new fund
    surface. Rides the **#9 gateway pay path** (needs a reachable LN gateway). **Dodges #16** — a
    derived/pasted address is a Lightning destination, not a `window.open` redirect. (Only an optional
@@ -104,7 +103,7 @@ Strike is **lighter** than Tando — the username IS the address, so there's no 
   (Strike)" appears; non-US context → it does not.
 - Enter username → resolves `<user>@strike.me` → "≈ $X" → pays the released sats; journal/double-pay
   guards apply unchanged; existing Lightning-Address payouts AND the Tando path unaffected.
-- Cash-receive hint shows once and is dismissible; a saved Strike destination appears one-tap in
-  Recovery's picker.
+- Cash-receive guidance is always shown in the Strike picker; a saved Strike destination pre-fills the
+  username but still passes through the Cash confirmation.
 - `strikeEligible` matrix + `strike-offramp.ts` unit tests added; `npm run predeploy` green. Leave
   uncommitted for Jetty's split.

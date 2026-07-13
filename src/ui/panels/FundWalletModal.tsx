@@ -1,5 +1,6 @@
 import { useState, useEffect, lazy, Suspense, type WheelEvent } from "react";
 import { T, inputStyle } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { CopyButton } from "../components/CopyButton.js";
 import { isSimModeOn, setSimMode } from "../../sim/simMode.js";
@@ -19,6 +20,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
   onRedeemEcash: (oobNotes: string) => Promise<void>;
   balanceMsats: number;
 }) {
+  const { t } = useT();
   const [tab, setTab] = useState<"receive" | "send">("receive");
   const [receiveType, setReceiveType] = useState<"lightning" | "ecash">("lightning");
   const [amountSats, setAmountSats] = useState("10000");
@@ -72,7 +74,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
 
   const handleGenerate = async () => {
     const n = parseInt(amountSats, 10);
-    if (!n || n <= 0) { setErr("Enter a valid sats amount"); return; }
+    if (!n || n <= 0) { setErr(t("fund.enterValidSats")); return; }
     setBusy(true); setErr(null);
     try {
       const bolt11 = await onCreateInvoice(n, description || "Chama top-up");
@@ -82,46 +84,46 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
       setReceived(false);
       setInvoice(bolt11);
     } catch (e: any) {
-      setErr(e.message || "Failed to create invoice");
+      setErr(e.message || t("fund.failedToCreateInvoice"));
     } finally { setBusy(false); }
   };
 
   const handlePayInvoice = async () => {
-    if (!bolt11Input.trim()) { setErr("Paste a Lightning invoice"); return; }
+    if (!bolt11Input.trim()) { setErr(t("fund.pasteLightningInvoiceErr")); return; }
     setBusy(true); setErr(null); setSuccess(null);
     try {
       await onPayInvoice(bolt11Input.trim());
-      setSuccess("Payment sent!"); setBolt11Input("");
+      setSuccess(t("fund.paymentSent")); setBolt11Input("");
     } catch (e: any) {
-      setErr(e.message || "Payment failed");
+      setErr(e.message || t("fund.paymentFailed"));
     } finally { setBusy(false); }
   };
 
   const handleRedeemEcash = async () => {
-    if (!ecashInput.trim()) { setErr("Paste ecash notes"); return; }
+    if (!ecashInput.trim()) { setErr(t("fund.pasteEcashNotesErr")); return; }
     setBusy(true); setErr(null); setSuccess(null);
     try {
       await onRedeemEcash(ecashInput.trim());
-      setSuccess("Ecash redeemed!"); setEcashInput("");
+      setSuccess(t("fund.ecashRedeemed")); setEcashInput("");
     } catch (e: any) {
-      setErr(e.message || "Redeem failed");
+      setErr(e.message || t("fund.redeemFailed"));
     } finally { setBusy(false); }
   };
 
   const handleSpendAll = async () => {
-    if (balanceMsats <= 0) { setErr("No balance to send"); return; }
+    if (balanceMsats <= 0) { setErr(t("fund.noBalanceToSend")); return; }
     setBusy(true); setErr(null);
     try { setEcashOutput(await onSpendNotes(balanceMsats)); }
-    catch (e: any) { setErr(e.message || "Failed"); }
+    catch (e: any) { setErr(e.message || t("fund.failed")); }
     finally { setBusy(false); }
   };
 
   const handleSpendAmount = async () => {
     const n = parseInt(amountSats, 10);
-    if (!n || n <= 0) { setErr("Enter a valid sats amount"); return; }
+    if (!n || n <= 0) { setErr(t("fund.enterValidSats")); return; }
     setBusy(true); setErr(null);
     try { setEcashOutput(await onSpendNotes(n * 1000)); }
-    catch (e: any) { setErr(e.message || "Failed"); }
+    catch (e: any) { setErr(e.message || t("fund.failed")); }
     finally { setBusy(false); }
   };
 
@@ -130,11 +132,11 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
     /native_fedimint_bridge_unavailable|Native Fedimint bridge is enabled but unreachable/i.test(err);
   const gatewayTrustError = !!err && /wallet-verifiable Lightning receive gateway/i.test(err);
 
-  const tabBtn = (t: "receive" | "send", label: string) => (
-    <button onClick={() => { setTab(t); setErr(null); setSuccess(null); setInvoice(null); setEcashOutput(null); }} style={{
+  const tabBtn = (tabId: "receive" | "send", label: string) => (
+    <button onClick={() => { setTab(tabId); setErr(null); setSuccess(null); setInvoice(null); setEcashOutput(null); }} style={{
       flex: 1, padding: "8px 0", borderRadius: T.rs, border: "none",
-      background: tab === t ? T.accent : T.surface,
-      color: tab === t ? "#000" : T.muted,
+      background: tab === tabId ? T.accent : T.surface,
+      color: tab === tabId ? "#000" : T.muted,
       fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
     }}>{label}</button>
   );
@@ -158,19 +160,19 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
         </div>
 
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-          {tabBtn("receive", "⚡ Receive")}
-          {tabBtn("send", "↗ Send")}
+          {tabBtn("receive", t("fund.receive"))}
+          {tabBtn("send", t("fund.send"))}
         </div>
 
         {/* RECEIVE */}
         {tab === "receive" && !invoice && (<>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <button onClick={() => { setReceiveType("lightning"); setErr(null); setSuccess(null); }} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: receiveType === "lightning" ? `1px solid ${T.accent}` : `1px solid ${T.border}`, background: receiveType === "lightning" ? T.accentDim : T.surface, color: receiveType === "lightning" ? T.accent : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Lightning</button>
-            <button onClick={() => { setReceiveType("ecash"); setErr(null); setSuccess(null); }} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: receiveType === "ecash" ? `1px solid ${T.amber}` : `1px solid ${T.border}`, background: receiveType === "ecash" ? T.amberDim : T.surface, color: receiveType === "ecash" ? T.amber : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Ecash</button>
+            <button onClick={() => { setReceiveType("ecash"); setErr(null); setSuccess(null); }} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: receiveType === "ecash" ? `1px solid ${T.amber}` : `1px solid ${T.border}`, background: receiveType === "ecash" ? T.amberDim : T.surface, color: receiveType === "ecash" ? T.amber : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>{t("fund.ecash")}</button>
           </div>
 
           {receiveType === "lightning" && (<>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>AMOUNT (SATS)</div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>{t("fund.amountSats")}</div>
             <input
               type="number"
               value={amountSats}
@@ -178,25 +180,25 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
               onWheel={blurNumberInputOnWheel}
               style={{ ...inputStyle, marginBottom: 12 }}
             />
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>DESCRIPTION</div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>{t("fund.description")}</div>
             <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} style={{ ...inputStyle, marginBottom: 16 }} />
             <button disabled={busy} onClick={handleGenerate} style={{
               width: "100%", padding: "12px 16px", borderRadius: T.rs,
               background: busy ? T.surface : T.accent, border: `1px solid ${T.accent}`,
               color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,
               cursor: busy ? "not-allowed" : "pointer",
-            }}>{busy ? "Generating..." : "⚡ Generate Lightning invoice"}</button>
+            }}>{busy ? t("fund.generating") : t("fund.generateLightningInvoice")}</button>
           </>)}
 
           {receiveType === "ecash" && (<>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>PASTE ECASH NOTES</div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>{t("fund.pasteEcashNotes")}</div>
             <textarea value={ecashInput} onChange={(e) => setEcashInput(e.target.value)} placeholder="fedimint..." rows={4} style={{ ...inputStyle, resize: "vertical" as const, marginBottom: 12, minHeight: 90 }} />
             <button disabled={busy} onClick={handleRedeemEcash} style={{
               width: "100%", padding: "12px 16px", borderRadius: T.rs,
               background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`,
               color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,
               cursor: busy ? "not-allowed" : "pointer",
-            }}>{busy ? "Redeeming..." : "Redeem ecash notes"}</button>
+            }}>{busy ? t("fund.redeeming") : t("fund.redeemEcashNotes")}</button>
           </>)}
         </>)}
 
@@ -208,18 +210,18 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
           }}>
             <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
             <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
-              Payment received
+              {t("fund.paymentReceived")}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
               +<BitcoinAmount sats={expectedMsats / 1000} size={22} gap={6} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
             </div>
             <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
-              Balance updated · closing…
+              {t("fund.balanceUpdatedClosing")}
             </div>
           </div>
         )}
         {tab === "receive" && invoice && !received && (<>
-          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 8, letterSpacing: 1, textAlign: "center" }}>SCAN OR COPY TO PAY</div>
+          <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 8, letterSpacing: 1, textAlign: "center" }}>{t("fund.scanOrCopyToPay")}</div>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
             <Suspense fallback={<div style={{ width: 280, height: 280, background: "#fff", borderRadius: T.rs }} />}>
               <QRCode
@@ -228,7 +230,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
                 fgColor="#050505"
                 bgColor="#ffffff"
                 margin={4}
-                alt="Lightning invoice QR code"
+                alt={t("fund.lightningQrAlt")}
               />
             </Suspense>
           </div>
@@ -256,8 +258,8 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
                   color: expired ? T.red : T.muted, letterSpacing: 0.5,
                 }}>
                   {expired
-                    ? "Invoice expired — generate a new one"
-                    : `Waiting for payment · ${mins}:${secs.toString().padStart(2, "0")}`}
+                    ? t("fund.invoiceExpiredGenerateNew")
+                    : t("fund.waitingForPayment", { time: `${mins}:${secs.toString().padStart(2, "0")}` })}
                 </span>
               </div>
             );
@@ -276,34 +278,34 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
               fontFamily: T.mono, fontSize: 10, color: T.amber,
               lineHeight: 1.5, textAlign: "center",
             }}>
-              ▲ Sim mode — auto-credits in 3-8s.<br />
-              Do not fund this invoice with real sats.
+              {t("fund.simAutoCredit")}<br />
+              {t("fund.simDoNotFund")}
             </div>
           )}
-          <CopyButton value={invoice} label="Copy invoice" copiedLabel="✓ Copied" style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.accentDim, border: `1px solid ${T.accent}44`, color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }} />
+          <CopyButton value={invoice} label={t("fund.copyInvoice")} copiedLabel={t("common.copied")} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.accentDim, border: `1px solid ${T.accent}44`, color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }} />
           <button onClick={() => {
             setInvoice(null);
             setBalanceAtInvoice(null);
             setExpectedMsats(0);
             setInvoiceExpiresAt(null);
-          }} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>New invoice</button>
+          }} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{t("fund.newInvoice")}</button>
         </>)}
 
         {/* SEND */}
         {tab === "send" && !ecashOutput && (<>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <button onClick={() => setSendType("lightning")} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: sendType === "lightning" ? `1px solid ${T.accent}` : `1px solid ${T.border}`, background: sendType === "lightning" ? T.accentDim : T.surface, color: sendType === "lightning" ? T.accent : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Lightning</button>
-            <button onClick={() => setSendType("ecash")} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: sendType === "ecash" ? `1px solid ${T.amber}` : `1px solid ${T.border}`, background: sendType === "ecash" ? T.amberDim : T.surface, color: sendType === "ecash" ? T.amber : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Ecash</button>
+            <button onClick={() => setSendType("ecash")} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: sendType === "ecash" ? `1px solid ${T.amber}` : `1px solid ${T.border}`, background: sendType === "ecash" ? T.amberDim : T.surface, color: sendType === "ecash" ? T.amber : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>{t("fund.ecash")}</button>
           </div>
 
           {sendType === "lightning" && (<>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>PASTE LIGHTNING INVOICE</div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>{t("fund.pasteLightningInvoice")}</div>
             <textarea value={bolt11Input} onChange={(e) => setBolt11Input(e.target.value)} placeholder="lnbc1..." rows={3} style={{ ...inputStyle, resize: "vertical" as const, marginBottom: 12, minHeight: 60 }} />
-            <button disabled={busy} onClick={handlePayInvoice} style={{ width: "100%", padding: "12px 16px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 12, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{busy ? "Sending..." : "⚡ Pay invoice"}</button>
+            <button disabled={busy} onClick={handlePayInvoice} style={{ width: "100%", padding: "12px 16px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 12, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{busy ? t("fund.sending") : t("fund.payInvoice")}</button>
           </>)}
 
           {sendType === "ecash" && (<>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>AMOUNT (SATS)</div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>{t("fund.amountSats")}</div>
             <input
               type="number"
               value={amountSats}
@@ -312,17 +314,17 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
               style={{ ...inputStyle, marginBottom: 12 }}
             />
             <div style={{ display: "flex", gap: 8 }}>
-              <button disabled={busy} onClick={handleSpendAmount} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`, color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{busy ? "Creating..." : "Create ecash"}</button>
-              <button disabled={busy} onClick={handleSpendAll} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>Send ALL (<BitcoinAmount sats={Math.floor(balanceMsats / 1000)} size={11} gap={3} glyphScale={1.18} color="inherit" glyphColor="inherit" />)</button>
+              <button disabled={busy} onClick={handleSpendAmount} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`, color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{busy ? t("fund.creating") : t("fund.createEcash")}</button>
+              <button disabled={busy} onClick={handleSpendAll} style={{ flex: 1, padding: "12px 8px", borderRadius: T.rs, background: busy ? T.surface : T.red, border: `1px solid ${T.red}`, color: busy ? T.muted : "#fff", fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer" }}>{t("fund.sendAllBefore")}<BitcoinAmount sats={Math.floor(balanceMsats / 1000)} size={11} gap={3} glyphScale={1.18} color="inherit" glyphColor="inherit" />{t("fund.sendAllAfter")}</button>
             </div>
           </>)}
         </>)}
 
         {tab === "send" && ecashOutput && (<>
-          <div style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, marginBottom: 8, letterSpacing: 1, textAlign: "center" }}>ECASH NOTES — COPY AND SEND TO RECIPIENT</div>
+          <div style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, marginBottom: 8, letterSpacing: 1, textAlign: "center" }}>{t("fund.ecashNotesCopySend")}</div>
           <div style={{ padding: 8, marginBottom: 12, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 8, color: T.text, wordBreak: "break-all", maxHeight: 100, overflowY: "auto" }}>{ecashOutput}</div>
-          <CopyButton value={ecashOutput} label="Copy ecash notes" copiedLabel="✓ Copied" style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.amberDim, border: `1px solid ${T.amber}44`, color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }} />
-          <button onClick={() => setEcashOutput(null)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Done</button>
+          <CopyButton value={ecashOutput} label={t("fund.copyEcashNotes")} copiedLabel={t("common.copied")} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.amberDim, border: `1px solid ${T.amber}44`, color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 8 }} />
+          <button onClick={() => setEcashOutput(null)} style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{t("common.done")}</button>
         </>)}
 
         {success && <div style={{ marginTop: 12, padding: 10, borderRadius: T.rs, background: T.greenDim, border: `1px solid ${T.green}44`, color: T.green, fontFamily: T.mono, fontSize: 10 }}>{success}</div>}
@@ -330,16 +332,16 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
           <>
             <div style={{ marginTop: 12, padding: 10, borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}44`, color: T.red, fontFamily: T.mono, fontSize: 10, wordBreak: "break-word" }}>
               {nativeBridgeUnavailable
-                ? "Native Fedimint is enabled, but the local Rust bridge is not running or reachable. Start the bridge and reconnect."
+                ? t("fund.nativeBridgeUnavailableShort")
                 : gatewayTrustError
-                ? "Funding unavailable here. This is the browser Fedimint SDK route, not the Rust bridge; the SDK could not verify a trusted receive gateway."
+                ? t("fund.sdkGatewayShort")
                 : err}
             </div>
             {diagnostics && (
               <CopyButton
                 value={diagnostics}
-                label="Copy Fedimint diagnostics"
-                copiedLabel="✓ Copied"
+                label={t("fund.copyDiagnostics")}
+                copiedLabel={t("common.copied")}
                 style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}44`, color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer", marginTop: 8 }}
               />
             )}
@@ -348,7 +350,7 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
                 onClick={openSimDemo}
                 style={{ width: "100%", padding: "10px 16px", borderRadius: T.rs, background: T.amberDim, border: `1px solid ${T.amber}55`, color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer", marginTop: 8 }}
               >
-                Open sim demo
+                {t("fund.openSimDemo")}
               </button>
             )}
           </>

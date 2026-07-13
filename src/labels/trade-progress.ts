@@ -19,6 +19,13 @@
 // owner the SELLER (funder/locker). The engine wins — see funderRole below.
 
 import { type ParsedEscrowEvent, Role, Outcome } from "../escrow-engine/types.js";
+import { translate, getCurrentLang } from "../i18n/index.js";
+
+// i18n (namespace "labels"): every user-visible string here resolves through
+// translate(getCurrentLang(), …) INSIDE the function at call time — never at
+// module load — so a language switch is picked up by the next render. English
+// output is byte-identical to the pre-i18n strings (tests.ts asserts on it).
+// EXCEPTION: markDoneChatMessage stays hardcoded English — see its comment.
 
 // ── Who locks vs who performs ──────────────────────────────────────────────
 //
@@ -60,6 +67,42 @@ export interface MarkDoneOpts {
   lendingPhase?: "disbursement" | "repayment";
 }
 
+interface MarkDoneParts {
+  icon: string;
+  /** i18n key for the imperative button label. */
+  labelKey: string;
+  /** i18n key for the past participle (display surfaces only). */
+  doneKey: string;
+  /** Raw ENGLISH participle — used ONLY by markDoneChatMessage, whose output
+   *  rides the wire (kind 38108) and is recognised cross-client by
+   *  isStructuredMarkDoneMessage; it must stay byte-identical English in
+   *  every UI language. */
+  doneEn: string;
+}
+
+function markDoneParts(
+  category: string | undefined,
+  fulfillment: string | undefined,
+  opts: MarkDoneOpts = {},
+): MarkDoneParts {
+  switch (category) {
+    case "marketplace":
+      if (fulfillment === "service") return { icon: "✓", labelKey: "labels.markCompleted", doneKey: "labels.doneCompleted", doneEn: "completed" };
+      if (fulfillment === "digital") return { icon: "📤", labelKey: "labels.markSent", doneKey: "labels.doneSent", doneEn: "sent" };
+      return { icon: "📦", labelKey: "labels.markDelivered", doneKey: "labels.doneDelivered", doneEn: "delivered" }; // physical (default)
+    case "p2p-trade":
+      return { icon: "💸", labelKey: "labels.markSent", doneKey: "labels.doneSent", doneEn: "sent" };
+    case "bill-pay":
+      return { icon: "✓", labelKey: "labels.markPaid", doneKey: "labels.donePaid", doneEn: "paid" };
+    case "lending":
+      return opts.lendingPhase === "repayment"
+        ? { icon: "↩", labelKey: "labels.markRepaid", doneKey: "labels.doneRepaid", doneEn: "repaid" }
+        : { icon: "📥", labelKey: "labels.markReceived", doneKey: "labels.doneReceived", doneEn: "received" };
+    default:
+      return { icon: "✓", labelKey: "labels.markDone", doneKey: "labels.doneDone", doneEn: "done" };
+  }
+}
+
 /** The performer's mark-done verb, keyed off (category, fulfillment) — and, for
  *  lending, the cycle phase. Marketplace splits by fulfillment (the only
  *  vertical where fulfillment is a real choice); the rest are per-vertical. */
@@ -68,22 +111,13 @@ export function markDoneVerb(
   fulfillment: string | undefined,
   opts: MarkDoneOpts = {},
 ): MarkDoneVerb {
-  switch (category) {
-    case "marketplace":
-      if (fulfillment === "service") return { icon: "✓", label: "Mark completed", done: "completed" };
-      if (fulfillment === "digital") return { icon: "📤", label: "Mark sent", done: "sent" };
-      return { icon: "📦", label: "Mark delivered", done: "delivered" }; // physical (default)
-    case "p2p-trade":
-      return { icon: "💸", label: "Mark sent", done: "sent" };
-    case "bill-pay":
-      return { icon: "✓", label: "Mark paid", done: "paid" };
-    case "lending":
-      return opts.lendingPhase === "repayment"
-        ? { icon: "↩", label: "Mark repaid", done: "repaid" }
-        : { icon: "📥", label: "Mark received", done: "received" };
-    default:
-      return { icon: "✓", label: "Mark done", done: "done" };
-  }
+  const p = markDoneParts(category, fulfillment, opts);
+  const lang = getCurrentLang();
+  return {
+    icon: p.icon,
+    label: translate(lang, p.labelKey),
+    done: translate(lang, p.doneKey),
+  };
 }
 
 /** Plausible refund reasons to offer as chips when a party arms a refund — the
@@ -97,26 +131,28 @@ export function refundReasons(
   fulfillment: string | undefined,
   voteRole: Role,
 ): string[] {
+  const lang = getCurrentLang();
+  const t = (key: string) => translate(lang, key);
   if (voteRole === performerRole(category)) {
     // The performer is returning the sats / backing out.
     switch (category) {
-      case "marketplace": return ["Out of stock", "Can't fulfill it", "Buyer asked to cancel"];
-      case "p2p-trade": return ["Couldn't send the fiat", "Changed my mind"];
-      case "bill-pay": return ["Couldn't pay the bill", "Changed my mind"];
-      case "lending": return ["Don't need it anymore", "Changed my mind"];
-      default: return ["Can't complete it", "Changed my mind"];
+      case "marketplace": return [t("labels.reasonOutOfStock"), t("labels.reasonCantFulfill"), t("labels.reasonBuyerAskedCancel")];
+      case "p2p-trade": return [t("labels.reasonCouldntSendFiat"), t("labels.reasonChangedMind")];
+      case "bill-pay": return [t("labels.reasonCouldntPayBill"), t("labels.reasonChangedMind")];
+      case "lending": return [t("labels.reasonDontNeedAnymore"), t("labels.reasonChangedMind")];
+      default: return [t("labels.reasonCantComplete"), t("labels.reasonChangedMind")];
     }
   }
   // The funder is asking for their locked sats back.
   switch (category) {
     case "marketplace":
-      return fulfillment === "service" ? ["Work wasn't done", "Not as agreed", "Changed my mind"]
-        : fulfillment === "digital" ? ["File never arrived", "Not as described", "Changed my mind"]
-        : ["It didn't arrive", "Not as described", "Changed my mind"];
-    case "p2p-trade": return ["Fiat never arrived", "Wrong amount", "Changed my mind"];
-    case "bill-pay": return ["Bill wasn't paid", "I paid it myself", "Changed my mind"];
-    case "lending": return ["Terms not met", "Changed my mind"];
-    default: return ["Didn't get it", "Changed my mind"];
+      return fulfillment === "service" ? [t("labels.reasonWorkNotDone"), t("labels.reasonNotAsAgreed"), t("labels.reasonChangedMind")]
+        : fulfillment === "digital" ? [t("labels.reasonFileNeverArrived"), t("labels.reasonNotAsDescribed"), t("labels.reasonChangedMind")]
+        : [t("labels.reasonDidntArrive"), t("labels.reasonNotAsDescribed"), t("labels.reasonChangedMind")];
+    case "p2p-trade": return [t("labels.reasonFiatNeverArrived"), t("labels.reasonWrongAmount"), t("labels.reasonChangedMind")];
+    case "bill-pay": return [t("labels.reasonBillNotPaid"), t("labels.reasonPaidItMyself"), t("labels.reasonChangedMind")];
+    case "lending": return [t("labels.reasonTermsNotMet"), t("labels.reasonChangedMind")];
+    default: return [t("labels.reasonDidntGetIt"), t("labels.reasonChangedMind")];
   }
 }
 
@@ -128,7 +164,13 @@ const MARK_DONE_ICONS = ["📦", "✓", "📤", "💸", "📥", "↩"];
 /** The structured chat note the performer publishes on mark-done (rides kind
  *  38108, like a normal message — no new wire event). Marketplace-physical
  *  keeps its exact legacy wording the buyer + arbiter already recognise; the
- *  other verticals follow the same "{icon} Marked as {done}" shape. */
+ *  other verticals follow the same "{icon} Marked as {done}" shape.
+ *
+ *  ⚠ NOT i18n'd — deliberately. This string goes over the WIRE and is
+ *  recognised on the receiving client (any language, any version) by
+ *  isStructuredMarkDoneMessage's `.includes(" Marked as ")` + icon-prefix
+ *  check. It must stay byte-identical English everywhere; hence doneEn, not
+ *  the translated participle. */
 export function markDoneChatMessage(
   category: string | undefined,
   fulfillment: string | undefined,
@@ -137,8 +179,8 @@ export function markDoneChatMessage(
   if (category === "marketplace" && (fulfillment ?? "physical") === "physical") {
     return "📦 Marked as delivered — on its way.";
   }
-  const v = markDoneVerb(category, fulfillment, opts);
-  return `${v.icon} Marked as ${v.done}.`;
+  const p = markDoneParts(category, fulfillment, opts);
+  return `${p.icon} Marked as ${p.doneEn}.`;
 }
 
 /** True when a chat message is a structured mark-done note (any vertical), so
@@ -190,12 +232,15 @@ export function eventToSystemBubble(
 ): SystemBubble | null {
   const at = event.raw.created_at;
   const key = event.raw.id;
+  const lang = getCurrentLang();
+  const t = (tKey: string, params?: Record<string, string | number>) =>
+    translate(lang, tKey, params);
   const p = event.payload as { type: string; outcome?: Outcome; role?: Role };
   switch (p.type) {
     case "escrow:create":
-      return { key, at, icon: "📋", tone: "teal", text: `Trade reserved · ${ctx.shortId}` };
+      return { key, at, icon: "📋", tone: "teal", text: t("labels.bubbleTradeReserved", { shortId: ctx.shortId }) };
     case "escrow:lock":
-      return { key, at, icon: "⚡", tone: "lock", text: `Sats locked in escrow · ${ctx.amountLabel}` };
+      return { key, at, icon: "⚡", tone: "lock", text: t("labels.bubbleSatsLocked", { amount: ctx.amountLabel }) };
     case "escrow:vote": {
       const outcome = p.outcome ?? Outcome.RELEASE;
       const voterRole = p.role ?? funderRole(ctx.category);
@@ -205,7 +250,7 @@ export function eventToSystemBubble(
       // "released → pays {themselves}".
       if (outcome === Outcome.RELEASE && voterRole === performerRole(ctx.category)) {
         const verb = markDoneVerb(ctx.category, ctx.fulfillment);
-        return { key, at, icon: verb.icon, tone: "green", text: `${voter} marked it ${verb.done}` };
+        return { key, at, icon: verb.icon, tone: "green", text: t("labels.bubbleMarkedIt", { voter, done: verb.done }) };
       }
       if (outcome === Outcome.REFUND) {
         // A lone refund stays calm (orange ↩) — the funder asking for their sats
@@ -213,24 +258,24 @@ export function eventToSystemBubble(
         // amber is the synthetic "⚖ Dispute opened" bubble when both sides clash.
         const funderName = ctx.nameFor(funderRole(ctx.category));
         if (voterRole === Role.ARBITER) {
-          return { key, at, icon: "⚖", tone: "vote", text: `Arbiter refunded → back to ${funderName}` };
+          return { key, at, icon: "⚖", tone: "vote", text: t("labels.bubbleArbiterRefunded", { funder: funderName }) };
         }
         if (voterRole === performerRole(ctx.category)) {
-          return { key, at, icon: "↩", tone: "vote", text: `${voter} refunded ${funderName}` };
+          return { key, at, icon: "↩", tone: "vote", text: t("labels.bubbleRefunded", { voter, funder: funderName }) };
         }
-        return { key, at, icon: "↩", tone: "vote", text: `${voter} asked for a refund` };
+        return { key, at, icon: "↩", tone: "vote", text: t("labels.bubbleAskedRefund", { voter }) };
       }
       // RELEASE by the funder (or arbiter ruling) → pays the performer.
       const recipient = ctx.nameFor(performerRole(ctx.category));
-      return { key, at, icon: "🗳️", tone: "vote", text: `${voter} released → pays ${recipient}` };
+      return { key, at, icon: "🗳️", tone: "vote", text: t("labels.bubbleReleased", { voter, recipient }) };
     }
     case "escrow:resolve": {
       const outcome = p.outcome ?? Outcome.RELEASE;
       return {
         key, at, icon: "✅", tone: "green",
         text: outcome === Outcome.REFUND
-          ? "Refund approved — ready to claim"
-          : "Released — ready to claim",
+          ? t("labels.bubbleRefundApproved")
+          : t("labels.bubbleReleasedReady"),
       };
     }
     case "escrow:claim": {
@@ -238,11 +283,11 @@ export function eventToSystemBubble(
       const winnerRole = outcome === Outcome.REFUND ? funderRole(ctx.category)
         : outcome === Outcome.RELEASE ? performerRole(ctx.category)
         : null;
-      const winner = winnerRole ? ctx.nameFor(winnerRole) : "the winner";
-      return { key, at, icon: "🎉", tone: "win", text: `Settled — ${ctx.amountLabel} to ${winner}` };
+      const winner = winnerRole ? ctx.nameFor(winnerRole) : t("labels.bubbleTheWinner");
+      return { key, at, icon: "🎉", tone: "win", text: t("labels.bubbleSettled", { amount: ctx.amountLabel, winner }) };
     }
     case "escrow:cancel":
-      return { key, at, icon: "✖", tone: "amber", text: "Trade cancelled" };
+      return { key, at, icon: "✖", tone: "amber", text: t("labels.bubbleTradeCancelled") };
     default:
       // join / complete / subscribe / period_release / chat — not in the feed.
       return null;
@@ -252,11 +297,11 @@ export function eventToSystemBubble(
 /** A dispute isn't a discrete event (it's both outcomes on record, unresolved),
  *  so the feed synthesises it at the moment the conflicting vote landed. */
 export function disputeBubble(at: number): SystemBubble {
-  return { key: "sys:dispute", at, icon: "⚖", tone: "amber", text: "Dispute opened" };
+  return { key: "sys:dispute", at, icon: "⚖", tone: "amber", text: translate(getCurrentLang(), "labels.bubbleDisputeOpened") };
 }
 
 /** Likewise an expiry is time-based, not an event — synthesised when the trade
  *  reads EXPIRED. */
 export function timeoutBubble(at: number): SystemBubble {
-  return { key: "sys:timeout", at, icon: "⏳", tone: "amber", text: "Timed out — past the deadline" };
+  return { key: "sys:timeout", at, icon: "⏳", tone: "amber", text: translate(getCurrentLang(), "labels.bubbleTimedOut") };
 }

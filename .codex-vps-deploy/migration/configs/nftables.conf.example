@@ -1,0 +1,22 @@
+# ORIGIN firewall (nftables). Adapt <MY_IP> and the wg interface/subnet.
+# Goal: SSH only from my admin IP; 80/443 ONLY from the tunnel; no public 80/443.
+
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    ct state established,related accept
+    iif "lo" accept
+
+    # SSH only from my admin IP
+    ip saddr <MY_IP> tcp dport 22 accept
+
+    # Web only from the WireGuard tunnel
+    iifname "wg0" tcp dport { 80, 443 } accept
+
+    # WireGuard (origin dials out; keep if your provider needs the inbound allow)
+    udp dport 51820 accept
+
+    # Anything else to 80/443 on the public NIC is dropped by the default policy.
+  }
+}

@@ -5,6 +5,7 @@ import {
   BP_FEDERATION_INVITE,
 } from "../../fedimint/federation-config.js";
 import { T, inputStyle } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 // Renders inside Sandbox mode (Settings → Advanced) when the user is
 // already joined to a federation. Lets the user pick a different
@@ -18,6 +19,7 @@ export function SwitchFederationPanel({
   fedimint: FedimintState;
   onSwitch: (inviteCode: string, opts?: { force?: boolean }) => Promise<void>;
 }) {
+  const { t } = useT();
   const presets = CURATED_PRESETS;
   const [selectedInvite, setSelectedInvite] = useState<string>(BP_FEDERATION_INVITE);
   const [customInvite, setCustomInvite] = useState<string>("");
@@ -36,7 +38,7 @@ export function SwitchFederationPanel({
   const requestCustomSwitch = () => {
     if (!customValid) return;
     setConfirming({
-      name: "External route",
+      name: t("chat.externalRoute"),
       invite: customTrimmed,
     });
   };
@@ -49,7 +51,7 @@ export function SwitchFederationPanel({
       setConfirming(null);
       setCustomInvite("");
     } catch (e: any) {
-      setErr(e?.message || "Switch failed");
+      setErr(e?.message || t("chat.switchFailed"));
     } finally {
       setBusy(false);
     }
@@ -65,10 +67,10 @@ export function SwitchFederationPanel({
         fontSize: 10, fontWeight: 600, color: T.muted, fontFamily: T.mono,
         letterSpacing: 1, marginBottom: 8,
       }}>
-        SWITCH ROUTE
+        {t("chat.switchRoute")}
       </div>
       <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 10, lineHeight: 1.5 }}>
-        Now on: <span style={{ color: T.text }}>{fedimint.federationName}</span>
+        {t("chat.nowOn")}<span style={{ color: T.text }}>{fedimint.federationName}</span>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -83,7 +85,7 @@ export function SwitchFederationPanel({
             cursor: busy ? "not-allowed" : "pointer",
           }}
         >
-          <optgroup label="Curated">
+          <optgroup label={t("chat.curated")}>
             {presets.filter((p) => p.source === "curated").map((p) => (
               <option key={p.inviteCode} value={p.inviteCode}>{p.name}</option>
             ))}
@@ -99,14 +101,14 @@ export function SwitchFederationPanel({
             cursor: busy ? "not-allowed" : "pointer", whiteSpace: "nowrap",
           }}
         >
-          {busy ? "Switching…" : "Switch"}
+          {busy ? t("chat.switching") : t("chat.switch")}
         </button>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
         <input
           type="text"
-          placeholder="…or paste fed1 invite"
+          placeholder={t("chat.pasteInvitePlaceholder")}
           value={customInvite}
           onChange={(e) => setCustomInvite(e.target.value)}
           disabled={busy}
@@ -123,7 +125,7 @@ export function SwitchFederationPanel({
             cursor: busy || !customValid ? "not-allowed" : "pointer", whiteSpace: "nowrap",
           }}
         >
-          Switch
+          {t("chat.switch")}
         </button>
       </div>
 
@@ -148,17 +150,14 @@ export function SwitchFederationPanel({
             background: T.card, border: `1px solid ${T.border}`,
           }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: T.text, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-              CONFIRM ROUTE SWITCH
+              {t("chat.confirmRouteSwitch")}
             </div>
             <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 16 }}>
-              Switch from <strong>{fedimint.federationName}</strong> to{" "}
-              <strong>{confirming.name}</strong>?
+              {t("chat.switchFromBefore")}<strong>{fedimint.federationName}</strong>{t("chat.switchFromJoin")}
+              <strong>{confirming.name}</strong>{t("chat.switchFromAfter")}
             </div>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 16 }}>
-              This wipes your local Chama's OPFS file and re-joins the new
-              one. Any ecash on the current Chama will be stranded until
-              you switch back. Your Nostr-backed seed and trade history
-              survive.
+              {t("chat.switchWipeWarning")}
             </div>
 
             {err && (
@@ -170,8 +169,7 @@ export function SwitchFederationPanel({
                 {err}
                 {refusalCode === "balance" && (
                   <div style={{ marginTop: 8, color: T.amber }}>
-                    Click <strong>Switch and destroy ecash</strong> to override.
-                    This permanently destroys the balance held under this route.
+                    {t("chat.destroyOverrideBefore")}<strong>{t("chat.destroyOverrideBold")}</strong>{t("chat.destroyOverrideAfter")}
                   </div>
                 )}
               </div>
@@ -188,7 +186,7 @@ export function SwitchFederationPanel({
                   cursor: busy ? "not-allowed" : "pointer",
                 }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => doSwitch(confirming, refusalCode === "balance")}
@@ -202,9 +200,9 @@ export function SwitchFederationPanel({
                   cursor: busy ? "not-allowed" : "pointer",
                 }}
               >
-                {busy ? "Switching…"
-                  : refusalCode === "balance" ? "Switch and destroy ecash"
-                  : "Switch route"}
+                {busy ? t("chat.switching")
+                  : refusalCode === "balance" ? t("chat.switchAndDestroy")
+                  : t("chat.switchRouteBtn")}
               </button>
             </div>
           </div>

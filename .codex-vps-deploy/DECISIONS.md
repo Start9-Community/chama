@@ -1,0 +1,2361 @@
+# Chama Decisions
+
+Architectural decisions that changed the product's shape. Each entry
+captures the date, the context (what prompted the decision), the
+options considered, the choice, and the rationale.
+
+This file is append-only. Decisions can be superseded by later entries
+but never edited away. When a decision is superseded, the new entry
+links back to the one it replaces.
+
+The goal: six months from now, when something feels weird and you
+wonder "why did we do it this way," you can find the answer here.
+
+---
+
+## 0. Format
+
+```
+## YYYY-MM-DD — Short title
+
+**Context:** What prompted the decision. What was the trigger event,
+the smoke-test catch, the design conversation, the operational
+reality?
+
+**Options considered:**
+- (a) Description, with tradeoff
+- (b) Description, with tradeoff
+- (c) Description, with tradeoff
+
+**Decision:** Picked option (X).
+
+**Rationale:** Why this choice over the others. What the decision
+optimizes for. What it gives up.
+
+**Implications:** Downstream consequences. What changes elsewhere
+because of this. What the next decision this unlocks (or blocks).
+
+**Status:** Active / Superseded by [link]
+```
+
+---
+
+## 2026-04-26 — Coordinator, not wallet (Pillar 2.1, Option B chosen)
+
+**Context:** v0.1.71's "33 sats missing" event surfaced a
+fundamental architectural question: where do user funds live between
+trades? Initial assumption was Chama held a Fedimint wallet that
+custodied bearer ecash. v0.1.75 investigation confirmed Fedimint
+ecash is bearer cash that lives only in client OPFS — federations
+do not custody unspent notes. Reading Fedi's
+`bridge/fedi-wasm/storage.rs` confirmed the upstream story is "go
+native via FFI"; web durability is structurally limited.
+
+**Options considered:**
+- (a) **Wallet model** — Chama as a Fedimint wallet client. Users
+      preload sats, hold balances, trade from those balances. Simple
+      mental model but exposes users to OPFS durability risk every
+      moment they're not actively trading.
+- (b) **Coordinator model** — Chama as a trade-coordinator. Lightning
+      is the universal interface; ecash exists only as cryptographic
+      substrate during the LOCK→CLAIM window. BOLT11 in at fund time,
+      BOLT11 out at claim time. OPFS drains between trades. No
+      persistent balance UI.
+- (c) **Hybrid** — Wallet for power users, coordinator for normies,
+      toggle in settings. Worst of both worlds; no clean mental model.
+
+**Decision:** Option (b), Coordinator model.
+
+**Rationale:** "No sats stranded, ever" is the deepest ethical
+commitment Chama can make. OPFS bearer-cash durability is genuinely
+limited (browser quotas, profile resets, cross-device, browser-bound
+key material). The wallet model leaks this fragility into every
+moment of user experience. The coordinator model contains it to the
+brief window where the trade structurally needs it. Lightning as
+universal interface also makes Chama interoperable with every other
+Bitcoin tool a user already has.
+
+**Implications:**
+- Trade lifecycle becomes: BOLT11 IN at fund time → ecash in escrow
+  during LOCK→CLAIM only → BOLT11 OUT at claim time → OPFS drains.
+- "Wallet" mental model is dead in user-facing language. UI calls it
+  "Chama," and balance is "Active funds in escrow."
+- Recovery banner exists for failure modes (interrupted trades,
+  half-finished claims), not steady state.
+- Federation switching becomes mechanically trivial when balance is
+  zero — tear down WASM client, init on new fed, OPFS rotates. No
+  Lightning round-trip, no fees, no balance to preserve.
+- One-trade-at-a-time becomes design choice, not technical limit.
+
+**Status:** Active. Operationalization in progress — v0.1.85 +
+v0.2.0 captured the language and architecture; v0.3.0 "Atomic
+Lifecycle" removes the FundWalletModal preload surface that still
+contradicts the doctrine.
+
+---
+
+## 2026-05-01 — Communities, not federations (PHILOSOPHY.md §2.3)
+
+**Context:** Federation as a primitive is invisible to most users —
+the cryptographic vocabulary doesn't map to anything in their lives.
+But every Bitcoin app forces users to learn it. Chama could either
+inherit that complexity or hide it. Building toward Adopting Bitcoin
+Nairobi made the question urgent: a Senegalese rice trader does not
+need to learn what a Fedimint guardian set is.
+
+**Options considered:**
+- (a) **Federation-primary** — User picks a federation by name from
+      a list (BLF, BP, etc.). Educational copy explains what they are.
+      Power-user-friendly but high cognitive load.
+- (b) **Community-primary, federation-derived** — User picks a
+      community (currency + country/region + language). Federation
+      derived automatically from the community. Federation appears
+      only in Settings → Advanced as plumbing.
+- (c) **No picker** — Auto-assign based on locale. Removes choice
+      entirely. Sovereignty-incompatible.
+
+**Decision:** Option (b).
+
+**Rationale:** The community is what the user actually identifies
+with — "I'm Senegalese, I trade in CFA, my neighbors speak Wolof and
+French." The federation is plumbing that backs that identity. Forcing
+users to learn the plumbing was a failure of product design, not a
+limit of the protocol. Communities map directly to real-world
+identity; federations don't.
+
+**Implications:**
+- Schema gains `community: <slug>` and `fulfillment` tags on listings.
+- `resolveFederationForCommunity(slug)` becomes the canonical resolver.
+- BLF (and later BP) backs all communities by default; communities
+  with no native federation route to the universal fallback.
+- "Federation" appears nowhere on user-facing surfaces except
+  Settings → Advanced. Code identifiers stay.
+- Federation-follows-listing (v0.2.0) becomes natural: the
+  community-on-listing tag tells the buyer's wallet which federation
+  to switch to.
+
+**Status:** Active. Shipped v0.1.78. Federation→Chama UI sweep
+completed v0.1.87. Federation-follows-listing protocol+UI shipped
+v0.2.0.
+
+---
+
+## 2026-05-04 — Federation follows the listing (PHILOSOPHY.md §2.3)
+
+**Context:** Cross-federation trade attempts produced stranded
+ecash — a mint on fed A cannot be redeemed on fed B. The naive fix
+was "warn the user." The right fix was structural: make
+cross-federation locks impossible to attempt at the protocol level.
+
+**Options considered:**
+- (a) **Warning-based** — Show a warning when buyer/seller/arbiter
+      are on different feds, let them proceed. Users will ignore
+      warnings; stranded ecash will follow.
+- (b) **Block + manual switch** — Detect mismatch, block lock, prompt
+      user to manually switch federations. Adds friction. Users may
+      not understand why.
+- (c) **Federation-follows-listing** — Tap a listing, Chama silently
+      switches your client to the listing's federation. Per Pillar
+      2.1 (wallets are zero between trades), the switch is mechanically
+      trivial and invisible. The user sees one consistent flow; the
+      protocol enforces correctness.
+
+**Decision:** Option (c).
+
+**Rationale:** Pillar 2.1 makes (c) cheap. The user's wallet is
+already zero between trades, so a "switch" is just "tear down WASM
+client, rotate OPFS file, init new client." No Lightning round-trip,
+no fees, no balance to preserve. The cost of (c) at runtime is
+near-zero; the cost of (a) is occasional permanent fund loss.
+
+**Implications:**
+- Listings always carry community + mintUrl tags (probe failures
+  cannot strip them — locked v0.1.87).
+- Browse renders cross-community listings with amber-tinted "peek"
+  styling — visible but visually distinguished. Two-section layout
+  in v0.2.0.
+- State A (matching federation) and State B (post-switch, was
+  non-matching) become canonical detail-screen framings.
+- Re-init happens on listing-tap, not Fund-tap. Detail screen always
+  opens on the right fed; Fund button never has to deal with
+  switching mid-flow.
+- Power-user federation tribalism is a v2 concern. v1 prioritizes
+  structural correctness.
+
+**Status:** Active. Shipped v0.2.0.
+
+---
+
+## 2026-05-05 — Three-tab navigation (Browse / Create / Me)
+
+**Context:** v0.1.x shipped with a Browse / My Trades / Me layout.
+"My Trades" implied the active trade was a tab — but Pillar 2.1's
+"one trade at a time" doctrine means an active trade is a *state of
+being a Chama user*, not one tab among others.
+
+**Options considered:**
+- (a) **Browse / My Trades / Me** (status quo).
+- (b) **Browse / Create / Me** with active trade interception —
+      every tab tap during active trade routes to the trade screen,
+      or a persistent "go to active trade" pill surfaces on non-trade
+      screens.
+- (c) **Single-screen mode during active trade** — full takeover,
+      no tabs visible. Too aggressive; users may legitimately want
+      to peek at Browse while waiting on a counterparty.
+
+**Decision:** Option (b).
+
+**Rationale:** Create is the seller's primary surface; surfacing it
+as a tab makes the marketplace bidirectional. The active trade as a
+state-of-being (rather than a tab) matches the lived experience of
+a single high-stakes transaction in flight. The pill is the gentle
+nudge; the gate fires only on commitment-creating actions (Fund,
+Create publish), not on navigation.
+
+**Implications:**
+- "My Trades" content moves to Me → Trade history.
+- Active-trade pill renders on Browse, Me, Sandbox, and Create,
+  below the FedimintBar.
+- Create publish button is gated when active commitment exists.
+- The pill also explains *why* Create is blocked — without it, the
+  block message is mystifying.
+
+**Status:** Active. Shipped v0.1.85.
+
+---
+
+## 2026-05-05 — Patcher workflow with Claude Code
+
+**Context:** Long-running solo project, building features that touch
+many files at once. Attempts at "let CC commit and push" experiments
+revealed the workflow worked best when CC stages a diff and a commit
+message but never actually commits/pushes/tags itself.
+
+**Options considered:**
+- (a) **Full autonomy** — CC commits, pushes, tags, deploys. Fastest
+      iteration; highest blast radius from a bad change.
+- (b) **Stage + propose** — CC writes patchers, runs typecheck +
+      tests, drafts commit messages to `/tmp/`, hands back to Jetty
+      who runs `release.sh`. Typecheck + tests pre-deploy gate is
+      always honored.
+- (c) **Manual everything** — Jetty writes all code, CC suggests
+      diffs as text. Slow; defeats the purpose.
+
+**Decision:** Option (b).
+
+**Rationale:** Two layers of review (CC self-checks via typecheck
+and tests; Jetty visually reviews the diff before deploy) catches
+both classes of bug — the type-level ones the human eye misses and
+the design-level ones the typechecker can't see. The 3-profile
+smoke test on Firefox + Chrome runs after every deploy as a third
+layer.
+
+**Implications:**
+- `release.sh` is the only thing that touches version, commits, and
+  pushes.
+- CC instructions explicitly forbid `npm version` and direct
+  `package.json` version edits.
+- All CC work products land in `/tmp/` for review.
+- Memory file `~/.claude/projects/-Users-Jetty-chama/memory/workflow_no_version_bumps.md`
+  enforces the version-bump rule across CC chats.
+
+**Status:** Active.
+
+---
+
+## 2026-05-06 — BACKLOG.md and DECISIONS.md as living documents
+
+**Context:** The project crossed ~50 open items spread across
+multiple version targets, plus inline TODOs and "filed for later"
+notes scattered through commits and chats. Memory + project knowledge
+alone became insufficient to track what was deliberate, what was
+deferred, and what was forgotten.
+
+**Options considered:**
+- (a) **Continue ad-hoc** — rely on commit messages and memory to
+      track outstanding items. Will keep working until it doesn't.
+- (b) **GitHub Issues** — convert each item to an Issue when it
+      becomes the next thing being worked on. Searchable, linkable,
+      assignable. Heavier ceremony per item.
+- (c) **In-repo `BACKLOG.md` + `DECISIONS.md`** — one file each at
+      repo root. Backlog tracks open items by version target;
+      Decisions logs architectural choices append-only. Searchable
+      via git, version-controlled, no tooling.
+
+**Decision:** Option (c) now, with Option (b) as natural augmentation
+once items become external/contributor-facing.
+
+**Rationale:** Solo project at this stage. The friction of GitHub
+Issues per item is too high for the small wins. BACKLOG.md as a
+single file with version-section organization is the lowest
+ceremony / highest value structure. DECISIONS.md captures the "why
+did we do it this way" moments that keep coming up. Together they
+externalize what was previously trapped in conversation history.
+
+**Implications:**
+- Every release commit message ends with a reference to
+  BACKLOG.md items addressed.
+- Architectural decisions (the QR-IN/QR-OUT atomic-lifecycle
+  realization, role-color-on-arbiter-buttons, etc.) get a
+  DECISIONS.md entry as they happen.
+- Items move out of BACKLOG.md only via commit messages —
+  same diff that ships the fix removes the line.
+- Future GitHub Issues integration: convert in-flight items to
+  Issues when external contributors (alexlwn123, future Fedimint
+  upstream collaborators) need visibility.
+
+**Status:** Active.
+
+---
+
+## 2026-05-06 — Atomic Lifecycle as v0.3.0 (FundWalletModal removal)
+
+**Context:** v0.2.0 shipped federation-follows-listing — a major
+convergence release for community/federation identity. During smoke
+review, Jetty noticed that FundWalletModal still presents an
+arbitrary "fund your wallet" surface. This contradicts Pillar 2.1's
+"BOLT11 IN at fund time → ecash only during LOCK→CLAIM → BOLT11 OUT
+at claim time" doctrine. The doctrine had been written into
+PHILOSOPHY.md as Pillar 2.1 but never operationalized in the UI.
+
+**Options considered:**
+- (a) **Bundle into v0.2.0** — pull FundWalletModal removal into
+      the v0.2.0 PR. Adds significant scope to an already-large
+      release; risks destabilizing federation-follows-listing.
+- (b) **v0.3.0 dedicated release** — let v0.2.0 ship as planned,
+      then immediately follow with a focused v0.3.0 that
+      operationalizes Option B. Clean slicing; each release ships
+      one big idea cleanly.
+- (c) **Defer indefinitely** — keep FundWalletModal in main paths;
+      treat the contradiction as acceptable until v1.5+. Pillar 2.1
+      becomes aspirational rather than operational.
+
+**Decision:** Option (b).
+
+**Rationale:** Federation-follows-listing is a real, valuable
+improvement on its own — v0.2.0 is the right shape and worth
+shipping cleanly. Atomic Lifecycle is the next axis of work,
+sequential not competing. Bundling them risks both. Deferring
+indefinitely is the worst path because every additional feature
+built on FundWalletModal as a primary surface entrenches the
+contradiction.
+
+**Implications:**
+- v0.2.0 ships with FundWalletModal still in primary paths
+  (recovery banner, destroy modal withdraw path, etc.). Documented
+  as a known gap in the v0.2.0 commit message.
+- v0.3.0 work: listing-tap → exact-amount BOLT11 invoice; claim →
+  BOLT11-OUT at claim time; FundWalletModal moves to Sandbox-only;
+  recovery banner copy shifts to failure-mode-only language;
+  EcashProvider interface designed for future Cashu support.
+- v0.3.0 is partly removal work (taking FundWalletModal off main
+  paths) and partly architectural (the listing-tap → exact-invoice
+  flow). This is "doctrinally pure" rather than feature-additive.
+
+**Status:** Active. v0.2.0 shipped; v0.3.0 brief drafting next.
+
+---
+
+## 2026-05-07 — LNURL-first claim hierarchy (Pillar 2.7 operationalized)
+
+**Context:** v0.3.0 brief discussion surfaced the question of how
+users actually provide a destination at claim time. Initial framing
+was "they paste a BOLT11." Wife's feedback (separate thread) on the
+marketplace UX flagged that paste-as-default fails for non-technical
+users. Designing pure Option B atomic lifecycle made the destination-
+input step's UX a first-class question.
+
+**Options considered:**
+- (a) **Paste-only:** user always pastes a BOLT11 invoice. Universal,
+      works for every wallet, but creates friction every claim and
+      doesn't reward returning users.
+- (b) **LN Address only:** user types a Lightning Address, system
+      resolves. Smoother for users who have one, but breaks for
+      wallets that only generate BOLT11 (some Phoenix versions, some
+      Wallet of Satoshi flows, certain Fedi configurations).
+- (c) **Three-tier hierarchy:** saved destination tap (primary), LN
+      Address with auto-save toggle (secondary), BOLT11 paste behind
+      Advanced disclosure (tertiary). The smooth path is the default;
+      the manual path is the escape hatch.
+
+**Decision:** Option (c).
+
+**Rationale:** Reordering affordances rather than removing them
+preserves the ability of every wallet to claim while making the
+common case effortless. The auto-save-on-first-claim detail is the
+key — the user pastes their address once, the system remembers,
+and from the second claim onward they tap a saved row. The toggle
+itself ("Save for next time") is the educational moment per Pillar
+2.7 — the user reads the toggle, understands implicitly that future
+trades will be faster, and the system has taught them without a
+tutorial.
+
+This also corrects an architectural mistake: handle-management
+should not live in Settings as the canonical add-flow. Settings is
+for *managing* handles (rename, remove, mark default), not for
+*adding the first one*. Adding happens organically in the moment
+the user feels the friction of typing an address. That's the right
+onboarding gradient — the user learns about the feature at the
+moment using it saves them future work.
+
+**Implications:**
+- Saved-handles surface (already exists from v0.1.79) becomes the
+  primary affordance at claim and fund time, not a settings-tucked
+  power feature.
+- "Save for next time" toggle defaults ON in the input field. Users
+  who want to use a one-off address can untoggle; default behavior
+  is the helpful behavior.
+- Same hierarchy applies symmetrically at QR-IN where appropriate
+  (sender providing destination; the asymmetry is real but the
+  affordance ordering principle holds).
+- BOLT11 paste lives behind "Advanced" disclosure or "More options"
+  expander. Available, not hidden. Doesn't clutter the main flow.
+- This affordance hierarchy becomes a Chama-wide pattern: tap-saved
+  > input-with-save-toggle > paste-advanced. Applies to any future
+  surface where users need to provide destinations or selections
+  with returning-user dynamics.
+
+**Status:** Active. Lands in v0.3.0 alongside the atomic lifecycle
+work. The two are mutually reinforcing — atomic lifecycle removes
+the wallet-balance preamble, LNURL-first claim removes the
+paste-each-time preamble, and the result is a flow where the user
+taps a listing and taps to claim and the system handles everything
+in between.
+
+---
+
+## 2026-05-07 — Menu primitive as vertical-agnostic listing schema
+
+**Context:** Wife provided marketplace feedback that single-item
+listings don't match how real merchants think — sats.coffee, a
+tailor, a motorbike repair shop, all have menus, not single items.
+Initial thought was "add multi-item to marketplace." Generalizing
+revealed the same pattern applies across all five Chama verticals.
+
+**Options considered:**
+- (a) **Marketplace-only multi-item:** add multi-item support as a
+      Marketplace-vertical feature. Solves the immediate feedback,
+      but ships the same primitive five times eventually as each
+      other vertical encounters the same need.
+- (b) **Per-vertical multi-item, custom each time:** build it for
+      each vertical when the vertical's users ask. Five different
+      schemas, five different basket UIs, five different LOCK
+      payloads. Worst-case path.
+- (c) **Vertical-agnostic menu primitive:** listings gain optional
+      `items: MenuItem[]`. Absent = single-item (today's behavior).
+      Present = buyer composes basket. Trade carries `selected_items`
+      summed into single `amount_sats`. Escrow envelope unchanged
+      across all verticals. Per-vertical applications (FX flavors,
+      product menus, utility-payment menus, loan tiers, arbitration
+      tiers) emerge naturally from the same primitive.
+
+**Decision:** Option (c).
+
+**Rationale:** The escrow envelope was always vertical-agnostic —
+LOCK, VOTE, CLAIM don't care what the trade is *for*, only that it
+has an amount and participants. Multi-item is a *listing* concept,
+not an escrow concept. Building it as a listing-schema feature with
+buyer-side basket UI keeps the protocol layer untouched and unlocks
+all five verticals simultaneously.
+
+The cross-vertical applications make this compelling beyond the
+original marketplace use case:
+- P2P Exchange: liquidity providers list multiple FX flavors per
+  rail in one listing
+- Marketplace: full merchant menus (sats.coffee, tailors, repair
+  shops, etc.)
+- Bill Pay: volunteer help desks offering multiple utility services
+  with per-service fees
+- Community Lending: lenders publishing tiered loan products
+- Raw Escrow: arbiters publishing tiered fee structures
+
+This positions Chama as a decentralized, self-custodial alternative
+to BTCPayServer-style merchant tooling, but with the substrate being
+Nostr + Fedimint instead of Lightning + custodial infrastructure.
+That's a meaningful market positioning beyond what single-item
+P2P trade unlocks.
+
+**Implications:**
+- v0.4.0 ships the menu primitive after v0.3.0 atomic lifecycle.
+  Sequence matters: v0.3.0 makes funding clean (one BOLT11 per
+  trade); v0.4.0 makes the unit-of-funding richer (one trade can
+  contain multiple items). They reinforce, don't fight.
+- Buyer-side basket UI is new code in Browse → Listing detail.
+  Quantity steppers, running total, basket-modify pre-create.
+- Seller-side menu builder is new step in Create wizard for menu-
+  listings. Save-draft applies same as fixed-price.
+- LOCK payload format extends with `selected_items: SelectedItem[]`
+  (a snapshot, not a reference — the listing could change after
+  the trade is created). Listing snapshot in trade includes
+  line-itemized description so seller and arbiter see exactly what
+  was ordered.
+- Per-vertical UX nuances (loan term picker for Lending, fee tier
+  picker for Raw Escrow, etc.) are styling on top of the same
+  basket primitive. Not five separate features.
+- Future market positioning narrative: "Chama is the decentralized,
+  self-custodial alternative to merchant payment infrastructure" —
+  v0.4.0 enables that story credibly. Pre-v0.4.0, Chama is a P2P
+  trade tool; post-v0.4.0, Chama is a multi-vertical commerce
+  primitive.
+
+**Status:** Active. Targeted for v0.4.0 after v0.3.0 ships. Wife
+credited as design partner for surfacing the underlying need; the
+cross-vertical generalization emerged in conversation with Claude
+on 2026-05-06.
+
+---
+
+## 2026-05-09 — DestinationPicker as canonical sender-side affordance
+
+**Context:** v0.3.0 needed a single "user provides a destination to
+receive sats" surface that three different consumer surfaces could
+reuse: the claim flow (Phase 3), the recovery banner failure-mode
+drain (Phase 4), and the destroy-modal recover-then-switch path
+(Phase 4). Building three near-identical pickers risked drift over
+time — the next maintainer adds a feature to one, forgets the others,
+and the three surfaces start diverging.
+
+**Options considered:**
+- (a) **Inline picker UI per surface** — each consumer renders its
+      own picker with its own LNURL resolution + saved-handle list +
+      BOLT11 paste affordance. Maximum flexibility per consumer; high
+      duplication; almost certain to drift.
+- (b) **DestinationPicker shell as canonical surface** — one React
+      component that consumers compose via
+      `<DestinationPicker onResolve={...} />`. The picker handles its
+      own LNURL resolution + tier rendering + error surfacing
+      internally; consumers receive a BOLT11 plus dispatch metadata
+      `{ saveAfter, addressUsed }` and decide what to do next.
+- (c) **Lower-level helpers, no shell** — export
+      `resolveLightningAddressToInvoice` + `decideDispatch` and let
+      consumers wire their own UI. Same drift risk as (a) plus the
+      added burden of every consumer reimplementing the visual
+      hierarchy.
+
+**Decision:** Option (b). The shell is the canonical surface;
+consumers import and compose, never reach past it into picker
+internals.
+
+**Rationale:** The three-tier visual hierarchy (saved rows / typed
+address with save toggle / BOLT11 paste under disclosure) is the load-
+bearing UX commitment from Pillar 2.7 — saved-first surfaces faster
+trades organically, and the "Save for next time" toggle IS the
+educational moment. Centralizing this in one component makes the
+hierarchy a single source of truth across surfaces. Phase 1 split the
+picker into a shell (`DestinationPicker.tsx`) plus pure decision
+logic (`destination-picker-logic.ts`); the logic is unit-tested
+exhaustively, and the shell is composed across consumers without
+exposing those internals.
+
+**Implications:**
+- Three consumer surfaces in v0.3.0 — `ClaimPayoutModal` (Phase 3),
+  `RecoveryPayoutModal` (Phase 4, used by both the recovery banner
+  and destroy-modal paths) — all mount `<DestinationPicker />`
+  directly. None of them imports from `destination-picker-logic.ts`.
+- Future surfaces (sovereign LN address withdrawal in v0.4.0, NWC
+  adapter in v1.5, any future "send sats out of Chama" flow) plug into
+  the same `onResolve` contract. NWC in v1.5 will likely add a fourth
+  tier ("use connected wallet") inside the shell, transparent to
+  existing consumers.
+- The internal seam (picker logic vs shell) is a stable architectural
+  boundary, not an implementation detail. Tests exist at the logic
+  layer; visual contract is reviewed at the shell layer.
+- Code-review heuristic: any future PR that imports from
+  `destination-picker-logic.ts` outside the shell or its own tests is
+  drifting from this decision. Catch in review, not after merge.
+
+**Status:** Active. Operationalized in v0.3.0 Phases 1 (foundation),
+3 (claim consumer), and 4 (recovery + destroy consumers). Pinned by
+the Phase 1 §36 picker-logic test surface and the Phase 3+4 reminder
+discipline that consumer surfaces compose the shell, not the
+internals.
+
+---
+
+## 2026-05-09 — AtomicFundingModal as receive-side BOLT11 surface
+
+**Context:** v0.3.0 needed a sender-side / receiver-side asymmetry to
+be intentional, not accidental. DestinationPicker (the previous
+decision) is unambiguously send-side: the user picks a destination to
+receive sats. The fund-time path looks superficially similar — the
+user is providing a wallet to interact with — but it's actually
+receive-side from Chama's perspective: Chama issues a BOLT11 invoice,
+the user's external Lightning wallet pays it. Lightning Addresses are
+receive-only by protocol; "auto-pay from saved Lightning Address" is
+not a thing the protocol allows.
+
+**Options considered:**
+- (a) **Symmetric DestinationPicker on both sides** — show saved
+      Lightning Addresses + "Save for next time" toggle at fund time
+      too. Visually consistent with the claim flow but architecturally
+      misleading: a Lightning Address has no spending authority, so
+      saving one at fund time would imply a capability the protocol
+      doesn't grant.
+- (b) **AtomicFundingModal as a separate receive-side surface** —
+      Chama-issued BOLT11 invoice is the centerpiece; user pays from
+      any external Lightning wallet via QR scan or paste. No saved-
+      destinations at fund time, because the user IS the sender. The
+      modal handles invoice generation, 15-minute countdown, payment
+      detection, mint-confirming watchdog, and chained LOCK in one
+      atomic flow.
+- (c) **Hide the fund-time UX entirely** — auto-detect inbound
+      payment via OPFS subscription and skip the modal. Sounds elegant
+      but breaks for users who need to actually scan a QR to pay; no
+      visual anchor for the "this is your funding moment" beat.
+
+**Decision:** Option (b). AtomicFundingModal is a receive-side
+surface; DestinationPicker is a send-side surface. The two never mix.
+
+**Rationale:** The protocol asymmetry between Lightning Addresses
+(receive-only) and Lightning sending (BOLT11 invoices, NWC for
+programmatic spending) is real and load-bearing. v0.3.0 ships the
+foundation that v1.5 NWC will layer on top of — at that point,
+AtomicFundingModal gains a "use connected wallet" branch that bypasses
+the BOLT11 display entirely (NWC grants spending authority with
+budgets, which Lightning Addresses fundamentally cannot). Designing
+the surfaces with the asymmetry visible NOW prevents v1.5 NWC from
+needing to restructure either modal.
+
+**Implications:**
+- DestinationPicker is mounted only by send-side consumers (claim,
+  recovery, destroy). Pinned by the Phase 1 reminder that consumer
+  surfaces compose the shell directly.
+- AtomicFundingModal is mounted only by the receive-side path
+  (listing-tap → Fund). It never composes DestinationPicker; the
+  surface architecture is intentionally not symmetric.
+- v1.5 NWC's "use connected wallet" feature will:
+  - Add a fourth tier inside DestinationPicker on the send side (NWC
+    grants spending authority, so the picker can now offer one-tap
+    auto-send instead of address-resolution).
+  - Add a pre-BOLT11 auto-pay branch inside AtomicFundingModal on the
+    receive side (the connected wallet pays the invoice
+    programmatically; the user never sees the BOLT11).
+  Both extensions plug in without restructuring either component.
+- Documentation surface: this asymmetry is mentioned in the brief and
+  in `DestinationPicker.tsx` / `AtomicFundingModal.tsx` file
+  headers. Future maintainers reading either modal in isolation can
+  see why the surfaces look different even though the user-facing
+  task ("connect a wallet to a trade") sounds similar.
+
+**Status:** Active. Operationalized in v0.3.0 Phase 2 (AtomicFunding-
+Modal + `runFundAndLock`). v1.5 NWC item in BACKLOG.md references this
+foundation explicitly.
+
+---
+
+## 2026-05-11 — Federation reachability as a first-class boot-time state
+
+**Context:** v0.3.0 shipped with federation reachability checked only
+at just-in-time moments (lock, claim, invoice creation). Production
+smoke on Bitcoin Principles (the default federation, b21068c8 —
+surfaced as "Global · USD" in the picker) caught the failure mode: 3
+of 4 guardians dead means mint operations cannot complete, but `join`
+succeeds because joining only requires reading public federation info
+(one guardian suffices). Result: every user composed a trade for ~90
+seconds before learning the federation was unreachable. The hang then
+manifested as the wrong terminal (`claim-pending`) because the
+useEscrow catch-all swallowed the typed bridge error into a silent
+watchdog (see sister entry below).
+
+**Options considered:**
+- (a) **Probe at lock time only** (status quo through v0.3.0).
+      Federation truth surfaces too late — after the user has invested
+      attention in composing a trade.
+- (b) **Periodic background probe** — every N seconds, refresh
+      reachability state. Adds complexity, polling cost, race
+      conditions between probe windows and user actions.
+- (c) **Cold-boot probe** — run probe1 sequentially after
+      initFedimint resolves successfully; expose result as
+      `bootProbeState`; gate action surfaces on it. Surfaces unreachable
+      federations at app load, before composition. Single source of
+      truth across the app.
+
+**Decision:** Option (c). probe1 lives inside `useEscrow.initFedimint`,
+sequential — runs after init resolves and before the action returns.
+`FedimintState.bootProbeState: "pending" | "ok" | "failed"` exposes
+the result. Action surfaces (Fund + Claim) gate on
+`bootProbeState === "failed"`. ChamaBar surfaces a single
+"⚠ Chama unreachable · Reconnect →" pill (the v0.3.0
+`decideChamaBarLabel` decision gains an `unreachable` kind that wins
+over the existing three). TradeDetail's Fund + Claim buttons disable
+with "Federation unreachable — reconnect first" subtitle pointing back
+at the ChamaBar Reconnect — single source of truth, no parallel
+surface.
+
+**Rationale:** Reachability is the floor for any other meaningful
+state. If the user can't reach the federation, they can't recover
+stranded sats, lock new ones, or claim trade winnings — the
+actionable next step is always Reconnect, not Recover or Vote.
+Surfacing reachability at boot turns "discover brokenness 90 seconds
+into composing" into "know immediately at app load and can act."
+Sequential placement inside initFedimint means probe1 truth is
+available before any meaningful navigation. Single Reconnect surface
+across the app (ChamaBar pill) prevents fragmentation — TradeDetail
+gates its buttons against the same flag, doesn't render its own
+Reconnect.
+
+**Implications:**
+- The existing healthRef cache override pattern stays for the legacy
+  probe2 path, but boot probe truth wins on conflict. The pre-Phase-3
+  optimism ("a successful join is itself proof of reachability") was
+  wrong in the broken-quorum case; boot probe explicitly overrides
+  that seed.
+- The Phase 1 `probeFederation` action also updates `bootProbeState`,
+  so the claim-bridge-threw Try-Again flow naturally unblocks the
+  boot gate across the entire UI. Same probe seam, three callsites
+  (initFedimint boot, claim-bridge-threw retry, ChamaBar Reconnect
+  tap — all dispatch through the same action).
+- `decideChamaBarLabel` priority ordering: unreachable > in-trade /
+  stranded / ready. Tested as a tripwire (§42 in tests.ts) — a
+  future refactor that accidentally reorders the priority checks
+  would let in-trade or stranded leak through during a federation
+  outage. The tripwire fires immediately on regression.
+- "pending" is a transient state (between initFedimint resolving and
+  probe1 awaiting); UI is fine with the brief optimistic rendering
+  during it. Only "failed" gates action surfaces.
+
+**Status:** Active. Operationalized in v0.4.0 Phase 3. §42 tripwire
+in tests.ts pins the priority ordering — failed-overrides-all-inputs
+is a forever-asset.
+
+---
+
+## 2026-05-11 — Typed bridge errors propagate; watchdog is fallback
+
+**Context:** v0.3.0 Phase 3 shipped the claim-and-payout three-terminal
+split (`claim-failed` / `claim-pending` / `payout-failed`). The design
+was correct, but a gap in the underlying `useEscrow.claimAndRedeem-
+Action` catch chain blocked it from working as designed. The catch
+had a "Probably transient" catch-all that swallowed typed bridge
+errors (`FED_PROBE_FAILED`, `FED_MISMATCH`) into a silent watchdog. By
+the time `runClaimAndPayout` saw the resolved promise, it interpreted
+the silently-returned local state as "claim succeeded, balance hasn't
+grown yet" → `claim-pending`. Production smoke: every claim attempt on
+Bitcoin Principles showed "Your sats are still arriving" for 60
+seconds, even though redeem definitively failed pre-publish with no
+spend, no chain advance, nothing in flight. The user had no path to
+retry beyond closing and reopening the modal.
+
+**Options considered:**
+- (a) Tighten the watchdog catch-all to ignore typed bridge errors so
+      they re-throw and `runClaimAndPayout`'s existing `claim-failed`
+      terminal catches them. Cheap, but conflates two different
+      failure modes (hard claim failure with no retry vs. retry-able
+      bridge unreachability).
+- (b) Restructure the three-terminal split. **Rejected** per Phase 1
+      scope guardrail — the three-terminal design was correct; the
+      swallow is what blocked it from working as designed.
+- (c) **Add a fourth retry-able terminal `claim-bridge-threw`** for
+      typed bridge errors with a documented set of codes
+      (`BRIDGE_THREW_ERROR_CODES`). Watchdog stays for genuinely
+      uncategorized errors (worker timeout, fetch failed, RPC
+      hiccups). Modal surfaces actual error + Try-again button.
+
+**Decision:** Option (c).
+`BRIDGE_THREW_ERROR_CODES = ["FED_PROBE_FAILED", "FED_MISMATCH"] as const`
+is the documented set; `isBridgeThrewError` predicate discriminates in
+`runClaimAndPayout`'s catch block. ClaimPayoutModal renders the new
+terminal with the underlying error as subtitle and a two-step
+Try-again button: probe federation first → if ok, re-dispatch claim
+from scratch with the same destination; if probe still fails, stay on
+terminal with updated error message.
+
+**Rationale:** The existing watchdog fallback (transient → wait for
+balance to land) is correct for genuinely transient errors, where the
+federation IS processing the redeem and the JS-side error reflects an
+RPC hiccup. But typed bridge errors with a known code communicate a
+structural state ("federation unreachable", "wallet on wrong fed")
+that no amount of waiting will fix. Surfacing them directly with the
+actual message + retry affordance matches reality. Watchdog stays as
+fallback for the unknown-error case, not the primary path for known
+errors.
+
+**Implications:**
+- Honest-copy fix at escrow-bridge.ts: the pre-stash
+  `FED_PROBE_FAILED` throw now says "(No sats were spent — retry when
+  your Chama is reachable.)" instead of the previous false "Notes
+  stashed for retry" message. Notes are NOT stashed at that point in
+  the flow (stash happens AFTER CLAIM publish, ~50 lines later). The
+  post-stash `claimPublished: true` throw keeps its existing "Claim
+  published, redeem failed" copy because notes ARE stashed there.
+  Two throw paths with different post-conditions and different copy —
+  Pillar 2.7 with gradations.
+- Tripwire test for the documented codes set: if a future maintainer
+  adds a new typed bridge error (e.g., `FED_DISCONNECTED`), the
+  `BRIDGE_THREW_ERROR_CODES.length === 2` assertion fails until they
+  update the documented set + add a routing test. Forces the contract
+  to evolve together.
+- The claim-bridge-threw retry path reuses the Phase 1
+  `probeFederation` action — same probe seam that the boot probe
+  uses. A successful retry-probe both unblocks the modal AND updates
+  `bootProbeState` to ok (see sister DECISIONS entry above), so the
+  ChamaBar unreachable pill clears and Fund/Claim re-enable across
+  the rest of the UI in one action.
+- The original three-terminal split is preserved unchanged.
+  `claim-pending` is now RESERVED for the case it was designed for:
+  bridge resolved successfully (no throw), but balance hasn't reflected
+  the credit within the 60s watchdog window. `payout-failed` stays
+  reserved for claim-landed-but-LN-send-threw.
+
+**Status:** Active. Operationalized in v0.4.0 Phase 1. §45 in tests.ts
+pins the discrimination at every quadrant: typed throws → bridge-threw,
+hard-failure throws → claim-failed, untyped throws → claim-failed,
+clean+stalled → claim-pending.
+
+---
+
+## 2026-05-11 — Fedi-runtime delegation is a viable v0.4.0 path
+
+**Context:** Pre-v0.3.0, the assumption was that Chama's browser OPFS
+Fedimint client would handle all federation operations directly,
+independent of Fedi. Production smoke against Bitcoin Principles
+(3 of 4 guardians dead) AND Bitcoin Life (full quorum, iroh-relay
+transport failure) confirmed that the OPFS-Fedimint-via-iroh-relay
+transport doesn't work in browser today, against any federation.
+
+**Decision:** Pursue Hybrid runtime. v0.4.0 detects Fedi webview at
+boot (per the _isFediRuntime pattern proven in Satoshi Market)
+and delegates federation operations to:
+  - window.fediInternal.generateEcash({amount}) for lock-time
+    ecash generation (federation-aware via notes prefix)
+  - window.fediInternal.receiveEcash(notes) for claim-time
+    ecash receipt (cross-federation confirmed working)
+  - window.webln.sendPayment/makeInvoice for LN routing
+  - window.nostr for NIP-07 signing (already used)
+
+Outside Fedi, Chama continues to use OPFS Fedimint client and
+surfaces honest errors per v0.4.0's claim-bridge-threw terminal
+until v0.x ships native iroh transport for browser.
+
+**Rationale:** The Satoshi Market codebase already proved every API
+above works in production. We are not exploring; we are porting
+a known-working integration pattern into Chama. v0.4.0 ships
+Nairobi-ready demo via Fedi webview; native browser transport
+remains a separate workstream without blocking demo timing.
+
+**Implications:**
+  - Fedi-runtime detection becomes a top-level architectural fork
+  - SSS escrow logic is unchanged (ecash splitting is rail-agnostic)
+  - Chama's OPFS client stays for non-Fedi-webview environments
+  - "Couldn't reach your Chama" remains correct fallback for
+    standalone browser until native transport ships
+  - Nairobi demo: Chama-as-Fedi-mini-app, demoable on any phone
+    with Fedi installed
+
+**Status:** Active — v0.4.0 scope, post-v0.4.0 release.
+
+---
+
+## 2026-05-11 — All current Chama surfaces blocked on Fedimint SDK ≤0.1.1 + iroh-relay ≥0.91 mismatch
+
+After v0.4.1's relay race fix unblocked Chama's local init path, the
+underlying federation transport reachability was revealed as a pure
+upstream dependency problem: @fedimint/fedimint-client-wasm-bundler
+ships a pre-iroh-0.91 client. iroh-relay servers were upgraded to
+iroh ≥0.91 (Aug 2025) with wire-level breaking changes to the WebSocket
+handshake protocol. Client and server can't handshake. HTTP 400 every
+time.
+
+Affected surfaces (all identically blocked):
+- Standalone browser (Firefox, Chrome, Safari) — same WASM
+- Capacitor APK — wraps WebView, same WASM
+- Chama-as-Fedi-mini-app — loads chama.satoshimarket.app, same WASM
+- (Only Fedi mobile native app reaches federations, via compiled
+  iroh-net binary that bypasses iroh-relay entirely; that code path
+  is not available to web clients)
+
+Tracking upstream: github.com/fedimint/fedimint-sdk/issues/288
+
+v0.4.1's relay race fix and v0.4.0's honest error surfacing remain
+correct and valuable independent of this issue. They make the local
+diagnostic clean so the "Chama unreachable" message now points at the
+real, upstream blocker.
+
+Unblock path:
+1. Fedimint SDK releases a version targeting iroh ≥0.91 → bump deps,
+   smoke test, ship v0.4.2
+2. If a working canary build is identified, use it as an interim
+   bridge while waiting for a proper release
+3. If both paths fail before Nairobi: pivot demo strategy to
+   listings-and-Nostr-only (signed escrow events render, full trade
+   completion deferred to post-SDK-update)
+
+Nairobi feasibility depends on (1) or (2). Architecturally Chama is
+ready; transport layer is upstream-blocked.
+
+**2026-05-18 update:** A working canary was confirmed, but the latest
+published npm packages remain `@fedimint/core@0.1.3`,
+`@fedimint/transport-web@0.1.2`, and
+`@fedimint/fedimint-client-wasm-bundler@0.1.1`. Fedimint SDK
+maintainers replied on issue #288 that the larger active effort is
+moving away from `wasm-pack` toward fully UniFFI-based builds across
+the SDK stack, so they are not promising an exact stable release
+timeline for the iroh bump.
+
+**Implication:** Continue Chama v1 as planned. The Chama architecture
+stays correct because it isolates Fedimint behind `IFedimintWallet`,
+keeps runtime detection at the edge, and treats SDK transport as a
+replaceable adapter concern. Do not rewrite toward UniFFI preemptively;
+wait for the SDK API/package shape to land, then adapt the factory.
+In the meantime, canary testing is now an upstream contribution track:
+smoke BP, BLF, Afribit, and the browser/Fedi surfaces, then report
+regressions with package hashes, federation, browser, and console logs.
+
+---
+
+## 2026-05-18 — NIP-46 signer app is advanced desktop-only until proven reliable
+
+**Context:** The "Use a signer app" button was sitting beside the
+primary sign-in CTA, but current NIP-46 attempts can stall and produce
+`WebSocket is already in CLOSING or CLOSED state` followed by a Chama
+timeout. The flow may still become the best desktop privacy path
+because it signs every event without embedding a browser key, but it
+has not earned primary placement yet.
+
+**Decision:** Hide NIP-46 under "More sign-in options" and offer it
+only in standalone desktop web sessions. Do not show it in native
+Capacitor builds, mobile browser sessions, or Fedi webviews.
+
+**Rationale:** Fedi webview already supplies `window.nostr`; mobile
+users need the least fragile sign-in surface; and desktop is where a
+remote signer can plausibly become the power-user default after real
+testing. This preserves the option without letting a flaky path define
+the first impression.
+
+**Promotion criteria:** Before making NIP-46 the desktop king, prove
+at least two signer implementations, verify relay behavior over
+`wss://relay.satoshimarket.app`, confirm NIP-44 encrypt/decrypt support
+or document fallback limits, and add user-visible timeout/retry copy
+that distinguishes signer rejection from relay failure.
+
+---
+
+## 2026-05-18 — Nairobi is demo context, not the primary roadmap goal
+
+**Context:** Older backlog entries treated Adopting Bitcoin Nairobi as
+the v1 forcing function. That was useful while the product surface was
+coalescing, but it became too restrictive: it encouraged demo-readiness
+to compete with product correctness, privacy boundaries, recovery
+semantics, and long-term maintainability.
+
+**Decision:** Chama's primary goal is an integrity-first v1, not a
+Nairobi launch date. Nairobi can still supply feedback, demos, partner
+stories, or useful pressure, but it does not define scope, sequencing,
+or quality bars.
+
+**Implications:**
+- Privacy/category fixes beat deadline-driven polish.
+- Launch can slip when the right architecture or user-safety work needs
+  more time.
+- Backlog language should refer to production feedback or real usage
+  rather than "Nairobi data" as the deciding input.
+- Demo plans live below product integrity work and should never block a
+  more important trust fix.
+
+**Status:** Active in the next post-v0.6.1 wave.
+
+---
+
+## 2026-05-18 — Lightning Addresses are payout destinations, not payment handles
+
+**Context:** The v0.3.x claim/recovery flow saved Lightning Addresses
+inside `chama_saved_handles` under a synthetic `LIGHTNING_RAIL`. That
+made implementation easy, but it blurred a privacy boundary: payment
+handles are counterparty-facing data that can be revealed in a LOCK
+event, while Lightning Addresses are self-payout destinations used only
+after claim or recovery.
+
+**Decision:** Move Lightning Address persistence into
+`chama_payout_destinations`. Migrate legacy `LIGHTNING_RAIL` rows out of
+`chama_saved_handles`, keep payment handles limited to fiat/public rails,
+and expose a separate Me → Settings row called "Payout destinations."
+
+**Implication:** Claim and recovery can still offer one-tap saved
+destinations, but the trade-time handle reveal picker no longer has any
+path to show or publish the user's Lightning wallet address.
+
+---
+
+## 2026-05-19 — One funding operation at a time replaces one trade at a time
+
+**Context:** The 2026-05-05 three-tab decision was built on top of a
+hard "one trade at a time" gate: while any user-as-buyer-or-seller
+escrow was live, Create and Fund were blocked. The gate was designed
+for an earlier architecture where concurrent trades risked ecash
+collisions in the shared OPFS wallet. Option B's full wiring (BOLT11
+IN → mint → `spendNotes` → LOCK → OPFS drains to 0) closes that risk:
+the wallet sits at zero between trades, and ecash only exists for the
+milliseconds spanning `runFundAndLock`. The hard gate now over-blocks
+— sellers can't serve multiple buyers, buyers can't browse for the
+next trade while a previous one is in LOCKED/voting/approved.
+
+**Decision:** Retire the one-trade-at-a-time hard gate. Replace it
+with a `fundingInProgress` flag that disables only a second Fund tap
+while `runFundAndLock` is mid-flight. Create + Browse stay open
+always. ChamaBar and ActiveTradePill become plural-aware ("3 active
+trades · 150k sats in escrow"). The recovery banner narrows to skip
+the expected-transient cases — mid-fund and mid-claim hold the
+balance briefly and shouldn't race the very flow that's about to
+drain it.
+
+**Rationale:**
+- The architectural risk the original gate protected against is gone.
+  What remains is one wallet-race scenario (two concurrent
+  `spendNotes` on the shared OPFS wallet), and that's local to the
+  funding flow, not the trade lifecycle. The AtomicFundingModal is
+  already exclusive by nature (one modal at a time); the flag is the
+  programmatic backstop.
+- Users complete trades because sats are locked, not because the UI
+  hid the rest of the app. The commitment is financial. Patience
+  still belongs in the design, but via education and nudges — the
+  pill, claim notifications, the ChamaBar "in escrow" surface — not
+  hard blocks.
+- Multi-trade is a real use case: a seller running three listings,
+  an arbiter watching two LOCKED trades, a buyer browsing for the
+  next thing while waiting on a counterparty to release the current
+  one. The old gate forced these users into a serial workflow that
+  didn't match either the architecture or their lived activity.
+
+**Implications:**
+- Tab routing still puts Browse / Create / Me at the same level.
+  The pill is now informational rather than gating; the only
+  visible "no, not yet" surface is the Fund button briefly greying
+  out while another funding flow is mid-flight.
+- The state machine is unchanged. Each trade's event chain remains
+  independent; concurrency was always a UI-layer concern, never a
+  protocol concern.
+- The "patience as a feature" language in PHILOSOPHY §2.1 is
+  retained but reframed: patience now lives in trade completion
+  speed and user judgment, not in interface gates.
+
+**Status:** Active. Shipped v0.6.5.
+
+---
+
+## 2026-05-20 - DECISION (locked): "P2P" renamed to "Exchange" across all user-facing surfaces. 
+P2P renamed to Exchange, Bill Pay renamed to Community Bill Pay across all user-facing surfaces. Internal category enum values (p2p-trade, bill-pay) unchanged. Pill abbreviation: ⚡ EXCHANGE and 🧾 COM. BILL PAY. Full name in Create wizard, Trade Detail, and educational contexts. The "Community" prefix is structural — it anchors the mutual-aid framing where someone helps someone else pay their bill, not a self-service fintech feature. Per Pillar 2.7, the name itself educates.
+
+---
+
+## 2026-05-22 - Arbiter dispute fee: fixed escalation, outcome-independent split
+
+**Decision:** Dispute fees are fixed at 1.5% additional (on top of the
+ambient 0.5%), split equally between buyer and seller regardless of who wins.
+Neither party chooses the amount.
+
+**Rejected alternatives:**
+- User-chosen dispute fee: both parties are adversarial at dispute time and
+  will race to the bottom. The losing party feels doubly robbed.
+- Average of both bids: trivially gameable. Bid 0, counterparty bids high,
+  split the middle.
+- Fee only from the losing party: creates perverse incentive — arbiter may
+  subconsciously favor outcomes that maximize their take.
+
+**Why outcome-independent split works:**
+The arbiter's compensation is decoupled from who wins. No party can buy a
+favorable outcome by paying more. The dispute cost is a known quantity before
+opening — users can price it honestly. Fast arbiter response is incentivized
+because the fee is already locked; slow response is just leaving money on the
+table.
+
+---
+
+## 2026-06-06 — Fiat listings show the creator's currency for everyone; viewer-currency "≈" retired
+
+**Context:** A listing carries a native fiat price in the creator's Chama
+currency — a Cotonou seller prices in XOF, a Dar seller in TZS. The headline
+already anchored on that native price, but a viewer whose own Chama used a
+different currency also saw a secondary "≈ {their currency}" line, converted
+live through FX rates. Two things were wrong with that second line. It implies a
+precision that doesn't exist — the seller will not accept the buyer's currency
+at mid-market rate, so it reads like a quote when it's a one-leg guess. And it
+depends on live FX, which means the same listing renders differently depending
+on whether rates loaded — broken entirely on Tauri (see the entry below), flaky
+on slow links.
+
+**Options considered:**
+- (a) **Keep the "≈" overlay** — convenient for cross-border viewers, but
+      dishonest about precision and non-deterministic across surfaces.
+- (b) **Creator currency for everyone, retire the "≈"** — one authoritative
+      fiat figure, identical for all viewers; sats (₿) stays the universal
+      cross-border reference since it's what actually settles.
+- (c) **Convert everything to the viewer's currency** — worst option; buries
+      the price the seller actually set behind an FX guess.
+
+**Decision:** Option (b). `shouldQuoteEstimatedFiat` returns false — the
+viewer-currency estimate is gone for any listing that carries a fiat price.
+Sats-only listings with no native fiat keep their single estimated figure;
+they have no creator price to anchor on and no second line to be redundant with.
+
+**Rationale:** Optimizes for honesty and determinism over convenience. Every
+viewer sees the same price the seller set, plus the same sats. No FX guesswork
+presented as a quote, and a listing looks identical with or without live rates.
+What we give up: a cross-border viewer no longer gets a glance-value in their own
+currency and has to read the sats (or learn the seller's currency). Worth it.
+
+**Implications:** Display-only — vote/escrow mechanics untouched. Removes a
+live-FX dependency from the render path, so listings survive offline/slow links
+and the Tauri rate-fetch gap intact. The two existing
+`shouldQuoteEstimatedFiat` unit assertions flip to expect suppression.
+
+**Status:** Active.
+
+---
+
+## 2026-06-06 — Market price/FX fetches go through the Tauri HTTP plugin on desktop
+
+**Context:** The Create form's sats↔fiat toggle was dead on the Tauri desktop
+build only — APK and browser both worked, Tauri showed sats and nothing else.
+The toggle isn't the bug: the BTC-price and FX-rate fetches never resolve under
+Tauri, so there's no rate to turn a typed fiat price into sats and the fiat
+fields have nothing to do. Why only Tauri — the APK serves from
+`https://localhost` and the browser from a real origin, and the public price
+APIs answer both because they send `Access-Control-Allow-Origin: *`. Tauri serves
+from a custom `tauri://` scheme; the system WebView (WebKitGTK / WKWebView)
+treats that as an opaque origin and blocks the cross-origin `fetch`, and no HTTP
+plugin was registered (`src-tauri/Cargo.toml` carried only `tauri-plugin-shell`)
+so the request had no way out of the WebView.
+
+**Options considered:**
+- (a) **Set a permissive CSP / hope the WebView allows it** — doesn't address
+      the opaque-origin block; WebKit still refuses, platform-dependent.
+- (b) **Proxy the price feeds through our own server** — reintroduces a server
+      Chama deliberately doesn't have; a liveness and trust dependency for a
+      cosmetic feature.
+- (c) **`@tauri-apps/plugin-http`, Tauri-only** — make the request from Rust
+      (reqwest), which isn't subject to WebView CORS; leave web/APK on the
+      global `fetch` untouched.
+
+**Decision:** Option (c). The two market modules (`markets/bitcoin-price.ts`,
+`markets/fiat-rates.ts`) route through the Tauri HTTP plugin when — and only
+when — `isTauriNativePlatform()` is true. The plugin is registered in the Rust
+shell and the price/FX hosts are allow-listed in the desktop capability.
+
+**Rationale:** Keeps Chama serverless, fixes the actual cause (origin/CORS, not
+CSP), and confines the change to the desktop surface so web and Android can't
+regress. Reuses the platform detector already used by the native bridge.
+
+**Implications:** One JS dependency, one Rust crate, and a capability allow-list
+that has to track the host list in the two market modules — if a price source is
+added there, its host must be added to the capability or it'll fail on desktop
+only. Web build and unit tests can't exercise the Rust side, so this needs a real
+`tauri:dev` / `tauri build` run to confirm the BTC pill resolves end-to-end.
+
+**Status:** Active.
+
+---
+
+## 2026-06-07 — Light mode via in-place palette swap, not CSS variables
+
+**Context:** #50 asks for dark/light theming. The entire UI styles itself with
+inline styles reading a single static `T` token object (`import { T }`), and a
+recon pass found **198 call sites** that build colors by string-concatenating an
+alpha onto a token (`` `${T.accent}aa` ``, `T.green + "18"`). There are no
+`React.memo`/`PureComponent` barriers anywhere in `src/ui`, all 16 `useMemo`s
+are data-shaping (none close over styles), and only three things capture token
+values at module load: `STATUS` and `inputStyle` in theme.ts, and the
+`globalCss` template in App.tsx. index.html hardcodes the boot background and
+`theme-color`.
+
+**Options considered:**
+- (a) **CSS custom properties** — the "modern" answer; instant switching. But
+      `var(--accent)` + `"aa"` is not a color: all 198 concat sites would need
+      `color-mix()` (WebView-support risk on older field devices in exactly the
+      markets Chama serves) or an explosion of per-alpha tokens. Biggest diff,
+      real compatibility risk.
+- (b) **Theme via React context** — type-safe, but abandons the codebase's
+      `import { T }` idiom and threads a hook through every component. Hundreds
+      of mechanical edits, no offsetting benefit.
+- (c) **Two palettes, swap in place** — `T` stays the one export;
+      `applyThemeMode()` `Object.assign`s DARK or LIGHT into it, rebuilds the
+      three module-load captures (`STATUS`, `inputStyle`, `globalCss` becomes a
+      function), and a root-level state bump repaints the whole tree (no memo
+      barriers — audited, not assumed). Mode persists like the amount-display
+      preference; a tiny pre-bundle script in index.html applies the saved mode
+      to the boot background so light users don't get a dark flash.
+
+**Decision:** Option (c), with modes `dark | light | system` (system follows
+`prefers-color-scheme` with a change listener). Dark stays the default — it's
+the brand. Toggle lives in Me. Role colors (PHILOSOPHY §5.2) stay identical in
+both palettes — sacred means sacred. QR codes and the scanner overlay stay
+universal black-on-white in both modes; a backup QR's job is to scan, not to
+match the wallpaper.
+
+**Rationale:** The 198 concat sites keep working untouched — the swap happens
+underneath the idiom instead of fighting it. The whole diff concentrates in
+theme.ts, the Me toggle, and index.html. Light-palette hues are darkened where
+needed (green/amber/teal/purple/accent text on white) to keep contrast honest.
+
+**Implications:** The palette is now the single source of truth and module-load
+capture is the one footgun: any future `const FOO = { x: T.accent }` at module
+scope will go stale on switch. Rule: read `T` at render time, or rebuild the
+constant inside `applyThemeMode()`. A unit test pins T/STATUS/inputStyle
+staying in sync across a swap.
+
+**Status:** Active.
+
+---
+
+## 2026-06-07 — Arbiter v3: presence bond (slash-to-cover), fairness by reputation
+
+**Context:** The arbiter economy (DESIGN-arbiter-economy.md §3–5) needs the
+bond question settled before V3 builds it. The crystallization: the protocol
+can objectively, replayably verify exactly ONE thing about an arbiter —
+**presence** (did the assigned arbiter's eligible vote land before
+`substitutionEligibleAt = disputeStart + min(4h, half remaining life)`?).
+**Fairness** — whether the ruling was right — is the arbiter's whole job and is
+inherently subjective. A protocol that auto-slashes on "wrong" rulings is a
+protocol adjudicating its own adjudicator.
+
+**Options considered:**
+- (a) **Bond in a parent escrow, redistributed to buyer/seller on a bad
+      outcome** (earlier idea) — complex design for little arbiter reward, and
+      it pays the wrong people: the parties were already made whole by the
+      substitute. Rejected.
+- (b) **Stake-per-dispute** — arbiter posts collateral when a dispute opens.
+      Fatal flaw: the no-show case is precisely the case where the arbiter is
+      offline, so the stake never gets posted exactly when it matters.
+      Rejected.
+- (c) **Standing presence bond, slash-to-cover** — locked ONCE into a k-of-n
+      community-custody escrow held by the community's top-rated chamacitos
+      (field-read G "senators"), reusing the same holder-only/SSS construct as
+      the trade escrow. Per-dispute "earmark" is a lien recorded in Nostr
+      state, not a fund move — zero live arbiter action at dispute time.
+      Movement happens only on a proven no-show, and a no-show's forfeiture
+      funds the SUBSTITUTE (capped call-out bonus → backup; remainder →
+      community treasury), never the parties.
+
+**Decision:** Option (c). Presence is measured by the bond; fairness is
+measured by reputation/ratings + community revocation (§5) and is never
+auto-slashed. On a substitution: the dispute fee (1.5%) is work-pay and routes
+to the ACTING backup, not the absent primary — parties already owed it, so a
+substitution costs them nothing extra. The forfeited bond is the absence
+penalty: capped bonus to the backup (a full-bond jackpot would make backups
+*want* primary no-shows), remainder to treasury. On small trades the bonus,
+not the tiny 1.5%, is what makes standby worth staffing.
+
+Refinements locked in from the 2026-06-07 design review:
+
+1. **Slashing is post-hoc — no trade ever waits on bond movement.** The trade
+   plane is fast and deterministic (backup eligibility replays from the event
+   chain; the backup votes; the trade settles with no bond dependency). The
+   bond plane is slow and human (k-of-n signatures, whenever). The presence
+   proof is permanent, so the evidence is as strong next week as today. The
+   backup's pay has two legs with two latencies: dispute fee rides trade
+   settlement, bonus rides custodian signatures. If custodians are slow, the
+   only delayed thing is the bonus and the treasury remainder — the parties
+   are already whole. The liveness dependency lands on the least time-critical
+   leg by construction.
+2. **Custody is protocol-manual, client-automatable.** SSS shares are inert
+   data; nothing executes itself — k humans' keys must act (the same reason
+   vote-flip died). But a custodian's CLIENT may verify the replayable proof
+   deterministically and surface one-tap co-sign, or auto-co-sign under an
+   opt-in policy. The key still signs; the human delegates judgment to a
+   verifier they chose. Safety does not come from the manual tap.
+3. **Safety comes from a challenge window + epistemic humility.** Before any
+   movement, custodians publish an intent-to-slash and wait (24–48h — free,
+   since slashing is post-hoc). And state the hard truth: **absence is never
+   provable in an open relay world** — only "absent from my view." A present
+   arbiter's vote can be eclipsed from custodian relays; a true no-show can
+   forge a *backdated* vote during the challenge window (`created_at` is
+   self-asserted). A single miss is therefore never fully adjudicable — which
+   is exactly why graduated, pattern-based slashing (field-read E) is not
+   softness but epistemic honesty: first miss → warning + reputation ding
+   (cheap if wrong); "my votes keep getting eclipsed" becomes statistically
+   implausible by the third occurrence. The mechanism absorbs the epistemics.
+4. **Federation binding is a rule, not a hope.** Bond, primary, backups, and
+   custodians all bind to the COMMUNITY's federation — senators are top-rated
+   chamacitos of that community, so they hold its fed by construction. A
+   cross-fed trade (regional routing) never moves the bond; it only consumes
+   presence. Two-rail payout on substitution: dispute fee in trade-settlement
+   terms, bonus in bond-fed ecash. The bond inherits the community fed's
+   guardian risk (long-lived ecash dies with its mint); sizing keeps that
+   bounded and top-up cadence doubles as a fed liveness check.
+
+Sizing: bond ≈ one period's expected duty earnings (disputes/period × avg
+dispute fee) — a diligent arbiter earns it back before profiting (field-read
+F: fidelity bond, NOT proof-of-stake). Tier-0 arbiters get low bond + low
+trade-amount ceiling (field-reads C/D) so capital doesn't lock out newcomers.
+Drawn-down bonds top up before new high-value assignments; an exiting arbiter
+reclaims once no open assignments remain (active-commitment guard).
+
+**Rationale:** Asks the protocol to verify only what it can verify. Keeps the
+arbiter's judgment accountable to humans (ratings, revocation), not to code.
+Pays the worker, punishes the absentee, and never turns either into a party
+windfall or a backup jackpot.
+
+**Implications:** Adds two invariants to DESIGN-arbiter-economy.md alongside
+the existing four (presence/fairness split; post-hoc slashing). Resolves the
+§3.3 "stake before each dispute" tension with the standing-bond lien. No code
+changes in this entry — documentation only.
+
+**Status:** Active (design). Implementation gated on the Ratings primitive +
+signed `kind:38104` roster + community-custody escrow (Build order §1–5;
+bonds remain last).
+
+---
+
+## 2026-06-07 — Expiry auto-refund is exploitable: a ghosting seller can keep fiat + sats
+
+**Context:** The attack, verified in code: seller locks sats (exchange,
+bill-pay, lending — the seller is the locker per `recipients.ts`) → buyer
+sends fiat and votes RELEASE → seller goes silent until expiry → the protocol
+refunds the locker. The seller keeps BOTH the fiat and the sats. Pure-inaction
+theft, zero cost, no forged message required. Pre-expiry the performing buyer
+has no path to win: `handleVote` returns `ARBITER_TOO_EARLY` unless BOTH
+buyer and seller voted, so a silent seller means the arbiter can never honor
+the buyer's standing RELEASE. At expiry the protocol actively pays the thief:
+`maybeAutoRefundExpired` auto-votes REFUND and pooled-lock healing
+(REFUND-only by invariant) finishes the job — to the locker.
+DESIGN-arbiter-substitution.md already conceded the symptom: "the expiry
+auto-refund, which always pays the locker regardless of who was right."
+
+**Options considered:**
+- (a) **Status quo** — correct for true abandonment (nobody performed), but
+      catastrophic for one-sided performance. Unacceptable once stated.
+- (b) **Auto-RELEASE at expiry when the buyer voted RELEASE** — rewards a
+      lying buyer who votes without paying; violates the healing invariant
+      (healing must never grant an arbitrary payout). Rejected.
+- (c) **Turn one-sided performance into a contest, not an abandonment:**
+      (1) suppress auto-refund and healing-REFUND when
+      `votes[buyer] === RELEASE` — a standing RELEASE from the non-locker
+      means someone claims to have performed; (2) relax `ARBITER_TOO_EARLY`
+      so that when one side voted RELEASE and the other has been silent past
+      a deadline, the arbiter MAY rule. The performing buyer gets a path to
+      win against a silent seller.
+
+**Decision:** Option (c) — designed, deliberately NOT implemented in this
+round. Documentation only.
+
+**Rationale:** The expiry default ("refund the locker") encodes "nobody
+performed." A standing RELEASE vote from the non-locker falsifies that
+assumption, so the default must yield to adjudication. The caveat is priced
+in: a buyer could vote RELEASE without paying to force a dispute — but that
+routes to the arbiter (the correct venue) and costs the lying buyer
+reputation; strictly better than today's costless seller theft. The symmetric
+safe case is preserved: buyer never voted (didn't pay) + seller silent →
+auto-refund to the seller remains correct. Invariants preserved: healing
+stays REFUND-only (it is *suppressed*, never flipped to RELEASE), and no
+settled vote is ever rewritten.
+
+**Implications:** This flaw is the strongest argument FOR the presence bond
+(entry above): the only thing protecting a performing buyer from a ghosting
+seller is an arbiter who shows up. It also sharpens the case for
+notifications (#88) — fewer innocent no-shows make the remaining silence
+legible as intent. Implementation (separate PR): `state-machine.ts`
+(`ARBITER_TOO_EARLY` relaxation + healing suppression) and
+`escrow-client.ts` (`maybeAutoRefundExpired` guard), with permutation tests
+across all four categories × who-voted-what × expiry.
+
+**Implemented (v2.9.0, 2026-06-08).** Shipped as designed, with two refinements
+surfaced during the build:
+- Suppression keys on the **non-locker** via `payoutRecipientFor(state, RELEASE)`
+  (one source of truth), not literally `votes[buyer]` — so the marketplace
+  inversion (buyer locks, seller performs) is covered by construction. The
+  locker's own RELEASE stays out of scope (locker-favorable, not theft).
+- Suppression **lifts** the moment an arbiter rules REFUND
+  (`isPerformanceContest` → false), so a buyer who votes RELEASE without paying
+  cannot freeze the locker's funds forever: the arbiter's REFUND ruling + the
+  locker's expiry refund still complete a legitimate 2-of-3. And `disputeStartAt`
+  gained a **second arm** (returns `oneSidedEscalationAt` for a one-sided RELEASE)
+  so backups unfreeze through the same gate — a ghosting locker + a no-show
+  assigned arbiter cannot win either.
+
+The escalation clock reuses the substitution formula re-anchored on the lone
+RELEASE vote (`oneSidedEscalationAt = releaseVoteAt + min(clamp(grace,0..4h, else
+4h), half remaining life)`), always strictly before expiry. New helpers
+(`oneSidedReleaseAnchor`, `oneSidedEscalationAt`, `isPerformanceContest`) are pure
+/ replay-deterministic. Touches `arbiter-substitution.ts`, `state-machine.ts`
+(`handleVote` + `canVote`), `escrow-client.ts` (`maybeAutoRefundExpired`). 2277/2277
+tests pass (+22 v2.9 permutation asserts: exploit-closed, freeze-lifted,
+abandonment-still-REFUND-only, marketplace inversion, locker-own-RELEASE excluded,
+escalation < expiry). A 4-lens adversarial review (theft / freeze / 2-of-3+purity
+/ consensus) found zero defects.
+
+Because relaxing `ARBITER_TOO_EARLY` changes which votes are **accepted** (not
+additive like `expirySeconds`), this ships as its own **coordinated release
+(v2.9.0)** — never folded into the additive v2.8. The UI companion ships in the
+same release: TradeDetail's expiry banner is now **contest-aware** (via
+`isPerformanceContest`) — when the non-locker holds a standing RELEASE it stops
+claiming "auto-refunds at expiry" (now false) and instead says an arbiter
+decides, plus the "make sure everyone's on the latest Chama" note (the "update
+before disputing" messaging, surfaced at the exact contest moment so the
+cross-version divergence is mitigated where it bites).
+
+**Status:** Active — **implemented in v2.9.0**.
+
+---
+
+## 2026-06-08 — Ratings primitive: binary, generic-ratee, trade-backed (kind:38123)
+
+**Context:** The arbiter economy (DESIGN-arbiter-economy.md §5) and the existing
+`canOfferSubscription` graduation gate both wait on a reputation primitive that
+never existed — `AggregateRatings` was a `{count, positive, negative}` shape fed
+`null` everywhere, and the Me dashboard shows a permanent "No ratings yet."
+Implementing it unblocks seller graduation now and tiered arbiter assignment /
+the arbiter dashboard later (#73).
+
+**Options considered:**
+- (a) **Stars / multi-dimension.** Finer signal, but makes the rater stop and
+      think (friction → skipped ratings), doesn't fit the binary graduation gate,
+      and is noisier / more gameable.
+- (b) **Binary 👍/👎, one tap, zero required text.** Drops straight into the
+      `{count, positive, negative}` scaffold; a rating gets *given*, not skipped.
+      Optional one-line reason is a later add.
+
+**Decision:** Option (b). One generic event — `kind:38123`, **purely additive**
+(old clients never query it, so it ships whenever ready; no coordinated-release
+dance, unlike v2.9). A rating is **self-signed by the rater**, tags the settled
+trade + ratee + thumb, and is **replaceable per (rater, trade, ratee)** so a rater
+can rate both counterparties of a trade and re-rating overwrites (no ballot-
+stuffing one trade). One generic ratee covers buyer, seller, AND arbiter with one
+event and one aggregator; v1 *capture* is principal↔principal (arbiter-rating
+capture rides with the arbiter dashboard, #73).
+
+**Integrity (no server):** a rating only counts if it references a **settled**
+escrow (`resolvedOutcome` present) that **both** the rater and ratee actually took
+part in (a stepped-in `actingArbiter` counts). Verifiers drop anything else — a
+rating on a trade you weren't in, or that never settled, is inert. Sybil cost =
+completing a real settled escrow (locking real sats), the same bootstrap posture
+as the signed roster.
+
+**Capture (two-part, non-blocking):** a one-tap on the COMPLETED trade screen —
+never a gate between the user and their sats — AND a one-tap on every settled-but-
+unrated trade in Me › history, because people bolt the instant they have their
+sats. Both land on the same replaceable slot, so "rate now" and "rate later"
+converge.
+
+**Implications:** New `src/reputation/ratings.ts` (build/parse/verify +
+`aggregateRatings` / `aggregateVerifiedRatings`, all pure/replay-deterministic),
+`useEscrow` publish/fetch wiring, `RatingTap` component, and the two capture
+placements. `canOfferSubscription` + the Me dashboard now read real data;
+`AggregateRatings` is owned by the reputation layer (decisions.ts re-exports).
+Deferred to #73: rating-tiered assignment, amount caps, "tread lightly," the
+arbiter dashboard, and the franchise widening that real history will allow.
+
+**Status:** Active — v1 implemented (primitive + capture + the two scaffolded
+consumers); tiered-assignment consumers (#73) deferred.
+
+---
+
+## 2026-06-14 — Arbiter v3 revised: the cabinet, real-SSS-lock bonds, strand-by-withholding, exposure sizing, tip-funded presence
+
+**Context:** The 2026-06-07 presence-bond model left three pieces unresolved
+once it met build reality (locked live with the maintainer + the second arbiter,
+Chapsmart; refined 2026-06-15): (1) "senator" custody was under-defined ("who
+are the VIPs?"); (2) sizing the bond at "≈ one period's duty earnings" is
+unmeasurable in a dispute-free month AND perversely rewards manufacturing
+disputes to inflate the figure; (3) "slash = move the forfeited bond to the
+backup/treasury" quietly re-introduced the third-party-moves-your-funds
+capability the escrow forbids.
+
+**Options considered:**
+- (a) Keep senator-custody + earnings-sizing + slash-as-fund-movement
+      (2026-06-07). Rejected for the three reasons above.
+- (b) Active burn/seize on slash — a cabinet key destroys or redirects the
+      bond. Rejected: rebuilds the exact "third party moves your funds" power
+      the 2-of-3 forbids, and lets a compromised cabinet grief-destroy bonds.
+- (c) **Cabinet + real-SSS-lock + strand-by-withholding + exposure-sizing.**
+
+**Decision:** Option (c). The current bond / pay / rating model:
+- **Two role tiers** — *Anchor* (a Level-A federation-endorsed arbiter who is
+  also a cabinet member) and *Bonded arbiter* (everyone else: posts a bond,
+  arbitrates within their exposure cap). Level B (guardian-verified) is retired;
+  Level C (unverified) isn't an arbiter, just a listing. Exposure tiers
+  (Bronze/Silver/Gold) survive as a separate axis, sized by bond.
+- **The cabinet replaces the senators — an n=3 trio.** Standing custody =
+  fed-owner + community-owner + a third trusted Level-A anchor (BLF: the
+  maintainer + Chapsmart + Graysatoshi). k-of-n, n=3, designed to widen. Chosen
+  over n=2 because n=3 makes the asymmetry robust: a bond RETURNS on any 1 of
+  the other 2 healing (survives one absent/griefing member) and STRANDS only if
+  the other 2 both refuse — no unilateral slash, no single colluder can block a
+  legit return.
+- **The bond is a real SSS lock, not a pledge** (corrects the interim
+  "commitment/pledge" framing, 2026-06-15). Ecash SSS-locked with the cabinet:
+  the owner holds one share, the cabinet the rest; mid-term the owner cannot
+  reconstruct alone.
+- **Return = the existing REFUND-only heal.** At term-end any one cabinet member
+  casts a REFUND-only heal → the bond returns to the owner (engine-computed
+  recipient). Bonds are a distinct lock class excluded from AUTO-refund and
+  routed to a deliberate cabinet heal — an extension of the v2.9 suppression
+  branch, not new machinery.
+- **Slash = strand-by-withholding.** To punish a cheat the cabinet simply
+  declines to heal → the bond never reconstructs → stranded forever. The "burn"
+  is by inaction; it never moves anyone's funds, so it never violates the safety
+  invariant. Plus reputational delisting, independent of the bond.
+- **Self-sized by EXPOSURE** — pledged amount = the trade-size ceiling. Bond =
+  skin; pay = wage. (Supersedes "≈ a term's earnings.")
+- **Time-boxed term, auto-return** absent a proven slash (active-commitment
+  guard: no open assignments) — a job/shift, not a paywall.
+- **Pay = tips (presence) + flat dispute fee (work); no treasury, no DAO.**
+  Availability is funded by an optional per-trade tip (which doubles as a
+  costly, Sybil-resistant presence signal); the dispute fee stays flat ("duty
+  pays, not power"). A dispute-free month is paid readiness, not unemployment.
+- **Not a DAO:** "slashing" = roster delisting + the public record, never a vote
+  to seize funds; the 24–48h challenge window is due process for a delisting;
+  slashing a cabinet member's OWN standing escalates to community consensus.
+
+**Rationale:** Reuses primitives that already shipped (SSS lock + the v2.9
+suppression branch + REFUND-only heal) instead of new machinery; never grants a
+third party the power to move the owner's funds; the return-any-1 / strand-all
+asymmetry protects an honest arbiter from a lone griefer while still letting the
+cabinet strand a proven cheat; exposure-sizing removes the manufacture-disputes
+perverse incentive; tips fund presence without a treasury or DAO ("they attract
+bad luck").
+
+**Implications:** Supersedes the 2026-06-07 senator-custody + earnings-sizing +
+slash-as-fund-movement design. Build order is unchanged — bonds remain LAST,
+their own money-path release after the verifier + Ratings + cabinet-roster +
+exposure tiers; this entry locks the *design*, nothing here is built yet. Honest
+residual (keep it loud, don't overclaim): a universal bond makes self-dealing
+expensive and visible, not cryptographically impossible — a single defection on
+a trade larger than the bond can still net something, which is why Gold also
+requires ratings + an established-fed identity. For the cabinet itself the
+residual is collusion among the custodians, bounded by community-consensus
+delisting + exposure caps + total reputational collapse — never by an automatic
+bond cascade.
+
+**Status:** Active (design). **Supersedes** the 2026-06-07 "Arbiter v3: presence
+bond (slash-to-cover), fairness by reputation" entry. Home docs:
+`docs/DESIGN-arbiter-economy.md` (2026-06-14, refined 2026-06-15) +
+`docs/DESIGN-arbiter-federation-proof.md` (Level A).
+
+---
+
+## 2026-06-16 — Arbiter bonds: the aggregate exposure cap, multi-community span, cabinet lifecycle
+
+**Context:** Operationalizing the 2026-06-14 cabinet/bond model surfaced the
+exposure question (what bounds the damage a cheating or colluding arbiter can do?)
+and the lifecycle questions (can an arbiter serve multiple communities? how do you
+replace a good-standing cabinet member?). Locked live with the maintainer.
+
+**Decision:**
+- **Aggregate exposure cap (two-sided, hard-enforced).** An arbiter's self-selected
+  bond caps BOTH any single trade AND the **sum of all their open bonded trades
+  across every chama combined**. Live capacity = `bond − Σ(open bonded trades)`; a
+  new assignment that would exceed the bond is refused. This bounds the maximum any
+  arbiter or colluding cabinet can ever burn/wash to the posted bond — the
+  structural backstop the "even if the cabinet are friends, it's safe" claim rests
+  on (NOT fed-owner virtue; a fed is cheap).
+- **Arbiters may span multiple communities** (reverses the earlier one-community
+  lean) — safe because of the aggregate cap + ratings; soft-flag "from another
+  chama" and prefer local arbiters in assignment.
+- **Cabinet member replacement = a term-boundary roster swap.** Heal the departing
+  member's bond back, swap the npub via the threshold roster/meta write, the
+  replacement bonds in, re-lock next term. No funds at risk, no re-founding. Only an
+  emergency (lost key / rogue) needs an off-cycle heal + re-lock.
+- **Cabinet members are public, established Nostr identities** (Genesis-specific) —
+  the cabinet + every arbiter + their ratings are Live on the globe, so a whole
+  chama's reputation is legible at a glance.
+- **Two onboarding paths:** hardcore (own 3 + own Level-A federation) or bootstrap
+  (anchor to BLF until you grow your own 3, then the bonding ceremony → Live).
+- **Loud heal-prompt** (UX invariant): healing an honest peer's bond is the loudest
+  prompt a cabinet member ever gets.
+- **Big-scale fake-cabinet attack** named as the residual; backstopped by
+  public-reputation-at-a-glance + the aggregate cap + the community-gated (ii)
+  escape hatch (`DESIGN-arbiter-economy.md` §4).
+
+**Rationale:** The aggregate cap turns "can't go far" into an enforced number and is
+what makes both multi-community span and a friends-could-be-the-cabinet model safe.
+The lifecycle decisions ride the existing term cycle (heal-then-relock), so no new
+machinery is needed.
+
+**Status:** Active (design). Extends the 2026-06-14 cabinet entry. Home doc:
+`docs/DESIGN-arbiter-economy.md` (v3 sharpening 2026-06-16). Bonds remain LAST in
+the build order.
+
+---
+
+## 2026-06-16 — BLF is the universal backup; GBF is the one US community ("USA · USD")
+
+**Context:** A live 3-instance Exchange test (v3.5.0 dev builds) had three fresh
+nsecs land on different federations, and selecting the USD community resolved to
+BLF instead of GBF. Investigation found the *structure* already matched the
+intended model (us-blf = BLF is the default; us-gbf = GBF is pinned to the US),
+but three things tangled it: (1) a label collision — the hidden BLF default
+carried the displayName "Global · USD" while the GBF community was "USA - USD",
+so a user on the default thought they were on the USD/GBF community; (2) the two
+community-blind fallbacks still returned BP; (3) the pre-signer onboarding pick
+was written to a global localStorage key that only the first connecting npub
+claimed, so fresh/secondary npubs on the same browser raced to the default.
+
+**Options considered:**
+- (a) Make GBF the no-pick default too (DEFAULT_COMMUNITY_SLUG → us-gbf).
+  Rejected: diverges from "BLF backs everything by default."
+- (b) Repoint the legacy `global-usd` slug to GBF (the brief's literal wording).
+  Rejected: leaves the us-blf label collision unfixed and repoints old listings.
+- (c) Fix the collision: GBF is the single visible US community ("USA · USD"); the
+  BLF default stays hidden and nameless ("Global · Bitcoin"); both community-blind
+  fallbacks → BLF; legacy `global-usd` stays hidden but repoints BP → BLF.
+
+**Decision:** (c). BLF is the universal backup federation across the board; GBF is
+pinned to the one pickable US community, labeled "USA · USD". A fallback carries
+no user-facing name.
+
+**Rationale:** BLF has been browser-reliable since the v0.5.0 canary iroh-relay
+0.90 bump (registry `browserReliable: true`), so the old "BP is the only browser-
+safe fallback" reasoning no longer holds. One visible US community + one nameless
+global backup removes the "two USD identities" confusion that made the default
+read as GBF. BP stays a curated/visible option but is no longer the silent default.
+
+**Implications:**
+- `resolveFederationForCommunity` (federation-config.ts:306) and the community-blind
+  `getFederationInvite` (federation-config.ts:87) now fall back to BLF, not BP.
+- Registry: us-gbf displayName "USA - USD" → "USA · USD"; us-blf displayName
+  "Global · USD" → "Global · Bitcoin"; legacy `global-usd` repointed BP → BLF
+  (still hidden, still wire-resolvable so old listings render on the same backup).
+- Onboarding (#1b): the globe pick is deferred — stashed pre-signer
+  (`setPendingCommunitySelection`) and committed to the connecting npub's scope
+  (`applyPendingCommunitySelection`), then cleared, so it can't leak to a later
+  npub. Expected to also clear the Create "set your main Chama" re-prompt (#4) and
+  the per-instance UI variance (#5); both to be confirmed on the device pass.
+- Ships in 3.5.1 alongside the cross-fed claim-hang fix.
+
+**Status:** Active.
+
+---
+
+## 2026-06-17 — Claim payout double-pay guard (escrow-keyed journal)
+
+**Context:** 3.5.1 device pass (round 2). A Community Bill Pay claim looped
+on "still arriving / RETRY" forever even though the 116-sat payout had
+landed in the destination wallet. Root cause: the LN-pay adapter
+(`sdk-adapter.ts` `waitForPay`) rejects on a 60s `subscribeLnPay` timeout
+while the HTLC is still in flight; the payment then settles, but the UI has
+already fallen to a retryable terminal. RETRY mints a FRESH invoice (new
+payment hash, so the gateway can't dedupe) and pays again — the wallet showed
+two near-identical payouts ~78s apart, exactly a 60s-timeout + retry.
+
+**Options considered:**
+- (a) Raise the pay-watch timeout. Reduces the window but doesn't close it,
+  and makes the spinner longer; a slow HTLC still double-pays.
+- (b) Idempotency keyed on the payment hash / invoice. Useless here — each
+  retry resolves a new invoice, so there's nothing stable to dedupe on.
+- (c) Persisted, ESCROW-keyed payout journal + re-attach to the durable
+  Fedimint `operationId` (never re-pay an in-flight payout); classify
+  outcomes so only a CONFIRMED refund frees a retry.
+
+**Decision:** Picked option (c). New `payments/payout-journal.ts` (mirrors
+`pending-redemptions.ts`: synchronous, user-scoped localStorage). The adapter
+tags pay errors `LN_PAY_INFLIGHT` (timeout / stream error / unexpected ⇒
+unknown), `LN_PAY_REFUNDED` (confirmed refund/cancel ⇒ retry-safe), or
+`LN_PAY_SUBMIT_FAILED` (no payment made ⇒ retry-safe), and exposes
+`awaitPayOutcome(operationId)` for re-attach. `runClaimAndPayout` guards at
+the TOP (before claim/balance work — a prior successful payout drains the
+balance, which would otherwise bounce a retry to claim-pending and never reach
+the journal): `settled` ⇒ skip + complete; `submitted` ⇒ re-attach (settled ⇒
+complete; refunded ⇒ clear + pay fresh; unknown ⇒ new `payout-confirming`
+terminal, never re-pay). A fresh in-flight payout also fires one bounded
+background re-attach so a late settle flips the trade to COMPLETED on its own.
+
+**Rationale:** Bearer-cash safety — the same "unknown ⇒ refuse" stance as the
+OPFS-wipe and ALREADY_SPENT_UNCONFIRMED guards. A second send is unrecoverable
+(the counterparty has the sats); a stuck-but-safe "confirming" surface is the
+lesser evil and resolves itself or on the next tap. The escrow key is the only
+stable handle because the destination invoice changes per retry.
+
+**Implications:**
+- New terminal `payout-confirming` (modal shows reassurance, NO retry button).
+- `IFedimintWallet.lightning.payInvoice` now surfaces the `operationId` through
+  `fedimint-client` → `escrow-bridge`; `awaitPayOutcome` is optional
+  (mock/native return "unknown" ⇒ they keep the submitted record, never re-pay).
+- Guard is Lightning-only; the on-chain payout path is unchanged.
+- 20 unit asserts in the escrow test suite cover every guard branch.
+- Ships in 3.5.1. Needs the device-pass re-test (real `subscribeLnPay`
+  re-attach behavior can't be unit-tested).
+- Round-3 follow-up: the device pass found the SAME bug on the REFUND side —
+  an after-lock back-out refund landed but the surface stuck on "Sending to
+  NWC…". The refund reuses `runClaimAndPayout` (journal already there), so its
+  fix was the App-level surface (`onClaimDirectNwc` now treats `payout-
+  confirming` as success, not error). The separate recovery path
+  (`balance-recovery.ts` `runRecoveryPayout`, via RecoveryPayoutModal) had NO
+  journal — it now shares the same escrow-keyed journal + completion-detection
+  + `payout-confirming` terminal, so a timed-out recovery shows "confirming"
+  (not a re-payable failure) and a retry is inert once settled. `actions.pay
+  Invoice` surfaces the operationId; `actions.awaitPayoutOutcome` added. +15
+  recovery-side unit asserts.
+- Round-3b: the after-lock refund still hung — the payout landed but the trade
+  never reached COMPLETED on either side (seller stuck CLAIMED, buyer stuck
+  SETTLING). Root cause: the background re-attach's `awaitPayOutcome` watched
+  only `subscribeLnPay`, which does NOT reliably re-emit a terminal state when
+  re-attaching to an ALREADY-settled op → "unknown" → `client.complete` (which
+  propagates the COMPLETE the buyer waits on) never fired. Fix: `awaitPayOutcome`
+  now checks the operation LOG (`getOperation` → `classifyPayOutcome`) first and
+  after the watch — the reliable settled/refunded signal. Extracted a reusable
+  `reattachPayout` action (also fired on opening a CLAIMED trade with a sent
+  payout, so a trade stuck across an app-close self-heals on view). Inline
+  TradeDetail claim card now shows "Payout sent — confirming" (no RETRY-CLAIM
+  invite) gated on the payout journal, instead of a permanent CLAIMED-retry
+  line. +8 classification asserts.
+
+**Status:** Active.
+
+---
+
+## 2026-06-18 — Pre-lock seat: 5-minute hold, no "Leave" button
+
+**Context:** The pre-lock "Leave" flow was incoherent — it forgot the trade
+forever (denylist), could wipe the chat, and "secretly" kept the seat held
+for the full 15-minute JOIN hold while telling the buyer they'd left. The
+device pass wanted Leave to free the seat immediately.
+
+**Options considered:**
+- (a) New UNJOIN event that expires the leaver's hold. Rejected — a
+  state-machine/protocol addition (new event kind + JOIN-after-UNJOIN
+  overwrite semantics + replay) is too much for a UX round.
+- (b) Shorten the hold + remove the explicit Leave action ("window shopping").
+
+**Decision:** Picked (b). `JOIN_HOLD_SECONDS` 15 min → **5 min** (types.ts) and
+**removed the pre-lock "Leave" button** + its `onLeave` forget-forever path
+(App.tsx, TradeDetail). A buyer who wanders off just lets the seat expire in
+5 min; with no explicit abandon, the trade is never buried and the chat is
+never wiped (both were artifacts of the Leave action). The honest seat
+display ("reserved · frees in Xm", re-joinable if open / "taken" if grabbed)
+already existed and derives from the hold.
+
+**Rationale:** Reservation-only behavior, no funds at risk — the cheapest fix
+that dissolves every original concern without touching the escrow protocol.
+
+**Implications:**
+- `JOIN_HOLD_SECONDS` is a CONSENSUS parameter — every client must run the
+  same value or two buyers briefly disagree on a seat (self-heals on
+  lock/expiry, no funds at risk). **Must ship as a coordinated version bump,
+  never a silent change.** (Per the no-version-bump workflow, the release
+  script owns the actual `package.json` bump — this entry is the coordination
+  flag; the constant change itself is the only code.)
+- It's the single source of truth — the seat display, `joinHoldExpiresAt`,
+  and the locker's lock window all shorten to 5 min; a real fund + CBP
+  cart-build must land inside that window (device re-test).
+- `JOIN_HOLD_LOCK_GRACE_SECONDS` kept at 2 min. No new event kind, no
+  state-machine structural change. Stale "15 minute" test wording updated.
+
+**Status:** Active.
+
+---
+
+## 2026-06-17 — Bill Pay roles: buyer = volunteer, seller = bill owner
+
+**Context:** 3.5.1 device pass read as a buyer↔seller role reversal in CBP —
+the seller instance showed "I paid the bill as a volunteer" and the cancel
+line was self-contradictory ("refund the bill owner · refund me").
+
+**Decision:** The sats ROUTING was always correct (recipients.ts: RELEASE →
+buyer, REFUND → seller; locker = seller) and is the source of truth. The
+2026-06-05 label pass had inverted only the surface: it put the volunteer
+copy + first-vote on the SELLER. Canonical mapping is **buyer = VOLUNTEER**
+(off-chain deed-doer — pays the bill, paid in sats on release, votes first)
+and **seller = BILL OWNER** (locks the sats, confirms, refunded on cancel).
+Fixed the label bodies (`vote-labels.ts`), the first voter
+(`decisions.ts` `firstHappyPathVoter` → buyer-first for bill-pay), the
+waiting copy, and the refund-routing noun (`TradeDetail.tsx` `partyNoun` —
+"bill owner"/"volunteer" instead of generic "seller"/"buyer"). Routing,
+locker, and payout logic were NOT touched — swapping them would have broken
+correct money flow.
+
+**Rationale:** The reversal was a labeling/turn-order bug, not a protocol
+bug; the cheapest correct fix aligns the copy to the routing, not vice versa.
+
+**Implications:** `#5` (saved handles not surfacing) was filed against the
+same screen — the reveal is shown to the locker (seller/owner), the right
+party, and reads the user's own `chama_saved_handles`; no static defect
+found, so it re-tests against the `#6` boot-scope fix. Vote-label + vote-
+prompt tests updated to the corrected mapping.
+
+`#7` (buyer back-out after lock) builds on the same hatch: post-lock CANCEL
+stays hard-blocked (state-machine.ts:1213) and there is NO unilateral auto-
+refund — the back-out is the REFUND vote (→ refund-to-locker, arbiter as
+backstop), so the hatch now opens a confirm that restates the routing and
+steers an already-performed deed-doer onto the RELEASE vote instead of
+forfeiting their sats. Routing/recipients/expiry-auto-refund are untouched
+(UX only). `#7(a)`: local Hide/Forget is now blocked while a trade still
+holds unresolved sats (LOCKED/APPROVED/CLAIMED/EXPIRED, a pending redeem
+stash, or a submitted payout) — only terminally-resolved trades hide, and
+resolved trades still render in Me → Done, so nothing is buried.
+
+**Status:** Active.
+
+---
+
+## 2026-06-23 — Native fresh-join: default Iroh discovery to n0 pkarr (HTTPS)
+
+**Context:** Fresh installs hung on first federation join ("timed out joining federation:
+deadline has elapsed") on real mobile/CGNAT (APK + Tauri), while the browser reached the
+same guardians fine. Root cause (verified against fedimint-connectors 0.11.1 + iroh source):
+the native client resolves guardian node addresses via DNS (:53) + mainline DHT (UDP) — both
+routinely throttled/blocked on mobile/CGNAT — while the browser (WASM) resolves via a
+PkarrResolver over HTTPS (n0's `dns.iroh.link/pkarr`), which sails through. The v3.6.0
+`--iroh-dns` / `CHAMA_FEDIMINT_IROH_DNS` lever existed but was never passed by either launcher,
+and no Chama resolver was ever stood up.
+
+**Options considered:**
+- (a) Stand up a Chama-owned PKARR resolver and point native at it. New infra; unnecessary — the guardians already publish to n0.
+- (b) Guardian-side: make each guardian publish to the default resolver. We don't control all guardians; doesn't generalize.
+- (c) Default the bridge's `iroh_dns` to n0's pkarr relay, applied via `set_iroh_dns` — **additive** (stacks on DNS+DHT, verified), overridable via the existing flag/env, inherited by both launchers with zero arg edits.
+
+**Decision:** (c). `DEFAULT_IROH_PKARR_RELAY` in `native/fedimint-bridge/src/main.rs`; native now
+resolves guardians the same reliable HTTPS way the browser does, on top of (not replacing)
+DNS+DHT. Also: join timeout 45s→90s; frontend 105s wait + 2 backoff retries (discovery errors
+only) + friendly Reconnect copy; `/health` exposes the effective iroh config + a boot-time
+discovery readiness probe (`reachable|degraded`); a launcher arg-parity test guards the original
+"lever never wired" regression.
+
+**Rationale:** The browser already resolving these guardians over n0 pkarr proves the records are
+there — native just wasn't querying pkarr. No new infra, fed-switch-safe (additive), not pinned to
+Chama infra.
+
+**Implications:**
+- Reproduces ONLY on real mobile/CGNAT — localhost CANNOT validate it (see `native/fedimint-bridge/FRESH-JOIN-SMOKE.md`). Real-mobile smoke is the release gate.
+- Pkarr fixes *resolution*, not *connectivity*. The native connector runs `RelayMode::Disabled` (no relay fallback) on both the 0.35 and 0.90 stacks, and the builder exposes no relay setter — so if pkarr resolves but the connect still fails on CGNAT, the lever is `FM_IROH_CONNECT_OVERRIDES` / an upstream fedimint change, NOT a Chama toggle.
+
+**Status:** Implemented, uncommitted for v4.0.0; needs real-mobile smoke before release. (board #17)
+
+---
+
+## 2026-06-23 — Funding gateway selection: pick a reachable gateway, never blind-select
+
+**Context:** Native funding failed at both ends. LOCK: `/invoice` "Couldn't find a reachable
+federation Lightning gateway… timed out after 12s." CLAIM: `/pay` "failed to start outgoing LN
+payment: Connection failed: Failed to connect to gateway." Live probe (buyer bridge :18002):
+the federation has 3 LN gateways — 2 reachable clearnet HTTPS (Fedi us-east-1, Henwen) and 1 dead
+`iroh://` (Banco Bitcoin, times out). The receive path used fedimint's blind
+`select_available_gateway(None)` (a `join_all` that waits for the slowest → the dead iroh gateway
+burns the 12s budget); the send path used `get_gateway(None)` (`.choose(&mut OsRng)` — a *random*
+gateway, dead iroh ~⅓ of the time). Guardians were reachable in both cases (cache refresh
+succeeded) — so this is gateway *selection*, NOT the join/discovery bug.
+
+**Options considered:**
+- (a) Raise the 12s select timeout. The dead gateway never answers — doesn't help.
+- (b) Frontend passes an explicit gatewayId from `/probe-gateways`. Works but per-platform and leaks selection into the UI.
+- (c) Bridge-side reachable-gateway selection shared by both paths.
+
+**Decision:** (c). New `pick_reachable_gateway` (`native/fedimint-bridge/src/main.rs`): lists
+gateways, orders clearnet before `iroh://`, then vetted, then lowest fee; probes each individually
+under a short 4s timeout and takes the first that answers; caches last-known-good (always
+re-probed). Wired into BOTH `select_receive_gateway` (Part 1, `/invoice`) and `pay()`'s auto path
+(Part 2, `/pay`). Explicit-gatewayId and `force_internal` paths unchanged; `pay_bolt11_invoice` is
+still called exactly once (fall-through lives purely in selection → no double-pay from the picker).
+
+**Rationale:** The federation's funding was never down — 2 gateways were reachable; blind/random
+selection just kept landing on the one dead `iroh://` endpoint. Fails safe (no sats moved on
+failure). Verified: blind `/invoice` 12.1s→1.29s; `/pay` auto path deterministically selects the
+clearnet gateway across runs, 0 sats moved (expired-invoice probe); predeploy green.
+
+**Implications:**
+- A federation whose gateways are ALL `iroh://` (possibly BLF) still has no reachable native gateway → that fed's funding stays gated on the native-iroh-connectivity work (see the fresh-join entry). Per-fed go/no-go: `/gateways` + `/probe-gateways` must show ≥1 reachable clearnet gateway.
+- Part 2 makes native `/pay` actually *send* for the first time — see the double-pay entry below; ship them together.
+
+**Status:** Implemented, uncommitted for v4.0.0 (Parts 1 & 2 verified). (board #9)
+
+---
+
+## 2026-06-23 — Native payout double-pay guard (corrects the 2026-06-17 browser journal guard's native assumption)
+
+**Context:** The reachable-gateway fix (Part 2 above) makes native `/pay` actually *send* for the
+first time — before, native claims always failed at gateway-connect, so nothing was sent and there
+was no ambiguity. That exposed a latent double-pay. An adversarial audit + raw-code verification
+found the **2026-06-17 escrow-keyed journal guard is browser/WASM-only and DORMANT on native** —
+the exact platform funding targets. That earlier entry's implication ("mock/native return
+'unknown' ⇒ they keep the submitted record, never re-pay") was **wrong**: native never *creates*
+the submitted record in the first place.
+
+**Why (verified):** `runClaimAndPayout` records a payout `submitted` (→ reconcile, never re-pay)
+ONLY when the thrown error has `code === "LN_PAY_INFLIGHT"` (`claim-and-payout.ts:763`); any other
+throw → `clearPayoutRecord` → re-payable (`:780`). `LN_PAY_INFLIGHT` is produced ONLY in
+`sdk-adapter.ts` (browser). Native `/pay` throws a plain `Error` (no code) and has no
+`awaitPayOutcome` (`fedimint-client.ts:960` returns "unknown"). ⇒ a native ambiguous payout (HTLC
+settles at the gateway, but `await_outgoing_payment` / local watch errors on a slow link → bridge
+500) is misclassified as a clean failure → seller retries → fresh invoice → **pays twice.**
+Secondary: a refund/failure returned as `200 {"Failure":…}` is read as success by `readOperationId`
+(`native-bridge-adapter.ts:262`) → false-settled (claim shown done, seller unpaid).
+
+**Decision:** Give native the same submitted→reconcile protection the browser has. Bridge: `/pay`
+returns discriminated outcomes (pre-send failure = safe re-pay; post-send ambiguous = operationId +
+inflight/unknown, not a bare 500; settled; refunded/failed explicit) + a reconcile endpoint that
+awaits an outgoing payment's outcome by operationId. Native adapter: emit
+`{code:"LN_PAY_INFLIGHT", operationId}` on ambiguity; implement `awaitPayOutcome`; never resolve a
+refund/`{"Failure"}` as settled. (Briefed in `design/mockups/chama-funding-gateway-fix-brief.md`
+Part 3; in progress at write time.)
+
+**Rationale:** Bearer-cash safety — a second send is unrecoverable (the counterparty has the sats).
+Same "unknown ⇒ refuse, not retry" stance as the browser guard and the OPFS-wipe /
+ALREADY_SPENT_UNCONFIRMED guards; it just hadn't reached native. This IS the core of board #9
+("Funding fund-*loss* fix") — the gateway selection was the visible symptom.
+
+**Implications:**
+- HARD SHIP RULE: Part 2 + Part 3 ship in the SAME release; native `/pay` reachable-selection must never go out without the native double-pay guard.
+- Corrects the native-safety claim in the 2026-06-17 entry (that entry's *browser* guard stands; its *native* assumption is fixed here).
+
+**Status:** Implemented + adversarially verified (stream-based classifier — only `Success`→settled, confirmed `Refunded`/`Canceled`→refunded, `UnexpectedError`/timeout→inflight; transport-failure→`LN_PAY_INFLIGHT`), uncommitted, bundled for v4.0.0. (board #9)
+
+---
+
+## 2026-06-23 — Payout-journal double-pay residuals: V8 fixed now, V7 + V6 deferred
+
+**Context:** The Part 2+3 adversarial sweep — after closing all #9-related double-pays (native now at
+browser parity, incl. a classifier bug that *would have shipped*: `await_outgoing_payment`'s `Failure`
+collapses a settled-but-change-reclaim-failed payment, so mapping `Failure → refunded` re-pays a
+settled payout; fixed by classifying the pay-state stream directly) — surfaced TWO pre-existing,
+cross-platform gaps in the shared v3.5.1 escrow-keyed payout journal. They affect the browser
+identically and are not introduced by #9, but #9 (native now actually pays) newly exposes them on native:
+- **V8 — journal write fails:** `saveJournal` (`payout-journal.ts:96-107`) swallows a localStorage
+  write error (quota / private mode / disabled) with only `console.error` — its own comment admits this
+  "re-opens the double-pay window." **No app-death needed**; reachable on storage-restricted mobile WebViews.
+- **V7 — app dies mid-pay:** all journal writes happen AFTER the `/pay` call
+  (`claim-and-payout.ts:749→754`; submitted record in the catch `:764`), so a crash / Cmd+Q / OS-kill
+  between bridge-commit and the JS write leaves an empty journal → retry double-pays.
+- (related) **V6 — stuck "payout-confirming":** an inflight payout can stay confirming forever if the
+  operationId is lost or the pay-watch never re-emits.
+
+**Options considered:**
+- (a) Ship Part 2+3, defer both. Leaves a no-conditions double-pay (V8) open in a release whose theme is closing double-pays.
+- (b) Fix V8 now; brief V7 + V6 for the next leg.
+- (c) Fix V7 + V8 now (full hardening incl. pre-send journaling + reconcile-by-escrow). Largest scope; shared path + new bridge endpoint, into an already-huge release.
+
+**Decision:** (b). **V8 fixed in v4.0.0** — fail-closed: `saveJournal` re-throws; the claim
+orchestrator refuses to proceed pre-send / forces `payout-confirming` post-send when the submitted
+guard can't persist (never a re-payable failure). **V7 + V6 deferred** to the immediate next leg,
+briefed in `design/mockups/chama-payout-journal-hardening-brief.md` (pre-send journaling +
+reconcile-by-escrow; the reconcile endpoint also closes V6).
+
+**Rationale:** V8 is a double-pay with no extra conditions, reachable on the exact mobile-WebView
+audience of the Nairobi launch, and the fix is small — it cannot ship open in a release about
+eliminating double-pays (it would contradict the "never double-sent / unknown ⇒ confirm" promise just
+added to PHILOSOPHY 2.1). V7 is narrower (needs a crash in a tight window), pre-existing on browser,
+and its fix is a larger shared-path change (write-reordering + a new bridge endpoint + `escrowId` on
+`/pay`) that also closes V6 — it deserves its own adversarial verification, not a rush into an already
+enormous release (scope-creep test, PHILOSOPHY §7).
+
+**Implications:**
+- v4.0.0 payout-safety scope = Part 2 (reachable-gateway send) + Part 3 (native submitted→reconcile) + V8 (journal fail-closed). All native double-pays with no/low extra conditions are closed.
+- Until V7 (+V6) lands, an app-death in the narrow mid-pay window remains a pre-existing, cross-platform double-pay risk — same as the browser today.
+- The V8 fix touches the shared browser claim path → its own predeploy + adversarial check before v4.0.0.
+
+**Status:** V8 — implemented + adversarially verified, uncommitted (v4.0.0): fail-closed `saveJournal` re-throw + pre-send writability probe (refuses before `payInvoice`) + post-send persist-fail → `payout-confirming`, on both claim and recovery paths; ~30 fund-safety tests, predeploy green (2696). V7 + V6 — briefed, scheduled next leg.
+
+---
+
+## 2026-06-24 — Claim "credit unconfirmed" (ALREADY_SPENT_UNCONFIRMED): balance-reconcile, don't over-alarm
+
+**Context:** A *successful* claim was ending in a loud red "CLAIM NEEDS ATTENTION" banner
+(`MeScreen.tsx:256`) for both parties. `markUnresolvedCredit` fires whenever the mint reports the
+released note `ALREADY_SPENT_UNCONFIRMED` (`escrow-bridge.ts:677`): the note is **confirmed consumed**,
+but Chama has no signal that *this* wallet was credited. The `unresolved-credit` stranded variant
+(`pending-redemptions.ts:115`) got the SAME loud "save the bearer note" treatment as a genuinely-live
+un-redeemed note — over-alarming a benign, common outcome (especially on native, which lacks a
+credit-confirm signal) and training users to ignore a real fund-safety alert.
+
+**Verified:** the note is mint-confirmed spent → **no double-spend possible** (re-present fails),
+nothing live to "save." Fund-SAFE; a UX bug, not a money bug. (Trigger gating + variant skip semantics
+cross-checked in source.)
+
+**Options considered:**
+- (a) Leave as-is. Successful trades keep ending in a red alarm; cry-wolf erodes the real alert.
+- (b) Blanket-calm every `unresolved-credit` (dismissible). Better, but still shows an alert on the common benign case and leans on the user to "check your balance."
+- (c) **Balance-reconcile + split:** auto-resolve silently when balance confirms the credit; calm dismissible alert only when it can't; keep loud red for genuinely-live notes.
+
+**Decision:** (c). Scope strictly to `stranded === "unresolved-credit"`; `retries-exhausted` /
+`poisoned` keep the loud "save the bearer note" red (may be live money). **Archive (not delete)** on
+resolve/dismiss — bearer string stays exportable. Brief:
+`design/mockups/chama-claim-credit-reconcile-brief.md`.
+
+**Rationale:** Separates "definitely fine" (balance confirms → silent) from the genuinely-ambiguous
+"claimed on another device / not credited here" sliver (→ calm alert) — honors "unknown ⇒ verify"
+without crying wolf. Same doctrine as the payout/relay guards: the safety net is correct; it just
+over-fired on the common case.
+
+**Implications:**
+- Pre-launch UX fix (not fund-safety) — but launch-relevant: a successful Nairobi trade shouldn't end in red.
+- Fund-SAFE: spent notes can't double-spend; archive-not-delete preserves the recovery path.
+
+**Status:** Briefed, in progress (uncommitted), pre-launch.
+
+---
+
+## 2026-06-26 — US fiat off-ramp = pay a fiat-converting Lightning Address (Strike flagship)
+
+**Context:** Tando proved the cleanest possible off-ramp for Kenya — a Lightning
+Address (`<msisdn>@bitcoin.co.ke`) that settles to KES in M-Pesa, non-custodial,
+riding Chama's existing LUD-16 payout path (`resolveLightningAddressToInvoice`,
+`tando-offramp.ts`). Open question: can the US have an equivalent without Chama
+becoming a money transmitter? It can. A **Strike username is a LUD-16 Lightning
+Address** (`username@strike.me`), and Strike's per-user **default receive currency
+= Cash** setting auto-converts inbound Lightning to **USD** in the recipient's
+Strike balance (withdrawable to a US bank by ACH). Verified against Strike's FAQ
+("delivered directly to your Strike account as either cash or bitcoin… change your
+default delivery method at any time") and licensing footer (Zap Solutions, Inc.,
+NMLS ID 1902919, NYDFS virtual-currency license). The captcha on the
+`strike.me/<user>` web page is irrelevant — we resolve the **Lightning Address via
+LNURL-pay** (Chama sets the amount), the call every wallet makes; the captcha only
+guards the human page.
+
+**Options considered:**
+- (a) **Build our own US fiat bridge** — a Chama-run bot/account that receives
+      Zelle/Cash App and releases ecash. Textbook unlicensed money transmission
+      (18 U.S.C. §1960: FinCEN MSB + ~50 state MTLs + KYC/AML), and the consumer
+      rails freeze the pattern on sight. Rejected.
+- (b) **Strike-for-Business API integration** — branded, programmatic,
+      revenue-share. Requires Chama to be an incorporated entity with a contract
+      + compliance flow-down. Against ethos (no corp) and unnecessary.
+- (c) **Pay a user-supplied, fiat-converting Lightning Address at claim.** Chama
+      stays a coordinator (BOLT11-OUT at claim, per 2026-04-26); the licensed
+      third party does the fiat conversion entirely under the **user's own**
+      account + KYC + limits. Provider-agnostic; Strike is the flagship US
+      instance, Bitcoin Well and Cash App are drop-in siblings.
+
+**Decision:** (c). The US off-ramp is "pay a fiat-converting Lightning Address,"
+provider-agnostic, with **Strike as the flagship**. Same mechanism as Tando,
+generalized: a fiat-converting Lightning Address is a payout *destination*, never
+a redirect-swap and never a Chama-held balance.
+
+**Rationale:** Zero new custody and zero new money-transmission surface — it is
+literally the existing claim BOLT11-OUT, pointed at an address that happens to
+settle in USD. No incorporation, no API relationship, no KYC flow-down to Chama;
+eligibility/limits/identity live entirely with Strike and the user. Stays true to
+"coordinator, not wallet" and "payment methods are first-class extensible data."
+Provider-agnostic so Chama is never locked to one company — Strike, Bitcoin Well,
+and Cash App are interchangeable LUD-16 endpoints.
+
+**Implications:**
+- New module mirrors `tando-offramp.ts` but **lighter** — a Strike user's
+  `username@strike.me` is already a valid payout destination, so there's no
+  phone→address normalization. Mostly `isStrikeLightningAddress()`, an
+  `isUSPayoutContext()` analog to `isKenyaPayoutContext` (match the `us-usd` /
+  GBF "USA · USD" community family or USD currency), and UX glue. Saved in the
+  shared payout-destinations store like any LN Address.
+- **The user must set Strike receive currency to Cash themselves** — Chama can't
+  set it. Flow = save your Strike Lightning Address as a payout destination + a
+  one-time "flip Strike to receive Cash (USD)" hint. Left on Bitcoin, they
+  receive sats (fine, just not an off-ramp).
+- Chama sends **sats**; the USD amount and any spread are Strike's at receipt.
+  UI shows "≈ $X at Strike's rate," never a guarantee.
+- Rides the same Lightning **gateway pay path** as claim payout (the #9 family) —
+  works wherever the fed has a reachable LN gateway. No new infra. Sidesteps the
+  Tauri `window.open` opener bug (#16) for the pay path (an address paste is a
+  Lightning destination, not a redirect); only an optional "open Strike to sign
+  up" link would hit it.
+- **Availability caveat:** Strike is not in every US state / country and has its
+  own limits; the registry entry should carry availability metadata and degrade
+  gracefully (paste-invoice / other providers).
+- Independent of `EXTERNAL_SWAPS_ENABLED` (Tando precedent) — fiat-converting
+  LN-address off-ramps ride the always-available payout path.
+
+**Status:** Decided (2026-06-26, uncommitted). Implementation tracked in BACKLOG
+("US fiat off-ramp via a fiat-converting Lightning Address"). Not gated on 4.1;
+sequence after it.
+
+---
+
+## 2026-06-27 — "Continuous service" feedback: prepaid subscription is built; open-ended Patreon deferred
+
+**Context:** The first trader asked, unprompted, for "something provided
+continuously" — naming three examples in one breath: "on-request beats," monthly
+"beatbox lessons," and a "Nostr Patreon" for ongoing support, saying they'd use
+Chama as such if it existed. This re-validates a feature already designed
+(PHILOSOPHY §2.6 merchant graduation + principle #7) and ~built at the protocol
+layer — and surfaces that the trader conflated three different mechanisms.
+
+**The three-way split (the key disentangling):**
+- **On-request / commissions** ("a beat when I want one," commission artwork) —
+  repeat *one-off* trades, not recurring at all. Reuses the existing Marketplace
+  **service** fulfillment type + storefront-per-npub. Lightest lift, near-zero
+  new protocol.
+- **Fixed-term subscription** ("monthly lessons for a season") — the feature
+  already built: `SUBSCRIBE` / `PERIOD_RELEASE` / `handleSubscribe` in
+  escrow-client + state-machine, the `canOfferSubscription` gate, extension
+  kinds 38109-38110 designed. **Prepaid-and-released:** the buyer escrows the
+  whole term up front (`totalPeriods × periodAmount === amount`, enforced) and
+  each period releases as delivered. Remaining work is UI + the gate reveal; the
+  Ratings-primitive blocker BACKLOG cited is stale (cleared 2026-06-08).
+- **Open-ended Patreon** ("pay forever, cancel anytime") — the only one that
+  fights the architecture.
+
+**Decision:**
+1. **Reaffirm prepaid-and-released as THE recurring model.** It fits "the wallet
+   is dead — sats exist only in escrow" (#6) and the reputation-gated-trust
+   thesis (#7): the subscriber's whole term is escrowed and disputable per
+   period — a *stronger* promise than Patreon, not a lesser one. UX must say
+   "prepay a season, released as delivered / renewable fixed terms," never
+   "pay-as-you-go forever."
+2. **Surface the built subscription feature** behind `canOfferSubscription` —
+   sequence it now that a real graduated-track seller is asking. UI only.
+3. **Ship commissions cheaply** via the service type + storefront-per-npub.
+4. **Defer open-ended recurring.** True pull-recurring would need NWC budgets
+   (subscriber authorizes "up to X/month to this npub"; already flagged in
+   BACKLOG's NWC follow-up), which reintroduces a *standing authorization* — an
+   idle-balance-adjacent capability that rubs against #6. Not built until that
+   ethos tension is resolved on purpose; this entry is the placeholder.
+
+**Implications:** No code this session — capture only (BACKLOG items updated:
+recurring-unlock blocker marked cleared + field-validated; new on-request /
+commission item). The first-trader ask is itself the signal the graduation gate
+was designed to answer — earned authority showing up in the wild on day one.
+
+**Status:** Decided (2026-06-27, capture-only). Build sequencing tracked in
+BACKLOG; open-ended/NWC recurring parked pending an explicit ethos decision.
+
+---
+
+## 2026-07-01 — Stage-2 bond-custody wire: two new kinds, encrypt the descriptor, ceremony on the Me tab
+
+Stage 2 of the multisig bond wiring adds the off-chain coordination layer — a
+`BondCustody` store + NIP-44 descriptor/PSBT transport + the bonding ceremony.
+Three wire/UX questions were genuinely open (surfaced by CC, decided by Jetty on
+the verifier chat's recommendation). **Load-bearing invariant across all three:**
+Stage-2 security rests on the keystone re-fetching the kind-38132 attestations
+LIVE and rebuilding — the wire descriptor is NEVER trusted for keys/address.
+
+**Decision:**
+1. **Allocate Nostr kinds 38133 (descriptor) + 38134 (PSBT) — distinct
+   replaceability.** 38133 = parameterized-replaceable, one CURRENT descriptor per
+   bond (`d=bondId`, newest-wins, like 38130/38132). 38134 = the co-sign
+   artifacts, keyed `d=bondId` PER AUTHOR so the owner's proposal + each
+   custodian's partial are three distinct addressable events that never clobber
+   (queryable via `authors:[trio] + #d:[bondId]` — no `#e`-filter widening of the
+   shared relay type; the on-chain tx is the permanent record). *Reasoning:* the
+   3813x band is Chama's governance/bond namespace, 38133/38134 are collision-free,
+   and two kinds cleanly separate the replaceable descriptor from the append
+   co-sign set. Both recorded in the `bonds.ts` kind-allocation ledger.
+2. **Encrypt the descriptor to the trio (NIP-44), not plaintext — and the bondId
+   is OPAQUE, never address-derived.** *Reasoning:* this is a PRIVACY call, not a
+   security one — the keystone never trusts the wire descriptor (it re-fetches
+   38132 live + recomputes), so plaintext-vs-encrypt changes nothing about safety.
+   Encrypting removes a permanent, queryable `npub → BTC-address → amount`
+   deanonymization index off the relays. The `d`/`p` tags stay clear for routing;
+   only the content is NIP-44'd — which FORCES an opaque bondId (`bond_<random>`),
+   because an address-derived id would leak the funding address straight back out
+   in the clear `d`-tag and defeat the encryption. Public proof-of-backing
+   (Phase 2B) is a separate, deliberate, minimal disclosure — not now.
+3. **The "Post Your Bond" ceremony lives on the Me tab (cabinet-only), gated +
+   default-off, built to relocate to the Dashboard.** Behind `useCabinetMembership()`
+   + a `SHOW_BOND_CEREMONY` flag (default false). *Reasoning:* the Dashboard is the
+   bond's designed long-term home (stats / ratings / standing / bond) but is still
+   a placeholder, so Me — where a user manages their own identity/standing — is the
+   natural interim home and a clean stepping-stone. Kept OFF the Browse/Create trade
+   flow (arbiter-only, dormant) and OFF the arbiter application form (posting a bond
+   is standing-management, not applying).
+
+**Implications:** Stage 2 stays fund-safe and behind the funding boundary (the
+ceremony stops at showing the recomputed funding address; funding + LOCK + the live
+co-sign are Stage 3, Jetty's hard stop). `BONDS_ENFORCED` stays false; the
+test-cabinet seam stays DEV-only. The verifier chat independently confirmed the
+built A/B/C core honors decisions 1+2 (opaque bondId, encrypted content,
+`verifyReceivedDescriptor` rebuilds from live-fetched 38132, store recompute-on-load
+tamper gate); CC's own adversarial pass on the store+transport is the second gate.
+
+**Status:** Decided (2026-07-01, Jetty on verifier recommendation). Kinds +
+encryption + opaque-bondId built in Sub-steps A/B/C (predeploy green, typecheck
+clean); ceremony (Sub-steps D/E/F) pending CC's adversarial results.
+
+---
+
+## 2026-07-01 — Verticals: cut Lending, add "Work" + Community Pool Sats (CPS)
+
+Direction capture (not built). Lending was believed to be the global-south flagship; the
+intuition to cut it is right, and the principle underneath also picks the replacements.
+
+**The principle:** Chama's escrow/arbiter/reputation machinery solves *simultaneous-exchange*
+trust ("will the counterparty deliver NOW"), not *future-promise* trust ("will they repay
+LATER"). Every vertical that works is the former (exchange, bill-pay, goods, work). Lending is
+the latter — once the money disburses the machinery has nothing to grip, which is why every
+P2P lending system needs collateral, KYC/legal recourse, or a tight real-world social graph.
+The graph is exactly what makes REAL chamas' lending work; Chama-the-app is pseudonymous +
+global and lacks it by design, so "enforce repayment without going social-hard" is structurally
+impossible. Collateral/LTV reintroduces liquidations that harm the exact global-south users
+(BTC dips → seize their BTC); "keep it stable" = stablecoins/custody = a different, non-Chama
+product.
+
+**Decision:**
+1. **Cut Lending** as a vertical (gut-check any usage/default data first). Crack the door only
+   for a future *community-internal* form (a real chama with the social graph) — a v3 nicety,
+   not a category.
+2. **"Work"** — elevate services/labor to a first-class vertical, named simply **Work**. Small
+   discrete jobs (fix / build / tutor / translate / deliver): poster funds escrow → worker
+   submits proof → poster releases (arbiter on dispute). Purest escrow fit, ~zero new machinery,
+   huge informal-economy TAM, and the escrow IS the recourse — the exact "get paid reliably"
+   pain lending never solved. Scope = small jobs, NOT recruiting/large offers. "Work" beats
+   "Jobs/Gigs" (dignity + universality) and "social work" (too cozy).
+3. **Community Pool Sats (CPS)** — the true "chama" unlock: >1 npub pool sats toward ONE fixed,
+   transparent **destination** (a merchant/store LUD-16, or a specific address), released when
+   the goal is met, refunded all-or-nothing if not. ⭐ The **destination-lock** is the whole
+   insight — the sats are earmarked to a real good and CANNOT be redirected to the requester's
+   discretionary wallet, which is what makes it *purchase-assistance / purposed remittance*, not
+   begging, and is exactly the trust problem escrow CAN solve. CPS is **lending's INTENT (help
+   someone afford a thing) delivered via escrow's STRENGTH (destination-locked, simultaneous,
+   disputable) instead of lending's fatal weakness (future repayment).** Reuses the existing
+   LUD-16 payout rail (Tando/ChapSmart/DestinationPicker) + escrow + ratings.
+
+**Reverse-lending anti-abuse:** where lending screened the *borrower's* repayment, CPS screens
+the *requester's genuineness*. (a) skin-in-the-game — requester pre-locks a % of the goal (e.g.
+50%); (b) ratings on the requester + on "did the help materialize"; (c) tier caps (a newcomer
+asks small; climbs by fulfilling genuine, destination-verified requests — the mirror of
+lending's tiers). **⚠ CENTRAL hard problem to design BEFORE building: destination collusion** —
+a requester colluding with a sock-puppet "merchant" LUD-16 they control turns the pool back into
+free cash. So CPS must lean on VERIFIED merchant destinations (a rated storefront), donor
+confirmation of receipt, and caps to bound the blast radius. This is CPS's analogue of lending's
+enforcement problem — but escrow-to-destination shrinks it enormously vs. lending's total
+absence of recourse.
+
+**⭐ The anchor when we build this — the TRIANGLE OF STAKES (the real collusion fix):** capping the
+requester's front-% isn't what closes the hole — it's that the **MERCHANT is a third stakeholder.**
+Route the payout to a *registered* merchant (bootstrap: reuse an offramp's merchant registry, e.g.
+`pay.chapsmart.com` — registering is a real process = a vetting signal, and the payout lands in a
+**KYC'd mobile-money account** = a real identity + recourse). Then a scam needs a registered
+merchant *willing to burn their registration and rating* — not just a throwaway lud16. So the
+defense is three independent stakes, and capping any one leaves the other two: **requester**
+(front-% by tier + rating), **merchant** (registration + rating + KYC'd payout), **donors**
+(bounded, all-or-nothing refundable). The durable vetting oracle is Chama's OWN merchant reputation
+(a fulfilled-order track record) — ChapSmart-registration is the cold-start, region-locked to where
+they operate, NOT the endgame. A merchant-landing-page-as-free-bond is fine defense-in-depth but
+weak alone (a cheap page is forgeable) — never the gate. Front-% tiers (Jetty): newbie ≥60% / medium
+50% / OG 30%, ALL paying a verified merchant. **Base demand is the mundane universal case** — a
+group splitting/pooling ONE bill (restaurant, family need), cash/mobile-money today; stranger-help
+is the viral upside, and the single-payer merchant-rail is the lower-risk proven-demand hedge under
+the whole thing.
+
+**Escrow structure:** CPS is bounded / all-or-nothing (Kickstarter-shaped): fund X toward
+destination D by deadline T; each donor's contribution is an INDEPENDENT escrow bound to the
+goal, released together on success or refunded on miss. This SIDESTEPS the escrow complexity of
+a recurring savings-ROSCA (long-lived escrow + dynamic add/remove membership) — the deadline
+keeps escrow duration short (Fedimint-friendly), and independent per-donor escrows avoid a
+shared mutable multi-party lock. The savings-ROSCA (monthly save-and-release) is the hard-mode
+one and is explicitly NOT the plan.
+
+**Alignment:** CPS digitizes harambee / susu-for-a-purchase (collective contribution toward a
+member's need) non-custodially — the chama heritage done right (collective *purpose*, not
+loans); a structured, trust-minimized "help a pleb buy a thing." Perfect global-south fit.
+⭐ Note (corrected): the LUD-16 offramp underneath is itself a **POS-less merchant-acceptance
+rail** — a global-south merchant's phone-number-lud16 makes them payable worldwide with local
+cash in hand (no terminal / acquiring bank / BTCPay; a leapfrog, not a catch-up, like mobile
+money over the bank branch). So it DOES replace the MERCHANT-side POS stack; what it does NOT
+replace is the offramp PROVIDER — the *trusted settlement layer*, so the rail is only as wide
+as offramp coverage. CPS is the many-payer layer on that same endpoint (see PHILOSOPHY §2.10).
+
+**Implications:** No code this session — capture only. BACKLOG updated (Work + CPS under Product
+Expansion; Lending scratched). PHILOSOPHY §2.10 records the escrow-fit principle. Open design
+before CPS ships: destination verification, sybil/farming resistance, the all-or-nothing refund
+path (fund-safety-grade), the tier model.
+
+**Status:** Direction captured (2026-07-01). Work = near-term elevation of existing
+services/commission surfaces; CPS = designed-next vertical (needs the anti-collusion design
+first). Lending cut pending a data gut-check.
+
+## 2026-07-03 — Private community federations over Nostr (ultra-private chamas) + the cross-fed lockdown
+
+**Decision (direction captured):** let a user privately share a **federation invite** with *their
+community* over Nostr — a **NIP-44-encrypted event `#p`-tagged to the chosen members** (the exact
+pattern the bond descriptor already uses), so a group can spin up or adopt their own Fedimint and
+hand it peer-to-peer to exactly the people they choose. It never hits a public index, never touches
+other Chama clients. Aligns with (and privately extends) the emerging **NIP-87** ecash-mint-
+discoverability draft (public kind 38173 = fedimint announcement, 38172 = cashu, 38000 = recommend);
+our variant is the *encrypted, scoped* one — the cypherpunk half NIP-87 leaves open.
+
+**⭐ LOCKED (Jetty, 2026-07-03) — a private community fed is a self-contained economy; fed-switching
+INSIDE it is disabled, by design, not by limitation.** The "cross-fed trading is hard" caveat is a
+**non-issue**: nobody in a private, trust-scoped fed wants to switch out — the boundary *is* the
+privacy + trust model. So a private fed must **completely lock down** fed-switching for its members
+(no switch-out surface; the fed is the whole world for that group). This is a feature: it's what
+makes the group's economy sovereign and its privacy airtight.
+
+**Why it's on-ethos (not scope creep):** "chama" *means* a community savings/economic group; a
+group running its own fed is Fedimint's own thesis (community self-custody by people who know their
+guardians — strictly *safer* than discovering unknown public feds). It reuses everything we have:
+multi-fed support + `federation-invites.ts`, NIP-44 envelopes, and the new peg-out rail.
+
+**Recruitment thesis (Jetty):** over time this may be the **best new-user on-ramp** — you join
+Chama because a friend hands you their community's private fed, not because you found a public
+marketplace. Trust travels through the invite. Private community feds could become the primary
+top-of-funnel, with the public marketplace as the outer ring.
+
+**Status:** direction + the cross-fed lockdown LOCKED; no code this session. Brief:
+`design/mockups/chama-private-community-feds-brief.md`. Open design before build: the encrypted-
+invite kind + "join from invite" surface, the hard fed-switch lockdown for private-fed members, and
+how trades/CPS scope cleanly to the single fed.
+
+## 2026-07-03 — New vertical: a group SAVINGS feature (individual custody + social read-only)
+
+**Decision (on-ethos, LOCKED as a designed-next vertical; UI name = "Stack"):** a
+private group savings surface where friends each keep sats **in their own ecash** and see each
+other's *progress* read-only (NIP-44 encrypted, opt-in), then **graduate on-chain privately** (the
+peg-out rail) when the stack is meaningful. "A community wallet with individual rights" (Jetty).
+
+**⭐ The distinction that makes it clean — and different from CPS:** this is **individual custody +
+social visibility**, NOT a pooled pot. CPS = the *shared* pot (group-owned sats toward one goal);
+this = *personal* stacks side-by-side with a shared window. They're complementary halves of what a
+chama actually is: the shared treasury and everyone's own stack. Keeping them conceptually separate
+is the whole point — no shared mutable custody here, so it never inherits CPS's pooling complexity.
+
+**Why it's on-ethos, not a wallet-scope-creep:** "chama" *means* a savings group — this is the app
+living up to its name. It's **escrow-ethos-clean**: nobody holds anyone else's money, so there's no
+future-promise trust (the exact line that killed Lending — this stays on the right side of it). It
+reuses everything: ecash (the stack), NIP-44 (the private read-only share), peg-out (graduate to
+self-custody — the "move it on-chain when the time is right" moment), and a private community fed as
+the natural container (a savings circle basically *is* a private-fed group).
+
+**Design guardrails (Jetty + verifier):**
+- **Read-only + opt-in + small-sats framing.** Default to sharing *progress/streak* ("stacked 8
+  weeks running"), not a raw balance — reframes it from "watch my net worth" to "watch us build the
+  habit" (safer + more motivating). Visibility is per-person and opt-in.
+- **Chat: skip or keep thin/optional.** People have their own comms; don't reinvent messaging.
+- **Same app, not a separate repo.** Shares the fed stack, NIP-44, peg-out, the name, and — most
+  importantly — the community; a separate app would fork the userbase and duplicate the stack.
+- **Timing:** designed-next vertical alongside Work + CPS; POST-launch, not a pre-launch distraction.
+
+**Status:** concept LOCKED (2026-07-03). No code. BACKLOG updated under Product Expansion.
+
+**⭐ UI NAMES LOCKED (Jetty, 2026-07-03) — short labels that fit a small UI (the CBP lesson):**
+the three post-launch verticals are **Work** (services/labor — already locked), **Chip In**
+(the pooling/crowdfund feature, formerly "Collaborative Payment Splitting" / Community Pool Sats /
+CPS — the shared pot toward one destination), and **Stack** (the group savings feature — individual
+custody + social read-only). Long internal names may persist in docs; the *UI* uses Work / Chip In /
+Stack.
+
+## 2026-07-03 — ⭐ BOND MODEL SEALED: single-key timelock COMMITMENT (Tier 0.1); ladder retired
+
+**The pivot.** CC's adversarial pass (confirmed independently by the verifier) proved the OG-cabinet
+2-of-3 is self-dealing: three people share one keyset, so **any two control all three bonds** (return
+their own, steal the third's — our own Stage-3a Row 4 proved that spend on Mutinynet), the §11.1 MAD
+story is **cryptographically false** (colluders recover their own bonds, lose nothing), and strand
+doubles as an extortion lever. No app code can fix a script — a dishonest signer just hand-signs.
+Reasoning to the root with Jetty landed on a **different, better design**, not a patch.
+
+**SEALED — v1 bond = a single-key TIMELOCK COMMITMENT.** Each arbiter locks **their OWN sats to their
+OWN key until term-end T** — one Taproot leaf (`<T> CLTV DROP <ownerKey> CHECKSIG`). No cabinet, no
+2-of-3, no custody, no descriptor / inbox / co-sign. **Collusion-impossible by construction** (there
+is no shared custody to collude over — nobody but the owner ever holds a key to their own bond). A
+chama can run with **ONE arbiter**: the coordination barrier drops to zero (a bootstrapping unlock for
+places with few bitcoiners); the capital commitment stays — that *is* the signal.
+
+**What it deliberately gives up (sealed honestly — no second MAD overclaim):** no slashing, no
+seizure, no victim-compensation *from the bond* (the owner always reclaims at T). The deterrent is
+**locked capital (illiquidity) + reputation + non-renewal + trade caps.** It deters a reputation-
+caring arbiter completely; it does NOT stop a burn-the-identity scammer — reputation only bites those
+who want a future. This is the *right* trade for the philosophy: 99% happy path, arbiters paid to nail
+the 1% fast and get publicly rated; the bond was never meant to be a seizure pool, it's a **public,
+costly, honest signal**.
+
+**⭐ GOLD — "bonded" is NOT binary; it's HOW MUCH, for HOW LONG (Jetty).** A tiny short bond is a weak
+signal; a large long one is strong. The market + ratings price it — bonded is a *magnitude*, not a
+badge. **Terms should be deliberately LONG:** normies are high-time-preference, so a long lock weighs
+on an arbiter's mind (they want their sats back and can't claw them early — "time feels so far away
+when you lock"), which is precisely the honesty filter. **It is very hard to be a low-time-preference
+lurking bad actor.** Ratings self-promote the truth: traders (esp. for big trades) gravitate to the
+best-ranked, longest-standing arbiters. The genesis arbiter (Jetty) bonds the **most, for the
+longest**, to lead by example. Reputation built over time = the longest chain of honest arbiters.
+
+**Cabinet's two jobs, separated:** (a) bond custody = **DELETED** (it was the collusion hole); (b) a
+*pool* of arbiters for coverage/redundancy = a separate OPERATIONAL choice, **not required** by the
+bond. Allow one arbiter; don't force more.
+
+**Ladder retired.** 0.2 (≥5 cabinets) ❌, 0.3 (external key on a live multisig) ❌ (belonged to the
+dropped model — a live external key can't give trustless slashing), Tier 1 (oracles) ❌, Tier 3 (CTV,
+not on mainnet) → parked as a zero-cost Mutinynet curiosity for later. **Only Tier 2 kept as the
+optional FUTURE upgrade:** commitment + *trustless slashing* (best of both worlds) via an **open
+STRANGER ceremony** — participants presign the only allowed futures (return-to-owner, slash-to-pool),
+then **delete their keys** (zero ongoing power, so strangers are ideal — the more diverse, the surer
+one deleted honestly). Added ONLY IF reputation ever proves too soft; heavy, careful implementation.
+
+**Immediate:** the false MAD ceremony copy is REMOVED (`BondCeremonyModal.tsx` TrustCopy, interim
+honest copy + `TODO(commitment-bond)`). **Invariant:** no real-sats OG bond funds until the single-key
+timelock ships. **Next:** build the one-leaf timelock bond, prove it on Mutinynet (a "spend-before-T →
+REJECTED" harness row), then the test-sats 3-npub e2e over the new leaf. Brief:
+`chama-bond-collusion-closure-brief.md` (the ladder + why we walked around it).

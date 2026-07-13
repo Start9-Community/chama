@@ -20,15 +20,22 @@
 // that outcome — not the outcome itself.
 
 import { Role, Outcome } from "../escrow-engine/types.js";
+import { translate, getCurrentLang } from "../i18n/index.js";
 
 export type Fulfillment = "physical" | "service" | "digital";
 
 export type Category = "marketplace" | "p2p-trade" | "bill-pay" | "lending" | "raw-escrow";
 
+// i18n (namespace "labels"): the tables below hold i18n KEYS, not display
+// strings — safe at module load. getVoteLabel resolves the key through
+// translate(getCurrentLang(), …) at call time, so the button re-renders in the
+// live language. English output is byte-identical to the pre-i18n strings
+// (tests.ts asserts on it).
+
 export interface VotePair {
-  /** Button text when voting RELEASE */
+  /** i18n key for the button text when voting RELEASE */
   release: string;
-  /** Button text when voting REFUND */
+  /** i18n key for the button text when voting REFUND */
   refund: string;
 }
 
@@ -42,12 +49,12 @@ export interface CategoryLabels {
 }
 
 const NEUTRAL: CategoryLabels = {
-  buyer:   { release: "Release sats", refund: "Refund sats" },
-  seller:  { release: "Release sats", refund: "Refund sats" },
-  arbiter: { release: "Release sats", refund: "Refund sats" },
+  buyer:   { release: "labels.voteNeutralRelease", refund: "labels.voteNeutralRefund" },
+  seller:  { release: "labels.voteNeutralRelease", refund: "labels.voteNeutralRefund" },
+  arbiter: { release: "labels.voteNeutralRelease", refund: "labels.voteNeutralRefund" },
 };
 
-const ARBITER_NEUTRAL: VotePair = { release: "Side with buyer", refund: "Side with seller" };
+const ARBITER_NEUTRAL: VotePair = { release: "labels.voteSideWithBuyer", refund: "labels.voteSideWithSeller" };
 
 // Composite key: `${category}:${fulfillment}` — flat table, trivially
 // extensible. Marketplace is the only vertical with three entries; the
@@ -56,26 +63,26 @@ const ARBITER_NEUTRAL: VotePair = { release: "Side with buyer", refund: "Side wi
 const TABLE: Record<string, CategoryLabels> = {
   // ── Marketplace — physical goods ────────────────────────────────────
   "marketplace:physical": {
-    buyer:  { release: "I received it",  refund: "I didn't get it" },
-    seller: { release: "Item delivered", refund: "Buyer never received" },
+    buyer:  { release: "labels.voteMarketplacePhysicalBuyerRelease",  refund: "labels.voteMarketplacePhysicalBuyerRefund" },
+    seller: { release: "labels.voteMarketplacePhysicalSellerRelease", refund: "labels.voteMarketplacePhysicalSellerRefund" },
     arbiter: ARBITER_NEUTRAL,
   },
   // ── Marketplace — service ───────────────────────────────────────────
   "marketplace:service": {
-    buyer:  { release: "I received the service", refund: "Service not delivered" },
-    seller: { release: "Service rendered",       refund: "Buyer didn't accept" },
+    buyer:  { release: "labels.voteMarketplaceServiceBuyerRelease",  refund: "labels.voteMarketplaceServiceBuyerRefund" },
+    seller: { release: "labels.voteMarketplaceServiceSellerRelease", refund: "labels.voteMarketplaceServiceSellerRefund" },
     arbiter: ARBITER_NEUTRAL,
   },
   // ── Marketplace — digital goods ─────────────────────────────────────
   "marketplace:digital": {
-    buyer:  { release: "I received the file", refund: "File never arrived" },
-    seller: { release: "Delivered",           refund: "Buyer didn't receive" },
+    buyer:  { release: "labels.voteMarketplaceDigitalBuyerRelease",  refund: "labels.voteMarketplaceDigitalBuyerRefund" },
+    seller: { release: "labels.voteMarketplaceDigitalSellerRelease", refund: "labels.voteMarketplaceDigitalSellerRefund" },
     arbiter: ARBITER_NEUTRAL,
   },
   // ── P2P — fiat exchange (always "service") ──────────────────────────
   "p2p-trade:service": {
-    buyer:  { release: "I sent the fiat", refund: "Cancel — never sent fiat" },
-    seller: { release: "Fiat received",   refund: "Fiat not received" },
+    buyer:  { release: "labels.voteP2pBuyerRelease",  refund: "labels.voteP2pBuyerRefund" },
+    seller: { release: "labels.voteP2pSellerRelease", refund: "labels.voteP2pSellerRefund" },
     arbiter: ARBITER_NEUTRAL,
   },
   // ── Bill Pay — the VOLUNTEER (buyer role) pays the owner's fiat bill
@@ -90,8 +97,8 @@ const TABLE: Record<string, CategoryLabels> = {
   //    read as a role reversal on the device pass; routing was always right,
   //    only these labels + the turn order in decisions.ts were inverted.) ──
   "bill-pay:service": {
-    buyer:  { release: "I paid the bill as a volunteer", refund: "Cancel — I can't pay this bill" },
-    seller: { release: "My bill was paid",               refund: "Bill not paid" },
+    buyer:  { release: "labels.voteBillPayBuyerRelease",  refund: "labels.voteBillPayBuyerRefund" },
+    seller: { release: "labels.voteBillPaySellerRelease", refund: "labels.voteBillPaySellerRefund" },
     arbiter: ARBITER_NEUTRAL,
   },
   // ── Lending — first cycle (loan disbursement). The borrower's first
@@ -100,8 +107,8 @@ const TABLE: Record<string, CategoryLabels> = {
   //    aware borrower says when their situation has changed. The
   //    repayment cycle is a separate Option B trade with reversed roles.
   "lending:service": {
-    buyer:  { release: "Loan received — I'll repay on time", refund: "Cancel — I can't take this loan right now" },
-    seller: { release: "Loan disbursed", refund: "Borrower didn't accept" },
+    buyer:  { release: "labels.voteLendingBuyerRelease",  refund: "labels.voteLendingBuyerRefund" },
+    seller: { release: "labels.voteLendingSellerRelease", refund: "labels.voteLendingSellerRefund" },
     arbiter: ARBITER_NEUTRAL,
   },
 };
@@ -121,7 +128,10 @@ export function getVoteLabel(
     role === Role.BUYER  ? entry.buyer  :
     role === Role.SELLER ? entry.seller :
     (entry.arbiter ?? ARBITER_NEUTRAL);
-  return outcome === Outcome.RELEASE ? pair.release : pair.refund;
+  return translate(
+    getCurrentLang(),
+    outcome === Outcome.RELEASE ? pair.release : pair.refund,
+  );
 }
 
 /** Default fulfillment for a given category. Marketplace defaults to

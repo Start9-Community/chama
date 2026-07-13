@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 /** Copy text to the clipboard, robustly. navigator.clipboard is undefined or a
  *  no-op in some Tauri/Capacitor webviews (same class as window.confirm), so
@@ -36,17 +37,20 @@ function execCommandCopy(text: string): void {
 // `style` to keep its look. (Used app-wide so no copy button is a dead button.)
 export function CopyButton({
   value,
-  label = "Copy",
-  copiedLabel = "✓ Copied!",
+  label,
+  copiedLabel,
   style,
   disabled,
 }: {
   value: string;
+  /** Defaults to a localized "Copy". */
   label?: string;
+  /** Defaults to a localized "✓ Copied!". */
   copiedLabel?: string;
   style?: React.CSSProperties;
   disabled?: boolean;
 }) {
+  const { t } = useT();
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -74,7 +78,7 @@ export function CopyButton({
         cursor: disabled ? "default" : "pointer",
       }}
     >
-      {copied ? copiedLabel : label}
+      {copied ? (copiedLabel ?? t("browse.copiedDefault")) : (label ?? t("common.copy"))}
     </button>
   );
 }

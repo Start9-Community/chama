@@ -29,6 +29,7 @@ import {
   shouldQuoteEstimatedFiat,
   type AmountDisplayMode,
 } from "../amount-display.js";
+import { useT, type TFunc } from "../../i18n/index.js";
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
 // chama_browse_amber_tint_sorted. Quiet, not alarmist — it's a
@@ -60,6 +61,7 @@ export function TradeCard({
    *  Undefined for single-unit listings (no badge). */
   stockLeft?: number;
 }) {
+  const { t } = useT();
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
   const nowSec = Math.floor(Date.now() / 1000);
@@ -90,10 +92,12 @@ export function TradeCard({
   const counterpartyPk = viewerRole === Role.SELLER ? participants[Role.BUYER]
     : viewerRole === Role.BUYER ? sellerPubkey : null;
   const counterpartyLine = counterpartyPk
-    ? `${viewerRole === Role.SELLER ? "Buyer" : "Seller"} · ${profileNameFor(profileNames, counterpartyPk, kind0Enabled) ?? shortPubkey(counterpartyPk)}`
+    ? t(viewerRole === Role.SELLER ? "card.buyerLine" : "card.sellerLine", {
+        name: profileNameFor(profileNames, counterpartyPk, kind0Enabled) ?? shortPubkey(counterpartyPk),
+      })
     : null;
   const sellerContextLine = !isParticipant && sellerPubkey && state.category !== "marketplace"
-    ? `Seller · ${sellerName ?? shortPubkey(sellerPubkey)}`
+    ? t("card.sellerLine", { name: sellerName ?? shortPubkey(sellerPubkey) })
     : null;
   const status = STATUS[state.status] ?? STATUS.CREATED;
   // v4.1 (#15) unread badge: count messages from the other party since this device
@@ -108,7 +112,7 @@ export function TradeCard({
   const chatUnread = unreadChatForTrade(state, myRoleForUnread);
   // v4.1 (#12): CBP bill type, resolved for display (icon + label). Null elsewhere.
   const billTypeChip = state.category === "bill-pay" ? billTypeDisplay(state.billType) : null;
-  const timeLine = compactJoinHoldRemaining(state, nowSec) ?? compactTimeRemaining(state, nowSec);
+  const timeLine = compactJoinHoldRemaining(state, nowSec, t) ?? compactTimeRemaining(state, nowSec, t);
   const fiatLine = state.fiatAmount != null && state.fiatCurrency
     ? formatFiatAmount(state.fiatAmount, state.fiatCurrency)
     : null;
@@ -125,8 +129,8 @@ export function TradeCard({
   const storefrontImages = isStorefrontTile
     ? menuItems.map(item => item.imageDataUrl).filter((src): src is string => !!src)
     : [];
-  const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null) : null;
-  const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, fiatFloor) : null;
+  const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null, t) : null;
+  const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, fiatFloor, t) : null;
   const listingCurrency = listingFiatCurrency(state, fiatFloor, listingCommunity?.currency);
   const estimatedCurrency = resolveEstimatedFiatCurrency({
     viewerCurrency: quoteCurrency,
@@ -137,7 +141,11 @@ export function TradeCard({
     listingCurrency,
   });
   const fiatPrimary = fiatLine
-    ?? (fiatFloor ? `${hasMenu ? "from " : ""}${formatFiatAmount(fiatFloor.amount, fiatFloor.currency)}` : null);
+    ?? (fiatFloor
+      ? (hasMenu
+          ? t("card.fromFiat", { amount: formatFiatAmount(fiatFloor.amount, fiatFloor.currency) })
+          : formatFiatAmount(fiatFloor.amount, fiatFloor.currency))
+      : null);
   const estimatedFiatPrimary = (quoteViewerFiat || !fiatPrimary) && estimatedCurrency
     ? estimatedFiatPrimaryLabel({
         amountMsats: state.amountMsats,
@@ -147,6 +155,7 @@ export function TradeCard({
         hasMenu,
         usdPerBtc: btcPrice.usd,
         usdFiatRates: fiatRates.rates,
+        t,
       })
     : null;
   const displayFiatPrimary = quoteViewerFiat
@@ -160,7 +169,7 @@ export function TradeCard({
     : fiatLine ?? (
       hasMenu
         ? menuLine
-        : state.category === "marketplace" ? fulfillmentLabel(state.fulfillment) : null
+        : state.category === "marketplace" ? fulfillmentLabel(state.fulfillment, t) : null
     );
   const previewArbiterPk = state.status === EscrowStatus.CREATED
     && !participants[Role.ARBITER]
@@ -180,7 +189,7 @@ export function TradeCard({
       position: "relative", isolation: "isolate",
     }}>
       {chatUnread > 0 && (
-        <span aria-label={`${chatUnread} unread message${chatUnread === 1 ? "" : "s"}`} style={{
+        <span aria-label={chatUnread === 1 ? t("card.unreadMessageOne") : t("card.unreadMessageMany", { count: chatUnread })} style={{
           position: "absolute", top: 8, right: 8, zIndex: 2,
           display: "inline-flex", alignItems: "center", gap: 3,
           minWidth: 18, height: 18, padding: "0 5px", boxSizing: "border-box",
@@ -252,7 +261,7 @@ export function TradeCard({
               lineHeight: 1.2,
             }}>
               <span style={{ fontSize: 11, lineHeight: 1 }}>{CAT_ICON[state.category] || "📦"}</span>
-              {shortCategoryLabel(state.category)}
+              {shortCategoryLabel(state.category, t)}
             </span>
             {billTypeChip && billTypeChip.label !== state.description && (
               <span style={{
@@ -283,7 +292,7 @@ export function TradeCard({
                 border: `1px solid ${T.accent}33`,
                 fontFamily: T.mono, fontWeight: 800,
               }}>
-                {menuBadgeLabel(state.category)}
+                {menuBadgeLabel(state.category, t)}
               </span>
             )}
             {/* #7 Stage 3: derived stock on a multi-unit listing. >0 → "N left";
@@ -296,7 +305,7 @@ export function TradeCard({
                 border: `1px solid ${(stockLeft > 0 ? T.green : T.amber)}55`,
                 fontFamily: T.mono, fontWeight: 800,
               }}>
-                {stockLeft > 0 ? `${stockLeft} left` : "reserved"}
+                {stockLeft > 0 ? t("card.stockLeft", { count: stockLeft }) : t("card.reserved")}
               </span>
             )}
             {state.category === "marketplace" && sellerPubkey && (
@@ -311,7 +320,7 @@ export function TradeCard({
               }}>
                 <span aria-hidden="true">★</span>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  Store · {sellerName ?? shortPubkey(sellerPubkey)}
+                  {t("card.storeLine", { name: sellerName ?? shortPubkey(sellerPubkey) })}
                 </span>
               </span>
             )}
@@ -416,7 +425,7 @@ export function TradeCard({
             }}>
               {hasMenu && !exchangeRange && !showFiatPrimary && (
                 <span style={{ fontSize: 10, color: T.muted, fontWeight: 800, lineHeight: 1 }}>
-                  from
+                  {t("card.from")}
                 </span>
               )}
               {showFiatPrimary ? (
@@ -457,7 +466,7 @@ export function TradeCard({
               textOverflow: "ellipsis",
               whiteSpace: "nowrap" as const,
             }}>
-              accepts {paymentMethodsLine}
+              {t("card.accepts", { methods: paymentMethodsLine })}
             </div>
           )}
           {premiumLine && (
@@ -502,7 +511,7 @@ export function TradeCard({
               width: 6, height: 6, borderRadius: "50%",
               background: status.c, boxShadow: `0 0 8px ${status.c}66`,
             }} />
-            {compactStatusLabel(state, nowSec, pubkey)}
+            {compactStatusLabel(state, nowSec, pubkey, t)}
           </span>
           {timeLine && (
             <div style={{
@@ -528,6 +537,7 @@ function shortPubkey(pubkey: string): string {
 // copy is the bonus that makes it shareable for a dispute or support thread.
 function TradeIdLine({ id }: { id: string }) {
   const [copied, setCopied] = useState(false);
+  const { t } = useT();
   return (
     <div
       onClick={(e) => {
@@ -536,7 +546,7 @@ function TradeIdLine({ id }: { id: string }) {
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}
-      title="Tap to copy trade ID"
+      title={t("card.tapToCopyTradeId")}
       style={{
         marginTop: -2, marginBottom: 9,
         display: "inline-flex", alignItems: "center", gap: 5, maxWidth: "100%",
@@ -545,7 +555,7 @@ function TradeIdLine({ id }: { id: string }) {
       }}
     >
       <span style={{ color: copied ? T.green : T.muted, flexShrink: 0 }}>
-        {copied ? "✓ copied" : "ID"}
+        {copied ? t("card.copied") : t("card.idLabel")}
       </span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const, opacity: 0.85 }}>
         {id}
@@ -576,40 +586,46 @@ function TradeTimeLine({ createdAt }: { createdAt: number }) {
   );
 }
 
-function shortCategoryLabel(category: string): string {
-  if (category === "p2p-trade") return "Exchange";
-  if (category === "bill-pay") return "Com. Bill Pay";
-  if (category === "marketplace") return "Market";
-  if (category === "lending") return "Lending";
-  if (category === "raw-escrow") return "Raw";
+function shortCategoryLabel(category: string, t: TFunc): string {
+  if (category === "p2p-trade") return t("card.categoryExchange");
+  if (category === "bill-pay") return t("card.categoryBillPay");
+  if (category === "marketplace") return t("card.categoryMarket");
+  if (category === "lending") return t("card.categoryLending");
+  if (category === "raw-escrow") return t("card.categoryRaw");
   return category;
 }
 
-function fulfillmentLabel(fulfillment: EscrowState["fulfillment"]): string {
-  if (fulfillment === "physical") return "Physical";
-  if (fulfillment === "digital") return "Digital";
-  return "Service";
+function fulfillmentLabel(fulfillment: EscrowState["fulfillment"], t: TFunc): string {
+  if (fulfillment === "physical") return t("card.fulfillmentPhysical");
+  if (fulfillment === "digital") return t("card.fulfillmentDigital");
+  return t("card.fulfillmentService");
 }
 
-function menuBadgeLabel(category: string): string {
-  if (category === "p2p-trade") return "☰ Options";
-  if (category === "bill-pay") return "☰ Bills";
-  if (category === "lending") return "☰ Loans";
-  return "☰ Store";
+function menuBadgeLabel(category: string, t: TFunc): string {
+  if (category === "p2p-trade") return t("card.menuBadgeOptions");
+  if (category === "bill-pay") return t("card.menuBadgeBills");
+  if (category === "lending") return t("card.menuBadgeLoans");
+  return t("card.menuBadgeStore");
 }
 
 function menuSummary(
   category: string,
   count: number,
   fiatFloor: { amount: number; currency: string } | null,
+  t: TFunc,
 ): string {
-  const noun = category === "p2p-trade" ? "option"
-    : category === "bill-pay" ? "bill"
-    : category === "lending" ? "loan"
-    : "item";
-  const base = `${count} ${noun}${count === 1 ? "" : "s"}`;
+  const base = category === "p2p-trade"
+    ? (count === 1 ? t("card.menuOptionOne") : t("card.menuOptionMany", { count }))
+    : category === "bill-pay"
+    ? (count === 1 ? t("card.menuBillOne") : t("card.menuBillMany", { count }))
+    : category === "lending"
+    ? (count === 1 ? t("card.menuLoanOne") : t("card.menuLoanMany", { count }))
+    : (count === 1 ? t("card.menuItemOne") : t("card.menuItemMany", { count }));
   return fiatFloor
-    ? `${base} · from ${fiatFloor.currency} ${fiatFloor.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+    ? `${base} · ${t("card.fromAmount", {
+        currency: fiatFloor.currency,
+        amount: fiatFloor.amount.toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      })}`
     : base;
 }
 
@@ -641,6 +657,7 @@ function estimatedFiatPrimaryLabel({
   hasMenu,
   usdPerBtc,
   usdFiatRates,
+  t,
 }: {
   amountMsats: number;
   currency: string;
@@ -649,6 +666,7 @@ function estimatedFiatPrimaryLabel({
   hasMenu: boolean;
   usdPerBtc: number | null;
   usdFiatRates: Record<string, number>;
+  t: TFunc;
 }): string | null {
   const normalizedCurrency = normalizeFiatCurrency(currency);
   if (!normalizedCurrency) return null;
@@ -672,7 +690,7 @@ function estimatedFiatPrimaryLabel({
     usdPerBtc,
     usdFiatRates,
   });
-  return label && hasMenu ? `from ${label}` : label;
+  return label && hasMenu ? t("card.fromFiat", { amount: label }) : label;
 }
 
 function estimatedFiatRangeLabel({
@@ -725,7 +743,7 @@ function paymentMethodsSummary(methods: string[] | undefined): string | null {
   return `${visible}${extra}`;
 }
 
-function compactStatusLabel(state: EscrowState, nowSec: number, viewerPubkey?: string): string {
+function compactStatusLabel(state: EscrowState, nowSec: number, viewerPubkey: string | undefined, t: TFunc): string {
   const { status } = state;
   if (
     status === EscrowStatus.CREATED &&
@@ -734,23 +752,23 @@ function compactStatusLabel(state: EscrowState, nowSec: number, viewerPubkey?: s
       !!getEffectiveParticipantAt(state, role, nowSec)
     )
   ) {
-    return "Joined";
+    return t("card.statusJoined");
   }
-  if (status === EscrowStatus.CREATED) return "Open";
-  if (status === EscrowStatus.LOCKED) return "Escrow";
+  if (status === EscrowStatus.CREATED) return t("card.statusOpen");
+  if (status === EscrowStatus.LOCKED) return t("card.statusEscrow");
   if (status === EscrowStatus.APPROVED) {
     // Resolved for someone else → the viewer's part is done; only the
     // winner still has a claim to make. Their chip reads Done, not Claim.
     if (viewerPubkey && state.resolvedOutcome) {
       const winner = payoutRecipientFor(state, state.resolvedOutcome);
-      if (winner && winner.pubkey !== viewerPubkey) return "Done";
+      if (winner && winner.pubkey !== viewerPubkey) return t("card.statusDone");
     }
-    return "Claim";
+    return t("card.statusClaim");
   }
-  if (status === EscrowStatus.CLAIMED) return "Settling";
-  if (status === EscrowStatus.COMPLETED) return "Done";
-  if (status === EscrowStatus.EXPIRED) return "Timed out";
-  if (status === EscrowStatus.CANCELLED) return "Closed";
+  if (status === EscrowStatus.CLAIMED) return t("card.statusSettling");
+  if (status === EscrowStatus.COMPLETED) return t("card.statusDone");
+  if (status === EscrowStatus.EXPIRED) return t("card.statusTimedOut");
+  if (status === EscrowStatus.CANCELLED) return t("card.statusClosed");
   return status;
 }
 
@@ -763,6 +781,7 @@ function MiniTrinityRing({
   pubkey: string;
   previewArbiterPk: string | null;
 }) {
+  const { t } = useT();
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 5,
@@ -793,7 +812,9 @@ function MiniTrinityRing({
               }} />
             )}
             <span
-              title={filled ? `${role}: ${isYou ? "You" : pk}` : `${role}: open`}
+              title={filled
+                ? t("card.ringRoleTaken", { role, who: isYou ? t("card.you") : (pk ?? "") })
+                : t("card.ringRoleOpen", { role })}
               style={{
                 width: 22, height: 22, borderRadius: "50%",
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
@@ -814,7 +835,7 @@ function MiniTrinityRing({
   );
 }
 
-function compactJoinHoldRemaining(state: EscrowState, nowSec: number): { label: string; tone: string } | null {
+function compactJoinHoldRemaining(state: EscrowState, nowSec: number, t: TFunc): { label: string; tone: string } | null {
   if (state.status !== EscrowStatus.CREATED) return null;
   const activeHoldRoles = TRINITY_RING_ORDER
     .filter(role => role !== state.initiator.role)
@@ -825,10 +846,10 @@ function compactJoinHoldRemaining(state: EscrowState, nowSec: number): { label: 
   const remaining = Math.min(...activeHoldRoles.map(([, r]) => r ?? Infinity));
   const minutes = Math.max(1, Math.ceil(remaining / 60));
   const tone = remaining < 120 ? T.red : remaining < 300 ? T.amber : T.muted;
-  return { label: `lock ${minutes}m`, tone };
+  return { label: t("card.lockCountdown", { minutes }), tone };
 }
 
-function compactTimeRemaining(state: EscrowState, nowSec = Math.floor(Date.now() / 1000)): { label: string; tone: string } | null {
+function compactTimeRemaining(state: EscrowState, nowSec: number, t: TFunc): { label: string; tone: string } | null {
   if (!state.expiresAt) return null;
   if (
     state.status === EscrowStatus.COMPLETED
@@ -838,13 +859,13 @@ function compactTimeRemaining(state: EscrowState, nowSec = Math.floor(Date.now()
     return null;
   }
   const remaining = state.expiresAt - nowSec;
-  if (remaining <= 0) return { label: "Expired", tone: T.red };
+  if (remaining <= 0) return { label: t("card.expired"), tone: T.red };
   const hours = Math.floor(remaining / 3600);
   const minutes = Math.floor((remaining % 3600) / 60);
   const tone = remaining < 600 ? T.red : remaining < 3600 ? T.amber : T.muted;
   const label = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
   return {
-    label: state.status === EscrowStatus.CREATED ? `listing ${label}` : label,
+    label: state.status === EscrowStatus.CREATED ? t("card.listingCountdown", { time: label }) : label,
     tone,
   };
 }

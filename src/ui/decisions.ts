@@ -32,6 +32,7 @@ import {
   getEffectiveParticipantsAt,
 } from "../escrow-engine/types.js";
 import { arbiterVotePriority, substitutionEligibleAt } from "../escrow-engine/arbiter-substitution.js";
+import { translate, getCurrentLang } from "../i18n/index.js";
 import { payoutRecipientFor } from "../escrow-engine/recipients.js";
 import type { AggregateRatings } from "../reputation/ratings.js";
 
@@ -1223,7 +1224,8 @@ export function resolveCreateMintUrl(inputs: {
 export function decideListingTapEffect(inputs: ListingTapInputs): ListingTapEffect {
   const targetInvite = resolveListingInvite(inputs.listing);
   const community = inputs.listing.community ? getCommunityBySlug(inputs.listing.community) : null;
-  const displayName = community?.displayName ?? "the listing's community";
+  const displayName = community?.displayName
+    ?? translate(getCurrentLang(), "app.fallbackListingCommunity");
 
   if (inputs.currentInvite === targetInvite) {
     return { kind: "matching" };
@@ -1315,9 +1317,11 @@ export function decideTradeDetailFraming(inputs: DetailFramingInputs): DetailFra
   const listingCom = inputs.listingCommunity ? getCommunityBySlug(inputs.listingCommunity) : null;
   return {
     kind: "state-b",
-    listingCommunityName: listingCom?.displayName ?? "another community",
+    listingCommunityName: listingCom?.displayName
+      ?? translate(getCurrentLang(), "app.fallbackAnotherCommunity"),
     listingFlagEmoji: listingCom?.flagEmoji ?? "🌐",
-    homeCommunityName: homeCom?.displayName ?? "your community",
+    homeCommunityName: homeCom?.displayName
+      ?? translate(getCurrentLang(), "app.fallbackYourCommunity"),
     homeFlagEmoji: homeCom?.flagEmoji ?? "🌐",
   };
 }
@@ -1384,25 +1388,28 @@ function firstHappyPathVoter(state: EscrowState): Role {
 }
 
 function waitingForFirstVoteCopy(state: EscrowState, role: Role): string {
+  const lang = getCurrentLang();
   if (role === Role.SELLER) {
-    if (state.category === "bill-pay") return "Waiting on the bill owner to confirm";
-    if (state.category !== "marketplace") return "Waiting on seller to confirm";
-    if (state.fulfillment === "digital") return "Waiting on seller to deliver the file";
-    if (state.fulfillment === "service") return "Waiting on seller to deliver the service";
-    return "Waiting on seller to ship";
+    if (state.category === "bill-pay") return translate(lang, "app.waitBillOwnerConfirm");
+    if (state.category !== "marketplace") return translate(lang, "app.waitSellerConfirm");
+    if (state.fulfillment === "digital") return translate(lang, "app.waitSellerDeliverFile");
+    if (state.fulfillment === "service") return translate(lang, "app.waitSellerDeliverService");
+    return translate(lang, "app.waitSellerShip");
   }
-  if (state.category === "bill-pay") return "Waiting on the volunteer to pay the bill";
-  if (state.category === "lending") return "Waiting on buyer to confirm the loan arrived";
-  return "Waiting on buyer to confirm payment sent";
+  if (state.category === "bill-pay") return translate(lang, "app.waitVolunteerPayBill");
+  if (state.category === "lending") return translate(lang, "app.waitBuyerLoanArrived");
+  return translate(lang, "app.waitBuyerPaymentSent");
 }
 
 /** Human countdown for the backup-arbiter floor: "in ~2h 10m" / "in ~8m". */
 export function formatStepInCountdown(seconds: number): string {
   const s = Math.max(0, seconds);
-  if (s < 60) return "in under a minute";
+  if (s < 60) return translate(getCurrentLang(), "app.countdownUnderMinute");
   const h = Math.floor(s / 3600);
   const m = Math.ceil((s % 3600) / 60);
-  return h > 0 ? `in ~${h}h ${m}m` : `in ~${m}m`;
+  return h > 0
+    ? translate(getCurrentLang(), "app.countdownHoursMinutes", { h, m })
+    : translate(getCurrentLang(), "app.countdownMinutes", { m });
 }
 
 export function decideVotePrompt(
@@ -1460,7 +1467,9 @@ export function decideVotePrompt(
         return {
           kind: "waiting",
           waitingOn: "dispute",
-          message: `Dispute live — the assigned arbiter has the floor. As backup arbiter you can step in ${formatStepInCountdown(eligibleAt - nowSec)}.`,
+          message: translate(getCurrentLang(), "app.backupArbiterStepIn", {
+            countdown: formatStepInCountdown(eligibleAt - nowSec),
+          }),
         };
       }
       return { kind: "buttons", role: Role.ARBITER, outcomes: [Outcome.RELEASE, Outcome.REFUND] };
@@ -1498,14 +1507,14 @@ export function decideVotePrompt(
       return {
         kind: "waiting",
         waitingOn: "dispute",
-        message: "Waiting for buyer and seller; arbiter only acts on a dispute",
+        message: translate(getCurrentLang(), "app.arbiterWaitingBothVotes"),
       };
     }
     if (buyerVote === sellerVote) {
       return {
         kind: "waiting",
         waitingOn: "dispute",
-        message: "Buyer and seller agree; no arbiter action needed",
+        message: translate(getCurrentLang(), "app.arbiterNoActionNeeded"),
       };
     }
     return { kind: "buttons", role, outcomes: standardOutcomes };

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { T, ROLE_COLOR } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { HelpTip } from "./HelpTip.js";
 
@@ -17,6 +18,7 @@ export function ArbiterApplyForm({
   onApply: (community: string, statement: string) => Promise<void>;
   onClose?: () => void;
 }) {
+  const { t } = useT();
   const [statement, setStatement] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -27,7 +29,7 @@ export function ArbiterApplyForm({
 
   const submit = async () => {
     if (!statement.trim()) {
-      setError("Tell the community why — the statement IS the application.");
+      setError(t("bond.applyErrorEmpty"));
       return;
     }
     setBusy(true);
@@ -40,11 +42,11 @@ export function ArbiterApplyForm({
         ? `${statement.trim()}\n\nFederation operator — invite + steward key: ${fedInvite.trim()}`
         : statement;
       await onApply(communitySlug, fullStatement);
-      setStatus("Application signed and published. The community steward reviews it from their roster surface.");
+      setStatus(t("bond.applySuccess"));
       setStatement("");
       setFedInvite("");
     } catch (e: any) {
-      setError(e?.message || "Couldn't publish the application. Check relays and retry.");
+      setError(e?.message || t("bond.applyFailed"));
     } finally {
       setBusy(false);
     }
@@ -56,16 +58,16 @@ export function ArbiterApplyForm({
         <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
           <span style={{ fontSize: 15, lineHeight: 1 }}>⚖️</span>
           <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 800, color: ROLE_COLOR.arbiter, letterSpacing: 0.5 }}>
-            BECOME A COMMUNITY ARBITER
+            {t("bond.applyHeading")}
           </span>
-          <HelpTip title="What is an arbiter?" label="What is a community arbiter?">
-            An arbiter is a trusted community member who can <strong>break a tie in a dispute</strong> — and only then. You step in only when the buyer and seller disagree, never on a normal trade. You can <strong>never take anyone's money</strong>: escrow is 2-of-3, so you only release the sats to the side telling the truth. Arbiters build a public reputation over time.
+          <HelpTip title={t("bond.applyTipTitle")} label={t("bond.applyTipLabel")}>
+            {t("bond.applyTipP1")}<strong>{t("bond.applyTipBold1")}</strong>{t("bond.applyTipP2")}<strong>{t("bond.applyTipBold2")}</strong>{t("bond.applyTipP3")}
             {/* TODO(bond 2A): add "post a bond to raise your exposure cap" line here once BONDS_ENFORCED ships. */}
           </HelpTip>
         </span>
         {onClose && (
           <button
-            type="button" onClick={onClose} aria-label="Close"
+            type="button" onClick={onClose} aria-label={t("common.close")}
             style={{ background: "none", border: "none", color: T.muted, fontSize: 20, lineHeight: 1, cursor: "pointer", padding: "0 2px", flexShrink: 0 }}
           >×</button>
         )}
@@ -75,27 +77,21 @@ export function ArbiterApplyForm({
           teaser (real custody lands with Phase 2A; today it's apply-and-build). */}
       <div style={{ fontSize: 11, color: T.muted, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 10 }}>
         <span style={{ color: T.text, fontWeight: 700 }}>
-          If you want to lead your community — or already do — this is your seat.
+          {t("bond.applyPitchLead")}
         </span>{" "}
-        You're the neutral third key: you vote only when buyer and seller
-        disagree, and the dispute fee (1.5%, split-paid by both parties) is yours
-        for the work. Fairness is your public rating.
+        {t("bond.applyPitchBody")}
         <div style={{
           marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}`,
           fontSize: 10.5, lineHeight: 1.5,
         }}>
-          <span style={{ color: ROLE_COLOR.arbiter, fontWeight: 700 }}>What's coming:</span>{" "}
-          becoming a fully bonded arbiter will mean posting a small bond together
-          with two other trusted people you choose — <strong>not today</strong>.
-          For now, apply, keep trading, and build your reputation riding alongside
-          the founding arbiters. The steward reviews applications and signs the
-          roster.
+          <span style={{ color: ROLE_COLOR.arbiter, fontWeight: 700 }}>{t("bond.applyComingLabel")}</span>{" "}
+          {t("bond.applyComingBefore")}<strong>{t("bond.applyComingBold")}</strong>{t("bond.applyComingAfter")}
         </div>
       </div>
       <textarea
         value={statement}
         onChange={e => setStatement(e.target.value)}
-        placeholder={`Why you? Languages, availability, how ${displayName} knows you…`}
+        placeholder={t("bond.applyPlaceholder", { community: displayName })}
         rows={3}
         maxLength={800}
         style={{
@@ -113,19 +109,19 @@ export function ArbiterApplyForm({
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
           <span style={{ fontSize: 11, fontWeight: 800, color: ROLE_COLOR.arbiter, fontFamily: T.mono, letterSpacing: 0.5 }}>
-            🏰 RUN YOUR OWN FEDERATION?
+            {t("bond.applyFedHeading")}
           </span>
-          <HelpTip title="Federation operator" label="What is the federation-operator field?">
-            Optional. If you run the Fedimint federation behind a community, pasting your invite + steward key is the strongest proof you're real — it lets the steward fast-track your application.
+          <HelpTip title={t("bond.applyFedTipTitle")} label={t("bond.applyFedTipLabel")}>
+            {t("bond.applyFedTipBody")}
           </HelpTip>
         </div>
         <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.sans, lineHeight: 1.45, marginBottom: 8 }}>
-          Federation operators are the strongest anchors — the premier proof-of-work path. Paste your invite + steward key and the steward can fast-track you.
+          {t("bond.applyFedBody")}
         </div>
         <input
           value={fedInvite}
           onChange={e => setFedInvite(e.target.value)}
-          placeholder="fed1… invite + steward npub / key (optional)"
+          placeholder={t("bond.applyFedPlaceholder")}
           style={{
             width: "100%", boxSizing: "border-box",
             padding: "9px 11px", borderRadius: T.rs,
@@ -144,7 +140,7 @@ export function ArbiterApplyForm({
           cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1,
         }}
       >
-        {busy ? "Publishing…" : "Sign + send application"}
+        {busy ? t("bond.applyPublishing") : t("bond.applySubmit")}
       </button>
       {status && (
         <div style={{ marginTop: 8, fontSize: 11, color: T.green, fontFamily: T.mono, lineHeight: 1.4 }}>

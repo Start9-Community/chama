@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import jsQR from "jsqr";
+import { useT } from "../i18n/index.js";
 
 interface QRScannerProps {
   onScan: (data: string) => void;
@@ -7,6 +8,7 @@ interface QRScannerProps {
 }
 
 export default function QRScanner({ onScan, onClose }: QRScannerProps) {
+  const { t } = useT();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -45,7 +47,7 @@ export default function QRScanner({ onScan, onClose }: QRScannerProps) {
           videoRef.current.play();
         }
       } catch (e: any) {
-        if (mounted) setError(e.message || "Camera access denied");
+        if (mounted) setError(e.message || t("browse.cameraAccessDenied"));
       }
     })();
     return () => { mounted = false; stopCamera(); };
@@ -108,22 +110,22 @@ export default function QRScanner({ onScan, onClose }: QRScannerProps) {
     }}>
       {error ? (
         <div style={{ color: "#f87171", fontFamily: "monospace", fontSize: 14, padding: 32, textAlign: "center" }}>
-          Camera: {error}
+          {t("browse.cameraError", { error })}
           <div style={{ marginTop: 16, display: "flex", gap: 12, justifyContent: "center" }}>
             <button onClick={() => { setError(null); setPasteMode(true); }} style={{
               padding: "12px 24px", background: "#a78bfa22", border: "1px solid #a78bfa44",
               borderRadius: 8, color: "#a78bfa", fontFamily: "monospace", fontSize: 12, cursor: "pointer",
-            }}>Paste instead</button>
+            }}>{t("browse.pasteInstead")}</button>
             <button onClick={onClose} style={{
               padding: "12px 24px", background: "#1e1e2e", border: "1px solid #333",
               borderRadius: 8, color: "#999", fontFamily: "monospace", fontSize: 12, cursor: "pointer",
-            }}>Close</button>
+            }}>{t("common.close")}</button>
           </div>
         </div>
       ) : pasteMode ? (
         <div style={{ padding: 32, width: "100%", maxWidth: 360 }}>
           <div style={{ fontSize: 11, color: "#a78bfa", fontFamily: "monospace", marginBottom: 12, letterSpacing: 1, textAlign: "center" }}>
-            PASTE NSEC OR BUNKER URI
+            {t("browse.pasteNsecTitle")}
           </div>
           <input
             value={pasteInput}
@@ -145,15 +147,15 @@ export default function QRScanner({ onScan, onClose }: QRScannerProps) {
               flex: 1, padding: "12px", background: "#a78bfa", border: "none",
               borderRadius: 8, color: "#000", fontFamily: "monospace", fontSize: 13,
               fontWeight: 700, cursor: "pointer",
-            }}>Submit</button>
+            }}>{t("browse.submit")}</button>
             <button onClick={() => { setPasteMode(false); setError(null); }} style={{
               padding: "12px 20px", background: "#1e1e2e", border: "1px solid #333",
               borderRadius: 8, color: "#999", fontFamily: "monospace", fontSize: 12, cursor: "pointer",
-            }}>Camera</button>
+            }}>{t("browse.camera")}</button>
             <button onClick={onClose} style={{
               padding: "12px 20px", background: "#1e1e2e", border: "1px solid #333",
               borderRadius: 8, color: "#999", fontFamily: "monospace", fontSize: 12, cursor: "pointer",
-            }}>Close</button>
+            }}>{t("common.close")}</button>
           </div>
         </div>
       ) : (
@@ -171,18 +173,18 @@ export default function QRScanner({ onScan, onClose }: QRScannerProps) {
               transform: "translateX(-50%) translateY(-28px)",
               color: "#a78bfa", fontFamily: "monospace", fontSize: 11,
               fontWeight: 600, letterSpacing: 1,
-            }}>POINT AT QR CODE</div>
+            }}>{t("browse.pointAtQr")}</div>
           </div>
           <canvas ref={canvasRef} style={{ display: "none" }} />
           <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
             <button onClick={() => { stopCamera(); setPasteMode(true); }} style={{
               padding: "14px 32px", background: "#a78bfa22", border: "1px solid #a78bfa44",
               borderRadius: 8, color: "#a78bfa", fontFamily: "monospace", fontSize: 12, cursor: "pointer",
-            }}>Paste instead</button>
+            }}>{t("browse.pasteInstead")}</button>
             <button onClick={() => { stopCamera(); onClose(); }} style={{
               padding: "14px 32px", background: "none", border: "1px solid #555",
               borderRadius: 8, color: "#999", fontFamily: "monospace", fontSize: 12, cursor: "pointer",
-            }}>Cancel</button>
+            }}>{t("common.cancel")}</button>
           </div>
         </>
       )}

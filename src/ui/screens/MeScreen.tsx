@@ -21,6 +21,8 @@
 // doctrine is visible from day one.
 
 import { useState, useEffect } from "react";
+import { useT, translate, getCurrentLang } from "../../i18n/index.js";
+import { LanguageRow } from "../components/LanguagePills.js";
 import {
   type EscrowState,
   EscrowStatus,
@@ -79,12 +81,14 @@ import { readKind0Toggle, writeKind0Toggle } from "../nostr-profiles.js";
 
 type MeTradeFilter = "all" | "needs" | "live" | "listings" | "done";
 
-const ME_TRADE_FILTERS: { id: MeTradeFilter; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "needs", label: "Needs you" },
-  { id: "live", label: "Live" },
-  { id: "listings", label: "Listings" },
-  { id: "done", label: "Done" },
+// i18n: labels are DICTIONARY KEYS resolved with t() at render (module-level
+// constants can't call hooks). The `id` values are compared — never translated.
+const ME_TRADE_FILTERS: { id: MeTradeFilter; labelKey: string }[] = [
+  { id: "all", labelKey: "me.filterAll" },
+  { id: "needs", labelKey: "me.filterNeedsYou" },
+  { id: "live", labelKey: "me.filterLive" },
+  { id: "listings", labelKey: "me.filterListings" },
+  { id: "done", labelKey: "me.filterDone" },
 ];
 
 export function MeScreen({
@@ -196,6 +200,7 @@ export function MeScreen({
    *  re-opening the trade retries with a fresh budget). */
   stuckNativeLocks?: PendingNativeLock[];
 }) {
+  const { t } = useT();
   const npubShort = pubkey.slice(0, 8) + "…" + pubkey.slice(-4);
   const [localKind0On, setLocalKind0On] = useState<boolean>(() => readKind0Toggle(pubkey));
   const kind0On = kind0Enabled ?? localKind0On;
@@ -269,7 +274,7 @@ export function MeScreen({
           fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
           letterSpacing: 1, marginBottom: 10,
         }}>
-          PROFILE
+          {t("me.profile")}
         </div>
         <div style={{
           display: "flex", alignItems: "center", gap: 14,
@@ -328,14 +333,11 @@ export function MeScreen({
             fontSize: 11, fontWeight: 600, color: T.red,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
           }}>
-            STRANDED CLAIM — ACTION NEEDED
+            {t("me.strandedClaimTitle")}
           </div>
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.5 }}>
             <BitcoinAmount sats={Math.floor(entry.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
-            {" "}from a settled trade couldn't land in your wallet automatically.
-            The bearer note — the money itself — is saved only in this browser.
-            Tap to export it now, before clearing data or switching federations
-            can destroy the only copy.
+            {" "}{t("me.strandedClaimBody")}
           </div>
         </div>
       ))}
@@ -357,13 +359,11 @@ export function MeScreen({
             fontSize: 11, fontWeight: 600, color: T.amber,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
           }}>
-            CHECK YOUR OTHER DEVICE
+            {t("me.checkOtherDeviceTitle")}
           </div>
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.5, marginBottom: 12 }}>
             <BitcoinAmount sats={Math.floor(entry.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
-            {" "}from a settled trade was reported already claimed, but your balance
-            here is short by that much — it most likely landed on another device.
-            The note is saved as a backup if you need it.
+            {" "}{t("me.checkOtherDeviceBody")}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {onExportStrandedClaim && (
@@ -376,7 +376,7 @@ export function MeScreen({
                   cursor: "pointer",
                 }}
               >
-                View note
+                {t("me.viewNote")}
               </button>
             )}
             <button
@@ -388,7 +388,7 @@ export function MeScreen({
                 cursor: "pointer",
               }}
             >
-              Dismiss
+              {t("me.dismiss")}
             </button>
           </div>
         </div>
@@ -410,20 +410,19 @@ export function MeScreen({
             fontSize: 11, fontWeight: 600, color: isSmallLeftover ? T.muted : T.amber,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 12,
           }}>
-            {isClaimPayoutRecovery ? "PAYOUT RECOVERY" : "SATS RECOVERY"}
+            {isClaimPayoutRecovery ? t("me.payoutRecoveryTitle") : t("me.satsRecoveryTitle")}
           </div>
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
             {isSmallLeftover ? (
               <>
-                <BitcoinAmount sats={localRecoverySats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> saved as a small leftover.
-                Chama keeps small leftovers out of the main flow and lets them accumulate here.
+                <BitcoinAmount sats={localRecoverySats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> {t("me.smallLeftoverBody")}
               </>
             ) : (
               <>
-                <BitcoinAmount sats={localRecoverySats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> are safe in your Chama and ready to recover.
+                <BitcoinAmount sats={localRecoverySats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> {t("me.recoverReadyBody")}
                 {localReserveSats > 0 && (
                   <>
-                    {" "}About <BitcoinAmount sats={localReserveSats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> stay reserved for Lightning fees.
+                    {" "}{t("me.reservedForFeesBefore")} <BitcoinAmount sats={localReserveSats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> {t("me.reservedForFeesAfter")}
                   </>
                 )}
               </>
@@ -436,7 +435,7 @@ export function MeScreen({
               borderRadius: T.rs, color: T.muted,
               fontFamily: T.mono, fontSize: 10, lineHeight: 1.45,
             }}>
-              TRACE · {traceCopy}
+              {t("me.tracePrefix", { trace: traceCopy })}
               {satsTrace?.escrowId ? (
                 <div style={{ wordBreak: "break-all" as const, marginTop: 4 }}>
                   {satsTrace.escrowId}
@@ -458,10 +457,10 @@ export function MeScreen({
             }}
           >
             {recoverWorthwhile
-              ? <>{isClaimPayoutRecovery ? "Recover payout" : "Recover"} <BitcoinAmount sats={localRecoverableSats} size={12} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /></>
+              ? <>{isClaimPayoutRecovery ? t("me.recoverPayout") : t("me.recover")} <BitcoinAmount sats={localRecoverableSats} size={12} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /></>
               : isSmallLeftover
-                ? "Accumulating — too small to recover over Lightning yet"
-                : "Waiting for enough sats to recover"}
+                ? t("me.accumulatingTooSmall")
+                : t("me.waitingEnoughSats")}
           </button>
           {/* v2.4 #56 — fee-free ecash exit. Available for ANY balance,
               including dust the LN "Recover" button can't economically move.
@@ -477,7 +476,7 @@ export function MeScreen({
                 fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer",
               }}
             >
-              Withdraw as ecash · no LN fees
+              {t("me.withdrawEcash")}
             </button>
           )}
         </div>
@@ -497,21 +496,19 @@ export function MeScreen({
             fontSize: 11, fontWeight: 600, color: T.amber,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 10,
           }}>
-            LOCK RECOVERY PAUSED
+            {t("me.lockRecoveryPausedTitle")}
           </div>
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
-            A funding attempt of{" "}
+            {t("me.lockRecoveryBodyBefore")}{" "}
             <BitcoinAmount msats={entry.amountMsats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />{" "}
-            couldn't be recovered automatically after several tries. Your notes
-            are kept safe on this device — opening the trade and funding it
-            again retries the recovery first.
+            {t("me.lockRecoveryBodyAfter")}
           </div>
           <div style={{
             marginTop: 8, fontFamily: T.mono, fontSize: 10, color: T.muted,
             wordBreak: "break-all" as const,
           }}>
             {entry.escrowId}
-            {entry.lastError ? <div style={{ marginTop: 4 }}>Last error: {entry.lastError.slice(0, 120)}</div> : null}
+            {entry.lastError ? <div style={{ marginTop: 4 }}>{t("me.lastError", { error: entry.lastError.slice(0, 120) })}</div> : null}
           </div>
           <button
             onClick={() => onOpenTrade(entry.escrowId)}
@@ -522,7 +519,7 @@ export function MeScreen({
               fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer",
             }}
           >
-            Open trade
+            {t("me.openTrade")}
           </button>
         </div>
       ))}
@@ -542,12 +539,14 @@ export function MeScreen({
             fontSize: 11, fontWeight: 600, color: T.teal,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
           }}>
-            PENDING ECASH EXPORT
+            {t("me.pendingEcashExportTitle")}
           </div>
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.5 }}>
-            You minted{" "}
+            {t("me.mintedEcashBefore")}{" "}
             <BitcoinAmount sats={Math.floor(pendingEcashExport.amountMsats / 1000)} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
-            {" "}as an ecash note{pendingEcashExport.federationLabel ? ` on ${pendingEcashExport.federationLabel}` : ""}. Tap to copy or scan it again, then confirm once it's imported.
+            {" "}{pendingEcashExport.federationLabel
+              ? t("me.mintedEcashAfterOnFed", { federation: pendingEcashExport.federationLabel })
+              : t("me.mintedEcashAfter")}
           </div>
         </div>
       )}
@@ -572,7 +571,7 @@ export function MeScreen({
           fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
           letterSpacing: 1, marginBottom: 12,
         }}>
-          RATINGS
+          {t("me.ratingsTitle")}
         </div>
         {ratings && ratings.count > 0 ? (
           <div>
@@ -581,7 +580,7 @@ export function MeScreen({
                 {ratings.count}
               </span>
               <span style={{ fontSize: 12, color: T.muted, fontFamily: T.mono }}>
-                rating{ratings.count !== 1 ? "s" : ""}
+                {ratings.count !== 1 ? t("me.ratingMany") : t("me.ratingOne")}
               </span>
               <span style={{ flex: 1 }} />
               <span style={{
@@ -592,7 +591,7 @@ export function MeScreen({
                 {Math.round((ratings.positive / Math.max(ratings.count, 1)) * 100)}%
               </span>
               <span style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
-                positive
+                {t("me.positive")}
               </span>
             </div>
             {/* v3.1.1 (#2): 👍/👎 breakdown, consistent with the tap-a-
@@ -601,14 +600,12 @@ export function MeScreen({
             <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 10, fontFamily: T.mono, fontSize: 13 }}>
               <span style={{ color: T.green, fontWeight: 700 }}>👍 {ratings.positive}</span>
               <span style={{ color: T.amber, fontWeight: 700 }}>👎 {ratings.negative}</span>
-              <span style={{ color: T.muted, fontSize: 11 }}>from {ratings.count} settled trade{ratings.count !== 1 ? "s" : ""}</span>
+              <span style={{ color: T.muted, fontSize: 11 }}>{ratings.count !== 1 ? t("me.ratingsFromTradesMany", { count: ratings.count }) : t("me.ratingsFromTradesOne", { count: ratings.count })}</span>
             </div>
           </div>
         ) : (
           <div style={{ fontSize: 12, color: T.muted, fontFamily: T.sans, lineHeight: 1.55 }}>
-            No ratings yet — complete your first trade to start building
-            reputation. Ratings unlock graduated capabilities like
-            recurring payments.
+            {t("me.noRatingsYet")}
           </div>
         )}
       </div>
@@ -625,16 +622,16 @@ export function MeScreen({
           }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
-                Appearance
+                {t("me.appearance")}
               </div>
               <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-                Auto follows your device
+                {t("me.appearanceHint")}
               </div>
             </div>
             <div style={{ display: "flex", gap: 4 }}>
               {(["dark", "light", "system"] as ThemeMode[]).map(mode => {
                 const active = themeMode === mode;
-                const label = mode === "system" ? "Auto" : mode === "dark" ? "Dark" : "Light";
+                const label = mode === "system" ? t("me.auto") : mode === "dark" ? t("me.dark") : t("me.light");
                 return (
                   <button
                     key={mode}
@@ -655,17 +652,18 @@ export function MeScreen({
             </div>
           </div>
         )}
+        <LanguageRow />
         <NotificationsRow />
         <DmNotificationsRow />
         <NostrNamesRow on={kind0On} onToggle={() => setKind0On(!kind0On)} />
         {SHOW_BOND_CEREMONY && onOpenBondCeremony && (
-          <SettingsRow label="Post your bond" hint="Lock your own sats for a term — a public commitment to arbitrate fairly" onClick={onOpenBondCeremony} />
+          <SettingsRow label={t("me.postYourBond")} hint={t("me.postYourBondHint")} onClick={onOpenBondCeremony} />
         )}
-        <SettingsRow label="Payment methods" hint="Phone, mobile money, bank, and app IDs" onClick={onOpenSavedHandles} />
-        <SettingsRow label="Lightning Addresses" hint="Saved addresses for claims and recovery" onClick={onOpenPayoutDestinations} />
-        <SettingsRow label="Advanced" hint="Sandbox mode and Chama tools" onClick={onOpenAdvanced} />
-        <SettingsRow label="Help & FAQ" hint="Trading basics, getting paid, arbiter duties, recovery" onClick={onOpenHelp} />
-        <SettingsRow label="Sign out" hint={null} onClick={onSignOut} danger />
+        <SettingsRow label={t("me.paymentMethods")} hint={t("me.paymentMethodsHint")} onClick={onOpenSavedHandles} />
+        <SettingsRow label={t("me.lightningAddresses")} hint={t("me.lightningAddressesHint")} onClick={onOpenPayoutDestinations} />
+        <SettingsRow label={t("me.advanced")} hint={t("me.advancedHint")} onClick={onOpenAdvanced} />
+        <SettingsRow label={t("me.helpFaq")} hint={t("me.helpFaqHint")} onClick={onOpenHelp} />
+        <SettingsRow label={t("me.signOut")} hint={null} onClick={onSignOut} danger />
       </div>
 
       <MeTradeHistory
@@ -718,7 +716,9 @@ function MeTradeHistory({
   archivedTrades?: TradeIndexEntry[];
   onOpenArchivedTrade?: (id: string) => void;
 }) {
-  const activeFilterLabel = ME_TRADE_FILTERS.find((filter) => filter.id === activeFilter)?.label ?? "All";
+  const { t } = useT();
+  const activeFilterKey = ME_TRADE_FILTERS.find((filter) => filter.id === activeFilter)?.labelKey ?? "me.filterAll";
+  const activeFilterLabel = t(activeFilterKey);
   const [refreshing, setRefreshing] = useState(false);
   const handleRefresh = async () => {
     if (!onRefreshTrades || refreshing) return;
@@ -741,7 +741,7 @@ function MeTradeHistory({
             fontSize: 11, fontWeight: 700, color: T.muted, fontFamily: T.mono,
             letterSpacing: 1, textTransform: "uppercase",
           }}>
-            My trades
+            {t("me.myTrades")}
           </div>
           <div style={{
             marginTop: 4, color: T.text, fontFamily: T.sans,
@@ -762,7 +762,7 @@ function MeTradeHistory({
               type="button"
               onClick={handleRefresh}
               disabled={refreshing}
-              title="Re-check relays for your trades"
+              title={t("me.refreshTitle")}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 5,
                 background: "transparent", border: `1px solid ${T.border}`,
@@ -778,7 +778,7 @@ function MeTradeHistory({
                 display: "inline-block",
                 animation: refreshing ? "spin 0.8s linear infinite" : "none",
               }}>↻</span>
-              {refreshing ? "Syncing…" : "Refresh"}
+              {refreshing ? t("me.syncing") : t("me.refresh")}
             </button>
           )}
         </div>
@@ -807,7 +807,7 @@ function MeTradeHistory({
                 letterSpacing: 0,
               }}
             >
-              {filter.label} {count > 0 ? count : ""}
+              {t(filter.labelKey)} {count > 0 ? count : ""}
             </button>
           );
         })}
@@ -819,7 +819,7 @@ function MeTradeHistory({
           background: T.surface, border: `1px dashed ${T.border}`,
           borderRadius: T.r, color: T.muted, fontFamily: T.mono, fontSize: 11,
         }}>
-          No trades yet. Browse listings to start one.
+          {t("me.noTradesYet")}
         </div>
       ) : trades.length === 0 ? (
         <div style={{
@@ -827,7 +827,7 @@ function MeTradeHistory({
           background: T.surface, border: `1px dashed ${T.border}`,
           borderRadius: T.r, color: T.muted, fontFamily: T.mono, fontSize: 11,
         }}>
-          Nothing in this view right now.
+          {t("me.nothingInView")}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -866,9 +866,9 @@ function MeTradeHistory({
             letterSpacing: 1, textTransform: "uppercase", marginBottom: 8,
             display: "flex", alignItems: "center", gap: 8,
           }}>
-            <span>Earlier trades</span>
+            <span>{t("me.earlierTrades")}</span>
             <span style={{ flex: 1, height: 1, background: T.border }} />
-            <span style={{ opacity: 0.7 }}>{archivedTrades!.length} from history</span>
+            <span style={{ opacity: 0.7 }}>{t("me.fromHistory", { count: archivedTrades!.length })}</span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {archivedTrades!.map((e) => (
@@ -883,7 +883,7 @@ function MeTradeHistory({
             marginTop: 8, fontSize: 9, color: T.muted, fontFamily: T.mono,
             lineHeight: 1.5, opacity: 0.7,
           }}>
-            Remembered on this device. Tap to reload the full trade from your Chama relay.
+            {t("me.rememberedOnDevice")}
           </div>
         </div>
       )}
@@ -901,21 +901,24 @@ function ArchivedTradeRow({
   entry: TradeIndexEntry;
   onOpen: () => void;
 }) {
+  const { t } = useT();
   const when = entry.createdAt > 0
     ? new Date(entry.createdAt * 1000).toLocaleString(undefined, {
         month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit",
       })
     : "—";
-  const cat = entry.category === "p2p-trade" ? "Exchange"
-    : entry.category === "bill-pay" ? "Com. Bill Pay"
-    : entry.category === "marketplace" ? "Market"
-    : entry.category === "lending" ? "Lending"
+  // The compared values ("p2p-trade" etc.) are category ids — data, never
+  // translated; only the displayed labels go through the dictionary.
+  const cat = entry.category === "p2p-trade" ? t("me.categoryExchange")
+    : entry.category === "bill-pay" ? t("me.categoryBillPay")
+    : entry.category === "marketplace" ? t("me.categoryMarket")
+    : entry.category === "lending" ? t("me.categoryLending")
     : entry.category;
   const statusLabel = entry.lastStatus.charAt(0) + entry.lastStatus.slice(1).toLowerCase();
   return (
     <div
       onClick={onOpen}
-      title="Tap to reload this trade"
+      title={t("me.tapToReload")}
       style={{
         display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
         padding: "9px 11px", background: T.surface,
@@ -981,6 +984,7 @@ function MeDashboard({
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
   pubkey: string;
 }) {
+  const { t } = useT();
   const hasSellerDashboard = dashboard.sellerOpen.length > 0 || dashboard.sellerLive.length > 0;
   const hasNeedsYou = dashboard.needsYou.length > 0;
   const showDashboard = hasNeedsYou || hasSellerDashboard || dashboard.arbiterVisible;
@@ -1002,7 +1006,7 @@ function MeDashboard({
           fontSize: 11, fontWeight: 700, color: T.muted, fontFamily: T.mono,
           letterSpacing: 1, textTransform: "uppercase",
         }}>
-          Trade dashboard
+          {t("me.tradeDashboard")}
         </div>
         {hasNeedsYou && (
           <span style={{
@@ -1010,16 +1014,18 @@ function MeDashboard({
             padding: "4px 8px", borderRadius: 999,
             background: T.accentDim, border: `1px solid ${T.accent}44`,
           }}>
-            {dashboard.needsYou.length} needs you
+            {t("me.needsYouCount", { count: dashboard.needsYou.length })}
           </span>
         )}
       </div>
 
       {hasNeedsYou && (
         <DashboardRow
-          label="Needs you"
-          value={`${dashboard.needsYou.length} trade${dashboard.needsYou.length === 1 ? "" : "s"}`}
-          hint="Vote or claim when a trade is waiting on your key."
+          label={t("me.needsYou")}
+          value={dashboard.needsYou.length === 1
+            ? t("me.tradeCountOne", { count: dashboard.needsYou.length })
+            : t("me.tradeCountMany", { count: dashboard.needsYou.length })}
+          hint={t("me.needsYouHint")}
           tone={T.accent}
           onClick={firstNeedsYou ? () => onOpenTrade(firstNeedsYou.id) : undefined}
           last={!hasSellerDashboard && !dashboard.arbiterVisible}
@@ -1028,9 +1034,9 @@ function MeDashboard({
 
       {hasSellerDashboard && (
         <DashboardRow
-          label="Seller queue"
-          value={`${dashboard.sellerOpen.length} open · ${dashboard.sellerLive.length} live`}
-          hint="Listings stay public here; live orders become your working queue."
+          label={t("me.sellerQueue")}
+          value={t("me.openLiveCounts", { open: dashboard.sellerOpen.length, live: dashboard.sellerLive.length })}
+          hint={t("me.sellerQueueHint")}
           tone={T.green}
           onClick={firstSeller ? () => onOpenTrade(firstSeller.id) : undefined}
           last={!dashboard.arbiterVisible}
@@ -1059,11 +1065,13 @@ function MeDashboard({
 
 type SellerQueueKey = "ready" | "holds" | "live" | "stock";
 
-const SELLER_QUEUE_LABEL: Record<SellerQueueKey, string> = {
-  ready: "Ready",
-  holds: "Holds",
-  live: "Live",
-  stock: "Stock",
+// i18n: dictionary KEYS resolved with t() at render (module-level constants
+// can't call hooks). The SellerQueueKey ids are compared — never translated.
+const SELLER_QUEUE_LABEL_KEY: Record<SellerQueueKey, string> = {
+  ready: "me.queueReady",
+  holds: "me.queueHolds",
+  live: "me.queueLive",
+  stock: "me.queueStock",
 };
 
 function SellerDashboardPanel({
@@ -1077,6 +1085,7 @@ function SellerDashboardPanel({
   onSellerEditListing?: (id: string) => void;
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
 }) {
+  const { t } = useT();
   const [queue, setQueue] = useState<SellerQueueKey>(() => firstSellerQueue(dashboard));
   useEffect(() => {
     if (sellerQueueTrades(dashboard, queue).length > 0) return;
@@ -1099,22 +1108,22 @@ function SellerDashboardPanel({
             fontFamily: T.mono, color: T.green, fontSize: 10,
             fontWeight: 900, letterSpacing: 1, textTransform: "uppercase",
           }}>
-            Seller dashboard
+            {t("me.sellerDashboard")}
           </div>
           <div style={{
             marginTop: 3,
             fontFamily: T.sans, color: T.text, fontSize: 15,
             fontWeight: 800,
           }}>
-            Inventory and orders
+            {t("me.inventoryAndOrders")}
           </div>
         </div>
         <div style={{
           fontFamily: T.mono, color: T.muted, fontSize: 10,
           lineHeight: 1.35, textAlign: "right" as const,
         }}>
-          {dashboard.sellerOpen.length.toLocaleString()} open<br />
-          {dashboard.sellerLive.length.toLocaleString()} live
+          {t("me.openCount", { count: dashboard.sellerOpen.length.toLocaleString() })}<br />
+          {t("me.liveCount", { count: dashboard.sellerLive.length.toLocaleString() })}
         </div>
       </div>
 
@@ -1125,32 +1134,44 @@ function SellerDashboardPanel({
         marginBottom: 12,
       }}>
         <DashboardMetric
-          label="Ready"
+          label={t("me.queueReady")}
           value={dashboard.sellerReadyToLock.length}
           tone={T.accent}
           active={queue === "ready"}
-          onClick={() => setQueue("ready")}
+          onClick={() => {
+            if (dashboard.sellerReadyToLock.length === 0) return;
+            setQueue("ready");
+          }}
         />
         <DashboardMetric
-          label="Holds"
+          label={t("me.queueHolds")}
           value={dashboard.sellerWindowShoppers.length}
           tone={T.amber}
           active={queue === "holds"}
-          onClick={() => setQueue("holds")}
+          onClick={() => {
+            if (dashboard.sellerWindowShoppers.length === 0) return;
+            setQueue("holds");
+          }}
         />
         <DashboardMetric
-          label="Live"
+          label={t("me.queueLive")}
           value={dashboard.sellerLive.length}
           tone={T.purple}
           active={queue === "live"}
-          onClick={() => setQueue("live")}
+          onClick={() => {
+            if (dashboard.sellerLive.length === 0) return;
+            setQueue("live");
+          }}
         />
         <DashboardMetric
-          label="Stock"
+          label={t("me.queueStock")}
           value={dashboard.sellerInventory.length}
           tone={T.green}
           active={queue === "stock"}
-          onClick={() => setQueue("stock")}
+          onClick={() => {
+            if (dashboard.sellerInventory.length === 0) return;
+            setQueue("stock");
+          }}
         />
       </div>
 
@@ -1178,21 +1199,28 @@ function DashboardMetric({
   active: boolean;
   onClick: () => void;
 }) {
+  // Empty queues aren't selectable — clicking them used to flash the empty
+  // state then snap back via the panel's "prefer a non-empty queue" effect.
+  const disabled = value === 0 && !active;
   return (
     <button
-      onClick={onClick}
+      type="button"
+      disabled={disabled}
+      onClick={disabled ? undefined : onClick}
+      aria-disabled={disabled}
       style={{
         minWidth: 0,
         padding: "10px 6px",
         background: active ? `${tone}22` : T.surface,
         border: `1px solid ${active ? tone : value > 0 ? tone + "44" : T.border}`,
         borderRadius: T.rs,
-        cursor: "pointer",
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.55 : 1,
       }}
     >
       <div style={{
         fontFamily: T.mono,
-        color: tone,
+        color: disabled ? T.muted : tone,
         fontSize: 20,
         fontWeight: 900,
         lineHeight: 1,
@@ -1230,14 +1258,15 @@ function SellerQueueList({
   onSellerEditListing?: (id: string) => void;
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
 }) {
+  const { t } = useT();
   const tone = sellerQueueTone(queue);
   const emptyCopy = queue === "stock"
-    ? "No open inventory right now."
+    ? t("me.emptyStock")
     : queue === "live"
-      ? "No live seller orders right now."
+      ? t("me.emptyLive")
       : queue === "holds"
-        ? "No buyers browsing your listings right now."
-        : "No orders are finalized for lock yet.";
+        ? t("me.emptyHolds")
+        : t("me.emptyReady");
 
   if (trades.length === 0) {
     return (
@@ -1279,14 +1308,16 @@ function SellerQueueList({
           textTransform: "uppercase",
           letterSpacing: 1,
         }}>
-          {SELLER_QUEUE_LABEL[queue]} queue
+          {t("me.queueHeader", { label: t(SELLER_QUEUE_LABEL_KEY[queue]) })}
         </div>
         <div style={{
           fontFamily: T.mono,
           color: T.muted,
           fontSize: 10,
         }}>
-          {trades.length.toLocaleString()} item{trades.length === 1 ? "" : "s"}
+          {trades.length === 1
+            ? t("me.itemCountOne", { count: trades.length.toLocaleString() })
+            : t("me.itemCountMany", { count: trades.length.toLocaleString() })}
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column" }}>
@@ -1321,6 +1352,7 @@ function SellerQueueItem({
   onSellerEditListing?: (id: string) => void;
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
 }) {
+  const { t } = useT();
   const canDelete = trade.status === EscrowStatus.CREATED && Boolean(onSellerDeleteListing);
   const canEdit = trade.status === EscrowStatus.CREATED && Boolean(onSellerEditListing);
 
@@ -1376,15 +1408,15 @@ function SellerQueueItem({
         gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
         gap: 6,
       }}>
-        <SellerActionButton label="View" tone={T.text} onClick={() => onOpenTrade(trade.id)} />
+        <SellerActionButton label={t("me.view")} tone={T.text} onClick={() => onOpenTrade(trade.id)} />
         <SellerActionButton
-          label="Edit"
+          label={t("me.edit")}
           tone={T.amber}
           disabled={!canEdit}
           onClick={() => onSellerEditListing?.(trade.id)}
         />
         <SellerActionButton
-          label={canDelete ? "Delete" : "Locked"}
+          label={canDelete ? t("me.delete") : t("me.locked")}
           tone={canDelete ? T.red : T.muted}
           disabled={!canDelete}
           onClick={() => onSellerDeleteListing?.(trade.id)}
@@ -1429,10 +1461,12 @@ function SellerActionButton({
 
 type ArbiterQueueKey = "needs" | "watching" | "settled";
 
-const ARBITER_QUEUE_LABEL: Record<ArbiterQueueKey, string> = {
-  needs: "Needs decision",
-  watching: "Watching",
-  settled: "Settled",
+// i18n: dictionary KEYS resolved with t() at render (module-level constants
+// can't call hooks). The ArbiterQueueKey ids are compared — never translated.
+const ARBITER_QUEUE_LABEL_KEY: Record<ArbiterQueueKey, string> = {
+  needs: "me.needsDecision",
+  watching: "me.queueWatching",
+  settled: "me.queueSettled",
 };
 
 function ArbiterDashboardPanel({
@@ -1444,6 +1478,7 @@ function ArbiterDashboardPanel({
   onOpenTrade: (id: string) => void;
   viewerPubkey: string;
 }) {
+  const { t } = useT();
   const [queue, setQueue] = useState<ArbiterQueueKey>(() => firstArbiterQueue(dashboard));
   useEffect(() => {
     if (arbiterQueueTrades(dashboard, queue).length > 0) return;
@@ -1466,22 +1501,22 @@ function ArbiterDashboardPanel({
             fontFamily: T.mono, color: ROLE_COLOR.arbiter, fontSize: 10,
             fontWeight: 900, letterSpacing: 1, textTransform: "uppercase",
           }}>
-            Arbiter dashboard
+            {t("me.arbiterDashboard")}
           </div>
           <div style={{
             marginTop: 3,
             fontFamily: T.sans, color: T.text, fontSize: 15,
             fontWeight: 800,
           }}>
-            Disputes and watched trades
+            {t("me.disputesAndWatched")}
           </div>
         </div>
         <div style={{
           fontFamily: T.mono, color: T.muted, fontSize: 10,
           lineHeight: 1.35, textAlign: "right" as const,
         }}>
-          listed arbiter<br />
-          BLF pool
+          {t("me.listedArbiter")}<br />
+          {t("me.blfPool")}
         </div>
       </div>
 
@@ -1492,25 +1527,34 @@ function ArbiterDashboardPanel({
         marginBottom: 12,
       }}>
         <DashboardMetric
-          label="Needs"
+          label={t("me.queueNeeds")}
           value={dashboard.arbiterDisputes.length}
           tone={T.red}
           active={queue === "needs"}
-          onClick={() => setQueue("needs")}
+          onClick={() => {
+            if (dashboard.arbiterDisputes.length === 0) return;
+            setQueue("needs");
+          }}
         />
         <DashboardMetric
-          label="Watching"
+          label={t("me.queueWatching")}
           value={dashboard.arbiterWatching.length}
           tone={ROLE_COLOR.arbiter}
           active={queue === "watching"}
-          onClick={() => setQueue("watching")}
+          onClick={() => {
+            if (dashboard.arbiterWatching.length === 0) return;
+            setQueue("watching");
+          }}
         />
         <DashboardMetric
-          label="Settled"
+          label={t("me.queueSettled")}
           value={dashboard.arbiterSettled.length}
           tone={T.green}
           active={queue === "settled"}
-          onClick={() => setQueue("settled")}
+          onClick={() => {
+            if (dashboard.arbiterSettled.length === 0) return;
+            setQueue("settled");
+          }}
         />
       </div>
 
@@ -1535,12 +1579,13 @@ function ArbiterQueueList({
   onOpenTrade: (id: string) => void;
   viewerPubkey: string;
 }) {
+  const { t } = useT();
   const tone = arbiterQueueTone(queue);
   const emptyCopy = queue === "needs"
-    ? "No disputes need your decision right now."
+    ? t("me.emptyDisputes")
     : queue === "watching"
-      ? "No pool trades to watch right now."
-      : "No settled arbiter history yet.";
+      ? t("me.emptyWatching")
+      : t("me.emptySettled");
 
   if (trades.length === 0) {
     return (
@@ -1582,14 +1627,16 @@ function ArbiterQueueList({
           textTransform: "uppercase",
           letterSpacing: 1,
         }}>
-          {ARBITER_QUEUE_LABEL[queue]}
+          {t(ARBITER_QUEUE_LABEL_KEY[queue])}
         </div>
         <div style={{
           fontFamily: T.mono,
           color: T.muted,
           fontSize: 10,
         }}>
-          {trades.length.toLocaleString()} trade{trades.length === 1 ? "" : "s"}
+          {trades.length === 1
+            ? t("me.tradeCountOne", { count: trades.length.toLocaleString() })
+            : t("me.tradeCountMany", { count: trades.length.toLocaleString() })}
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column" }}>
@@ -1621,6 +1668,7 @@ function ArbiterQueueItem({
   onOpenTrade: (id: string) => void;
   viewerPubkey: string;
 }) {
+  const { t } = useT();
   const tone = arbiterQueueTone(queue);
   const participants = getEffectiveParticipantsAt(trade);
 
@@ -1678,9 +1726,9 @@ function ArbiterQueueItem({
         gap: 6,
         marginBottom: 8,
       }}>
-        <VoteChip label="Buyer" outcome={trade.votes[Role.BUYER]} />
-        <VoteChip label="Seller" outcome={trade.votes[Role.SELLER]} />
-        <VoteChip label="You" outcome={trade.votes[Role.ARBITER]} />
+        <VoteChip label={t("me.buyer")} outcome={trade.votes[Role.BUYER]} />
+        <VoteChip label={t("me.seller")} outcome={trade.votes[Role.SELLER]} />
+        <VoteChip label={t("me.you")} outcome={trade.votes[Role.ARBITER]} />
       </div>
 
       <div style={{
@@ -1698,10 +1746,10 @@ function ArbiterQueueItem({
           overflow: "hidden",
           textOverflow: "ellipsis",
         }}>
-          B {shortPubkey(participants[Role.BUYER])} · S {shortPubkey(participants[Role.SELLER])}
+          {t("me.partiesShort", { buyer: shortPubkey(participants[Role.BUYER]), seller: shortPubkey(participants[Role.SELLER]) })}
         </div>
         <SellerActionButton
-          label={queue === "needs" ? "Decide" : "View"}
+          label={queue === "needs" ? t("me.decide") : t("me.view")}
           tone={tone}
           onClick={() => onOpenTrade(trade.id)}
         />
@@ -1711,16 +1759,17 @@ function ArbiterQueueItem({
 }
 
 function VoteChip({ label, outcome }: { label: string; outcome?: Outcome }) {
+  const { t } = useT();
   const tone = outcome === Outcome.RELEASE
     ? T.green
     : outcome === Outcome.REFUND
       ? T.amber
       : T.muted;
   const text = outcome === Outcome.RELEASE
-    ? "release"
+    ? t("me.voteRelease")
     : outcome === Outcome.REFUND
-      ? "refund"
-      : "pending";
+      ? t("me.voteRefund")
+      : t("me.votePending");
 
   return (
     <div style={{
@@ -1820,17 +1869,19 @@ function sellerQueueTone(queue: SellerQueueKey): string {
 }
 
 function sellerQueueStatus(queue: SellerQueueKey, trade: EscrowState): string {
+  // Pure helper (no hooks) — resolved via translate() at call time (render).
+  const lang = getCurrentLang();
   const itemSummary = selectedOrMenuSummary(trade);
   if (queue === "ready") {
-    return `${itemSummary ?? "order finalized"} · waiting for your lock`;
+    return `${itemSummary ?? translate(lang, "me.orderFinalized")} · ${translate(lang, "me.waitingForYourLock")}`;
   }
   if (queue === "holds") {
-    return `${itemSummary ?? "buyer browsing"} · waiting for checkout`;
+    return `${itemSummary ?? translate(lang, "me.buyerBrowsing")} · ${translate(lang, "me.waitingForCheckout")}`;
   }
   if (queue === "live") {
-    return `${trade.status.toLowerCase()} · ${itemSummary ?? "money moving"}`;
+    return `${trade.status.toLowerCase()} · ${itemSummary ?? translate(lang, "me.moneyMoving")}`;
   }
-  return itemSummary ?? "single listing";
+  return itemSummary ?? translate(lang, "me.singleListing");
 }
 
 function firstArbiterQueue(dashboard: MeDashboardModel): ArbiterQueueKey {
@@ -1852,9 +1903,11 @@ function arbiterQueueTone(queue: ArbiterQueueKey): string {
 }
 
 function arbiterQueueStatus(queue: ArbiterQueueKey, trade: EscrowState, viewerPubkey?: string): string {
+  // Pure helper (no hooks) — resolved via translate() at call time (render).
+  const lang = getCurrentLang();
   if (queue === "needs") {
     if (trade.status === EscrowStatus.EXPIRED) {
-      return `${arbiterDisputeLine(trade)} · expired unresolved — open it to heal (auto-refunds the locker)`;
+      return `${arbiterDisputeLine(trade)} · ${translate(lang, "me.expiredUnresolvedSuffix")}`;
     }
     // Arbiter substitution: a BACKUP viewing a pooled-lock dispute sees the
     // assigned arbiter's floor countdown, then the step-in invitation.
@@ -1865,28 +1918,28 @@ function arbiterQueueStatus(queue: ArbiterQueueKey, trade: EscrowState, viewerPu
       const eligibleAt = substitutionEligibleAt(trade);
       const nowSec = Math.floor(Date.now() / 1000);
       if (eligibleAt !== null && nowSec < eligibleAt) {
-        return `${arbiterDisputeLine(trade)} · assigned arbiter has the floor · you can step in ${formatStepInCountdown(eligibleAt - nowSec)}`;
+        return `${arbiterDisputeLine(trade)} · ${translate(lang, "me.arbiterHasFloor")} · ${translate(lang, "me.stepInCountdown", { countdown: formatStepInCountdown(eligibleAt - nowSec) })}`;
       }
-      return `${arbiterDisputeLine(trade)} · assigned arbiter absent · step in as backup`;
+      return `${arbiterDisputeLine(trade)} · ${translate(lang, "me.arbiterAbsentStepIn")}`;
     }
-    return `${arbiterDisputeLine(trade)} · decision needed`;
+    return `${arbiterDisputeLine(trade)} · ${translate(lang, "me.decisionNeeded")}`;
   }
   if (queue === "watching") {
     return `${arbiterDisputeLine(trade)} · ${trade.status.toLowerCase()}`;
   }
-  return `${trade.status.toLowerCase()} · ${trade.resolvedOutcome ?? "no outcome"}`;
+  return `${trade.status.toLowerCase()} · ${trade.resolvedOutcome ?? translate(lang, "me.noOutcome")}`;
 }
 
 function arbiterDisputeLine(trade: EscrowState): string {
   const buyer = voteText(trade.votes[Role.BUYER]);
   const seller = voteText(trade.votes[Role.SELLER]);
-  return `buyer ${buyer} · seller ${seller}`;
+  return translate(getCurrentLang(), "me.disputeLine", { buyer, seller });
 }
 
 function voteText(outcome?: Outcome): string {
-  if (outcome === Outcome.RELEASE) return "release";
-  if (outcome === Outcome.REFUND) return "refund";
-  return "pending";
+  if (outcome === Outcome.RELEASE) return translate(getCurrentLang(), "me.voteRelease");
+  if (outcome === Outcome.REFUND) return translate(getCurrentLang(), "me.voteRefund");
+  return translate(getCurrentLang(), "me.votePending");
 }
 
 // v2.3.1 — the deliberate "change your Chama" surface. The Browse pill is now
@@ -1909,6 +1962,7 @@ function YourChamaCard({
   loadLiveness?: (slug: string) => Promise<ChamaLiveness | null>;
   livenessBlocksPerDay?: number;
 }) {
+  const { t } = useT();
   const [changing, setChanging] = useState(false);
   const [query, setQuery] = useState("");
   // Your own chama's chain-verified liveness — auto-refreshed (mount, focus, and a
@@ -1920,7 +1974,7 @@ function YourChamaCard({
     ? countries.find((country) => country.code === current.country) ?? null
     : null;
   const currentCountryCode = currentCountry?.code ?? current?.country ?? null;
-  const currentCountryLabel = currentCountry?.name ?? current?.country ?? "Global";
+  const currentCountryLabel = currentCountry?.name ?? current?.country ?? t("me.globalRegion");
   const currentCountryFlag = currentCountry?.flag ?? (current?.country ? current.flagEmoji : null);
   const currentCountrySubline = currentCountry
     ? countrySubline(currentCountry)
@@ -1943,7 +1997,7 @@ function YourChamaCard({
         <div style={{
           fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1,
         }}>
-          YOUR CHAMA
+          {t("me.yourChama")}
         </div>
         {!hasActiveCommitment && (
           <button
@@ -1959,7 +2013,7 @@ function YourChamaCard({
               padding: "5px 10px", borderRadius: T.rs, cursor: "pointer",
             }}
           >
-            {changing ? "Cancel" : "Switch"}
+            {changing ? t("common.cancel") : t("me.switch")}
           </button>
         )}
       </div>
@@ -1990,7 +2044,7 @@ function YourChamaCard({
           </div>
         </div>
         <div style={{ color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 900 }}>
-          current
+          {t("me.current")}
         </div>
       </div>
 
@@ -2006,9 +2060,7 @@ function YourChamaCard({
           background: T.amberDim, border: `1px solid ${T.amber}44`,
           fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
         }}>
-          You have a live trade. Finish it before switching — your locked sats
-          live on this Chama, and a switch would put your claim on hold until you
-          switch back.
+          {t("me.liveTradeNoSwitch")}
         </div>
       )}
 
@@ -2026,7 +2078,7 @@ function YourChamaCard({
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search countries..."
+              placeholder={t("me.searchCountriesPlaceholder")}
               autoComplete="off"
               autoCapitalize="off"
               spellCheck={false}
@@ -2042,7 +2094,11 @@ function YourChamaCard({
             fontSize: 10, fontWeight: 800, color: T.muted,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
           }}>
-            {search ? `${otherCountries.length} MATCH${otherCountries.length === 1 ? "" : "ES"}` : "OTHER COUNTRIES"}
+            {search
+              ? (otherCountries.length === 1
+                ? t("me.countryMatchOne", { count: otherCountries.length })
+                : t("me.countryMatchMany", { count: otherCountries.length }))
+              : t("me.otherCountries")}
           </div>
           <div style={{ display: "grid", gap: 8, maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
             {otherCountries.length === 0 ? (
@@ -2052,7 +2108,7 @@ function YourChamaCard({
                 color: T.muted, fontFamily: T.mono, fontSize: 11,
                 textAlign: "center" as const,
               }}>
-                No countries match that search.
+                {t("me.noCountriesMatch")}
               </div>
             ) : otherCountries.map((country) => (
               <button
@@ -2090,7 +2146,7 @@ function YourChamaCard({
                   </span>
                 </span>
                 <span style={{ color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 900 }}>
-                  switch
+                  {t("me.switchAction")}
                 </span>
               </button>
             ))}
@@ -2243,18 +2299,22 @@ function selectedOrMenuSummary(trade: EscrowState): string | null {
   if (selectedItems.length > 0) return selectedItemsSummary(selectedItems);
   const menuCount = trade.items?.length ?? 0;
   if (menuCount === 0) return null;
-  if (trade.category === "bill-pay") return `${menuCount} bill${menuCount === 1 ? "" : "s"}`;
-  if (trade.category === "lending") return `${menuCount} loan${menuCount === 1 ? "" : "s"}`;
-  if (trade.category === "marketplace") return `${menuCount} item${menuCount === 1 ? "" : "s"}`;
-  return `${menuCount} option${menuCount === 1 ? "" : "s"}`;
+  // Pure helper (no hooks) — resolved via translate() at call time (render).
+  // The compared category values are data ids, never translated.
+  const lang = getCurrentLang();
+  const one = menuCount === 1;
+  if (trade.category === "bill-pay") return translate(lang, one ? "me.billCountOne" : "me.billCountMany", { count: menuCount });
+  if (trade.category === "lending") return translate(lang, one ? "me.loanCountOne" : "me.loanCountMany", { count: menuCount });
+  if (trade.category === "marketplace") return translate(lang, one ? "me.itemCountOne" : "me.itemCountMany", { count: menuCount });
+  return translate(lang, one ? "me.optionCountOne" : "me.optionCountMany", { count: menuCount });
 }
 
 function selectedItemsSummary(items: SelectedMenuItem[]): string {
   if (items.length === 1) {
     const item = items[0];
-    return `${item.label}${item.quantity > 1 ? ` x${item.quantity}` : ""}`;
+    return `${item.label}${item.quantity > 1 ? ` ${translate(getCurrentLang(), "me.timesQuantity", { quantity: item.quantity })}` : ""}`;
   }
-  return `${items.length} selected`;
+  return translate(getCurrentLang(), "me.selectedCount", { count: items.length });
 }
 
 
@@ -2301,7 +2361,7 @@ function isArbiterSettledTrade(trade: EscrowState): boolean {
 }
 
 function shortPubkey(pubkey: string | null | undefined): string {
-  if (!pubkey) return "empty";
+  if (!pubkey) return translate(getCurrentLang(), "me.emptyPubkey");
   return pubkey.slice(0, 6) + "…";
 }
 
@@ -2355,6 +2415,7 @@ function isDoneTrade(trade: EscrowState): boolean {
 // dispute / settled). Default on; the OS permission is the real gate, so
 // flipping it on proactively asks. Self-contained — no prop threading.
 function NotificationsRow() {
+  const { t } = useT();
   const [on, setOn] = useState<boolean>(() => notificationsEnabled());
   const toggle = () => {
     const next = !on;
@@ -2369,10 +2430,10 @@ function NotificationsRow() {
     }}>
       <div>
         <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
-          Notifications
+          {t("me.notifications")}
         </div>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-          Locked · claim ready · disputes · settled
+          {t("me.notificationsHint")}
         </div>
       </div>
       <button
@@ -2402,6 +2463,7 @@ function NotificationsRow() {
 // Self-contained — reads/writes the pref directly. Auto or On proactively asks
 // OS permission (the real gate).
 function DmNotificationsRow() {
+  const { t } = useT();
   const [pref, setPref] = useState<DmNotifyPref>(() => dmNotifyPref());
   const pick = (next: DmNotifyPref) => {
     setPref(next);
@@ -2409,9 +2471,9 @@ function DmNotificationsRow() {
     if (next !== "off") void ensureNotificationPermission();
   };
   const sublabel =
-    pref === "auto" ? "Auto — buzzes when you're the arbiter"
-    : pref === "on" ? "On — buzzes on every trade"
-    : "Off — chat stays silent";
+    pref === "auto" ? t("me.dmAutoHint")
+    : pref === "on" ? t("me.dmOnHint")
+    : t("me.dmOffHint");
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -2419,7 +2481,7 @@ function DmNotificationsRow() {
     }}>
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
-          DM notifications
+          {t("me.dmNotifications")}
         </div>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
           {sublabel}
@@ -2428,7 +2490,7 @@ function DmNotificationsRow() {
       <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
         {(["auto", "on", "off"] as DmNotifyPref[]).map(opt => {
           const active = pref === opt;
-          const label = opt === "auto" ? "Auto" : opt === "on" ? "On" : "Off";
+          const label = opt === "auto" ? t("me.auto") : opt === "on" ? t("me.on") : t("me.off");
           return (
             <button
               key={opt}
@@ -2456,6 +2518,7 @@ function DmNotificationsRow() {
 function NostrNamesRow({ on, onToggle }: {
   on: boolean; onToggle: () => void;
 }) {
+  const { t } = useT();
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -2463,10 +2526,10 @@ function NostrNamesRow({ on, onToggle }: {
     }}>
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
-          Nostr names
+          {t("me.nostrNames")}
         </div>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-          Show profile names instead of npub IDs
+          {t("me.nostrNamesHint")}
         </div>
       </div>
       <button

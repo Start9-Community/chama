@@ -19,6 +19,7 @@
 // new invoice, no double payment.
 
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
 import type { PendingNativeLock } from "../../fedimint/pending-native-locks.js";
 
@@ -39,6 +40,7 @@ export function PendingLockCard({
   /** Navigate to the trade detail. */
   onOpenTrade: () => void;
 }) {
+  const { t } = useT();
   const spent = entry.stage !== "intent";
   return (
     <div style={{ padding: "12px 16px 0", maxWidth: 560, margin: "0 auto" }}>
@@ -50,7 +52,7 @@ export function PendingLockCard({
           fontSize: 10, fontWeight: 700, color: T.accent, fontFamily: T.mono,
           letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8,
         }}>
-          ⏸ Finish locking your trade
+          {t("recovery.finishLockTag")}
         </div>
 
         <div style={{
@@ -58,13 +60,12 @@ export function PendingLockCard({
           lineHeight: 1.5, marginBottom: 4,
         }}>
           {spent
-            ? <>Your last session ended before the lock finished. Your{" "}
+            ? <>{t("recovery.lockSpentBefore")}{" "}
                 <BitcoinAmount msats={entry.amountMsats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />{" "}
-                are safe — finish the lock to put them in escrow.</>
-            : <>You were funding this trade when the app closed. Pick up where
-                you left off — locking{" "}
+                {t("recovery.lockSpentAfter")}</>
+            : <>{t("recovery.lockIntentBefore")}{" "}
                 <BitcoinAmount msats={entry.amountMsats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />{" "}
-                puts your sats in escrow.</>}
+                {t("recovery.lockIntentAfter")}</>}
         </div>
 
         {tradeDescription && (
@@ -89,7 +90,7 @@ export function PendingLockCard({
               cursor: busy ? "default" : "pointer", letterSpacing: 0.5,
             }}
           >
-            {busy ? "Finishing…" : "Finish lock →"}
+            {busy ? t("recovery.finishing") : t("recovery.finishLockCta")}
           </button>
           <button
             onClick={onOpenTrade}
@@ -101,7 +102,7 @@ export function PendingLockCard({
               cursor: "pointer",
             }}
           >
-            Open trade
+            {t("recovery.openTrade")}
           </button>
         </div>
 
@@ -109,7 +110,7 @@ export function PendingLockCard({
           marginTop: 8, fontSize: 9, color: T.muted, fontFamily: T.mono,
           lineHeight: 1.5,
         }}>
-          Recovery is automatic and fee-free — nothing is sent over Lightning.
+          {t("recovery.lockFooter")}
         </div>
       </div>
     </div>

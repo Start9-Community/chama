@@ -30,6 +30,7 @@ import {
   type CancelPayload,
   type ChatImageAttachment,
   type ChatPayload,
+  type PremiumPayload,
   type HandleEnvelope,
   type SubscribePayload,
   type PeriodReleasePayload,
@@ -54,6 +55,7 @@ const KIND_TO_TYPE: Record<number, string> = {
   [EscrowEventKind.COMPLETE]: "escrow:complete",
   [EscrowEventKind.CANCEL]:   "escrow:cancel",
   [EscrowEventKind.CHAT]:     "escrow:chat",
+  [EscrowEventKind.PREMIUM]:  "escrow:premium",
   [EscrowEventKind.SUBSCRIBE]:      "escrow:subscribe",
   [EscrowEventKind.PERIOD_RELEASE]: "escrow:period_release",
 };
@@ -431,6 +433,17 @@ function validateChatPayload(data: unknown): data is ChatPayload {
   );
 }
 
+function validatePremiumPayload(data: unknown): data is PremiumPayload {
+  const d = data as Record<string, unknown>;
+  return (
+    d.type === "escrow:premium" &&
+    validateEnvelope(d.noteEnvelope) &&
+    typeof d.payerRole === "string" && Object.values(Role).includes(d.payerRole as Role) &&
+    (d.noteKind === "ambient" || d.noteKind === "dispute") &&
+    typeof d.sentAt === "number"
+  );
+}
+
 function validateSubscribePayload(data: unknown): data is SubscribePayload {
   const d = data as Record<string, unknown>;
   return (
@@ -466,6 +479,7 @@ const PAYLOAD_VALIDATORS: Record<number, (data: unknown) => boolean> = {
   [EscrowEventKind.COMPLETE]: validateCompletePayload,
   [EscrowEventKind.CANCEL]:   validateCancelPayload,
   [EscrowEventKind.CHAT]:     validateChatPayload,
+  [EscrowEventKind.PREMIUM]:  validatePremiumPayload,
   [EscrowEventKind.SUBSCRIBE]:      validateSubscribePayload,
   [EscrowEventKind.PERIOD_RELEASE]: validatePeriodReleasePayload,
 };
@@ -589,9 +603,15 @@ export function parseEscrowEvent(
  * timestamp since they don't participate in the state chain.
  */
 export function sortEventChain(events: ParsedEscrowEvent[]): ParsedEscrowEvent[] {
-  // Separate state events from chat events
-  const stateEvents = events.filter(e => e.kind !== EscrowEventKind.CHAT);
-  const chatEvents = events.filter(e => e.kind === EscrowEventKind.CHAT);
+  // Separate state events from auxiliary (non-consensus) events. CHAT and
+  // PREMIUM carry no e-tag (prevEventId null) — leaving them in the state
+  // bucket would let `find(prevEventId === null)` pick one as the chain
+  // ROOT ahead of CREATE, and the replay would fail MISSING_CREATE (trade
+  // unloadable). They interleave by timestamp below instead.
+  const isAux = (e: ParsedEscrowEvent) =>
+    e.kind === EscrowEventKind.CHAT || e.kind === EscrowEventKind.PREMIUM;
+  const stateEvents = events.filter(e => !isAux(e));
+  const chatEvents = events.filter(isAux);
 
   // Find the root (CREATE event — no prevEventId)
   const root = stateEvents.find(e => e.prevEventId === null);

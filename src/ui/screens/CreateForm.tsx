@@ -33,6 +33,7 @@
 //     publish). Save-draft button + Publish button.
 
 import { useState, useEffect } from "react";
+import { useT, translate, getCurrentLang } from "../../i18n/index.js";
 import { type MenuItem } from "../../escrow-engine/types.js";
 import { randomId } from "../../storage/random-id.js";
 import { categoryAllowsFulfillmentChoice, type Fulfillment } from "../../labels/vote-labels.js";
@@ -88,13 +89,15 @@ type ListingMode = "single" | "menu";
 // the wizard sells the same vision the splash does without promising a creatable
 // flow that isn't wired. `id` is `string` for that reason. Lending retired here
 // (Work replaces it); the "lending" Vertical + logic stay in code for back-compat.
-const VERTICALS: { id: string; label: string; icon: string; description: string; comingSoon?: boolean }[] = [
-  { id: "p2p-trade", label: "Exchange", icon: "⚡", description: "Swap sats for fiat with another user." },
-  { id: "bill-pay", label: "Community Bill Pay", icon: "🧾", description: "Pay a bill in exchange for sats." },
-  { id: "marketplace", label: "Marketplace", icon: "🏪", description: "Sell goods, services, or digital items." },
-  { id: "work", label: "Work", icon: "🛠️", description: "Get small jobs done — fix, build, tutor.", comingSoon: true },
-  { id: "chip-in", label: "Chip In", icon: "🤝", description: "Pool sats together with your community.", comingSoon: true },
-  { id: "stack", label: "Stack", icon: "🪙", description: "Save toward a goal — your keys, your sats.", comingSoon: true },
+// i18n: label/description are DICTIONARY KEYS, resolved with t() at render
+// (module-level constants can't call hooks) — same pattern as INTRO_USE_CASES.
+const VERTICALS: { id: string; labelKey: string; icon: string; descriptionKey: string; comingSoon?: boolean }[] = [
+  { id: "p2p-trade", labelKey: "create.verticalExchange", icon: "⚡", descriptionKey: "create.verticalExchangeDesc" },
+  { id: "bill-pay", labelKey: "create.verticalBillPay", icon: "🧾", descriptionKey: "create.verticalBillPayDesc" },
+  { id: "marketplace", labelKey: "create.verticalMarketplace", icon: "🏪", descriptionKey: "create.verticalMarketplaceDesc" },
+  { id: "work", labelKey: "create.verticalWork", icon: "🛠️", descriptionKey: "create.verticalWorkDesc", comingSoon: true },
+  { id: "chip-in", labelKey: "create.verticalChipIn", icon: "🤝", descriptionKey: "create.verticalChipInDesc", comingSoon: true },
+  { id: "stack", labelKey: "create.verticalStack", icon: "🪙", descriptionKey: "create.verticalStackDesc", comingSoon: true },
 ];
 
 interface FormState {
@@ -158,12 +161,13 @@ const MENU_IMAGE_ACCEPT = [
   ".png",
   ".webp",
 ].join(",");
+// i18n: labelKey resolved with translate(getCurrentLang()) at render.
 const LENDING_TIER_LIMITS = [
-  { tier: 1, maxSats: 50_000, label: "Starter" },
-  { tier: 2, maxSats: 200_000, label: "Proven" },
-  { tier: 3, maxSats: 500_000, label: "Trusted" },
-  { tier: 4, maxSats: 1_000_000, label: "Prime" },
-  { tier: 5, maxSats: 2_000_000, label: "OG" },
+  { tier: 1, maxSats: 50_000, labelKey: "create.tierStarter" },
+  { tier: 2, maxSats: 200_000, labelKey: "create.tierProven" },
+  { tier: 3, maxSats: 500_000, labelKey: "create.tierTrusted" },
+  { tier: 4, maxSats: 1_000_000, labelKey: "create.tierPrime" },
+  { tier: 5, maxSats: 2_000_000, labelKey: "create.tierOg" },
 ] as const;
 const MAX_FEDIMINT_LENDING_SATS = LENDING_TIER_LIMITS[LENDING_TIER_LIMITS.length - 1].maxSats;
 
@@ -357,20 +361,21 @@ function lendingTierLimitForTier(tier: number | undefined): typeof LENDING_TIER_
 }
 
 function lendingTierSummary(value: string) {
+  const lang = getCurrentLang();
   const sats = parseWholeSats(value);
   const tier = lendingTierForSats(sats);
   const limit = lendingTierLimitForTier(tier);
-  if (!sats) return "Enter principal to assign borrower tier.";
+  if (!sats) return translate(lang, "create.enterPrincipal");
   if (!tier || !limit) {
     return (
       <>
-        Above current Fedimint lending cap of <BitcoinAmount sats={MAX_FEDIMINT_LENDING_SATS} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />.
+        {translate(lang, "create.aboveLendingCapBefore")} <BitcoinAmount sats={MAX_FEDIMINT_LENDING_SATS} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />{translate(lang, "create.aboveLendingCapAfter")}
       </>
     );
   }
   return (
     <>
-      Tier {tier} · {limit.label} · up to <BitcoinAmount sats={limit.maxSats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+      {translate(lang, "create.tierSummaryBefore", { tier, label: translate(lang, limit.labelKey) })} <BitcoinAmount sats={limit.maxSats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
     </>
   );
 }
@@ -563,89 +568,100 @@ function markFirstPublished(pubkey: string | null): void {
 }
 
 function menuTitleForVertical(vertical: Vertical): string {
-  if (vertical === "p2p-trade") return "SAT OPTIONS";
-  if (vertical === "bill-pay") return "BILLS";
-  if (vertical === "lending") return "LOAN OFFERS";
-  return "STORE ITEMS";
+  const lang = getCurrentLang();
+  if (vertical === "p2p-trade") return translate(lang, "create.menuTitleExchange");
+  if (vertical === "bill-pay") return translate(lang, "create.menuTitleBillPay");
+  if (vertical === "lending") return translate(lang, "create.menuTitleLending");
+  return translate(lang, "create.menuTitleMarket");
 }
 
 function menuAddLabelForVertical(vertical: Vertical): string {
-  if (vertical === "p2p-trade") return "+ Option";
-  if (vertical === "bill-pay") return "+ Bill";
-  if (vertical === "lending") return "+ Loan";
-  return "+ Item";
+  const lang = getCurrentLang();
+  if (vertical === "p2p-trade") return translate(lang, "create.menuAddExchange");
+  if (vertical === "bill-pay") return translate(lang, "create.menuAddBillPay");
+  if (vertical === "lending") return translate(lang, "create.menuAddLending");
+  return translate(lang, "create.menuAddMarket");
 }
 
 function menuPlaceholderForVertical(vertical: Vertical, index: number): string {
-  if (vertical === "p2p-trade") return `Option ${index + 1}`;
-  if (vertical === "bill-pay") return `Bill ${index + 1}`;
-  if (vertical === "lending") return `Loan offer ${index + 1}`;
-  return `Item ${index + 1}`;
+  const lang = getCurrentLang();
+  if (vertical === "p2p-trade") return translate(lang, "create.menuPlaceholderExchange", { n: index + 1 });
+  if (vertical === "bill-pay") return translate(lang, "create.menuPlaceholderBillPay", { n: index + 1 });
+  if (vertical === "lending") return translate(lang, "create.menuPlaceholderLending", { n: index + 1 });
+  return translate(lang, "create.menuPlaceholderMarket", { n: index + 1 });
 }
 
 function menuHintForVertical(vertical: Vertical): string {
-  if (vertical === "p2p-trade") return "Buyers choose an exact sats amount inside an option.";
-  if (vertical === "bill-pay") return "Volunteers can bundle one or more bills before locking.";
-  if (vertical === "lending") return "Lenders choose one or more loan requests to fund.";
-  return "Products and services can carry images and fiat anchors.";
+  const lang = getCurrentLang();
+  if (vertical === "p2p-trade") return translate(lang, "create.menuHintExchange");
+  if (vertical === "bill-pay") return translate(lang, "create.menuHintBillPay");
+  if (vertical === "lending") return translate(lang, "create.menuHintLending");
+  return translate(lang, "create.menuHintMarket");
 }
 
 function menuCurrencyHint(vertical: Vertical, currency: string): string {
-  if (vertical === "p2p-trade") return `Every option uses ${currency}; no mixed-currency checkout.`;
-  if (vertical === "bill-pay") return `All bill estimates use ${currency}; volunteers can bundle them safely.`;
-  if (vertical === "lending") return `Loan tiers are sats-based; ${currency} stays as the community fiat context for repayment display.`;
-  return `All item fiat anchors display in ${currency}.`;
+  const lang = getCurrentLang();
+  if (vertical === "p2p-trade") return translate(lang, "create.menuCurrencyExchange", { currency });
+  if (vertical === "bill-pay") return translate(lang, "create.menuCurrencyBillPay", { currency });
+  if (vertical === "lending") return translate(lang, "create.menuCurrencyLending", { currency });
+  return translate(lang, "create.menuCurrencyMarket", { currency });
 }
 
 function singleModeLabel(vertical: Vertical): string {
-  if (vertical === "bill-pay") return "Single bill";
-  if (vertical === "marketplace") return "Single";
-  if (vertical === "lending") return "One loan";
-  return "One swap";
+  const lang = getCurrentLang();
+  if (vertical === "bill-pay") return translate(lang, "create.singleModeBillPay");
+  if (vertical === "marketplace") return translate(lang, "create.singleModeMarket");
+  if (vertical === "lending") return translate(lang, "create.singleModeLending");
+  return translate(lang, "create.singleModeExchange");
 }
 
 function menuModeLabel(vertical: Vertical): string {
-  if (vertical === "p2p-trade") return "Curated swaps";
-  if (vertical === "bill-pay") return "Monthly bills";
-  if (vertical === "lending") return "Loanbook";
-  return "Storefront";
+  const lang = getCurrentLang();
+  if (vertical === "p2p-trade") return translate(lang, "create.menuModeExchange");
+  if (vertical === "bill-pay") return translate(lang, "create.menuModeBillPay");
+  if (vertical === "lending") return translate(lang, "create.menuModeLending");
+  return translate(lang, "create.menuModeMarket");
 }
 
 function singleModeDescription(vertical: Vertical): string {
-  if (vertical === "bill-pay") return "One bill, one checkout.";
-  if (vertical === "marketplace") return "One product or service.";
-  if (vertical === "lending") return "One principal amount.";
-  return "One exact sats amount.";
+  const lang = getCurrentLang();
+  if (vertical === "bill-pay") return translate(lang, "create.singleModeDescBillPay");
+  if (vertical === "marketplace") return translate(lang, "create.singleModeDescMarket");
+  if (vertical === "lending") return translate(lang, "create.singleModeDescLending");
+  return translate(lang, "create.singleModeDescExchange");
 }
 
 function menuModeDescription(vertical: Vertical): string {
-  if (vertical === "p2p-trade") return "Let buyers choose from options.";
-  if (vertical === "bill-pay") return "Let volunteers bundle bills.";
-  if (vertical === "lending") return "Multiple loan requests in one place.";
-  return "A seller page with multiple items.";
+  const lang = getCurrentLang();
+  if (vertical === "p2p-trade") return translate(lang, "create.menuModeDescExchange");
+  if (vertical === "bill-pay") return translate(lang, "create.menuModeDescBillPay");
+  if (vertical === "lending") return translate(lang, "create.menuModeDescLending");
+  return translate(lang, "create.menuModeDescMarket");
 }
 
 function descriptionLabel(vertical: Vertical, usingMenu: boolean): string {
+  const lang = getCurrentLang();
   if (usingMenu) {
-    if (vertical === "bill-pay") return "BUNDLE NAME";
-    if (vertical === "marketplace") return "STORE NAME";
-    if (vertical === "lending") return "LOAN BOOK NAME";
-    return "NAME";
+    if (vertical === "bill-pay") return translate(lang, "create.descLabelBundle");
+    if (vertical === "marketplace") return translate(lang, "create.descLabelStore");
+    if (vertical === "lending") return translate(lang, "create.descLabelLoanBook");
+    return translate(lang, "create.descLabelName");
   }
-  return "DESCRIPTION";
+  return translate(lang, "create.descLabelDescription");
 }
 
 function descriptionPlaceholder(vertical: Vertical, usingMenu: boolean): string {
+  const lang = getCurrentLang();
   if (usingMenu) {
-    if (vertical === "bill-pay") return "My bills for the month";
-    if (vertical === "marketplace") return "Your store name";
-    if (vertical === "lending") return "Your lending desk";
-    return "Your exchange name";
+    if (vertical === "bill-pay") return translate(lang, "create.descPlaceholderBillsMenu");
+    if (vertical === "marketplace") return translate(lang, "create.descPlaceholderStoreMenu");
+    if (vertical === "lending") return translate(lang, "create.descPlaceholderLendingMenu");
+    return translate(lang, "create.descPlaceholderExchangeMenu");
   }
-  if (vertical === "bill-pay") return "Pay my electricity bill";
-  if (vertical === "marketplace") return "What are you selling?";
-  if (vertical === "lending") return "Loan terms in a sentence";
-  return "What are you trading?";
+  if (vertical === "bill-pay") return translate(lang, "create.descPlaceholderBillPay");
+  if (vertical === "marketplace") return translate(lang, "create.descPlaceholderMarket");
+  if (vertical === "lending") return translate(lang, "create.descPlaceholderLending");
+  return translate(lang, "create.descPlaceholderExchange");
 }
 
 function descriptionRequired(vertical: Vertical, usingMenu: boolean): boolean {
@@ -658,41 +674,45 @@ function descriptionRequired(vertical: Vertical, usingMenu: boolean): boolean {
 }
 
 function fallbackMenuDescription(vertical: Vertical, menuItems: MenuItem[]): string {
+  const lang = getCurrentLang();
   if (menuItems.length === 1) return menuItems[0]?.label ?? "";
-  if (vertical === "p2p-trade") return `${menuItems.length} sats options`;
-  if (vertical === "bill-pay") return `${menuItems.length}-bill bundle`;
-  if (vertical === "lending") return `${menuItems.length} loan offers`;
-  return `${menuItems.length}-item store`;
+  if (vertical === "p2p-trade") return translate(lang, "create.fallbackSatsOptions", { count: menuItems.length });
+  if (vertical === "bill-pay") return translate(lang, "create.fallbackBillBundle", { count: menuItems.length });
+  if (vertical === "lending") return translate(lang, "create.fallbackLoanOffers", { count: menuItems.length });
+  return translate(lang, "create.fallbackItemStore", { count: menuItems.length });
 }
 
 function buildListingDescription(form: FormState, vertical: Vertical, menuItems: MenuItem[]): string {
   const desc = form.desc.trim();
   if (desc) return desc;
   if (menuItems.length > 0) return fallbackMenuDescription(vertical, menuItems);
-  if (vertical === "p2p-trade") return "Sats for sale";
+  if (vertical === "p2p-trade") return translate(getCurrentLang(), "create.fallbackSatsForSale");
   // CBP (#12): the free-text description is retired for single bills — the
   // bill-type IS the identity. Fall back to its label so the listing always has
   // a title (and the publish gate's `listingDescription.length > 0` passes).
-  if (vertical === "bill-pay") return billTypeDisplay(form.billType)?.label ?? "Bill payment";
+  if (vertical === "bill-pay") return billTypeDisplay(form.billType)?.label ?? translate(getCurrentLang(), "create.fallbackBillPayment");
   return "";
 }
 
-function menuPartialMessage(vertical: Vertical): string {
-  if (vertical === "p2p-trade") return "Complete option names and valid min/max sats before review.";
-  if (vertical === "bill-pay") return "Complete bill names and sats before review.";
-  if (vertical === "lending") return "Complete loan names and sats before review.";
-  return "Complete item names and sats before review.";
+// i18n: the review screen used to derive its copy via
+// `menuPartialMessage(v).replace("review", "publishing")` — a string edit that
+// breaks under translation, so the stage is now an explicit parameter.
+function menuPartialMessage(vertical: Vertical, stage: "review" | "publishing" = "review"): string {
+  const lang = getCurrentLang();
+  const stageWord = translate(lang, stage === "publishing" ? "create.stagePublishing" : "create.stageReview");
+  if (vertical === "p2p-trade") return translate(lang, "create.menuPartialExchange", { stage: stageWord });
+  if (vertical === "bill-pay") return translate(lang, "create.menuPartialBillPay", { stage: stageWord });
+  if (vertical === "lending") return translate(lang, "create.menuPartialLending", { stage: stageWord });
+  return translate(lang, "create.menuPartialMarket", { stage: stageWord });
 }
 
 function menuCountLabel(vertical: Vertical, count: number): string {
-  const noun = vertical === "p2p-trade"
-    ? "option"
-    : vertical === "bill-pay"
-      ? "bill"
-      : vertical === "lending"
-        ? "offer"
-        : "item";
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+  const lang = getCurrentLang();
+  const one = count === 1;
+  if (vertical === "p2p-trade") return translate(lang, one ? "create.menuCountOptionOne" : "create.menuCountOptionMany", { count });
+  if (vertical === "bill-pay") return translate(lang, one ? "create.menuCountBillOne" : "create.menuCountBillMany", { count });
+  if (vertical === "lending") return translate(lang, one ? "create.menuCountOfferOne" : "create.menuCountOfferMany", { count });
+  return translate(lang, one ? "create.menuCountItemOne" : "create.menuCountItemMany", { count });
 }
 
 function menuFiatFloor(items: MenuItem[]): { amount: number; currency: string } | null {
@@ -787,15 +807,17 @@ function supportsPremium(vertical: Vertical): boolean {
 }
 
 function premiumLabelForVertical(vertical: Vertical): string {
-  if (vertical === "lending") return "PREMIUM APR (%)";
-  if (vertical === "bill-pay") return "VOLUNTEER BONUS (%)";
-  return "PREMIUM (%)";
+  const lang = getCurrentLang();
+  if (vertical === "lending") return translate(lang, "create.premiumLabelLending");
+  if (vertical === "bill-pay") return translate(lang, "create.premiumLabelBillPay");
+  return translate(lang, "create.premiumLabel");
 }
 
 function premiumHintForVertical(vertical: Vertical, currency: string): string {
-  if (vertical === "lending") return "Shown as APR on the loan request.";
-  if (vertical === "bill-pay") return `Extra sats the volunteer keeps for paying your bill — your ${currency} bill amount doesn't change.`;
-  return `Shown with the ${currency} exchange price.`;
+  const lang = getCurrentLang();
+  if (vertical === "lending") return translate(lang, "create.premiumHintLending");
+  if (vertical === "bill-pay") return translate(lang, "create.premiumHintBillPay", { currency });
+  return translate(lang, "create.premiumHint", { currency });
 }
 
 function formatPremiumPercent(premiumBps: number): string {
@@ -815,9 +837,9 @@ function premiumReviewLine(form: FormState, vertical: Vertical): string | null {
   const premiumBps = parsePremiumBps(form.premium);
   if (premiumBps === undefined) return null;
   const display = formatPremiumPercent(premiumBps);
-  if (vertical === "lending") return `${display}% premium APR`;
+  if (vertical === "lending") return translate(getCurrentLang(), "create.premiumReviewApr", { value: display });
   const signed = premiumBps > 0 ? `+${display}` : display;
-  return `${signed}% premium`;
+  return translate(getCurrentLang(), "create.premiumReview", { value: signed });
 }
 
 function parseFiatAmount(value: string): number | null {
@@ -885,6 +907,7 @@ function satsInputForFiat({
 }
 
 function premiumCheckoutLine(form: FormState, vertical: Vertical): string | null {
+  const lang = getCurrentLang();
   if (vertical === "lending" || !supportsPremium(vertical)) return null;
   const premiumBps = parsePremiumBps(form.premium);
   const baseFiat = parseFiatAmount(form.fiat);
@@ -893,16 +916,26 @@ function premiumCheckoutLine(form: FormState, vertical: Vertical): string | null
     if (premiumBps === undefined || baseSats <= 0) return null;
     const lockSats = satsWithPremium(baseSats, premiumBps);
     const billLabel = baseFiat !== null && baseFiat > 0
-      ? `${formatFiatAmount(baseFiat, form.cur)} bill`
-      : "bill";
-    const bonusNote = premiumBps > 0 ? ` (its value + ${formatPremiumPercent(premiumBps)}% bonus)` : "";
-    return `You lock ₿ ${fmtSats(lockSats * 1000)} — a volunteer pays your ${billLabel} and keeps the sats${bonusNote}.`;
+      ? translate(lang, "create.billLabelWithAmount", { amount: formatFiatAmount(baseFiat, form.cur) })
+      : translate(lang, "create.billLabelPlain");
+    const bonusNote = premiumBps > 0
+      ? translate(lang, "create.volunteerBonusNote", { percent: formatPremiumPercent(premiumBps) })
+      : "";
+    return translate(lang, "create.volunteerLockLine", {
+      sats: fmtSats(lockSats * 1000),
+      bill: billLabel,
+      bonus: bonusNote,
+    });
   }
   if (premiumBps === undefined || baseFiat === null || baseFiat <= 0) return null;
   const checkoutFiat = baseFiat * (1 + premiumBps / 10_000);
   if (!Number.isFinite(checkoutFiat) || checkoutFiat < 0) return null;
   const signed = premiumBps > 0 ? `+${formatPremiumPercent(premiumBps)}%` : `${formatPremiumPercent(premiumBps)}%`;
-  return `${formatFiatAmount(baseFiat, form.cur)} ${signed} = ${formatFiatAmount(checkoutFiat, form.cur)} at checkout`;
+  return translate(lang, "create.premiumCheckoutEquation", {
+    base: formatFiatAmount(baseFiat, form.cur),
+    signed,
+    total: formatFiatAmount(checkoutFiat, form.cur),
+  });
 }
 
 function railCreateSearchText(rail: Rail): string {
@@ -981,6 +1014,7 @@ export function CreateForm({
    *  doesn't thread it. */
   communitySlug?: string | null;
 }) {
+  const { t } = useT();
   // Resolve community context for the listing. Read once at mount;
   // listing publishes into the community the user currently SEES as
   // theirs (Pillar 2.3 "current community" = the header identity, per
@@ -1195,7 +1229,7 @@ export function CreateForm({
         marginBottom: 14,
       }}>
         <span style={{ fontSize: 18, fontWeight: 700, color: T.text, fontFamily: T.sans }}>
-          New listing
+          {t("create.newListing")}
         </span>
         <button onClick={onClose} style={{
           background: "none", border: "none", color: T.muted,
@@ -1311,6 +1345,7 @@ function ArbiterWarningCard({
   onCancel: () => void;
   onGoToArbiterTrade: (escrowId: string) => void;
 }) {
+  const { t } = useT();
   if (warning.kind === "none") return null;
   const isHard = warning.kind === "hard";
   const counterpartyA = displayCounterpartyName({
@@ -1339,7 +1374,7 @@ function ArbiterWarningCard({
           fontFamily: T.mono, letterSpacing: 1.5, textTransform: "uppercase",
           marginBottom: 12,
         }}>
-          {isHard ? "Arbitration vote pending" : "You're an arbiter"}
+          {isHard ? t("create.warnHardTitle") : t("create.warnSoftTitle")}
         </div>
         {isHard ? (
           <>
@@ -1347,7 +1382,7 @@ function ArbiterWarningCard({
               fontSize: 14, fontWeight: 700, color: T.text, fontFamily: T.sans,
               lineHeight: 1.4, marginBottom: 12,
             }}>
-              A trade you're arbiting needs your vote.
+              {t("create.warnHardHeadline")}
             </div>
             {/* v0.3.0 Phase 6 (item 8): tightened from 4 sentences to
                 3, dropping the "Your decision determines where their
@@ -1358,9 +1393,8 @@ function ArbiterWarningCard({
               fontSize: 13, color: T.text, fontFamily: T.sans,
               lineHeight: 1.55, marginBottom: 20,
             }}>
-              <strong>{counterpartyA}</strong> and <strong>{counterpartyB}</strong>{" "}
-              disagreed on their trade. Splitting your attention now could
-              cost someone their sats. Resolve theirs first.
+              <strong>{counterpartyA}</strong>{t("create.warnAnd")}<strong>{counterpartyB}</strong>{" "}
+              {t("create.warnHardBody")}
             </div>
           </>
         ) : (
@@ -1369,15 +1403,14 @@ function ArbiterWarningCard({
               fontSize: 14, fontWeight: 700, color: T.text, fontFamily: T.sans,
               lineHeight: 1.4, marginBottom: 12,
             }}>
-              You're currently arbiter on an active trade.
+              {t("create.warnSoftHeadline")}
             </div>
             <div style={{
               fontSize: 13, color: T.text, fontFamily: T.sans,
               lineHeight: 1.55, marginBottom: 20,
             }}>
-              <strong>{counterpartyA}</strong> and <strong>{counterpartyB}</strong>{" "}
-              haven't disputed and may never need you, but your attention could
-              be needed quickly.
+              <strong>{counterpartyA}</strong>{t("create.warnAnd")}<strong>{counterpartyB}</strong>{" "}
+              {t("create.warnSoftBody")}
             </div>
           </>
         )}
@@ -1388,22 +1421,22 @@ function ArbiterWarningCard({
                 onClick={() => onGoToArbiterTrade(warning.escrowId)}
                 style={primaryButtonStyle(T.accent)}
               >
-                Go to arbitration trade ›
+                {t("create.goToArbitrationTrade")}
               </button>
               <button
                 onClick={onContinue}
                 style={mutedSecondaryButtonStyle()}
               >
-                Continue anyway
+                {t("create.continueAnyway")}
               </button>
             </>
           ) : (
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={onCancel} style={equalButtonStyle()}>
-                Cancel
+                {t("common.cancel")}
               </button>
               <button onClick={onContinue} style={equalButtonStyle()}>
-                Continue anyway
+                {t("create.continueAnyway")}
               </button>
             </div>
           )}
@@ -1469,6 +1502,7 @@ function Step1({
   onContinueDraft: (d: SavedDraft) => void;
   onNext: () => void;
 }) {
+  const { t } = useT();
   const visibleDrafts = showAllDrafts ? drafts : drafts.slice(0, 3);
   const hiddenDraftCount = Math.max(0, drafts.length - 3);
   // CBP's "Monthly bills" multi-mode is parked (coming soon) — never leave the
@@ -1486,17 +1520,17 @@ function Step1({
             fontSize: 11, color: T.muted, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 8,
           }}>
-            CONTINUE A DRAFT
+            {t("create.continueADraft")}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {visibleDrafts.map(d => {
               const v = VERTICALS.find(vert => vert.id === d.vertical)!;
               const ageMs = Date.now() - d.savedAt;
               const ageMin = Math.floor(ageMs / 60_000);
-              const ageStr = ageMin < 1 ? "just now"
-                : ageMin < 60 ? `${ageMin}m ago`
-                : ageMin < 1440 ? `${Math.floor(ageMin / 60)}h ago`
-                : `${Math.floor(ageMin / 1440)}d ago`;
+              const ageStr = ageMin < 1 ? t("create.ageJustNow")
+                : ageMin < 60 ? t("create.ageMinutes", { count: ageMin })
+                : ageMin < 1440 ? t("create.ageHours", { count: Math.floor(ageMin / 60) })
+                : t("create.ageDays", { count: Math.floor(ageMin / 1440) });
               return (
                 <button
                   key={d.vertical}
@@ -1513,14 +1547,14 @@ function Step1({
                   <span style={{ fontSize: 18 }}>{v.icon}</span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600 }}>
-                      Continue your last {v.label} listing
+                      {t("create.continueDraftTitle", { vertical: t(v.labelKey) })}
                     </div>
                     <div style={{
                       fontSize: 10, color: T.muted, fontFamily: T.mono,
                       marginTop: 2,
                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const,
                     }}>
-                      {d.formState.desc || "(no description yet)"} · {ageStr}
+                      {d.formState.desc || t("create.noDescriptionYet")} · {ageStr}
                     </div>
                   </div>
                   <span style={{ color: T.muted, fontSize: 16 }}>›</span>
@@ -1536,7 +1570,10 @@ function Step1({
                   cursor: "pointer", padding: "8px",
                 }}
               >
-                ▼ Show {hiddenDraftCount} more draft{hiddenDraftCount !== 1 ? "s" : ""}
+                {t(
+                  hiddenDraftCount === 1 ? "create.showMoreDraftsOne" : "create.showMoreDraftsMany",
+                  { count: hiddenDraftCount },
+                )}
               </button>
             )}
           </div>
@@ -1548,7 +1585,7 @@ function Step1({
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         letterSpacing: 1, marginBottom: 8,
       }}>
-        WHAT KIND OF TRADE?
+        {t("create.whatKindOfTrade")}
       </div>
       <div style={{
         display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10,
@@ -1580,20 +1617,20 @@ function Step1({
                     marginLeft: "auto", fontSize: 8, fontWeight: 800, letterSpacing: 0.5,
                     color: T.amber, background: `${T.amber}22`,
                     padding: "1px 5px", borderRadius: 999,
-                  }}>SOON</span>
+                  }}>{t("create.soonPill")}</span>
                 )}
               </span>
               <span style={{
                 fontSize: 13, fontWeight: 700, color: active ? T.accent : T.text,
                 fontFamily: T.sans,
               }}>
-                {v.label}
+                {t(v.labelKey)}
               </span>
               <span style={{
                 fontSize: 10, color: T.muted, fontFamily: T.sans,
                 lineHeight: 1.4,
               }}>
-                {v.description}
+                {t(v.descriptionKey)}
               </span>
             </button>
           );
@@ -1605,7 +1642,7 @@ function Step1({
           vertical's multi/store mode, driving the same listingMode state. */}
       <div style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 8 }}>
-          LISTING STYLE
+          {t("create.listingStyle")}
         </div>
         <div style={{
           position: "relative", display: "grid", gridTemplateColumns: "1fr 1fr",
@@ -1645,7 +1682,7 @@ function Step1({
                     fontSize: 8, fontWeight: 800, letterSpacing: 0.5,
                     color: T.amber, background: `${T.amber}22`,
                     padding: "1px 5px", borderRadius: 999,
-                  }}>SOON</span>
+                  }}>{t("create.soonPill")}</span>
                 )}
               </button>
             );
@@ -1682,8 +1719,8 @@ function Step1({
               {homeCommunity?.flagEmoji ?? "🌐"}
             </span>
             <span style={{ flex: 1, fontSize: 12, color: T.text, fontFamily: T.sans }}>
-              Listing in <strong>{homeCommunity?.displayName ?? "your community"}</strong>
-              {" "}— not your home
+              {t("create.listingInBefore")}<strong>{homeCommunity?.displayName ?? t("create.yourCommunityFallback")}</strong>
+              {t("create.listingInAfter")}
             </span>
             <button
               onClick={onSetHome}
@@ -1694,15 +1731,16 @@ function Step1({
                 fontWeight: 800, letterSpacing: 0.5, flexShrink: 0,
               }}
             >
-              SET AS HOME →
+              {t("create.setAsHome")}
             </button>
           </div>
           <div style={{
             marginTop: 6, fontSize: 10, color: T.muted,
             fontFamily: T.sans, lineHeight: 1.4,
           }}>
-            Home decides where Chama signs you in. One tap makes{" "}
-            {homeCommunity?.displayName ?? "this community"} your home.
+            {t("create.homeExplains", {
+              name: homeCommunity?.displayName ?? t("create.thisCommunityFallback"),
+            })}
           </div>
         </div>
       )}
@@ -1713,7 +1751,7 @@ function Step1({
         color: T.bg, fontFamily: T.mono, fontSize: 14, fontWeight: 800,
         cursor: "pointer", letterSpacing: 0.5,
       }}>
-        Next ›
+        {t("create.nextButton")}
       </button>
     </>
   );
@@ -1739,6 +1777,7 @@ function Step2({
   onBack: () => void;
   onNext: () => void;
 }) {
+  const { t } = useT();
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
   const [paymentRailQuery, setPaymentRailQuery] = useState("");
@@ -1946,7 +1985,7 @@ function Step2({
         setImageError(null);
         updateMenuItem(id, { imageDataUrl });
       } catch (e: any) {
-        setImageError(e?.message || "That file doesn't look like a supported photo, or it's too large for this release. Try JPG, PNG, or WebP.");
+        setImageError(e?.message || t("create.imageFallbackError"));
       }
     })();
   };
@@ -1968,19 +2007,19 @@ function Step2({
             cursor: "pointer",
           }}
         >
-          ⚠ {imageError} <span style={{ color: T.muted }}>(tap to dismiss)</span>
+          ⚠ {imageError} <span style={{ color: T.muted }}>{t("create.tapToDismiss")}</span>
         </div>
       )}
       {/* LISTING STYLE toggle relocated to Step 1 (v3.1 "every seller is a Store"). */}
 
       {categoryAllowsFulfillmentChoice(vertical) && (
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FULFILLMENT</div>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>{t("create.fulfillmentLabel")}</div>
           <select value={form.fulfillment} onChange={e => set("fulfillment", e.target.value as Fulfillment)}
             style={{ ...inputStyle, color: T.text, background: T.surface }}>
-            <option value="physical">Shipping</option>
-            <option value="service">Service</option>
-            <option value="digital">Digital</option>
+            <option value="physical">{t("create.fulfillmentShipping")}</option>
+            <option value="service">{t("create.fulfillmentService")}</option>
+            <option value="digital">{t("create.fulfillmentDigital")}</option>
           </select>
         </div>
       )}
@@ -1989,7 +2028,7 @@ function Step2({
           a stock count. 2+ makes it a parent buyers purchase via child escrows. */}
       {vertical === "marketplace" && !usingMenu && (
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>UNITS IN STOCK</div>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>{t("create.unitsInStock")}</div>
           <input
             type="number"
             inputMode="numeric"
@@ -2000,7 +2039,7 @@ function Step2({
             style={{ ...inputStyle, color: T.text, background: T.surface }}
           />
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.sans, marginTop: 5, lineHeight: 1.4 }}>
-            Leave blank or 1 for a single item. Set 2+ to sell multiple units — each buyer gets their own escrow, and Browse shows “N left.”
+            {t("create.stockHint")}
           </div>
         </div>
       )}
@@ -2021,7 +2060,7 @@ function Step2({
       {vertical === "bill-pay" && !usingMenu && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-            BILL TYPE <span style={{ color: T.amber, opacity: 0.9 }}>· pick one</span>
+            {t("create.billTypeLabel")} <span style={{ color: T.amber, opacity: 0.9 }}>{t("create.billTypePickOne")}</span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
             {billTypesForCountry(homeCommunity?.country).map(bt => {
@@ -2046,7 +2085,7 @@ function Step2({
             })}
           </div>
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.sans, marginTop: 6, lineHeight: 1.4 }}>
-            Helps a volunteer see what they're paying. Optional — tap again to clear.
+            {t("create.billTypeHint")}
           </div>
         </div>
       )}
@@ -2056,7 +2095,7 @@ function Step2({
           {!fiatPrimary && (
           <div style={{ flex: vertical === "lending" ? 1.15 : 1 }}>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-              {vertical === "lending" ? "LOAN PRINCIPAL (SATS)" : "PRICE"}
+              {vertical === "lending" ? t("create.loanPrincipalLabel") : t("create.priceLabel")}
             </div>
             <input
               type="number"
@@ -2069,7 +2108,7 @@ function Step2({
           )}
           {fiatPrimary && (
           <div style={{ flex: 1.15 }}>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>PRICE</div>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>{t("create.priceLabel")}</div>
             <div style={{ display: "flex", gap: 6 }}>
               <div style={{
                 width: 72,
@@ -2088,14 +2127,14 @@ function Step2({
               <input type="number" value={form.fiat} onChange={e => syncSingleFiat(e.target.value)} placeholder="50" style={{ ...inputStyle, flex: 1 }} />
             </div>
             <div style={{ marginTop: 5, fontSize: 9, color: T.muted, fontFamily: T.mono }}>
-              local price · escrow still settles in sats
+              {t("create.localPriceNote")}
             </div>
           </div>
           )}
           {fiatPrimary && (
           <div style={{ flex: 0.85 }}>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-              SATS
+              {t("create.satsLabel")}
             </div>
             <input
               type="number"
@@ -2108,7 +2147,7 @@ function Step2({
           )}
           {vertical === "lending" ? (
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>BORROWER TIER</div>
+              <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>{t("create.borrowerTier")}</div>
               <div style={{
                 minHeight: 44,
                 padding: "10px 12px",
@@ -2127,7 +2166,7 @@ function Step2({
             </div>
           ) : !fiatPrimary && (
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>FIAT</div>
+            <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>{t("create.fiatLabel")}</div>
             <div style={{ display: "flex", gap: 6 }}>
               <div style={{
                 width: 72,
@@ -2156,8 +2195,8 @@ function Step2({
               return (
                 <div style={{ marginTop: 5, fontSize: 9, color: liveRateReady ? T.muted : T.amber, fontFamily: T.mono }}>
                   {liveRateReady
-                    ? `auto from ${homeCommunity?.flagEmoji ?? "🌐"} Chama`
-                    : `${form.cur} rate still loading — type the amount, or it'll auto-fill when the live rate lands`}
+                    ? t("create.autoFromChama", { flag: homeCommunity?.flagEmoji ?? "🌐" })
+                    : t("create.rateLoading", { currency: form.cur })}
                 </div>
               );
             })()}
@@ -2167,7 +2206,7 @@ function Step2({
       ) : (
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-            MENU CURRENCY
+            {t("create.menuCurrencyLabel")}
           </div>
           <div style={{
             display: "flex",
@@ -2192,7 +2231,7 @@ function Step2({
             </div>
             <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.45 }}>
               {menuCurrencyHint(vertical, form.cur)}
-              {" "}Auto from {homeCommunity?.flagEmoji ?? "🌐"} Chama.
+              {" "}{t("create.autoFromChamaSentence", { flag: homeCommunity?.flagEmoji ?? "🌐" })}
             </div>
           </div>
         </div>
@@ -2245,10 +2284,10 @@ function Step2({
             marginBottom: 6,
           }}>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
-              ACCEPTED PAYMENT
+              {t("create.acceptedPayment")}
             </div>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>
-              {homeCommunity?.country ?? homeCommunity?.currency ?? "LOCAL"}
+              {homeCommunity?.country ?? homeCommunity?.currency ?? t("create.localFallback")}
             </div>
           </div>
           <div className="payment-rail-scroll" style={{
@@ -2300,7 +2339,7 @@ function Step2({
           <input
             value={paymentRailQuery}
             onChange={e => setPaymentRailQuery(e.target.value)}
-            placeholder="Search more payment methods"
+            placeholder={t("create.searchPaymentPlaceholder")}
             style={{
               ...inputStyle,
               marginTop: 8,
@@ -2326,7 +2365,7 @@ function Step2({
                   fontSize: 10,
                   padding: "4px 2px",
                 }}>
-                  No matching payment method.
+                  {t("create.noMatchingPayment")}
                 </div>
               ) : paymentSearchResults.map((rail, i) => {
                 const selected = form.paymentMethods.some(method =>
@@ -2364,7 +2403,7 @@ function Step2({
                       {rail.displayName}
                     </span>
                     <span style={{ color: selected ? T.accent : T.muted, flexShrink: 0 }}>
-                      {selected ? "Added" : "Add"}
+                      {selected ? t("create.addedRail") : t("create.addRail")}
                     </span>
                   </button>
                 );
@@ -2390,7 +2429,7 @@ function Step2({
           border: `1px solid ${T.red}44`,
           color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.45,
         }}>
-          Fedimint lending tiers currently top out at{" "}
+          {t("create.lendingCapBefore")}{" "}
           <BitcoinAmount
             sats={MAX_FEDIMINT_LENDING_SATS}
             size={10}
@@ -2398,8 +2437,7 @@ function Step2({
             glyphScale={1.2}
             color="inherit"
             glyphColor="inherit"
-          />.
-          Higher on-chain tiers come later.
+          />{t("create.lendingCapAfterLater")}
         </div>
       )}
       {usingMenu && (
@@ -2443,7 +2481,7 @@ function Step2({
                 alignItems: "baseline",
                 gap: 4,
               }}>
-                from {menuDisplayFiatFloorValue
+                {t("create.fromPrefix")} {menuDisplayFiatFloorValue
                   ? formatFiatAmount(menuDisplayFiatFloorValue.amount, menuDisplayFiatFloorValue.currency)
                   : <BitcoinAmount msats={Math.min(...menuItems.map(item => item.amountMsats))} size={10} gap={3} glyphScale={1.2} color={T.muted} glyphColor={T.muted} />}
               </div>
@@ -2470,7 +2508,7 @@ function Step2({
                     type="number"
                     value={item.sats}
                     onChange={e => updateMenuSats(item.id, e.target.value)}
-                    placeholder={vertical === "p2p-trade" ? "min sats" : vertical === "lending" ? "principal" : "sats"}
+                    placeholder={vertical === "p2p-trade" ? t("create.minSatsPlaceholder") : vertical === "lending" ? t("create.principalPlaceholder") : "sats"}
                     style={{ ...inputStyle, width: 92 }}
                   />
                   {vertical === "p2p-trade" && (
@@ -2478,7 +2516,7 @@ function Step2({
                       type="number"
                       value={item.maxSats}
                       onChange={e => updateMenuItem(item.id, { maxSats: e.target.value })}
-                      placeholder="max"
+                      placeholder={t("create.maxPlaceholder")}
                       style={{ ...inputStyle, width: 92 }}
                     />
                   )}
@@ -2487,7 +2525,7 @@ function Step2({
                   <input
                     value={item.description}
                     onChange={e => updateMenuItem(item.id, { description: e.target.value })}
-                    placeholder="Note"
+                    placeholder={t("create.notePlaceholder")}
                     style={{ ...inputStyle, flex: "1 1 140px", minWidth: 0, fontSize: 12 }}
                   />
                   {vertical !== "lending" && (
@@ -2513,14 +2551,14 @@ function Step2({
                         type="number"
                         value={item.termDays}
                         onChange={e => updateMenuItem(item.id, { termDays: e.target.value })}
-                        placeholder="days"
+                        placeholder={t("create.daysPlaceholder")}
                         style={{ ...inputStyle, width: 72, fontSize: 12 }}
                       />
                       <input
                         type="number"
                         value={item.apr}
                         onChange={e => updateMenuItem(item.id, { apr: e.target.value })}
-                        placeholder="APR"
+                        placeholder={t("create.aprPlaceholder")}
                         style={{ ...inputStyle, width: 72, fontSize: 12 }}
                       />
                       <div style={{
@@ -2545,9 +2583,9 @@ function Step2({
                       onChange={e => updateMenuItem(item.id, { fulfillment: e.target.value as Fulfillment })}
                       style={{ ...inputStyle, width: 108, padding: "12px 6px", fontSize: 11, color: T.text, background: T.card }}
                     >
-                      <option value="physical">Shipping</option>
-                      <option value="service">Service</option>
-                      <option value="digital">Digital</option>
+                      <option value="physical">{t("create.fulfillmentShipping")}</option>
+                      <option value="service">{t("create.fulfillmentService")}</option>
+                      <option value="digital">{t("create.fulfillmentDigital")}</option>
                     </select>
                   )}
                   <button
@@ -2588,7 +2626,7 @@ function Step2({
                       fontWeight: 800,
                       cursor: "pointer",
                     }}>
-                      {item.imageDataUrl ? "Change photo" : "+ Photo"}
+                      {item.imageDataUrl ? t("create.changePhoto") : t("create.addPhoto")}
                       <input
                         type="file"
                         accept={MENU_IMAGE_ACCEPT}
@@ -2624,7 +2662,7 @@ function Step2({
                             cursor: "pointer",
                           }}
                         >
-                          remove
+                          {t("create.removePhoto")}
                         </button>
                       </>
                     )}
@@ -2640,9 +2678,9 @@ function Step2({
                           fontWeight: 800,
                           color: item.maxQty.trim() ? T.accent : T.muted,
                         }}
-                        title="Max units of this item one order can take. Blank = unlimited."
+                        title={t("create.maxPerOrderTitle")}
                       >
-                        Max / order
+                        {t("create.maxPerOrder")}
                         <input
                           type="number"
                           min={1}
@@ -2694,7 +2732,7 @@ function Step2({
             cursor: form.menuItems.length >= MAX_MENU_ITEMS ? "default" : "pointer",
           }}
         >
-          {form.menuItems.length >= MAX_MENU_ITEMS ? `Max ${MAX_MENU_ITEMS} reached` : menuAddLabelForVertical(vertical)}
+          {form.menuItems.length >= MAX_MENU_ITEMS ? t("create.maxItemsReached", { count: MAX_MENU_ITEMS }) : menuAddLabelForVertical(vertical)}
         </button>
       </div>
       )}
@@ -2717,10 +2755,10 @@ function Step2({
           >
             <div>
               <div style={{ fontSize: 12, fontWeight: 600, color: form.isSubscription ? T.purple : T.muted, fontFamily: T.mono }}>
-                🔄 SUBSCRIPTION MODE
+                {t("create.subscriptionMode")}
               </div>
               <div style={{ fontSize: 10, color: T.muted, fontFamily: T.sans, marginTop: 2 }}>
-                Periodic release — lock upfront, release in installments
+                {t("create.subscriptionModeDesc")}
               </div>
             </div>
             <div style={{
@@ -2740,22 +2778,22 @@ function Step2({
             <div style={{ marginTop: 14 }}>
               <div style={{ display: "flex", gap: 12 }}>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono, marginBottom: 4 }}>PERIODS</div>
+                  <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono, marginBottom: 4 }}>{t("create.periodsLabel")}</div>
                   <select value={form.periods} onChange={e => set("periods", e.target.value)}
                     style={{ ...inputStyle, fontSize: 12, color: T.text, background: T.surface }}>
                     {[2,3,4,5,6,7,8,9,10,11,12,24,36,52].map(n => (
-                      <option key={n} value={n}>{n} period{n > 1 ? "s" : ""}</option>
+                      <option key={n} value={n}>{t(n === 1 ? "create.periodOptionOne" : "create.periodOptionMany", { count: n })}</option>
                     ))}
                   </select>
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono, marginBottom: 4 }}>INTERVAL</div>
+                  <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono, marginBottom: 4 }}>{t("create.intervalLabel")}</div>
                   <select value={form.intervalDays} onChange={e => set("intervalDays", e.target.value)}
                     style={{ ...inputStyle, fontSize: 12, color: T.text, background: T.surface }}>
-                    <option value="7">Weekly</option>
-                    <option value="14">Bi-weekly</option>
-                    <option value="30">Monthly</option>
-                    <option value="90">Quarterly</option>
+                    <option value="7">{t("create.intervalWeekly")}</option>
+                    <option value="14">{t("create.intervalBiweekly")}</option>
+                    <option value="30">{t("create.intervalMonthly")}</option>
+                    <option value="90">{t("create.intervalQuarterly")}</option>
                   </select>
                 </div>
               </div>
@@ -2771,7 +2809,7 @@ function Step2({
           color: T.text, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
           cursor: "pointer",
         }}>
-          ‹ Back
+          {t("create.backButton")}
         </button>
         <button onClick={onNext} disabled={!ready} style={{
           flex: 2, padding: "14px",
@@ -2783,7 +2821,7 @@ function Step2({
           cursor: ready ? "pointer" : "default",
           letterSpacing: 0.5,
         }}>
-          Review ›
+          {t("create.reviewButton")}
         </button>
       </div>
     </>
@@ -2813,6 +2851,7 @@ function Step3({
   onPublish: () => void;
   onSaveDraft: () => void;
 }) {
+  const { t } = useT();
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
   const v = VERTICALS.find(vert => vert.id === vertical)!;
@@ -2873,13 +2912,10 @@ function Step3({
             fontSize: 11, fontWeight: 700, color: T.accent, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 8,
           }}>
-            FIRST LISTING? HEADS UP
+            {t("create.firstListingHeadsUp")}
           </div>
           <div style={{ fontSize: 12, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
-            This listing will run on your current Chama route. Buyers on a
-            different route will be switched when they tap your listing — they
-            don't move money via Lightning to switch, just spin up a fresh
-            Chama on the right route.
+            {t("create.firstListingBody")}
           </div>
         </div>
       )}
@@ -2906,12 +2942,12 @@ function Step3({
           fontSize: 11, fontWeight: 700, color: T.muted, fontFamily: T.mono,
           letterSpacing: 1, marginBottom: 12,
         }}>
-          PREVIEW
+          {t("create.previewLabel")}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <span style={{ fontSize: 16 }}>{v.icon}</span>
           <span style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.sans }}>
-            {v.label}
+            {t(v.labelKey)}
           </span>
           {homeCommunity && (
             <span style={{
@@ -2924,7 +2960,7 @@ function Step3({
           )}
         </div>
         <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, marginBottom: 8 }}>
-          {listingDescription || <span style={{ color: T.muted, fontStyle: "italic" }}>(no description)</span>}
+          {listingDescription || <span style={{ color: T.muted, fontStyle: "italic" }}>{t("create.noDescription")}</span>}
         </div>
         {form.paymentMethods.length > 0 && (
           <div style={{
@@ -2964,7 +3000,7 @@ function Step3({
               alignItems: "baseline",
               gap: 6,
             }}>
-              <span style={{ color: T.muted, fontWeight: 700 }}>from</span>
+              <span style={{ color: T.muted, fontWeight: 700 }}>{t("create.fromPrefix")}</span>
               {showFiatPrimary && previewFiatFloor ? (
                 <span>{formatFiatAmount(previewFiatFloor.amount, previewFiatFloor.currency)}</span>
               ) : (
@@ -3022,9 +3058,9 @@ function Step3({
                           fontSize: 9,
                           whiteSpace: "nowrap" as const,
                         }}>
-                          {item.dueAt ? `due ${new Date(item.dueAt * 1000).toLocaleDateString()}` : ""}
-                          {item.termDays ? `${item.termDays}d` : ""}
-                          {item.trustTier ? ` · tier ${item.trustTier}` : ""}
+                          {item.dueAt ? t("create.dueDate", { date: new Date(item.dueAt * 1000).toLocaleDateString() }) : ""}
+                          {item.termDays ? t("create.termDaysShort", { days: item.termDays }) : ""}
+                          {item.trustTier ? t("create.tierSuffix", { tier: item.trustTier }) : ""}
                         </span>
                       )}
                     </span>
@@ -3080,7 +3116,7 @@ function Step3({
                   )}
                 </>
               )}
-              {form.isSubscription && <span style={{ color: T.muted, fontWeight: 500 }}>total</span>}
+              {form.isSubscription && <span style={{ color: T.muted, fontWeight: 500 }}>{t("create.totalSuffix")}</span>}
             </div>
             {previewPremium && (
               <div style={{ marginTop: 6, color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 800 }}>
@@ -3092,7 +3128,7 @@ function Step3({
         )}
         {partialMenuRows && (
           <div style={{ marginTop: 8, fontSize: 10, color: T.amber, fontFamily: T.mono }}>
-            {menuPartialMessage(vertical).replace("review", "publishing")}
+            {menuPartialMessage(vertical, "publishing")}
           </div>
           )}
       </div>
@@ -3104,7 +3140,7 @@ function Step3({
           color: T.text, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
           cursor: "pointer",
         }}>
-          ‹ Back
+          {t("create.backButton")}
         </button>
         <button onClick={onSaveDraft} style={{
           flex: 1, padding: "14px",
@@ -3112,7 +3148,7 @@ function Step3({
           color: T.text, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
           cursor: "pointer",
         }}>
-          Save draft
+          {t("create.saveDraft")}
         </button>
         <button
           onClick={onPublish}
@@ -3128,7 +3164,7 @@ function Step3({
             letterSpacing: 0.5,
           }}
         >
-          {submitting ? "Publishing…" : "Publish to community"}
+          {submitting ? t("create.publishing") : t("create.publishToCommunity")}
         </button>
       </div>
       {amountTooSmall && (
@@ -3144,7 +3180,7 @@ function Step3({
           textAlign: "center", marginTop: 6, fontSize: 10,
           color: T.red, fontFamily: T.mono, lineHeight: 1.45,
         }}>
-          Fedimint lending tiers currently top out at{" "}
+          {t("create.lendingCapBefore")}{" "}
           <BitcoinAmount
             sats={MAX_FEDIMINT_LENDING_SATS}
             size={10}
@@ -3152,11 +3188,11 @@ function Step3({
             glyphScale={1.2}
             color="inherit"
             glyphColor="inherit"
-          />.
+          />{t("create.lendingCapAfterDot")}
         </div>
       )}
       <div style={{ textAlign: "center", marginTop: 6, fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-        kind:38100 CREATE · NIP-44 encrypted · multi-relay
+        {t("create.protocolFooter")}
       </div>
     </>
   );

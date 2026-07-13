@@ -310,6 +310,8 @@ import {
 import {
   STRIKE_LNADDRESS_DOMAIN,
   STRIKE_CASH_HINT,
+  STRIKE_CASH_CAVEAT,
+  STRIKE_CASH_STEPS,
   normalizeStrikeUsername,
   isValidStrikeUsername,
   buildStrikeLightningAddress,
@@ -385,8 +387,10 @@ import {
 import { findBondFundingUtxos, esploraOutspend, esploraRecommendedFeeRate, defaultEsploraBase, defaultMinConfs, type EsploraFetch } from "../bond-multisig/fund-watcher.js";
 import {
   buildCommitmentBond, recomputeCommitmentAddress, buildReclaimTx, buildTimelockLeaf,
-  estimateReclaimVsize, estimateReclaimFeeSats, deriveBondSigningKey as deriveCommitmentKey,
+  buildKeyPathSweepTx, estimateReclaimVsize, estimateReclaimFeeSats,
+  estimateKeyPathSweepVsize, estimateKeyPathSweepFeeSats, deriveBondSigningKey as deriveCommitmentKey,
   bip86BondPath, MIN_COMMITMENT_TERM_BLOCKS, DEFAULT_RECLAIM_FEE_RATE,
+  resolveReclaimDestination, validateBitcoinAddressForNetwork,
 } from "../bond-multisig/commitment-bond.js";
 import {
   buildBondAnnouncementEvent, parseBondAnnouncementEvent, verifyBondAnnouncement,
@@ -395,7 +399,7 @@ import {
 import { computeChamaLiveness, formatLivenessReadout, bondedArbitersForCommunity } from "../arbiters/live-chama.js";
 import {
   serializeCommitment, deserializeCommitment, type CommitmentRecord,
-  upsertCommitmentBond, getCommitmentBond, newBondId as newCommitmentBondId,
+  upsertCommitmentBond, getCommitmentBond, listCommitmentBonds, reconstructBondRecord, newBondId as newCommitmentBondId,
 } from "../bond-multisig/commitment-store.js";
 import {
   AMBIENT_ARBITER_FEE_BPS,
@@ -2700,7 +2704,7 @@ console.log("\n── Bond funding watcher (commitment deposits + outspend recov
 // Taproot leaf, one signer, collusion-impossible by construction. Unit-level: the
 // address is deterministic, a valid reclaim (nLockTime = T) finalizes to a
 // broadcastable single-sig tx, and an early reclaim (nLockTime < T) still BUILDS
-// (it's the consensus-invalid tx the network rejects — proven on Mutinynet, not here).
+// (it's the consensus-invalid tx the network rejects — proven on-chain, not here).
 console.log("\n── Bond commitment (single-key CLTV timelock) ──");
 {
   const owner = (() => { const bp = btcMs.utils.randomPrivateKeyBytes(); return { bp, x: btcMs.utils.pubSchnorr(bp) }; })();
@@ -2718,6 +2722,51 @@ console.log("\n── Bond commitment (single-key CLTV timelock) ──");
 
   const utxo = { txid: "cc".repeat(32), index: 0, amountSats: 50_000n };
   const dest = btcMs.p2tr(owner.x, undefined, MS_NET).address as string;
+  const mainnetDest = btcMs.p2tr(owner.x, undefined, MS_MAINNET).address as string;
+
+  const validBondAddress = validateBitcoinAddressForNetwork(dest, MS_NET);
+  const wrongNetworkAddress = validateBitcoinAddressForNetwork(mainnetDest, MS_NET);
+  const malformedAddress = validateBitcoinAddressForNetwork("not a bitcoin address", MS_NET);
+  const emptyAddress = validateBitcoinAddressForNetwork("   ", MS_NET);
+  assert(validBondAddress.ok === true, "bondreclaim-dest: a signet/testnet address validates on the bond network");
+  assert(!wrongNetworkAddress.ok && wrongNetworkAddress.code === "wrong_network", "bondreclaim-dest: wrong-network address is rejected before build");
+  assert(!malformedAddress.ok && malformedAddress.code === "invalid", "bondreclaim-dest: malformed address is rejected");
+  assert(!emptyAddress.ok && emptyAddress.code === "empty", "bondreclaim-dest: empty address is rejected");
+
+  const depositDest = btcMs.p2tr(other, undefined, MS_NET).address as string;
+  const chamaResolved = resolveReclaimDestination({
+    choice: { kind: "chama" },
+    bondKeyAddress: dest,
+    network: MS_NET,
+    chamaDepositAddress: depositDest,
+  });
+  assert(chamaResolved.ok && chamaResolved.destination.actual === "chama" && chamaResolved.destination.address === depositDest,
+    "bondreclaim-dest: Back into Chama uses the Fedimint on-chain deposit address when available");
+
+  const fallbackResolved = resolveReclaimDestination({
+    choice: { kind: "chama" },
+    bondKeyAddress: dest,
+    network: MS_NET,
+    chamaDepositAddress: null,
+    fallbackReason: "fed down",
+  });
+  assert(fallbackResolved.ok && fallbackResolved.destination.requested === "chama" && fallbackResolved.destination.actual === "bond-key" && fallbackResolved.destination.address === dest,
+    "⭐ bondreclaim-dest: Chama-unavailable fallback reclaims to the bond key, preserving the emergency recovery path");
+
+  const externalResolved = resolveReclaimDestination({
+    choice: { kind: "external", address: depositDest },
+    bondKeyAddress: dest,
+    network: MS_NET,
+  });
+  assert(externalResolved.ok && externalResolved.destination.actual === "external" && externalResolved.destination.address === depositDest,
+    "bondreclaim-dest: user-entered external address can be the reclaim output");
+
+  const wrongExternal = resolveReclaimDestination({
+    choice: { kind: "external", address: mainnetDest },
+    bondKeyAddress: dest,
+    network: MS_NET,
+  });
+  assert(!wrongExternal.ok && wrongExternal.code === "wrong_network", "bondreclaim-dest: external address network mismatch blocks the reclaim build");
 
   // Valid reclaim: nLockTime = T, owner-signed, one-sig witness.
   const rawValid = buildReclaimTx({ bond, utxos: [utxo], ownerPriv: owner.bp, destination: dest, feeSats: 500n });
@@ -2726,10 +2775,14 @@ console.log("\n── Bond commitment (single-key CLTV timelock) ──");
   assert(decoded.getInput(0).sequence === 0xfffffffe, "bondcltv: input sequence enables nLockTime (0xfffffffe)");
   const w = decoded.getInput(0).finalScriptWitness!;
   assert(w.length === 3 && w[0].length === 64, "⭐ bondcltv: witness = [ownerSig(64), leaf, controlBlock] — one signer, no cabinet");
+  const rawExternal = buildReclaimTx({ bond, utxos: [utxo], ownerPriv: owner.bp, destination: depositDest, feeSats: 500n });
+  const externalOut = btcMs.Transaction.fromRaw(msHexToBytes(rawExternal)).getOutput(0);
+  const externalOutAddress = btcMs.Address(MS_NET).encode(btcMs.OutScript.decode(externalOut.script!));
+  assert(externalOutAddress === depositDest, "bondreclaim-dest: reclaim transaction pays the selected destination address");
 
   // Early reclaim: nLockTime < T still BUILDS (it's the tx the network rejects on CLTV).
   const rawEarly = buildReclaimTx({ bond, utxos: [utxo], ownerPriv: owner.bp, destination: dest, feeSats: 500n, txLockTime: T - 1 });
-  assert(btcMs.Transaction.fromRaw(msHexToBytes(rawEarly)).lockTime === T - 1, "⭐ bondcltv: an EARLY reclaim (nLockTime<T) builds — the consensus-invalid tx Mutinynet rejects");
+  assert(btcMs.Transaction.fromRaw(msHexToBytes(rawEarly)).lockTime === T - 1, "⭐ bondcltv: an EARLY reclaim (nLockTime<T) builds — the consensus-invalid tx a Bitcoin node rejects");
   assert(rawEarly !== rawValid, "bondcltv: early and valid reclaims differ only by the locktime commitment");
 
   // ⭐ Multi-UTXO sweep: fund the address twice → reclaim spends BOTH inputs to one
@@ -2740,6 +2793,23 @@ console.log("\n── Bond commitment (single-key CLTV timelock) ──");
   const sweep = btcMs.Transaction.fromRaw(msHexToBytes(rawSweep));
   assert(sweep.inputsLength === 2, "⭐ bondcltv: multi-UTXO reclaim sweeps BOTH inputs");
   assert(sweep.getOutput(0).amount === 30_000n + 12_345n - 500n, "bondcltv: sweep output = sum(utxos) − fee (any amount accepted)");
+
+  // Post-reclaim credit: the reclaim output is a normal BIP86 Taproot UTXO at
+  // the owner's key. Chama can spend it again into a visible destination such as
+  // a Fedimint peg-in address, instead of leaving "reclaimed" sats hidden.
+  const returnUtxo = { txid: "44".repeat(32), index: 0, amountSats: 29_700n };
+  const rawCredit = buildKeyPathSweepTx({ ownerXonly: owner.x, utxos: [returnUtxo], ownerPriv: owner.bp, destination: dest, feeSats: 300n, network: MS_NET });
+  const credit = btcMs.Transaction.fromRaw(msHexToBytes(rawCredit));
+  assert(credit.inputsLength === 1 && credit.outputsLength === 1, "bondcredit: return-address credit is a one-input/one-output sweep");
+  assert(credit.getOutput(0).amount === 29_400n, "bondcredit: output = reclaimed return UTXO − fee");
+  const creditWitness = credit.getInput(0).finalScriptWitness!;
+  assert(creditWitness.length === 1 && creditWitness[0].length === 64, "⭐ bondcredit: spends by normal Taproot key path (one Schnorr sig, no CLTV leaf)");
+
+  let wrongCreditKeyThrew = false;
+  try {
+    buildKeyPathSweepTx({ ownerXonly: owner.x, utxos: [returnUtxo], ownerPriv: btcMs.utils.randomPrivateKeyBytes(), destination: dest, feeSats: 300n, network: MS_NET });
+  } catch { wrongCreditKeyThrew = true; }
+  assert(wrongCreditKeyThrew, "bondcredit: a non-owner key cannot sweep the reclaimed return address");
 
   // ⭐ INVARIANT 3 (owner-only), the static half: the control block is exactly 33
   // bytes — [parity|leafver] + the 32-byte internal key, NO merkle path — so the
@@ -2773,6 +2843,13 @@ console.log("\n── Bond commitment (single-key CLTV timelock) ──");
     "bondcltv: a 4-input sweep fee scales with size (≥ 2 sat/vB)");
   assert(BigInt(estimateReclaimVsize(bond, 4)) > 300n,
     "⭐ bondcltv: the old flat 300-sat fee was BELOW 1 sat/vB on a 4-input sweep (unrelayable) — size-based fees fix a real bug");
+  for (let n = 1; n <= 4; n++) {
+    const returnUtxos = Array.from({ length: n }, (_, i) => ({ txid: (60 + i).toString(16).padStart(2, "0").repeat(32), index: i, amountSats: 25_000n }));
+    const raw = buildKeyPathSweepTx({ ownerXonly: owner.x, utxos: returnUtxos, ownerPriv: owner.bp, destination: dest, feeSats: 600n, network: MS_NET });
+    const actual = btcMs.Transaction.fromRaw(msHexToBytes(raw)).vsize;
+    assert(estimateKeyPathSweepVsize(n) === actual, `bondcredit: estimateKeyPathSweepVsize(${n} inputs) is byte-exact (${actual} vB)`);
+  }
+  assert(estimateKeyPathSweepFeeSats(1) === 300n, "bondcredit: 1-input credit keeps the 300-sat floor");
 
   // Dust guard: a fee that leaves the output below the P2TR dust floor throws
   // (an unrelayable reclaim must fail loudly at build time, not at broadcast).
@@ -2872,9 +2949,25 @@ console.log("\n── Commitment store (round-trip + tamper gate) ──");
   // A tampered ownerXonly (address no longer reproduces from the stored key) rejects.
   assert(deserializeCommitment({ ...s, ownerXonly: "00".repeat(32) }) === null,
     "⭐ bondcommit: a swapped ownerXonly (address no longer reproduces) is rejected");
-  // reclaimTxid survives the round-trip (the receipt of a finished bond).
-  const done = deserializeCommitment(serializeCommitment({ ...rec, phase: "reclaimed", reclaimTxid: "ff".repeat(32) }));
+  // reclaimTxid + creditTxid survive the round-trip (the receipts of a finished
+  // bond and its visible Chama credit).
+  const bondKeyAddr = btcMs.p2tr(x, undefined, MS_NET).address as string;
+  const done = deserializeCommitment(serializeCommitment({
+    ...rec,
+    phase: "reclaimed",
+    reclaimTxid: "ff".repeat(32),
+    reclaimDestination: { requested: "chama", actual: "bond-key", address: bondKeyAddr, fallbackReason: "fed down" },
+    creditTxid: "aa".repeat(32),
+    creditOperationId: "bond-credit-op",
+  }));
   assert(done?.phase === "reclaimed" && done?.reclaimTxid === "ff".repeat(32), "bondcommit: reclaimTxid round-trips");
+  assert(done?.creditTxid === "aa".repeat(32) && done?.creditOperationId === "bond-credit-op", "bondcommit: Chama credit receipt round-trips");
+  assert(done?.reclaimDestination?.requested === "chama" && done?.reclaimDestination?.actual === "bond-key" && done.reclaimDestination.address === bondKeyAddr,
+    "bondcommit: reclaim destination choice and actual output round-trip");
+  assert(deserializeCommitment({
+    ...s,
+    reclaimDestination: { requested: "external", actual: "external", address: btcMs.p2tr(x, undefined, MS_MAINNET).address as string },
+  }) === null, "bondcommit: stored reclaim destination must match the bond network");
   // ⭐ keyIndex round-trips (reclaim re-derives the right key); a legacy record → index 0.
   assert(deserializeCommitment(serializeCommitment({ ...rec, keyIndex: 7 }))?.keyIndex === 7, "bondcommit: keyIndex round-trips (per-bond derivation index)");
   assert(deserializeCommitment(s)?.keyIndex === 0, "bondcommit: a legacy record (no keyIndex) defaults to index 0");
@@ -2893,13 +2986,73 @@ console.log("\n── Commitment store (round-trip + tamper gate) ──");
   upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "locked", createdAt: 1_900_000_000 });
   assert(getCommitmentBond(bid)?.utxos?.length === 1, "⭐ bondcommit: an equal-rank upsert carries the funded UTXOs forward");
   // …and a stale downgrade is refused after reclaim.
-  upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "reclaimed", reclaimTxid: "aa".repeat(32), createdAt: 1_900_000_000 });
+  upsertCommitmentBond({
+    bondId: bid,
+    bond,
+    amountSats: 21_000n,
+    phase: "reclaimed",
+    reclaimTxid: "aa".repeat(32),
+    reclaimDestination: { requested: "chama", actual: "bond-key", address: bondKeyAddr, fallbackReason: "fed down" },
+    createdAt: 1_900_000_000,
+  });
+  upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "reclaimed", reclaimTxid: "bb".repeat(32), createdAt: 1_900_000_000 });
   upsertCommitmentBond({ bondId: bid, bond, amountSats: 21_000n, phase: "locked", utxos: rec.utxos, createdAt: 1_900_000_000 });
   const final = getCommitmentBond(bid);
-  assert(final?.phase === "reclaimed" && final?.reclaimTxid === "aa".repeat(32),
+  assert(final?.phase === "reclaimed" && final?.reclaimTxid === "bb".repeat(32),
     "⭐ bondcommit: a stale LOCKED upsert cannot downgrade a RECLAIMED bond (phase-monotonic)");
+  assert(final?.reclaimDestination?.requested === "chama" && final?.reclaimDestination?.actual === "bond-key",
+    "bondcommit: equal-rank upsert carries reclaim destination metadata forward");
+  // ⭐ Mainnet-only display: a mainnet (bc1) bond lists; a stale signet (tb1) test
+  // bond persisted on a dev device is filtered out (the v5.0 Tauri "testnet in
+  // dashboard" bug — old signet bonds must never show in a mainnet build).
+  const mainBond = buildCommitmentBond(x, 810_000, MS_MAINNET);
+  upsertCommitmentBond({ bondId: "bond_main_1", bond: mainBond, amountSats: 21_000n, phase: "created", createdAt: 1_900_000_000 });
+  const listed = listCommitmentBonds();
+  assert(listed.some((r) => r.bondId === "bond_main_1" && r.bond.address.startsWith("bc1")), "bondcommit: a mainnet (bc1) bond IS listed");
+  assert(!listed.some((r) => r.bond.address.startsWith("tb1")), "⭐ bondcommit: a stale signet (tb1) bond is filtered out of the display list");
   (globalThis as any).localStorage.clear();
   setLocalStorageUserScope(null);
+}
+
+// ── BOND RECOVERY (cross-device: rebuild a record from announcement + seed) ───
+// Same npub on two devices: a bond posted on one rebuilds locally on the other from
+// its own kind-38135 announcement + seed (the "my bond isn't on my other device" fix).
+console.log("\n── Bond recovery (reconstruct from announcement + seed) ──");
+{
+  const RECOVER_MNEMONIC = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+  const k0 = deriveCommitmentKey(RECOVER_MNEMONIC, { network: MS_MAINNET, index: 0 });
+  const announced = buildCommitmentBond(k0.xonly, 957_541, MS_MAINNET);
+  const bondKeyAddr = btcMs.p2tr(k0.xonly, undefined, MS_MAINNET).address as string;
+  const utxo = { txid: "cc".repeat(32), index: 0, amountSats: 30_000n };
+  // Live bond: funds at the CLTV address → LOCKED.
+  const live = reconstructBondRecord({
+    ownerXonlyHex: msBytesToHex(k0.xonly), lockUntil: 957_541, claimedSats: 30_000n,
+    announcedAddress: announced.address, seedWords: RECOVER_MNEMONIC, network: MS_MAINNET, bondUtxos: [utxo],
+  });
+  assert(live !== null && live.bond.address === announced.address, "bondrecover: rebuilds the announced bond address from the seed");
+  assert(live?.keyIndex === 0, `bondrecover: finds the derivation index that owns the key (got ${live?.keyIndex})`);
+  assert(live?.phase === "locked" && live?.utxos?.length === 1 && live?.amountSats === 30_000n, "bondrecover: funds at the CLTV address rebuild as LOCKED with the on-chain UTXOs");
+  // Reclaimed-not-swept: funds at the bond-KEY address → RECLAIMED, sweep-ready record.
+  const reclaimed = reconstructBondRecord({
+    ownerXonlyHex: msBytesToHex(k0.xonly), lockUntil: 957_541, claimedSats: 30_000n,
+    announcedAddress: announced.address, seedWords: RECOVER_MNEMONIC, network: MS_MAINNET, bondKeyUtxos: [utxo],
+  });
+  assert(reclaimed?.phase === "reclaimed" && reclaimed?.amountSats === 30_000n, "⭐ bondrecover: funds at the bond-KEY address rebuild as RECLAIMED (the stranded-sweep case)");
+  assert(reclaimed?.reclaimTxid === "cc".repeat(32), "bondrecover: reclaimTxid is taken from the bond-key UTXO (the tx that funded it)");
+  assert(reclaimed?.reclaimDestination?.actual === "bond-key" && reclaimed?.reclaimDestination?.address === bondKeyAddr, "bondrecover: the record points at the bond-key return address so 'credit to Chama' can sweep it");
+  assert(reconstructBondRecord({
+    ownerXonlyHex: msBytesToHex(k0.xonly), lockUntil: 957_541, claimedSats: 21_000n,
+    announcedAddress: announced.address, seedWords: RECOVER_MNEMONIC, network: MS_MAINNET,
+  }) === null, "bondrecover: an empty (never-funded or fully-swept) address recovers nothing");
+  assert(reconstructBondRecord({
+    ownerXonlyHex: msBytesToHex(k0.xonly), lockUntil: 957_541, claimedSats: 30_000n,
+    announcedAddress: announced.address.slice(0, -3) + "xyz", seedWords: RECOVER_MNEMONIC, network: MS_MAINNET, bondUtxos: [utxo],
+  }) === null, "⭐ bondrecover: an announced address that doesn't reproduce is rejected");
+  const otherSeed = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+  assert(reconstructBondRecord({
+    ownerXonlyHex: msBytesToHex(k0.xonly), lockUntil: 957_541, claimedSats: 30_000n,
+    announcedAddress: announced.address, seedWords: otherSeed, network: MS_MAINNET, bondUtxos: [utxo], maxIndex: 5,
+  }) === null, "⭐ bondrecover: a bond whose key isn't derivable from the seed is skipped (can't reclaim)");
 }
 
 // ── 5b-BONDANN. Commitment-bond ANNOUNCEMENT (kind 38135, chain-verifiable) ────
@@ -16592,27 +16745,31 @@ console.log("\n── STRIKE US-DOLLAR OFFRAMP ──");
     "Full Lightning Address yields the local part");
   assert(normalizeStrikeUsername("https://strike.me/alice") === "alice",
     "Profile URL yields the handle (resolved via LNURL, never the page)");
+  assert(normalizeStrikeUsername("strike.me/Alice?ref=x") === "alice",
+    "Bare Strike profile URL yields the handle");
+  assert(normalizeStrikeUsername("https://www.strike.me/Alice") === "alice",
+    "www Strike profile URL yields the handle");
   assert(normalizeStrikeUsername("a.b_c-1") === "a.b_c-1",
     "Dots, underscores and dashes are allowed inside the handle");
+  assert(normalizeStrikeUsername("a") === "a",
+    "Single-char handles are allowed locally; Strike's LNURL endpoint is authoritative");
 
   // Rejects malformed / foreign-host input.
   assert(normalizeStrikeUsername("alice@getchama.app") === null,
     "A non-strike.me host is rejected");
-  assert(normalizeStrikeUsername("a") === null,
-    "Single-char usernames are too short");
   assert(normalizeStrikeUsername(".alice") === null,
     "Username must start with an alphanumeric");
   assert(normalizeStrikeUsername("alice@strike.me@x") === null,
     "More than one @ is malformed");
   assert(normalizeStrikeUsername("") === null && normalizeStrikeUsername("   ") === null,
     "Empty / whitespace is rejected");
-  assert(isValidStrikeUsername("alice") && !isValidStrikeUsername("a"),
+  assert(isValidStrikeUsername("alice") && isValidStrikeUsername("a") && !isValidStrikeUsername(".alice"),
     "isValidStrikeUsername mirrors normalize");
 
   // Address building + round-trip.
   assert(buildStrikeLightningAddress("Alice") === "alice@strike.me",
     "buildStrikeLightningAddress forms <username>@strike.me (lowercased)");
-  assert(buildStrikeLightningAddress("a") === null,
+  assert(buildStrikeLightningAddress(".alice") === null,
     "buildStrikeLightningAddress returns null for invalid input");
   assert(isStrikeLightningAddress("alice@strike.me"),
     "isStrikeLightningAddress recognizes Strike addresses");
@@ -16620,6 +16777,8 @@ console.log("\n── STRIKE US-DOLLAR OFFRAMP ──");
     "isStrikeLightningAddress is case-insensitive");
   assert(!isStrikeLightningAddress("254712345678@bitcoin.co.ke"),
     "isStrikeLightningAddress rejects non-Strike addresses");
+  assert(!isStrikeLightningAddress("alice@strike.me@x"),
+    "isStrikeLightningAddress rejects malformed Strike-shaped addresses");
   assert(strikeUsernameFromAddress("alice@strike.me") === "alice",
     "strikeUsernameFromAddress recovers the username");
   assert(strikeUsernameFromAddress("alice@getchama.app") === null,
@@ -16631,21 +16790,36 @@ console.log("\n── STRIKE US-DOLLAR OFFRAMP ──");
   assert(strikeAddr === strikeAddr.toLowerCase() && isStrikeLightningAddress(strikeAddr),
     "Strike address is already lowercase and stays recognizable when stored");
 
-  // US context detection — gates the native Strike option (independent of
-  // EXTERNAL_SWAPS_ENABLED), and a Strike address is NOT a Kenya context.
+  // US context detection — gates the Strike username→@strike.me option
+  // (independent of EXTERNAL_SWAPS_ENABLED). TRADE context is authoritative
+  // (same rule as Kenya/Tanzania offramps).
   assert(isUSPayoutContext({ tradeCommunity: "us-gbf" }),
     "us-gbf trade community is a US payout context");
   assert(isUSPayoutContext({ homeCommunity: "us-usd" }),
     "us-usd home community is a US payout context");
+  assert(isUSPayoutContext({ tradeCommunity: "global-usd" }),
+    "global-usd trade community is a US payout context");
   assert(isUSPayoutContext({ fiatCurrency: "usd" }),
     "USD fiat currency (any case) is a US payout context");
   assert(!isUSPayoutContext({ tradeCommunity: "ke-kes", fiatCurrency: "KES" }),
     "A Kenya context is not a US payout context");
   assert(!isUSPayoutContext({}),
     "Empty context is not eligible for Strike");
+  assert(!isUSPayoutContext({ homeCommunity: "us-gbf", tradeCommunity: "ke-kes", fiatCurrency: "KES" }),
+    "US home does NOT leak Strike onto a Kenya (KES) trade");
+  assert(isUSPayoutContext({ homeCommunity: "us-gbf" }),
+    "US home with no trade context still offers Strike (context-less fallback)");
   // Cross-check the two offramps don't claim each other's addresses.
   assert(!isTandoLightningAddress("alice@strike.me") && !isStrikeLightningAddress("254712345678@bitcoin.co.ke"),
     "Tando and Strike address detectors are mutually exclusive");
+
+  // Cash-receive how-to copy + always-visible confirmation guidance.
+  assert(Array.isArray(STRIKE_CASH_STEPS) && STRIKE_CASH_STEPS.length >= 3,
+    "STRIKE_CASH_STEPS lists the Account → Bitcoin settings → Receive currency → Cash path");
+  assert(/cash/i.test(STRIKE_CASH_HINT) && /passive lightning/i.test(STRIKE_CASH_HINT),
+    "STRIKE_CASH_HINT names Cash + passive Lightning receives");
+  assert(/\$0\.01/.test(STRIKE_CASH_CAVEAT) && /bitcoin/i.test(STRIKE_CASH_CAVEAT),
+    "STRIKE_CASH_CAVEAT keeps Strike's small-payment bitcoin caveat visible");
 }
 
 // Per-category trade durations (v4.1 D, UNWIRED — pure CREATE-side expiry
@@ -19882,6 +20056,253 @@ console.log("\n── DURABLE ESCROW-EVENT CACHE ──");
   const evict3 = cache.selectEvictions(metas, 1);
   assert(evict3.join(",") === "term-old,term-new,live-old",
     "event-cache: only after ALL terminals are gone does it evict the oldest live trade");
+}
+
+// ── ARBITER PREMIUM (task #53 E1: the 0.5% insurance, kind 38113) ────────
+//
+// Load-bearing invariants: 25bps-per-side math · note-size floor ·
+// BONDED-ONLY gate (the earnings license) · verdict-neutrality (computed
+// from the amount, never the outcome) · PREMIUM accepted post-COMPLETED
+// without flipping status or touching eventChain · envelope round-trip
+// (only the arbiter can read the note) · ledger semantics (V7-style
+// sending intent, decline toggle can never clobber paid, attempt cap).
+console.log("\n── ARBITER PREMIUM (compute + kind 38113 + ledger) ──");
+{
+  const ap = await import("../arbiters/arbiter-premium.js");
+  const led = await import("../arbiters/arbiter-earnings.js");
+  const { setLocalStorageUserScope } = await import("../storage/user-scope.js");
+  const { createEnvelope, decryptFromEnvelope } = await import("./envelope.js");
+
+  // ── compute: math + gates ──
+  const slice = (over: Record<string, unknown> = {}) => ({
+    amountMsats: 1_000_000_000, // 1M-sat trade
+    participants: { buyer: BUYER_PK, seller: SELLER_PK, arbiter: ARBITER_PK },
+    bondedArbiters: [ARBITER_PK],
+    ...over,
+  }) as any;
+
+  const buyerSide = ap.computeArbiterPremium(slice(), BUYER_PK);
+  assert(buyerSide.payable === true
+    && buyerSide.payable && buyerSide.amountSats === 2_500
+    && buyerSide.amountMsats === 2_500_000
+    && buyerSide.payerRole === Role.BUYER
+    && buyerSide.arbiter === ARBITER_PK,
+    "premium: buyer side of a 1M-sat trade owes 2,500 sats (25 bps)");
+  const sellerSide = ap.computeArbiterPremium(slice(), SELLER_PK);
+  assert(sellerSide.payable === true && sellerSide.payable && sellerSide.payerRole === Role.SELLER,
+    "premium: seller side is symmetric (0.25% each, 0.5% total)");
+  assert(ap.PER_SIDE_PREMIUM_BPS === 25,
+    "premium: per-side bps is exactly half of AMBIENT_ARBITER_FEE_BPS");
+
+  // Verdict-neutral BY CONSTRUCTION: outcome fields don't exist in the
+  // input slice — the same trade yields the same premium either way.
+  const withOutcome = ap.computeArbiterPremium(
+    slice({ resolvedOutcome: "refund", status: EscrowStatus.COMPLETED }), BUYER_PK);
+  assert(withOutcome.payable === true && withOutcome.payable && withOutcome.amountSats === 2_500,
+    "premium: verdict-neutral — outcome/status fields never change the amount");
+
+  // Floor on NOTE size (~10 sats), not trade size.
+  const under = ap.computeArbiterPremium(slice({ amountMsats: 3_600_000 }), BUYER_PK);
+  assert(!under.payable && under.reason === "below-floor",
+    "premium: a 3,600-sat trade (9-sat note) skips — below the 10-sat note floor");
+  const at = ap.computeArbiterPremium(slice({ amountMsats: 4_000_000 }), BUYER_PK);
+  assert(at.payable === true && at.payable && at.amountSats === 10,
+    "premium: a 4,000-sat trade (10-sat note) is exactly at the floor — payable");
+
+  // BONDED-ONLY: the earnings license. OG-fallback seats earn nothing.
+  const ogSeat = ap.computeArbiterPremium(slice({ bondedArbiters: [] }), BUYER_PK);
+  assert(!ogSeat.payable && ogSeat.reason === "arbiter-not-bonded",
+    "premium: an unbonded (OG-fallback) seated arbiter earns NOTHING");
+  const otherBonded = ap.computeArbiterPremium(slice({ bondedArbiters: ["dd".repeat(32)] }), BUYER_PK);
+  assert(!otherBonded.payable && otherBonded.reason === "arbiter-not-bonded",
+    "premium: bonded subset must contain the SEATED arbiter, not just anyone");
+  const preStamp = ap.computeArbiterPremium(slice({ bondedArbiters: undefined }), BUYER_PK);
+  assert(!preStamp.payable && preStamp.reason === "arbiter-not-bonded",
+    "premium: pre-2B trades (no bondedArbiters stamp) never pay");
+
+  // Principal + seat gates.
+  assert(!ap.computeArbiterPremium(slice(), "ee".repeat(32)).payable,
+    "premium: a stranger owes nothing (not-principal)");
+  assert(!ap.computeArbiterPremium(slice(), ARBITER_PK).payable,
+    "premium: the arbiter never pays themselves (not-principal)");
+  const noArb = ap.computeArbiterPremium(
+    slice({ participants: { buyer: BUYER_PK, seller: SELLER_PK, arbiter: undefined } }), BUYER_PK);
+  assert(!noArb.payable && noArb.reason === "no-arbiter",
+    "premium: no seated arbiter → nothing to pay");
+  const badAmt = ap.computeArbiterPremium(slice({ amountMsats: 0 }), BUYER_PK);
+  assert(!badAmt.payable && badAmt.reason === "bad-amount",
+    "premium: zero/invalid amount → bad-amount");
+
+  // ── selection helpers ──
+  const mkTrade = (id: string, status: EscrowStatus, over: Record<string, unknown> = {}) =>
+    ({ id, status, ...slice(), ...over }) as any;
+  const targets = ap.selectPremiumPayTargets({
+    escrows: [
+      mkTrade("pp-done", EscrowStatus.COMPLETED),
+      mkTrade("pp-live", EscrowStatus.LOCKED),
+      mkTrade("pp-paid", EscrowStatus.COMPLETED),
+      mkTrade("pp-og", EscrowStatus.COMPLETED, { bondedArbiters: [] }),
+    ],
+    myPubkey: BUYER_PK,
+    hasOutboxRecord: (id: string) => id === "pp-paid",
+  });
+  assert(targets.length === 1 && targets[0] === "pp-done",
+    "premium: pay targets = COMPLETED + payable + no outbox record only");
+
+  const noteEv = (id: string) => ({ raw: { id, pubkey: BUYER_PK } }) as any;
+  const redeemTargets = ap.selectPremiumRedeemTargets({
+    escrows: [
+      mkTrade("pr-a", EscrowStatus.COMPLETED, { premiumNotes: [noteEv("n1")] }),
+      mkTrade("pr-b", EscrowStatus.COMPLETED, { premiumNotes: [noteEv("n2")] }),
+      mkTrade("pr-c", EscrowStatus.COMPLETED, { premiumNotes: [] }),
+    ],
+    myPubkey: ARBITER_PK,
+    isSettled: (eid: string) => eid === "n2",
+  });
+  assert(redeemTargets.length === 1 && redeemTargets[0] === "pr-a",
+    "premium: redeem targets = trades I arbiter holding UNSETTLED notes");
+  assert(ap.selectPremiumRedeemTargets({
+    escrows: [mkTrade("pr-a", EscrowStatus.COMPLETED, { premiumNotes: [noteEv("n1")] })],
+    myPubkey: BUYER_PK,
+    isSettled: () => false,
+  }).length === 0,
+    "premium: redeem targets empty when I'm not the seated arbiter");
+
+  // ── kind 38113 through the reducer ──
+  const { state: lockedState } = buildToLocked();
+  const doneState = {
+    ...lockedState,
+    status: EscrowStatus.COMPLETED,
+    // Past-deadline on purpose: the old gauntlet would auto-EXPIRE.
+    expiresAt: NOW - 1000,
+  };
+
+  const encMock = async (pt: string, pk: string) =>
+    `enc:${pk}:${Buffer.from(pt, "utf8").toString("base64")}`;
+  const decMock = async (ct: string, _pk: string) =>
+    Buffer.from(ct.split(":").slice(2).join(":"), "base64").toString("utf8");
+
+  const body = {
+    escrowId: ESCROW_ID, payerRole: Role.BUYER, amountSats: 2_500,
+    oobNotes: "oob-notes-premium-test", kind: "ambient" as const, createdAt: NOW,
+  };
+  const env = await createEnvelope(JSON.stringify(body), [ARBITER_PK], encMock);
+  const premiumPayload = {
+    type: "escrow:premium" as const,
+    noteEnvelope: env,
+    payerRole: Role.BUYER,
+    noteKind: "ambient" as const,
+    sentAt: NOW,
+  };
+  const premiumEv = makeParsedEvent(EscrowEventKind.PREMIUM, BUYER_PK, premiumPayload);
+
+  const applied = applyEvent(doneState, premiumEv);
+  if (assertOk(applied, "premium: PREMIUM is accepted on a COMPLETED (truly-terminal) trade")) {
+    assert(applied.state.status === EscrowStatus.COMPLETED,
+      "premium: a past-deadline PREMIUM never flips COMPLETED to EXPIRED");
+    assert(applied.state.eventChain.length === doneState.eventChain.length,
+      "premium: PREMIUM never enters eventChain (non-consensus)");
+    assert((applied.state.premiumNotes ?? []).length === 1,
+      "premium: the note lands in state.premiumNotes");
+
+    const again = applyEvent(applied.state, premiumEv);
+    assert(again.ok && (again.state.premiumNotes ?? []).length === 1,
+      "premium: a relay echo of the same event id dedups (still 1 note)");
+  }
+
+  const strangerEv = makeParsedEvent(EscrowEventKind.PREMIUM, "ee".repeat(32), premiumPayload);
+  assertErr(applyEvent(doneState, strangerEv), "NOT_PARTICIPANT",
+    "premium: a non-principal's PREMIUM is rejected");
+
+  // A bad premium mid-chain must never brick replay (fail-soft like CHAT).
+  const createEv = createEvent();
+  const replayed = replayEventChain([createEv, makeParsedEvent(
+    EscrowEventKind.PREMIUM, "ee".repeat(32), premiumPayload, createEv.raw.id)]);
+  assert(replayed.ok,
+    "premium: a stranger's PREMIUM in a replayed chain is skipped, not fatal");
+
+  // SORT SAFETY: PREMIUM has no e-tag (prevEventId null). If the sorter
+  // bucketed it with state events, root-find could pick it as the chain
+  // ROOT ahead of CREATE → MISSING_CREATE → trade unloadable. It must
+  // interleave like CHAT instead, and the sorted chain must replay.
+  const sortedChain = sortEventChain([premiumEv, createEv]);
+  assert(sortedChain[0].kind === EscrowEventKind.CREATE,
+    "premium: sortEventChain never lets a PREMIUM become the chain root");
+  assert(replayEventChain(sortedChain).ok,
+    "premium: a relay-fetched chain containing a PREMIUM replays clean");
+
+  // ── envelope: arbiter-only readability ──
+  const arbRead = await decryptFromEnvelope(env, ARBITER_PK, BUYER_PK, decMock);
+  assert(arbRead !== null && JSON.parse(arbRead!).oobNotes === body.oobNotes,
+    "premium: the arbiter decrypts the note body (oobNotes round-trips)");
+  const buyerRead = await decryptFromEnvelope(env, SELLER_PK, BUYER_PK, decMock);
+  assert(buyerRead === null,
+    "premium: a non-recipient (the seller) cannot read the note");
+
+  // ── parser ──
+  const rawPremium = makeRawEvent(EscrowEventKind.PREMIUM, BUYER_PK, [["d", ESCROW_ID]]);
+  const parsedOk = parseEscrowEvent(rawPremium, JSON.stringify(premiumPayload), true);
+  assert(parsedOk.ok && parsedOk.ok && parsedOk.event.kind === EscrowEventKind.PREMIUM,
+    "premium: parser accepts a well-formed kind-38113 payload");
+  const parsedBad = parseEscrowEvent(rawPremium, JSON.stringify({ ...premiumPayload, noteEnvelope: "nope" }), true);
+  assert(!parsedBad.ok,
+    "premium: parser rejects a payload without a valid envelope");
+
+  // ── ledger ──
+  setLocalStorageUserScope("npub_premium_test");
+  (globalThis as any).localStorage.clear();
+
+  led.recordPremiumSending("pl-1", 2_500_000);
+  assert(led.getPremiumOutboxRecord("pl-1")?.status === "sending",
+    "ledger: pre-spend 'sending' intent recorded (V7-style)");
+  led.clearPremiumSending("pl-1");
+  assert(led.getPremiumOutboxRecord("pl-1") === null,
+    "ledger: a failed spend clears the intent (retry possible)");
+
+  led.recordPremiumSending("pl-1", 2_500_000);
+  led.recordPremiumPaid("pl-1", 2_500_000, "op-1");
+  assert(led.getPremiumOutboxRecord("pl-1")?.status === "paid",
+    "ledger: sending upgrades to paid after publish");
+  led.clearPremiumSending("pl-1");
+  assert(led.getPremiumOutboxRecord("pl-1")?.status === "paid",
+    "ledger: clearPremiumSending never touches a paid record");
+  led.setPremiumDeclined("pl-1", true);
+  assert(led.getPremiumOutboxRecord("pl-1")?.status === "paid",
+    "ledger: the decline toggle can never clobber a paid record");
+
+  led.setPremiumDeclined("pl-2", true);
+  assert(led.getPremiumOutboxRecord("pl-2")?.status === "declined",
+    "ledger: declining writes a durable record (blocks the pay sweep)");
+  led.setPremiumDeclined("pl-2", false);
+  assert(led.getPremiumOutboxRecord("pl-2") === null,
+    "ledger: re-including clears ONLY a declined record");
+
+  const noteEntry = { eventId: "ne-1", escrowId: "pl-3", payer: BUYER_PK, amountMsats: 25_000, noteKind: "ambient" as const };
+  led.recordEarningAttemptFailed(noteEntry);
+  led.recordEarningAttemptFailed(noteEntry);
+  assert(led.getEarningRecord("ne-1")?.attempts === 2 && !led.isEarningSettled("ne-1"),
+    "ledger: redeem failures bump attempts; under the cap it stays retryable");
+  for (let i = 0; i < led.PREMIUM_REDEEM_MAX_ATTEMPTS; i++) led.recordEarningAttemptFailed(noteEntry);
+  assert(led.isEarningSettled("ne-1"),
+    "ledger: past the attempt cap a dead note is settled (stops retrying)");
+  led.recordEarningRedeemed(noteEntry);
+  assert(led.getEarningRecord("ne-1")?.status === "redeemed",
+    "ledger: a late successful redeem still records as redeemed");
+  led.recordEarningAttemptFailed(noteEntry);
+  assert(led.getEarningRecord("ne-1")?.status === "redeemed",
+    "ledger: a failure report never downgrades a redeemed record");
+
+  led.recordEarningRedeemed({ eventId: "ne-2", escrowId: "pl-3", payer: SELLER_PK, amountMsats: 25_000, noteKind: "ambient" });
+  led.recordEarningRedeemed({ eventId: "ne-3", escrowId: "pl-4", payer: BUYER_PK, amountMsats: 10_000, noteKind: "ambient" });
+  const sum = led.summarizeArbiterEarnings();
+  assert(sum.totalMsats === 60_000 && sum.tradeCount === 2 && sum.noteCount === 3,
+    "ledger: summary counts redeemed msats, distinct trades, and notes");
+
+  led.clearArbiterEarningStores();
+  assert(led.summarizeArbiterEarnings().noteCount === 0,
+    "ledger: clear wipes both stores");
+  (globalThis as any).localStorage.clear();
+  setLocalStorageUserScope(null);
 }
 
 // ══════════════════════════════════════════════════════════════════════════

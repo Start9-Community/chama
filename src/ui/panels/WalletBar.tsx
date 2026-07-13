@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 // Identity bar — shows the user's npub + relay status. Function name kept
 // for back-compat; the "Wallet" framing is dead per PHILOSOPHY.md §2.1.
@@ -9,13 +10,17 @@ export function WalletBar({ pubkey, connectedRelays, relayStatuses }: {
   connectedRelays: number;
   relayStatuses: Map<string, string>;
 }) {
+  const { t } = useT();
   const [showRelays, setShowRelays] = useState(false);
-  const networkLabel = connectedRelays > 0 ? "Online" : "Offline";
+  const networkLabel = connectedRelays > 0 ? t("fund.online") : t("fund.offline");
   return (
     <>
       <div
         onClick={() => setShowRelays(!showRelays)}
-        title={`${connectedRelays} network connection${connectedRelays !== 1 ? "s" : ""}`}
+        title={t(
+          connectedRelays !== 1 ? "fund.networkConnectionsMany" : "fund.networkConnectionsOne",
+          { count: connectedRelays },
+        )}
         style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "10px 16px", background: T.surface,

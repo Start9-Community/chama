@@ -2023,9 +2023,10 @@ and Cash App are interchangeable LUD-16 endpoints.
   GBF "USA · USD" community family or USD currency), and UX glue. Saved in the
   shared payout-destinations store like any LN Address.
 - **The user must set Strike receive currency to Cash themselves** — Chama can't
-  set it. Flow = save your Strike Lightning Address as a payout destination + a
-  one-time "flip Strike to receive Cash (USD)" hint. Left on Bitcoin, they
-  receive sats (fine, just not an off-ramp).
+  set it. Flow = enter/save your Strike Lightning Address as a payout
+  destination + a guided Account → Bitcoin settings → Receive currency → Cash
+  confirmation before Chama sends. Left on Bitcoin, they receive sats (fine,
+  just not a USD off-ramp).
 - Chama sends **sats**; the USD amount and any spread are Strike's at receipt.
   UI shows "≈ $X at Strike's rate," never a guarantee.
 - Rides the same Lightning **gateway pay path** as claim payout (the #9 family) —
@@ -2359,3 +2360,45 @@ honest copy + `TODO(commitment-bond)`). **Invariant:** no real-sats OG bond fund
 timelock ships. **Next:** build the one-leaf timelock bond, prove it on Mutinynet (a "spend-before-T →
 REJECTED" harness row), then the test-sats 3-npub e2e over the new leaf. Brief:
 `chama-bond-collusion-closure-brief.md` (the ladder + why we walked around it).
+
+---
+
+## 2026-07-12 — Option B reaffirmed under arbiter economics (Pillar 2.1 upheld, "Wallet" stays dead)
+
+**Context.** v5.1 introduced two things that hold sats between trades: the arbiter **premium**
+(a bonded arbiter accumulates 0.25%/side ecash earnings) and the bond **reclaim→credit** flow
+(reclaimed bond capital lands in the Fedimint balance). Building those, the verifier chat added a
+Dashboard card literally labelled **"CHAMA WALLET"** showing the spendable balance. Jetty flagged
+the conflict: PHILOSOPHY §2.1 (Option B) says "There is no persistent balance UI in Chama. The
+'Wallet' mental model is dead… a non-zero balance shouldn't exist in steady state at all." Are we
+breaking our deepest pillar?
+
+**Options.**
+- **A — reaffirm strict Option B.** Keep the capability (arbiters must be paid; reclaimed bonds must
+  land somewhere) but kill the "Wallet" word and framing everywhere; treat any held balance as
+  *transient sats to sweep out*, never a store of value.
+- **B — amend §2.1.** Scope "zero balance" to traders only and document a formal role-holder
+  earnings exception.
+
+**Choice: A (Jetty, without a shadow of a doubt).** §2.1 stands UNAMENDED. The ethical core —
+non-custody, no honeypot, every sat in transit toward a destination — was never in question
+(earnings are non-custodial bearer ecash the user holds; Chama and the federation custody nothing).
+What was at risk was resurrecting the *mental model* §2.1 killed. So: the word "Wallet" is removed
+from every surface the verifier introduced. The Dashboard card is now **"YOUR SATS"** (not "CHAMA
+WALLET"), framed "Earnings, reclaimed bonds, and payouts land here — sweep them to your own wallet
+anytime. Chama holds nothing between trades." Bond reclaim now moves into your Chama **balance** (not
+"wallet"); the landed copy points at YOUR SATS and nudges a sweep. EN/FR/ES all reworded
+(portefeuille/billetera → solde; CHAMA WALLET → VOS SATS/TUS SATS).
+
+**Rationale.** The trader lifecycle stays byte-identical — a buyer/seller still funds JIT and hits
+zero between trades; the premium is a deduction that *leaves* the trader, not a balance they hold.
+Only role-holders (bonded arbiters) and mid-flight reclaimed capital hold anything, and the design
+now frames every held balance as sweep-me-out rather than storage. Jetty's read on why this is
+self-enforcing: users — especially in the global south, where every sat they earned or bonded is
+needed back — sweep immediately; nothing lingers. So steady-state still trends to zero in practice,
+honoring §2.1's spirit and letter without amending it. The recovery-banner doctrine (a lingering
+balance is a state to drain, not a home) is preserved; the "Wallet" was and remains dead.
+
+**Guardrail for future agents.** Do not reintroduce a "Wallet" surface, label, or mental model.
+Held balances (arbiter earnings, reclaimed bonds, payouts, leftover) are transient — always framed
+and wired as sweep-out, never as a store of value or a place to keep funds in Chama.

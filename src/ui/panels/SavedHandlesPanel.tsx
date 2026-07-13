@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { T, inputStyle } from "../theme.js";
+import { useT, type TFunc } from "../../i18n/index.js";
 import {
   type SavedHandle,
   listSavedHandles,
@@ -143,8 +144,8 @@ function filterRails(rails: Rail[], query: string): Rail[] {
     .map(entry => entry.rail);
 }
 
-function railPrivacyLabel(rail: Rail): string {
-  return rail.allowPublicHandle ? "Public opt-in" : "Private";
+function railPrivacyLabel(rail: Rail, t: TFunc): string {
+  return rail.allowPublicHandle ? t("claim.privacyPublicOptIn") : t("claim.privacyPrivate");
 }
 
 function displayNetworkLabels(keys: readonly string[]): string[] {
@@ -159,6 +160,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
   communitySlug: string;
   onClose: () => void;
 }) {
+  const { t } = useT();
   const [handles, setHandles] = useState<SavedHandle[]>(() => listSavedHandles());
   const [revealedIds, setRevealedIds] = useState<Set<string>>(new Set());
   const [addRail, setAddRail] = useState<string>("");
@@ -226,7 +228,11 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
       : phonePlaceholderParts.inputValue || phonePlaceholderParts.normalized;
   const showPhoneSaveError = phoneSaveError && (!phoneCountryHint || phoneParts.nationalDigits.length > 0);
   const phoneProgressHint = phoneCountryHint
-    ? `${phoneCountryHint.countryName ?? `+${phoneCountryHint.countryCode}`}: ${phoneCountryHint.expectedLength} after +${phoneCountryHint.countryCode}`
+    ? t("claim.phoneProgressHint", {
+        country: phoneCountryHint.countryName ?? `+${phoneCountryHint.countryCode}`,
+        expected: phoneCountryHint.expectedLength,
+        code: phoneCountryHint.countryCode,
+      })
     : null;
 
   const handlePhoneInputChange = (rawInput: string) => {
@@ -265,7 +271,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
   const handleAddPhone = () => {
     setError(null);
     if (!phoneValue.trim()) {
-      setError("Enter a phone number");
+      setError(t("claim.errEnterPhone"));
       return;
     }
     try {
@@ -278,7 +284,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
       setPhoneNetworkQuery("");
       refresh();
     } catch (e: any) {
-      setError(e?.message || "Failed to save phone number");
+      setError(e?.message || t("claim.errSavePhoneFailed"));
     }
   };
 
@@ -293,7 +299,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
   const handleAdd = () => {
     setError(null);
     if (!addRail || !addValue.trim()) {
-      setError("Choose a payment method and enter the payment ID");
+      setError(t("claim.errChooseMethodAndId"));
       return;
     }
     try {
@@ -303,7 +309,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
       setRailQuery("");
       refresh();
     } catch (e: any) {
-      setError(e?.message || "Failed to save payment method");
+      setError(e?.message || t("claim.errSaveMethodFailed"));
     }
   };
 
@@ -338,7 +344,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
         alignItems: "center", marginBottom: 18,
       }}>
         <span style={{ fontSize: 18, fontWeight: 700, color: T.text, fontFamily: T.sans }}>
-          Payment methods
+          {t("claim.paymentMethods")}
         </span>
         <button onClick={onClose} style={{
           background: "none", border: "none",
@@ -350,8 +356,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         marginBottom: 14, lineHeight: 1.5,
       }}>
-        Save the ways people can pay you locally. Phone numbers stay private;
-        public usernames can be opted into profile display one by one.
+        {t("claim.paymentMethodsBody")}
       </div>
 
       <div style={{
@@ -371,13 +376,13 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
               fontFamily: T.mono, letterSpacing: 1,
               textTransform: "uppercase",
             }}>
-              Default for mobile money
+              {t("claim.defaultForMobileMoney")}
             </div>
             <div style={{
               fontSize: 16, fontWeight: 800, color: T.text,
               fontFamily: T.sans, marginTop: 2,
             }}>
-              Phone number
+              {t("claim.phoneNumber")}
             </div>
           </div>
           <span style={{
@@ -386,15 +391,14 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
             color: T.muted, fontFamily: T.mono, fontSize: 9,
             fontWeight: 800, letterSpacing: 0.3, flexShrink: 0,
           }}>
-            PRIVATE
+            {t("claim.privateBadge")}
           </span>
         </div>
         <div style={{
           fontSize: 11, color: T.muted, fontFamily: T.sans,
           lineHeight: 1.45, marginBottom: 12,
         }}>
-          Works for M-Pesa, Wave, Airtel Money, Orange Money, mobile bank
-          transfers, and most phone-based wallets.
+          {t("claim.worksForWallets")}
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <div style={{
@@ -465,7 +469,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
               whiteSpace: "nowrap" as const,
             }}
           >
-            Save phone
+            {t("claim.savePhone")}
           </button>
         </div>
         {phoneProgressHint && !showPhoneSaveError && (
@@ -495,11 +499,11 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                 fontSize: 10, color: T.muted, fontFamily: T.mono,
                 letterSpacing: 0.4,
               }}>
-                Optional network tags
+                {t("claim.optionalNetworkTags")}
               </div>
               {phoneNetworks.size > 0 && (
                 <span style={{ fontSize: 10, color: T.teal, fontFamily: T.mono }}>
-                  {[...phoneNetworks].length} selected
+                  {t("claim.selectedCount", { count: [...phoneNetworks].length })}
                 </span>
               )}
             </div>
@@ -519,7 +523,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
             <input
               value={phoneNetworkQuery}
               onChange={e => setPhoneNetworkQuery(e.target.value)}
-              placeholder="Search networks for this phone"
+              placeholder={t("claim.searchNetworksForPhone")}
               style={{ ...inputStyle, marginBottom: 8, padding: "10px 12px", fontSize: 12 }}
             />
             <div style={{ display: "grid", gap: 6 }}>
@@ -543,7 +547,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                   >
                     <span>{rail.displayName}</span>
                     <span style={{ color: selected ? T.teal : T.muted }}>
-                      {selected ? "Added" : "Add"}
+                      {selected ? t("claim.added") : t("claim.add")}
                     </span>
                   </button>
                 );
@@ -574,13 +578,13 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
               fontFamily: T.mono, letterSpacing: 1,
               textTransform: "uppercase",
             }}>
-              Banks &amp; apps
+              {t("claim.banksAndApps")}
             </div>
             <div style={{
               fontSize: 11, color: T.muted, fontFamily: T.sans,
               lineHeight: 1.4, marginTop: 3,
             }}>
-              Cards, PayPal, Zelle, bank transfer, UPI, Pix — mostly Western.
+              {t("claim.banksAndAppsBody")}
             </div>
           </div>
           <span style={{
@@ -600,7 +604,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
             setAddValue("");
             setError(null);
           }}
-          placeholder="Search PayPal, UPI, Pix, bank transfer..."
+          placeholder={t("claim.searchBanksPlaceholder")}
           style={{ ...inputStyle, marginBottom: 8 }}
         />
         <div style={{ display: "grid", gap: 6, marginBottom: selectedRail ? 12 : 0 }}>
@@ -610,7 +614,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
               border: `1px dashed ${T.border}`, color: T.muted,
               fontFamily: T.mono, fontSize: 11,
             }}>
-              No match yet. Try a country, app name, or "bank".
+              {t("claim.noMatchYet")}
             </div>
           ) : (
             methodResults.map((rail, i) => {
@@ -647,7 +651,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                       fontSize: 10, marginTop: 2,
                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                     }}>
-                      {rail.placeholder ?? "Payment ID"}
+                      {rail.placeholderKey ? t(rail.placeholderKey) : (rail.placeholder ?? t("claim.paymentIdFallback"))}
                     </span>
                   </span>
                   <span style={{
@@ -658,7 +662,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                     fontFamily: T.mono, fontSize: 9, fontWeight: 800,
                     flexShrink: 0,
                   }}>
-                    {railPrivacyLabel(rail)}
+                    {railPrivacyLabel(rail, t)}
                   </span>
                 </button>
               );
@@ -669,13 +673,13 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
         {selectedRail && (
           <div style={{ animation: "fadeIn 0.18s ease" }}>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>
-              Payment ID for {selectedRail.displayName}
+              {t("claim.paymentIdFor", { rail: selectedRail.displayName })}
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <input
                 value={addValue}
                 onChange={e => { setAddValue(e.target.value); setError(null); }}
-                placeholder={selectedRail.placeholder || "Your payment ID"}
+                placeholder={selectedRail.placeholderKey ? t(selectedRail.placeholderKey) : (selectedRail.placeholder || t("claim.yourPaymentId"))}
                 style={{ ...inputStyle, marginBottom: 0, flex: "1 1 220px" }}
               />
               <button
@@ -691,7 +695,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                   whiteSpace: "nowrap" as const,
                 }}
               >
-                Save method
+                {t("claim.saveMethod")}
               </button>
             </div>
           </div>
@@ -714,7 +718,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
         fontFamily: T.mono, letterSpacing: 1.3, marginBottom: 10,
         textTransform: "uppercase",
       }}>
-        Saved methods
+        {t("claim.savedMethods")}
       </div>
       {handles.length === 0 ? (
         <div style={{
@@ -723,8 +727,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
           color: T.muted, fontFamily: T.mono, fontSize: 12,
           marginBottom: 20, lineHeight: 1.5,
         }}>
-          No saved payment methods yet. Add a phone number or search for a
-          payment app above.
+          {t("claim.noSavedMethods")}
         </div>
       ) : (
         <div style={{ marginBottom: 24 }}>
@@ -767,7 +770,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                         flexShrink: 0,
                       }}
                     >
-                      {h.visibility === "public" ? "PUBLIC" : "PRIVATE"}
+                      {h.visibility === "public" ? t("claim.publicBadge") : t("claim.privateBadge")}
                     </button>
                   ) : (
                     <span style={{
@@ -775,7 +778,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                       background: T.surface, border: `1px solid ${T.border}`,
                       color: T.muted, fontFamily: T.mono, fontSize: 9, fontWeight: 800,
                       letterSpacing: 0.3, flexShrink: 0,
-                    }}>PRIVATE</span>
+                    }}>{t("claim.privateBadge")}</span>
                   )}
                 </div>
                 <button
@@ -788,13 +791,13 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                     display: "flex", justifyContent: "space-between",
                     gap: 10, textAlign: "left" as const,
                   }}
-                  title={revealed ? "Tap to mask" : "Tap to reveal"}
+                  title={revealed ? t("claim.tapToMask") : t("claim.tapToReveal")}
                 >
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {display}
                   </span>
                   <span style={{ color: T.muted, fontSize: 10, flexShrink: 0 }}>
-                    {revealed ? "Mask" : "Reveal"}
+                    {revealed ? t("claim.mask") : t("claim.reveal")}
                   </span>
                 </button>
 
@@ -812,14 +815,14 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                           fontSize: 9, color: T.muted, fontFamily: T.mono,
                           letterSpacing: 0.6, textTransform: "uppercase",
                         }}>
-                          Network tags
+                          {t("claim.networkTags")}
                         </div>
                         <div style={{
                           color: networkLabels.length ? T.teal : T.muted,
                           fontFamily: T.mono, fontSize: 10, marginTop: 3,
                           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                         }}>
-                          {networkLabels.length ? networkLabels.join(" · ") : "No tags yet"}
+                          {networkLabels.length ? networkLabels.join(" · ") : t("claim.noTagsYet")}
                         </div>
                       </div>
                       <button
@@ -836,7 +839,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                           cursor: "pointer", flexShrink: 0,
                         }}
                       >
-                        {editingNetworks ? "Done" : "Edit"}
+                        {editingNetworks ? t("common.done") : t("claim.edit")}
                       </button>
                     </div>
                     {editingNetworks && (
@@ -844,7 +847,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                         <input
                           value={handleNetworkQuery}
                           onChange={e => setHandleNetworkQuery(e.target.value)}
-                          placeholder="Search networks"
+                          placeholder={t("claim.searchNetworks")}
                           style={{ ...inputStyle, marginBottom: 8, padding: "9px 11px", fontSize: 12 }}
                         />
                         <div style={{ display: "grid", gap: 6 }}>
@@ -867,7 +870,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                               >
                                 <span>{rail.displayName}</span>
                                 <span style={{ color: selected ? T.teal : T.muted }}>
-                                  {selected ? "Added" : "Add"}
+                                  {selected ? t("claim.added") : t("claim.add")}
                                 </span>
                               </button>
                             );
@@ -885,7 +888,7 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
                     color: T.red, fontFamily: T.mono, fontSize: 10,
                     cursor: "pointer", padding: 0,
                   }}
-                >Delete</button>
+                >{t("claim.delete")}</button>
               </div>
             );
           })}

@@ -24,6 +24,8 @@ import {
 } from "../../payments/saved-handles.js";
 import { getRailByKey, matchRails, toRailKey, categoryUsesPaymentRails } from "../../payments/rail-registry.js";
 import { listPendingRedemptions } from "../../fedimint/pending-redemptions.js";
+import { computeArbiterPremium } from "../../arbiters/arbiter-premium.js";
+import { getPremiumOutboxRecord, setPremiumDeclined } from "../../arbiters/arbiter-earnings.js";
 import { getPayoutRecord } from "../../payments/payout-journal.js";
 import {
   T, STATUS, ROLE_COLOR, ROLE_COLOR_TEXT, CAT_LABEL, TRINITY_RING_ORDER,
@@ -88,6 +90,7 @@ import {
   shouldQuoteEstimatedFiat,
   type AmountDisplayMode,
 } from "../amount-display.js";
+import { useT, type TFunc } from "../../i18n/index.js";
 
 const samePubkey = (a?: string | null, b?: string | null): boolean =>
   !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -218,6 +221,7 @@ export function TradeDetail({
    *  refund banner. */
   isOversoldOrder?: boolean;
 }) {
+  const { t } = useT();
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
   const homeQuoteCurrency = homeCommunity ? getCommunityBySlug(homeCommunity)?.currency ?? null : null;
@@ -629,11 +633,11 @@ export function TradeDetail({
     });
   }, [savedOrderKey, hasExchangeMenu, hasMenu, state.id, state.status]);
 
-  const lockLabel = state.category === "marketplace" ? "Pay for Order"
-    : state.category === "lending" ? "Fund Loan"
-    : state.category === "bill-pay" ? "Fund Bill Order"
-    : state.category === "p2p-trade" ? "Fund Buyer Order"
-    : "Lock Sats";
+  const lockLabel = state.category === "marketplace" ? t("trade.lockLabelMarketplace")
+    : state.category === "lending" ? t("trade.lockLabelLending")
+    : state.category === "bill-pay" ? t("trade.lockLabelBillPay")
+    : state.category === "p2p-trade" ? t("trade.lockLabelP2p")
+    : t("trade.lockLabelDefault");
   const liveJoinHold = state.status === EscrowStatus.CREATED
     ? [Role.BUYER, Role.SELLER]
         .filter(role => role !== state.initiator.role)
@@ -690,8 +694,8 @@ export function TradeDetail({
       const isLive = isLatest && expiresAt > nowSec;
       const finalized = !!payload.orderFinalizedAt;
       const statusLabel = isLive
-        ? finalized ? "ready" : "holding"
-        : expiresAt <= nowSec ? "expired" : "updated";
+        ? finalized ? t("trade.attemptReady") : t("trade.attemptHolding")
+        : expiresAt <= nowSec ? t("trade.attemptExpired") : t("trade.attemptUpdated");
       return {
         id: event.raw.id,
         pubkey: event.pubkey,
@@ -712,6 +716,7 @@ export function TradeDetail({
     && samePubkey(sellerPubkey, pubkey);
   const lockMenuSelectionMissing = hasMenu && lockMenuItems.length === 0;
   const nextStep = detailNextStep({
+    t,
     state,
     myRole,
     canILock,
@@ -766,7 +771,7 @@ export function TradeDetail({
   const viewerEstimateLabel = viewerEstimate
     ? `≈ ${formatFiatAmount(viewerEstimate.amount, viewerEstimate.currency)}`
     : null;
-  const premiumCheckoutLine = detailPremiumCheckoutLine(state, heroFiat);
+  const premiumCheckoutLine = detailPremiumCheckoutLine(state, heroFiat, t);
   // v4.1 lifecycle-aware pane + checkout headline: the party that owes fiat (the
   // buyer in a sats↔fiat exchange, the volunteer/payer in CBP) needs who-to-pay +
   // how-much front and centre. Nobody owes fiat in marketplace/lending here, so
@@ -793,21 +798,21 @@ export function TradeDetail({
   // moment both outcomes are on record unresolved, for every seat.
   const titleDisputed = releaseVoteCount > 0 && refundVoteCount > 0 && !state.resolvedOutcome;
   const tradeRoomTitle = state.status === EscrowStatus.CREATED
-    ? hasMenu ? "Build the order" : "New order"
+    ? hasMenu ? t("trade.titleBuildOrder") : t("trade.titleNewOrder")
     : state.status === EscrowStatus.LOCKED
-      ? titleDisputed ? "A call is needed" : "Trade is live"
+      ? titleDisputed ? t("trade.titleCallNeeded") : t("trade.titleTradeLive")
       : state.status === EscrowStatus.COMPLETED
-        ? "Trade complete"
+        ? t("trade.titleTradeComplete")
         : state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED
-          ? "Ready to settle"
-          : "Trade room";
+          ? t("trade.titleReadyToSettle")
+          : t("trade.titleTradeRoom");
   const decisionTone = state.resolvedOutcome === Outcome.RELEASE
     ? T.green
     : state.resolvedOutcome === Outcome.REFUND
       ? T.amber
       : ROLE_COLOR.arbiter; // pending: the "awaiting decision" chip wears the arbiter's #5AC8FA — it's the arbiter's call.
-  const decisionLabel = state.resolvedOutcome ? "final decision" : "awaiting decision";
-  const decisionValue = state.resolvedOutcome ?? "pending";
+  const decisionLabel = state.resolvedOutcome ? t("trade.finalDecision") : t("trade.awaitingDecision");
+  const decisionValue = state.resolvedOutcome ?? t("trade.pending");
   // v3.1 stage 2 — elastic deal slot: auto-open at fund (CREATED) & dispute.
   const dealAutoOpen = state.status === EscrowStatus.CREATED
     || (releaseVoteCount > 0 && refundVoteCount > 0 && !state.resolvedOutcome);
@@ -837,10 +842,10 @@ export function TradeDetail({
   const showVerboseRouteEducation = false;
   const routeNote = state.status === EscrowStatus.CREATED
     ? framing.kind === "state-b"
-      ? `Trading on ${framing.listingFlagEmoji} ${framing.listingCommunityName}`
+      ? t("trade.tradingOn", { flag: framing.listingFlagEmoji, name: framing.listingCommunityName })
       : framing.sameFedSameCommunity
-        ? "Same community"
-        : "Same federation"
+        ? t("trade.sameCommunity")
+        : t("trade.sameFederation")
     : null;
 
   const handleVote = async (outcome: Outcome) => {
@@ -883,7 +888,7 @@ export function TradeDetail({
   // ── TradeView pager (Chat · Details · Parties) + living chat ───────────────
   // Presentation-only: the swipe pager state + living-chat bubble feed derived
   // from existing state. The reducer / event chain is never written.
-  const PAGER_TABS = ["Chat", "Details", "Parties"];
+  const PAGER_TABS = [t("trade.paneChat"), t("trade.paneDetails"), t("trade.paneParties")];
   const pagerRef = useRef<HTMLDivElement | null>(null);
   // v4.1: "a manual swipe wins forever" — lifecycle auto-focus must never yank a
   // user who has moved themselves. programmaticTargetRef lets onPagerScroll tell our
@@ -992,11 +997,11 @@ export function TradeDetail({
   // Vertical kicker over the nav title + on the Details pane header, so the
   // trade's vertical is obvious without inferring it from vote labels.
   const verticalKicker = state.category === "marketplace"
-    ? `MARKETPLACE · ${state.fulfillment === "service" ? "SERVICE" : state.fulfillment === "digital" ? "DIGITAL" : "GOODS"}`
-    : state.category === "p2p-trade" ? "P2P EXCHANGE"
-    : state.category === "bill-pay" ? "COMMUNITY BILL PAY"
-    : state.category === "lending" ? "LENDING"
-    : "ESCROW";
+    ? t("trade.kickerMarketplace", { kind: state.fulfillment === "service" ? t("trade.kickerService") : state.fulfillment === "digital" ? t("trade.kickerDigital") : t("trade.kickerGoods") })
+    : state.category === "p2p-trade" ? t("trade.kickerP2p")
+    : state.category === "bill-pay" ? t("trade.kickerBillPay")
+    : state.category === "lending" ? t("trade.kickerLending")
+    : t("trade.kickerEscrow");
   // Short deal title beside the back arrow (the item, not the phase narrative —
   // that lives in the action card). Menu listings summarise via the first item.
   const dealTitle = (state.items?.[0]?.label?.trim())
@@ -1006,14 +1011,14 @@ export function TradeDetail({
   // Living chat: lifecycle event bubbles derived from the event chain (+ the
   // synthetic dispute / timeout markers), woven into the message feed by time.
   const livingChatBubbles = useMemo<SystemBubble[]>(() => {
-    const nameFor = (r: Role) => r === myRole ? "You"
-      : r === Role.BUYER ? (dealBuyerName ?? "Buyer")
-      : r === Role.SELLER ? (dealSellerName ?? "Seller")
-      : "Arbiter";
+    const nameFor = (r: Role) => r === myRole ? t("trade.you")
+      : r === Role.BUYER ? (dealBuyerName ?? t("trade.buyer"))
+      : r === Role.SELLER ? (dealSellerName ?? t("trade.seller"))
+      : t("trade.arbiter");
     const ctx: LivingChatCtx = {
       category: state.category,
       shortId: shortTradeId,
-      amountLabel: `${fmtSats(state.amountMsats)} sats`,
+      amountLabel: t("trade.amountSats", { amount: fmtSats(state.amountMsats) }),
       resolvedOutcome: state.resolvedOutcome,
       fulfillment: state.fulfillment,
       nameFor,
@@ -1032,7 +1037,7 @@ export function TradeDetail({
       bubbles.push(timeoutBubble(last ? last.raw.created_at : nowSec));
     }
     return bubbles;
-  }, [state.eventChain, state.resolvedOutcome, state.status, titleDisputed, myRole, dealBuyerName, dealSellerName, shortTradeId, state.amountMsats, state.category, state.fulfillment, nowSec]);
+  }, [state.eventChain, state.resolvedOutcome, state.status, titleDisputed, myRole, dealBuyerName, dealSellerName, shortTradeId, state.amountMsats, state.category, state.fulfillment, nowSec, t]);
 
   // v4.1 ratings-in-chat: the SAME RatingTap (kind:38123), surfaced at the end of
   // the Chat feed at settlement — that's where the user is when the trade closes,
@@ -1058,7 +1063,7 @@ export function TradeDetail({
         gap: 12,
         marginBottom: 18,
       }}>
-        <button onClick={onBack} aria-label="Back" style={{
+        <button onClick={onBack} aria-label={t("common.back")} style={{
           width: 38,
           height: 38,
           flex: "0 0 auto",
@@ -1143,9 +1148,9 @@ export function TradeDetail({
           : (isClosed && state.lock?.notesHash) ? 1
           : 0;
         const stations = [
-          { key: "reserved", label: "Reserved" },
-          { key: "locked", label: isClosed ? "Closed" : isDisputed ? "Disputed" : "Locked" },
-          { key: "settled", label: "Settled" },
+          { key: "reserved", label: t("trade.spineReserved") },
+          { key: "locked", label: isClosed ? t("trade.spineClosed") : isDisputed ? t("trade.spineDisputed") : t("trade.spineLocked") },
+          { key: "settled", label: t("trade.spineSettled") },
         ];
         return (
           <div className="trade-progress-spine" style={{
@@ -1333,7 +1338,7 @@ export function TradeDetail({
                     fontSize: 10, fontWeight: 600, color: T.muted,
                     fontFamily: T.mono, letterSpacing: 0.5, marginBottom: 6,
                   }}>
-                    REVEAL HANDLE TO PARTICIPANTS
+                    {t("trade.revealHandleHeader")}
                   </div>
                   {allHandles.length === 0 ? (
                     <div style={{
@@ -1342,13 +1347,13 @@ export function TradeDetail({
                       color: T.muted, fontFamily: T.mono, fontSize: 11,
                       display: "flex", justifyContent: "space-between", alignItems: "center",
                     }}>
-                      <span>No saved handles. Lock will proceed without one.</span>
+                      <span>{t("trade.noSavedHandles")}</span>
                       {onOpenSettings && (
                         <button onClick={onOpenSettings} style={{
                           background: "none", border: "none",
                           color: T.accent, fontFamily: T.mono, fontSize: 11,
                           fontWeight: 700, cursor: "pointer", padding: 0,
-                        }}>+ Add</button>
+                        }}>{t("trade.addHandle")}</button>
                       )}
                     </div>
                   ) : (
@@ -1357,7 +1362,7 @@ export function TradeDetail({
                       onChange={e => setSelectedHandleId(e.target.value)}
                       style={{ ...inputStyle, color: T.text, background: T.surface }}
                     >
-                      <option value="">— don't reveal a handle —</option>
+                      <option value="">{t("trade.dontRevealHandle")}</option>
                       {allHandles.map(h => {
                         const rail = getRailByKey(h.rail);
                         return (
@@ -1387,15 +1392,15 @@ export function TradeDetail({
               <button
                 disabled={locking || directNwcFundPhase !== null || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal}
                 title={fundingInProgress
-                  ? "Another funding operation is in progress. Complete it first."
+                  ? t("trade.fundingInProgressNote")
                   : receiveUnavailable
-                    ? "Lightning receive is unavailable on this browser route. Use Fedi, native bridge, or sim demo."
+                    ? t("trade.receiveUnavailableTitle")
                   : lockBlockedByNoArbiter
-                    ? "No eligible arbiter is available for this trade."
+                    ? t("trade.noArbiterTitle")
                   : menuOrderNotFinal
-                    ? `${roleDisplayName(menuSelectorRole)} must press Ready before this order can be locked.`
+                    ? t("trade.mustPressReady", { role: roleDisplayName(menuSelectorRole, t) })
                   : menuSelectionMissing
-                    ? menuSelectionTitle(state.category)
+                    ? menuSelectionTitle(state.category, t)
                     : undefined}
                 onClick={async () => {
                   // v1.2.4: when the user has a saved NWC and the parent
@@ -1403,7 +1408,7 @@ export function TradeDetail({
                   // direct path threads phase labels back via onPhase so
                   // the button itself becomes the progress indicator.
                   if (activeNwc && onLockDirectNwc) {
-                    setDirectNwcFundPhase("Starting…");
+                    setDirectNwcFundPhase(t("trade.starting"));
                     try {
                       const result = await onLockDirectNwc({
                         nwcConnectionString: activeNwc.connectionString,
@@ -1452,22 +1457,22 @@ export function TradeDetail({
                 {directNwcFundPhase
                   ? `${directNwcFundPhase}`
                   : locking
-                  ? "Funding…"
+                  ? t("trade.funding")
                   : fundingInProgress || receiveUnavailable || lockBlockedByNoArbiter
-                    ? lockLabel + " unavailable"
+                    ? t("trade.lockUnavailable", { label: lockLabel })
                   : menuOrderNotFinal
-                    ? `Waiting for ${roleDisplayName(menuSelectorRole)} Ready`
+                    ? t("trade.waitingForReady", { role: roleDisplayName(menuSelectorRole, t) })
                   : menuSelectionMissing
-                    ? menuSelectionButtonLabel(state.category)
+                    ? menuSelectionButtonLabel(state.category, t)
                     : activeNwc && onLockDirectNwc
                       ? (
                           <>
-                            ⚡ {lockLabel} via {activeNwc.label} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                            {t("trade.fundViaWalletPrefix", { label: lockLabel, wallet: activeNwc.label })} <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
                           </>
                         )
                       : (
                           <>
-                            ⚡ {lockLabel} · <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                            {t("trade.fundPrefix", { label: lockLabel })} <BitcoinAmount msats={lockAmountMsats} size={14} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
                           </>
                         )}
               </button>
@@ -1524,7 +1529,7 @@ export function TradeDetail({
                     textDecoration: "underline",
                   }}
                 >
-                  Use a different funding method
+                  {t("trade.useDifferentFunding")}
                 </button>
               )}
               {fundingInProgress && (
@@ -1532,7 +1537,7 @@ export function TradeDetail({
                   textAlign: "center", marginTop: 8,
                   fontSize: 10, color: T.amber, fontFamily: T.mono,
                 }}>
-                  Another funding operation is in progress. Complete it first.
+                  {t("trade.fundingInProgressNote")}
                 </div>
               )}
               {lockBlockedByNoArbiter && !fundingInProgress && (
@@ -1540,7 +1545,7 @@ export function TradeDetail({
                   textAlign: "center", marginTop: 8,
                   fontSize: 10, color: T.amber, fontFamily: T.mono,
                 }}>
-                  No eligible arbiter for this trade
+                  {t("trade.noArbiterShort")}
                 </div>
               )}
               {bootProbeFailed && !fundingInProgress && !lockBlockedByNoArbiter && (
@@ -1548,7 +1553,7 @@ export function TradeDetail({
                   textAlign: "center", marginTop: 8,
                   fontSize: 10, color: T.amber, fontFamily: T.mono,
                 }}>
-                  Federation unreachable — reconnect first
+                  {t("trade.fedUnreachable")}
                 </div>
               )}
               {receiveUnavailable && !bootProbeFailed && !fundingInProgress && !lockBlockedByNoArbiter && (
@@ -1556,7 +1561,7 @@ export function TradeDetail({
                   textAlign: "center", marginTop: 8,
                   fontSize: 10, color: T.amber, fontFamily: T.mono,
                 }}>
-                  Lightning receive unavailable — use Fedi/native bridge or sim demo
+                  {t("trade.receiveUnavailableShort")}
                 </div>
               )}
             </div>
@@ -1616,20 +1621,20 @@ export function TradeDetail({
               : arbiterAssignment.status === "off-assignment"
                 ? {
                     loud: true,
-                    line: "The arbiter on this trade isn't the one it should have been assigned.",
-                    ack: "I understand this arbiter is off-assignment",
+                    line: t("trade.riskOffAssignmentLine"),
+                    ack: t("trade.riskOffAssignmentAck"),
                   }
               : selfRostered
                 ? {
                     loud: true,
-                    line: "This trade's arbiters are vouched for only by a roster signed by a party to this trade.",
-                    ack: "I understand these arbiters are self-rostered",
+                    line: t("trade.riskSelfRosteredLine"),
+                    ack: t("trade.riskSelfRosteredAck"),
                   }
               : feeGateUnmet
                 ? {
                     loud: false,
-                    line: "High-value or fee-bearing trade without an independent verified arbiter roster of 3+ members.",
-                    ack: "I understand this trade lacks a verified arbiter roster",
+                    line: t("trade.riskFeeGateLine"),
+                    ack: t("trade.riskFeeGateAck"),
                   }
                 : null;
             // Both adjacent money buttons arm-to-confirm now (not just the
@@ -1645,8 +1650,7 @@ export function TradeDetail({
                 color: performRisk.loud ? T.red : T.amber,
                 fontFamily: T.mono, fontSize: 10, fontWeight: 700, lineHeight: 1.5,
               }}>
-                ⚠ {performRisk.line} Proceed only if you trust it — a neutral
-                arbiter is what protects you once you've done your side of the deal.
+                ⚠ {performRisk.line} {t("trade.riskProceed")}
               </div>
             ) : null;
             // Who wins on RELEASE / REFUND
@@ -1682,41 +1686,41 @@ export function TradeDetail({
             // v3.2 prototype: the ruling names where the sats GO — "Release →
             // Mariam" beats "Side with seller". Recipient colours unchanged.
             const releaseLabel = isArbiter
-              ? "Release → " + ((releaseWinner === "seller" ? dealSellerName : dealBuyerName)
-                  ?? (releaseWinner === "seller" ? "Seller" : "Buyer"))
+              ? t("trade.releaseTo", { name: (releaseWinner === "seller" ? dealSellerName : dealBuyerName)
+                  ?? (releaseWinner === "seller" ? t("trade.roleSeller") : t("trade.roleBuyer")) })
               : performerVerb
                 ? performerVerb.label
                 : isFirstVoteMoment
                   ? getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE)
                   : voteOutcomeLabel("Release", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.RELEASE));
             const refundLabel = state.subscription
-              ? "Cancel & refund remaining"
+              ? t("trade.cancelRefundRemaining")
               : isArbiter
-                ? "Refund → " + ((refundWinner === "seller" ? dealSellerName : dealBuyerName)
-                    ?? (refundWinner === "seller" ? "Seller" : "Buyer"))
+                ? t("trade.refundTo", { name: (refundWinner === "seller" ? dealSellerName : dealBuyerName)
+                    ?? (refundWinner === "seller" ? t("trade.roleSeller") : t("trade.roleBuyer")) })
                 : isOversoldVoterView
                   // The single, unmistakable action on an oversold unit, phrased for
                   // whoever is tapping it: the seller refunds the duplicate; the buyer
                   // simply gets their own sats back.
-                  ? (voteRole === Role.SELLER ? "Refund duplicate order" : "Refund — get my sats back")
+                  ? (voteRole === Role.SELLER ? t("trade.refundDuplicateOrder") : t("trade.refundGetSatsBack"))
                   : isMarketplace && voteRole === Role.SELLER
                     // Market seller votes first; "Refund" stays neutral rather than
                     // presuming "Buyer never received" before any dispute exists.
-                    ? "Refund"
+                    ? t("trade.refundNeutral")
                     : voteOutcomeLabel("Refund", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND));
 
-            const amtLabel = `${fmtSats(state.amountMsats)} sats`;
+            const amtLabel = t("trade.amountSats", { amount: fmtSats(state.amountMsats) });
             const releaseRecipientName = (releaseWinner === "seller" ? dealSellerName : dealBuyerName)
-              ?? (releaseWinner === "seller" ? "the seller" : "the buyer");
+              ?? (releaseWinner === "seller" ? t("trade.theSeller") : t("trade.theBuyer"));
             // When the refund lands back on the VIEWER (e.g. the seller casting
             // the second vote on their own refund), name them "you" — "refund to
             // the seller" reads oddly when you ARE the seller.
             const refundToSelf = !isArbiter
               && voteRole === (refundWinner === "seller" ? Role.SELLER : Role.BUYER);
             const refundRecipientName = refundToSelf
-              ? "you"
+              ? t("trade.recipientYou")
               : ((refundWinner === "seller" ? dealSellerName : dealBuyerName)
-                ?? (refundWinner === "seller" ? "the seller" : "the buyer"));
+                ?? (refundWinner === "seller" ? t("trade.theSeller") : t("trade.theBuyer")));
             // Armed (second-tap) confirm copy names who gets paid + the amount.
             // The performer's risky release keeps its louder acknowledge wording.
             // Exchange/CBP: the FIAT payer's release IS "I sent the fiat" — their
@@ -1725,25 +1729,25 @@ export function TradeDetail({
             // release-the-sats wording. Falls back to the sats copy when no fiat.
             const fiatPayerSending = voteRole === fiatPayerRole && !!checkoutFiatLabel;
             const releaseConfirm = fiatPayerSending
-              ? `Tap again — confirm you sent ${checkoutFiatLabel}`
+              ? t("trade.confirmSentFiat", { amount: checkoutFiatLabel ?? "" })
               : performRisk
-                ? `${performRisk.ack} — tap again to confirm`
+                ? t("trade.ackTapAgain", { ack: performRisk.ack })
                 : performerVerb
-                  ? `Tap again — confirm & release ${amtLabel}`
-                  : `Tap again — pay ${releaseRecipientName} ${amtLabel}`;
-            const refundConfirm = `Tap again — refund ${amtLabel} to ${refundRecipientName}`;
+                  ? t("trade.confirmReleaseAmount", { amount: amtLabel })
+                  : t("trade.confirmPayAmount", { name: releaseRecipientName, amount: amtLabel });
+            const refundConfirm = t("trade.confirmRefundAmount", { amount: amtLabel, name: refundRecipientName });
             // Focused armed-state action line (the eyebrow says "tap again"; this
             // says only WHERE the sats go) — kept short so it centers cleanly
             // instead of wrapping an orphan word. The full sentence still rides
             // the aria-label (releaseConfirm/refundConfirm) for screen readers.
             const releaseArmedAction = fiatPayerSending
-              ? `Confirm you sent ${checkoutFiatLabel}`
+              ? t("trade.armedSentFiat", { amount: checkoutFiatLabel ?? "" })
               : performRisk
                 ? performRisk.ack
                 : performerVerb
-                  ? `Release ${amtLabel}`
-                  : `Pay ${releaseRecipientName} ${amtLabel}`;
-            const refundArmedAction = `Refund ${amtLabel} to ${refundRecipientName}`;
+                  ? t("trade.armedRelease", { amount: amtLabel })
+                  : t("trade.armedPay", { name: releaseRecipientName, amount: amtLabel });
+            const refundArmedAction = t("trade.armedRefund", { amount: amtLabel, name: refundRecipientName });
             // Refund reason chips for the double-gate (parties only — the arbiter
             // rules, it isn't asked "why"). Picking one sends it as the user's own
             // chat message AND casts the refund. Display-only: the reason rides the
@@ -1788,7 +1792,7 @@ export function TradeDetail({
                 className={releaseArmed ? "td-armed" : undefined}
                 disabled={voting}
                 onClick={() => armOrVote(Outcome.RELEASE)}
-                aria-label={releaseArmed ? `Confirm: ${releaseConfirm}` : `Vote release: ${releaseLabel}`}
+                aria-label={releaseArmed ? t("trade.confirmAria", { text: releaseConfirm }) : t("trade.voteReleaseAria", { label: releaseLabel })}
                 style={{
                   ...voteActionButtonStyle({
                     disabled: voting,
@@ -1801,7 +1805,7 @@ export function TradeDetail({
               >
                 {releaseArmed ? (
                   <span style={voteConfirmStackStyle}>
-                    <span style={voteConfirmEyebrowStyle}>⚠ Tap again to confirm</span>
+                    <span style={voteConfirmEyebrowStyle}>{t("trade.tapAgainEyebrow")}</span>
                     <span style={voteConfirmActionStyle}>{releaseArmedAction}</span>
                   </span>
                 ) : (
@@ -1820,7 +1824,7 @@ export function TradeDetail({
                 className={refundArmed ? "td-armed" : undefined}
                 disabled={voting}
                 onClick={() => armOrVote(Outcome.REFUND)}
-                aria-label={refundArmed ? `Confirm: ${refundConfirm}` : `Vote refund: ${refundLabel}`}
+                aria-label={refundArmed ? t("trade.confirmAria", { text: refundConfirm }) : t("trade.voteRefundAria", { label: refundLabel })}
                 style={{
                   ...voteActionButtonStyle({
                     disabled: voting,
@@ -1833,7 +1837,7 @@ export function TradeDetail({
               >
                 {refundArmed ? (
                   <span style={voteConfirmStackStyle}>
-                    <span style={voteConfirmEyebrowStyle}>⚠ Tap again to confirm</span>
+                    <span style={voteConfirmEyebrowStyle}>{t("trade.tapAgainEyebrow")}</span>
                     <span style={voteConfirmActionStyle}>{refundArmedAction}</span>
                   </span>
                 ) : (
@@ -1850,10 +1854,10 @@ export function TradeDetail({
             if (isFirstVoteMoment && showRelease && showRefund) {
               const refundRecipient = payoutRecipientFor(state, Outcome.REFUND);
               const cancelRouting = refundRecipient && refundRecipient.pubkey === pubkey
-                ? "refund me"
+                ? t("trade.refundMe")
                 : refundRecipient
-                  ? `sats return to the ${partyNoun(state.category, refundRecipient.role)}`
-                  : "the locked sats are returned";
+                  ? t("trade.satsReturnToParty", { party: partyNoun(state.category, refundRecipient.role, t) })
+                  : t("trade.lockedSatsReturned");
               return (
                 <div className="trade-vote-actions" style={{
                   display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 16,
@@ -1868,7 +1872,7 @@ export function TradeDetail({
                   {!cancelArmed ? (
                     <button
                       disabled={voting}
-                      aria-label={`Back out of this trade — ${cancelRouting}`}
+                      aria-label={t("trade.backOutAria", { routing: cancelRouting })}
                       onClick={() => setCancelArmed(true)}
                       style={{
                         width: "100%", marginTop: 10, padding: "9px 10px",
@@ -1888,11 +1892,11 @@ export function TradeDetail({
                       background: T.amberDim, border: `1px solid ${T.amber}66`,
                     }}>
                       <div style={{ color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700, marginBottom: 4 }}>
-                        Back out of this trade?
+                        {t("trade.backOutQuestion")}
                       </div>
                       <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>
-                        This casts a refund vote — {cancelRouting}.{" "}
-                        {deedDonePrompt(state.category)} Don't back out — mark it done instead and let the arbiter settle, so the sats can still come to you.
+                        {t("trade.castsRefundVote", { routing: cancelRouting })}{" "}
+                        {deedDonePrompt(state.category, t)} {t("trade.dontBackOut")}
                       </div>
                       <div style={{ display: "grid", gap: 10 }}>
                         <button
@@ -1905,11 +1909,11 @@ export function TradeDetail({
                             cursor: voting ? "default" : "pointer",
                           }}
                         >
-                          Mark it done — I did my part
+                          {t("trade.markItDone")}
                         </button>
                         {/* …or back out, tapping the reason — it rides into chat. */}
                         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 1 }}>
-                          …or back out — tap a reason ({cancelRouting}):
+                          {t("trade.orBackOutReason", { routing: cancelRouting })}
                         </div>
                         {reasonChips(reason => { setCancelArmed(false); onSendChat(reason); handleVote(Outcome.REFUND); })}
                         <button
@@ -1922,7 +1926,7 @@ export function TradeDetail({
                             cursor: voting ? "default" : "pointer",
                           }}
                         >
-                          Back out without a note
+                          {t("trade.backOutNoNote")}
                         </button>
                       </div>
                     </div>
@@ -1942,7 +1946,7 @@ export function TradeDetail({
                     borderRadius: T.r, padding: 14,
                   }}>
                     <div style={{ color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 800, letterSpacing: 0.5, marginBottom: 10 }}>
-                      REFUND {amtLabel} — WHY?
+                      {t("trade.refundWhy", { amount: amtLabel })}
                     </div>
                     {reasonChips(reason => { disarmVote(); onSendChat(reason); handleVote(Outcome.REFUND); })}
                     <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12 }}>
@@ -1952,14 +1956,14 @@ export function TradeDetail({
                         onClick={() => { disarmVote(); handleVote(Outcome.REFUND); }}
                         style={{ background: "none", border: "none", color: T.amber, fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: voting ? "default" : "pointer", padding: "4px 0" }}
                       >
-                        Refund without a note →
+                        {t("trade.refundNoNote")}
                       </button>
                       <button
                         type="button"
                         onClick={disarmVote}
                         style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontFamily: T.mono, fontSize: 11, cursor: "pointer", padding: "4px 0" }}
                       >
-                        Cancel
+                        {t("common.cancel")}
                       </button>
                     </div>
                   </div>
@@ -2014,7 +2018,7 @@ export function TradeDetail({
                   // the ClaimPayoutModal chooser → resolveNwcConnectionToInvoice
                   // → claimAndPayout in one shot, all from the button.
                   if (activeNwc && onClaimDirectNwc) {
-                    setDirectNwcClaimPhase("Starting…");
+                    setDirectNwcClaimPhase(t("trade.starting"));
                     try {
                       await onClaimDirectNwc({
                         nwcConnectionString: activeNwc.connectionString,
@@ -2048,16 +2052,16 @@ export function TradeDetail({
                 {directNwcClaimPhase
                   ? directNwcClaimPhase
                   : payoutConfirming
-                  ? "✓ PAYOUT SENT — CONFIRMING"
+                  ? t("trade.payoutSentConfirming")
                   : claimRetryBlocked
-                  ? "✕ CLAIM DID NOT SETTLE"
+                  ? t("trade.claimDidNotSettle")
                   : claiming
-                  ? state.status === EscrowStatus.CLAIMED ? "Retrying claim…" : "Claiming…"
+                  ? state.status === EscrowStatus.CLAIMED ? t("trade.retryingClaim") : t("trade.claiming")
                   : activeNwc && onClaimDirectNwc
                     ? (state.status === EscrowStatus.CLAIMED
-                        ? `⚡ RETRY CLAIM via ${activeNwc.label}`
-                        : `⚡ CLAIM YOUR SATS via ${activeNwc.label}`)
-                    : state.status === EscrowStatus.CLAIMED ? "⚡ RETRY CLAIM" : "⚡ CLAIM YOUR SATS"}
+                        ? t("trade.retryClaimVia", { wallet: activeNwc.label })
+                        : t("trade.claimSatsVia", { wallet: activeNwc.label }))
+                    : state.status === EscrowStatus.CLAIMED ? t("trade.retryClaim") : t("trade.claimSats")}
               </button>
               {/* v1.2.4: same indeterminate progress strip under the
                   Claim button while the direct-NWC claim is mid-action.
@@ -2105,7 +2109,7 @@ export function TradeDetail({
                     textDecoration: "underline",
                   }}
                 >
-                  Use a different payout method
+                  {t("trade.useDifferentPayout")}
                 </button>
               )}
               {bootProbeFailed && (
@@ -2113,7 +2117,7 @@ export function TradeDetail({
                   textAlign: "center", marginTop: 8,
                   fontSize: 10, color: T.amber, fontFamily: T.mono,
                 }}>
-                  Federation unreachable — reconnect first
+                  {t("trade.fedUnreachable")}
                 </div>
               )}
               {claimRetryBlocked && (
@@ -2121,7 +2125,7 @@ export function TradeDetail({
                   textAlign: "center", marginTop: 8,
                   fontSize: 10, color: T.red, fontFamily: T.mono,
                 }}>
-                  Ecash redeem failed after federation consumed the notes — retry is disabled
+                  {t("trade.ecashRedeemFailed")}
                 </div>
               )}
               {!bootProbeFailed && !claimRetryBlocked && state.status === EscrowStatus.CLAIMED && (
@@ -2130,8 +2134,8 @@ export function TradeDetail({
                   fontSize: 10, color: payoutConfirming ? T.green : T.amber, fontFamily: T.mono,
                 }}>
                   {payoutConfirming
-                    ? "Payout sent — confirming · the trade closes on its own once it lands"
-                    : "Claim already sent — retrying only completes the payout once your wallet confirms"}
+                    ? t("trade.payoutConfirmingNote")
+                    : t("trade.claimAlreadySentNote")}
                 </div>
               )}
             </div>
@@ -2145,12 +2149,12 @@ export function TradeDetail({
               borderTop: `1px solid ${T.border}`,
             }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-                {isMultiUnitParent ? "BUY FROM THIS LISTING" : "JOIN THIS TRADE"}
+                {isMultiUnitParent ? t("trade.buyFromListing") : t("trade.joinThisTrade")}
               </div>
               {isMultiUnitParent && onPurchase && (
                 soldOut ? (
                   <div style={{ padding: "12px 14px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 12, fontWeight: 700, textAlign: "center", letterSpacing: 0.5 }}>
-                    SOLD OUT · all units claimed
+                    {t("trade.soldOut")}
                   </div>
                 ) : (
                 <div style={{ marginBottom: 4 }}>
@@ -2163,7 +2167,7 @@ export function TradeDetail({
                       onClick={() => setBuyQty(q => Math.min(buyMax, q + 1))}
                       style={{ width: 40, height: 40, borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 18, fontWeight: 800, cursor: (purchasing || buyQtyClamped >= buyMax) ? "default" : "pointer" }}>+</button>
                     <div style={{ color: T.muted, fontFamily: T.mono, fontSize: 11, marginLeft: 4 }}>
-                      {typeof stockLeft === "number" ? `${stockLeft} left` : `${state.stock} in stock`}
+                      {typeof stockLeft === "number" ? t("trade.stockLeft", { count: stockLeft }) : t("trade.inStock", { count: state.stock ?? 0 })}
                     </div>
                   </div>
                   <button type="button" disabled={purchasing}
@@ -2177,10 +2181,10 @@ export function TradeDetail({
                       color: T.accent, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
                       cursor: purchasing ? "default" : "pointer",
                     }}>
-                    {purchasing ? "Starting your order…" : `Buy ${buyQtyClamped} unit${buyQtyClamped > 1 ? "s" : ""}`}
+                    {purchasing ? t("trade.startingOrder") : (buyQtyClamped > 1 ? t("trade.buyUnitsMany", { count: buyQtyClamped }) : t("trade.buyUnitsOne", { count: buyQtyClamped }))}
                   </button>
                   <p style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, margin: "8px 2px 0" }}>
-                    Each purchase is its own 2-of-3 escrow — you'll fund and lock it on the next screen.
+                    {t("trade.purchaseEscrowNote")}
                   </p>
                 </div>
                 )
@@ -2197,7 +2201,7 @@ export function TradeDetail({
                     color: ROLE_COLOR.buyer, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
                     cursor: joining ? "default" : "pointer", transition: "all 0.2s",
                   }}>
-                    {joining ? "Joining..." : "Join as Buyer"}
+                    {joining ? t("trade.joining") : t("trade.joinAsBuyer")}
                   </button>
                 )}
                 {/* v0.6.5: hide the Join-as-Arbiter affordance when the
@@ -2214,7 +2218,7 @@ export function TradeDetail({
                     color: ROLE_COLOR.arbiter, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
                     cursor: joining ? "default" : "pointer", transition: "all 0.2s",
                   }}>
-                    {joining ? "Joining..." : "Join as Arbiter"}
+                    {joining ? t("trade.joining") : t("trade.joinAsArbiter")}
                   </button>
                 )}
               </div>
@@ -2228,7 +2232,7 @@ export function TradeDetail({
                   color: ROLE_COLOR.seller, fontFamily: T.mono, fontSize: 13, fontWeight: 700,
                   cursor: joining ? "default" : "pointer", transition: "all 0.2s",
                 }}>
-                  {joining ? "Joining..." : "Join as Seller"}
+                  {joining ? t("trade.joining") : t("trade.joinAsSeller")}
                 </button>
               )}
               </>)}
@@ -2247,7 +2251,7 @@ export function TradeDetail({
                 fontWeight: 700, cursor: "pointer", textAlign: "left",
               }}
             >
-              Open chat &amp; evidence →
+              {t("trade.openChatEvidence")}
             </button>
           )}
         </div>
@@ -2289,7 +2293,7 @@ export function TradeDetail({
               <ChatPanel state={state} myRole={myRole} onSend={onSendChat} embedded hideHeader fill systemBubbles={livingChatBubbles} ratingCta={chatRatingCta} />
             ) : (
               <div style={TD_PANE_PLACEHOLDER}>
-                Chat opens for the buyer, seller, and arbiter once the trade is live.
+                {t("trade.chatPlaceholder")}
               </div>
             )}
           </div>
@@ -2325,7 +2329,7 @@ export function TradeDetail({
                 textAlign: "center" as const,
               }}>
                 <div style={{ fontFamily: T.mono, fontSize: 9.5, fontWeight: 800, letterSpacing: 1.2, color: T.muted, marginBottom: 5 }}>
-                  {myRole === fiatPayerRole ? "YOU OWE" : myRole === Role.SELLER ? "YOU'LL RECEIVE" : "FIAT DUE"}
+                  {myRole === fiatPayerRole ? t("trade.youOwe") : myRole === Role.SELLER ? t("trade.youllReceive") : t("trade.fiatDue")}
                 </div>
                 <div style={{ fontFamily: T.sans, fontSize: 30, fontWeight: 900, color: T.text, lineHeight: 1.05 }}>
                   {checkoutFiatLabel}
@@ -2337,6 +2341,7 @@ export function TradeDetail({
                 )}
               </div>
             )}
+            <ArbiterInsuranceRow state={state} pubkey={pubkey} />
           <div className="trade-detail-hero" style={{
             padding: "0 0 10px",
             marginBottom: 4,
@@ -2411,7 +2416,7 @@ export function TradeDetail({
                   : ""}
               {viewerEstimateLabel ? ` · ${viewerEstimateLabel}` : ""}
               {routeNote ? ` · ${routeNote}` : ""}
-              {myRole ? ` · ${roleDisplayName(myRole)}` : ""}
+              {myRole ? ` · ${roleDisplayName(myRole, t)}` : ""}
             </div>
             {state.category === "marketplace" && sellerPubkey && (
               <div style={{
@@ -2431,7 +2436,7 @@ export function TradeDetail({
               }}>
                 <span aria-hidden="true">★</span>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  Store · {sellerProfileName ?? shortParticipantPubkey(sellerPubkey)}
+                  {t("trade.storeName", { name: sellerProfileName ?? shortParticipantPubkey(sellerPubkey) })}
                 </span>
               </div>
             )}
@@ -2460,8 +2465,8 @@ export function TradeDetail({
               letterSpacing: 1,
             }}>
               {state.status === EscrowStatus.CREATED && !canSelectMenu
-                ? `${roleDisplayName(menuSelectorRole).toUpperCase()} CART`
-                : menuHeaderTitle(state.category, state.status === EscrowStatus.CREATED)}
+                ? t("trade.roleCart", { role: roleDisplayName(menuSelectorRole, t).toUpperCase() })
+                : menuHeaderTitle(state.category, state.status === EscrowStatus.CREATED, t)}
             </div>
             <div style={{
               color: T.accent,
@@ -2473,11 +2478,11 @@ export function TradeDetail({
               minWidth: 96,
             }}>
               {state.status === EscrowStatus.CREATED && !canSelectMenu && menuDisplayAmountMsats <= 0
-                ? `waiting on ${roleDisplayName(menuSelectorRole).toLowerCase()}`
+                ? t("trade.waitingOnRole", { role: roleDisplayName(menuSelectorRole, t).toLowerCase() })
                 : state.status === EscrowStatus.CREATED && hasExchangeMenu && menuDisplayAmountMsats <= 0
-                ? "choose amount"
+                ? t("trade.chooseAmount")
                 : state.status === EscrowStatus.CREATED && menuDisplayAmountMsats <= 0
-                ? menuSelectionHint(state.category)
+                ? menuSelectionHint(state.category, t)
                 : (
                   <BitcoinAmount
                     msats={state.status === EscrowStatus.CREATED ? (menuDisplayAmountMsats || lockAmountMsats) : state.amountMsats}
@@ -2511,7 +2516,7 @@ export function TradeDetail({
                 lineHeight: 1.55,
                 textAlign: "center",
               }}>
-                Waiting for {roleDisplayName(menuSelectorRole).toLowerCase()} to build the order.
+                {t("trade.waitingToBuildOrder", { role: roleDisplayName(menuSelectorRole, t).toLowerCase() })}
               </div>
             )}
             {renderedMenuRows.map(item => {
@@ -2528,7 +2533,7 @@ export function TradeDetail({
               const maxMsats = item.maxAmountMsats ?? item.amountMsats;
               const exactMsats = exactSats * 1000;
               const exactAmountValid = exactMsats >= minMsats && exactMsats <= maxMsats;
-              const metaLine = menuMetaLine(item);
+              const metaLine = menuMetaLine(item, t);
               const allowsQuantity = state.category === "marketplace";
               // Anti-drain (#6): clamp the buyer's stepper to the seller's
               // per-item cap (and the global 99 ceiling). The reducer rejects
@@ -2586,7 +2591,7 @@ export function TradeDetail({
                     }}>
                       {menuAmountLabel(item)}
                       {"quantity" in item && item.quantity > 1 ? ` × ${item.quantity}` : ""}
-                      {allowsQuantity && itemQtyCap < 99 ? ` · max ${itemQtyCap}` : ""}
+                      {allowsQuantity && itemQtyCap < 99 ? ` · ${t("trade.maxQty", { count: itemQtyCap })}` : ""}
                     </div>
                     {metaLine && (
                       <div style={{
@@ -2626,7 +2631,7 @@ export function TradeDetail({
                       }))}
                       style={menuPickButtonStyle(selected)}
                     >
-                      {selected ? "Selected" : menuPickLabel(state.category)}
+                      {selected ? t("trade.selectedCap") : menuPickLabel(state.category, t)}
                     </button>
                   ) : interactive ? (
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -2678,7 +2683,7 @@ export function TradeDetail({
                           )
                           : allowsQuantity
                             ? `×${qty}`
-                            : "selected"
+                            : t("trade.selectedLower")
                         : ""}
                     </div>
                   )}
@@ -2719,14 +2724,14 @@ export function TradeDetail({
                 }}
               >
                 {joining
-                  ? "Saving..."
+                  ? t("trade.saving")
                   : selectionMatchesSavedOrder
-                    ? "Cart saved"
+                    ? t("trade.cartSaved")
                     : selectedMenuItems.length === 0
-                      ? menuSelectionButtonLabel(state.category)
+                      ? menuSelectionButtonLabel(state.category, t)
                       : (
                         <>
-                          Save cart · <BitcoinAmount msats={selectedMenuAmountMsats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                          {t("trade.saveCartPrefix")} <BitcoinAmount msats={selectedMenuAmountMsats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
                         </>
                       )}
               </button>
@@ -2757,12 +2762,12 @@ export function TradeDetail({
                 }}
               >
                 {joining
-                  ? "Confirming..."
+                  ? t("trade.confirming")
                   : selectedMenuItems.length === 0
-                    ? "Not ready"
+                    ? t("trade.notReady")
                     : (
                       <>
-                        Ready · <BitcoinAmount msats={selectedMenuAmountMsats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+                        {t("trade.readyPrefix")} <BitcoinAmount msats={selectedMenuAmountMsats} size={11} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
                       </>
                     )}
               </button>
@@ -2787,7 +2792,7 @@ export function TradeDetail({
             letterSpacing: 1,
             marginBottom: 9,
           }}>
-            TRADE TERMS
+            {t("trade.tradeTerms")}
           </div>
           {acceptedPaymentMethods.length > 0 && (
             <>
@@ -2819,7 +2824,7 @@ export function TradeDetail({
               </div>
               {myRole !== Role.SELLER && suggestedRail && railMatch.shared.length > 0 && (
                 <div style={{ marginTop: 8, color: T.muted, fontSize: 11, lineHeight: 1.5 }}>
-                  You both use <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong>.
+                  {t("trade.youBothUseBefore")} <strong style={{ color: T.green }}>{suggestedRail.displayName}</strong>{t("trade.youBothUseAfter")}
                 </div>
               )}
             </>
@@ -2838,7 +2843,7 @@ export function TradeDetail({
               fontSize: 11,
               lineHeight: 1.4,
             }}>
-              <span style={{ color: T.muted, fontWeight: 800, letterSpacing: 0.7 }}>PREMIUM</span>
+              <span style={{ color: T.muted, fontWeight: 800, letterSpacing: 0.7 }}>{t("trade.premiumLabel")}</span>
               <span style={{ fontSize: 13, fontWeight: 900, textAlign: "right" as const }}>
                 {premiumLine}
                 {premiumCheckoutLine && (
@@ -2863,8 +2868,8 @@ export function TradeDetail({
           textAlign: "center" as const, lineHeight: 1.5,
         }}>
           {framing.sameFedSameCommunity
-            ? "Same community as your Chama"
-            : "Same federation as your Chama · cross-community trade"}
+            ? t("trade.sameCommunityAsChama")
+            : t("trade.sameFedCrossCommunity")}
         </div>
       )}
       {/* v0.3.0 Phase 6: one-time State B educational card. Renders
@@ -2883,14 +2888,15 @@ export function TradeDetail({
             fontSize: 11, fontWeight: 700, color: T.accent, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 8,
           }}>
-            FIRST CROSS-FEDERATION TRADE? HEADS UP
+            {t("trade.stateBHeadsUp")}
           </div>
           <div style={{ fontSize: 12, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 12 }}>
-            Your wallet was on {framing.homeFlagEmoji} {framing.homeCommunityName}.
-            Since this listing is on {framing.listingFlagEmoji} {framing.listingCommunityName} and
-            your balance was 0 sats, we switched automatically. No funds moved
-            on Lightning — fresh wallet on {framing.listingFlagEmoji} {framing.listingCommunityName} for
-            this trade. Switching back is just another tap.
+            {t("trade.stateBBody", {
+              homeFlag: framing.homeFlagEmoji,
+              homeName: framing.homeCommunityName,
+              listingFlag: framing.listingFlagEmoji,
+              listingName: framing.listingCommunityName,
+            })}
           </div>
           <button
             onClick={() => {
@@ -2904,7 +2910,7 @@ export function TradeDetail({
               cursor: "pointer", letterSpacing: 0.3,
             }}
           >
-            Got it
+            {t("trade.gotIt")}
           </button>
         </div>
       )}
@@ -2918,19 +2924,19 @@ export function TradeDetail({
             fontSize: 11, fontWeight: 700, color: T.amber, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 8,
           }}>
-            CROSS-FEDERATION
+            {t("trade.crossFederation")}
           </div>
           {/* v0.3.0 Phase 6: tightened from
                 "Running on {emoji} {name} · we switched you in for this trade."
               to drop "we" — the system did it; the framing is the user's. */}
           <div style={{ fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55, marginBottom: 6 }}>
-            Running on {framing.listingFlagEmoji} <strong>{framing.listingCommunityName}</strong> · switched in for this trade
+            {t("trade.runningOnBefore")} {framing.listingFlagEmoji} <strong>{framing.listingCommunityName}</strong> {t("trade.runningOnAfter")}
           </div>
           {/* v0.3.0 Phase 6: educational essay moved to the one-time
               card above. This callout is now a single reassuring
               sentence, the only thing returning State-B users see. */}
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
-            Your Chama switched automatically — no funds at risk.
+            {t("trade.switchedAutomatically")}
           </div>
         </div>
       )}
@@ -2971,15 +2977,15 @@ export function TradeDetail({
                 background: T.amberDim, border: `1px solid ${T.amber}44`,
               }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: T.amber, fontFamily: T.mono }}>
-                  {isExpired ? "⏰ EXPIRED — an arbiter decides" : "⚖️ A release vote is in"}
+                  {isExpired ? t("trade.expiredArbiterDecides") : t("trade.releaseVoteIn")}
                 </div>
                 <div style={{ fontSize: 11, color: T.text, fontFamily: T.sans, marginTop: 6 }}>
                   {isExpired
-                    ? "Someone voted to release, so this won't auto-refund — an arbiter rules on who's right."
-                    : "At the deadline this goes to an arbiter, not an automatic refund."}
+                    ? t("trade.expiredNoAutoRefund")
+                    : t("trade.deadlineGoesToArbiter")}
                 </div>
                 <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 6 }}>
-                  Make sure everyone in this trade is on the latest Chama, so the decision settles the same for all.
+                  {t("trade.latestChamaNote")}
                 </div>
               </div>
             ) : isExpired ? (
@@ -2988,13 +2994,13 @@ export function TradeDetail({
                 background: T.redDim, border: `1px solid ${T.red}44`,
               }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: T.red, fontFamily: T.mono }}>
-                  ⏰ TRADE EXPIRED
+                  {t("trade.tradeExpired")}
                 </div>
                 <div style={{ fontSize: 11, color: T.text, fontFamily: T.sans, marginTop: 6 }}>
-                  🛡️ Community arbiter will auto-vote REFUND
+                  {t("trade.arbiterAutoRefund")}
                 </div>
                 <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 4 }}>
-                  Sats will be returned to the {refundRecipientFor(state.category)} automatically
+                  {t("trade.satsReturnedAuto", { party: refundRecipientFor(state.category) === "seller" ? t("trade.sellerNoun") : t("trade.buyerNoun") })}
                 </div>
               </div>
             ) : (
@@ -3007,8 +3013,8 @@ export function TradeDetail({
                   fontSize: 10, fontFamily: T.mono,
                   color: isUrgent ? T.red : T.amber,
                 }}>
-                  {isUrgent ? "⚠️ Expiring soon! " : "⏱️ "}
-                  If time expires → arbiter auto-refunds to {refundRecipientFor(state.category)}
+                  {isUrgent ? `${t("trade.expiringSoon")} ` : "⏱️ "}
+                  {t("trade.ifTimeExpires", { party: refundRecipientFor(state.category) === "seller" ? t("trade.sellerNoun") : t("trade.buyerNoun") })}
                 </span>
               </div>
             )}
@@ -3028,17 +3034,16 @@ export function TradeDetail({
             fontSize: 11, fontWeight: 800, color: T.amber, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 8,
           }}>
-            ⏳ RESERVED · BEING VIEWED BY ANOTHER {roleDisplayName(reservedByOther.role).toUpperCase()}
+            {t("trade.reservedByOther", { role: roleDisplayName(reservedByOther.role, t).toUpperCase() })}
           </div>
           <CountdownTimer
             expiresAt={reservedByOther.expiresAt}
-            label="FREES UP IN (IF THEY DON'T LOCK)"
+            label={t("trade.freesUpIn")}
           />
           <div style={{
             marginTop: 8, fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
           }}>
-            Someone is on this order. If their hold expires you can grab it; if they
-            lock, it's taken. None of your sats have moved.
+            {t("trade.reservedNote")}
           </div>
         </div>
       )}
@@ -3054,8 +3059,8 @@ export function TradeDetail({
           <CountdownTimer
             expiresAt={liveJoinHold?.expiresAt ?? state.expiresAt}
             label={liveJoinHold
-              ? `${roleDisplayName(liveLockWindowRole ?? liveJoinHold.role).toUpperCase()} LOCK WINDOW ENDS IN`
-              : state.status === EscrowStatus.CREATED ? "LISTING EXPIRES IN" : "TRADE EXPIRES IN"}
+              ? t("trade.lockWindowEndsIn", { role: roleDisplayName(liveLockWindowRole ?? liveJoinHold.role, t).toUpperCase() })
+              : state.status === EscrowStatus.CREATED ? t("trade.listingExpiresIn") : t("trade.tradeExpiresIn")}
           />
         </div>
       )}
@@ -3073,7 +3078,7 @@ export function TradeDetail({
             borderRadius: T.rs,
           }}>
             <div style={{ fontFamily: T.mono, fontSize: 11, color: T.muted }}>
-              draft order forming…
+              {t("trade.draftOrderForming")}
             </div>
             <div style={{
               marginTop: 7, display: "flex", alignItems: "center",
@@ -3085,7 +3090,7 @@ export function TradeDetail({
                 background: ROLE_COLOR[menuSelectorRole as keyof typeof ROLE_COLOR] ?? T.muted,
               }} />
               <span style={{ color: ROLE_COLOR[menuSelectorRole as keyof typeof ROLE_COLOR] ?? T.muted }}>
-                waiting on {roleDisplayName(menuSelectorRole).toLowerCase()}
+                {t("trade.waitingOnRole", { role: roleDisplayName(menuSelectorRole, t).toLowerCase() })}
               </span>
             </div>
           </div>
@@ -3139,7 +3144,7 @@ export function TradeDetail({
                 fontFamily: T.mono,
                 letterSpacing: 1,
               }}>
-                BUYER ATTEMPTS
+                {t("trade.buyerAttempts")}
               </div>
               <div style={{
                 color: T.amber,
@@ -3147,7 +3152,7 @@ export function TradeDetail({
                 fontSize: 10,
                 fontWeight: 900,
               }}>
-                {buyerAttemptRows.length} event{buyerAttemptRows.length === 1 ? "" : "s"}
+                {buyerAttemptRows.length === 1 ? t("trade.eventCountOne", { count: buyerAttemptRows.length }) : t("trade.eventCountMany", { count: buyerAttemptRows.length })}
               </div>
             </div>
             <div style={{
@@ -3199,12 +3204,12 @@ export function TradeDetail({
                       lineHeight: 1.4,
                     }}>
                       {attempt.selectedCount > 0
-                        ? `${attempt.selectedCount} option${attempt.selectedCount === 1 ? "" : "s"} selected`
-                        : "no order snapshot yet"}
+                        ? (attempt.selectedCount === 1 ? t("trade.optionsSelectedOne", { count: attempt.selectedCount }) : t("trade.optionsSelectedMany", { count: attempt.selectedCount }))
+                        : t("trade.noOrderSnapshot")}
                       {" · "}
                       {attempt.expiresAt > nowSec
-                        ? `${Math.ceil((attempt.expiresAt - nowSec) / 60)}m left`
-                        : `${Math.ceil((nowSec - attempt.expiresAt) / 60)}m expired`}
+                        ? t("trade.minutesLeft", { count: Math.ceil((attempt.expiresAt - nowSec) / 60) })
+                        : t("trade.minutesExpired", { count: Math.ceil((nowSec - attempt.expiresAt) / 60) })}
                     </div>
                   </div>
                   {attempt.amountMsats > 0 && (
@@ -3270,14 +3275,16 @@ export function TradeDetail({
           gap: 12,
           marginBottom: 14,
         }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>PARTICIPANTS</div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>{t("trade.participants")}</div>
           {state.communityArbiters && state.communityArbiters.length > 0 && (
             <div style={{ fontSize: 10, color: T.purple, fontFamily: T.mono }}>
               {state.actingArbiter && state.actingArbiter !== participants[Role.ARBITER]
                 // Arbiter substitution: a pool backup's vote currently holds the
                 // arbiter slot (the assigned arbiter went absent past the floor).
-                ? `standby arbiter ${shortParticipantPubkey(state.actingArbiter)} stepped in`
-                : `${state.communityArbiters.length} arbiter${state.communityArbiters.length !== 1 ? "s" : ""} on standby`}
+                ? t("trade.standbyArbiterSteppedIn", { pubkey: shortParticipantPubkey(state.actingArbiter) })
+                : (state.communityArbiters.length !== 1
+                    ? t("trade.arbitersOnStandbyMany", { count: state.communityArbiters.length })
+                    : t("trade.arbitersOnStandbyOne", { count: state.communityArbiters.length }))}
             </div>
           )}
         </div>
@@ -3334,29 +3341,27 @@ export function TradeDetail({
             fontFamily: T.sans, fontSize: 13, fontWeight: 700, color: T.text,
           }}>
             <span style={{ fontSize: 15, lineHeight: 1 }}>🛡️</span>
-            How your money is protected
+            {t("trade.howMoneyProtected")}
             <span style={{ marginLeft: "auto", color: T.muted, fontSize: 11, fontFamily: T.mono }}>▾</span>
           </summary>
           <div style={{ padding: "0 14px 14px", fontFamily: T.sans }}>
             <div style={{ fontSize: 12.5, color: T.muted, lineHeight: 1.6, marginBottom: 12 }}>
-              The sats are locked in{" "}
-              <strong style={{ color: T.text }}>2-of-3 escrow</strong> — no one
-              can move them alone. Releasing needs{" "}
-              <strong style={{ color: T.text }}>2 of the 3</strong> to agree
-              (normally the buyer and seller).{" "}
-              <strong style={{ color: T.text }}>Chama never holds your money.</strong>
+              {t("trade.shieldBody1")}{" "}
+              <strong style={{ color: T.text }}>{t("trade.shieldEscrowStrong")}</strong> {t("trade.shieldBody2")}{" "}
+              <strong style={{ color: T.text }}>{t("trade.shield2of3Strong")}</strong> {t("trade.shieldBody3")}{" "}
+              <strong style={{ color: T.text }}>{t("trade.shieldNeverHolds")}</strong>
             </div>
             <div style={{ display: "grid", gap: 8 }}>
               {([
-                { c: ROLE_COLOR.buyer, k: "Buyer", d: "the person buying in this trade" },
-                { c: ROLE_COLOR.arbiter, k: "Arbiter", d: "a neutral tiebreaker — only votes if the two sides disagree" },
-                { c: ROLE_COLOR.seller, k: "Seller", d: "the person selling" },
-              ] as const).map(({ c, k, d }) => (
+                { c: ROLE_COLOR.buyer, k: "Buyer", labelKey: "trade.roleBuyer", descKey: "trade.legendBuyer" },
+                { c: ROLE_COLOR.arbiter, k: "Arbiter", labelKey: "trade.roleArbiter", descKey: "trade.legendArbiter" },
+                { c: ROLE_COLOR.seller, k: "Seller", labelKey: "trade.roleSeller", descKey: "trade.legendSeller" },
+              ] as const).map(({ c, k, labelKey, descKey }) => (
                 <div key={k} style={{ display: "flex", alignItems: "baseline", gap: 9, fontSize: 12, lineHeight: 1.45 }}>
                   <span style={{ width: 9, height: 9, borderRadius: "50%", background: c, flexShrink: 0, transform: "translateY(1px)" }} />
                   <span>
-                    <strong style={{ color: T.text }}>{k}</strong>
-                    <span style={{ color: T.muted }}> — {d}</span>
+                    <strong style={{ color: T.text }}>{t(labelKey)}</strong>
+                    <span style={{ color: T.muted }}> — {t(descKey)}</span>
                   </span>
                 </div>
               ))}
@@ -3378,10 +3383,10 @@ export function TradeDetail({
               display: "flex", alignItems: "center", gap: 8,
             }}>
               <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: titleDisputed ? T.amber : T.muted, letterSpacing: 1 }}>
-                {titleDisputed ? "VOTES ON RECORD" : "SETTLEMENT"}
+                {titleDisputed ? t("trade.votesOnRecord") : t("trade.settlementHeader")}
               </span>
               <span style={{ fontFamily: T.mono, fontSize: 10, color: decisionTone }}>
-                {state.resolvedOutcome ? String(state.resolvedOutcome).toLowerCase() : "awaiting"} · {releaseVoteCount}R / {refundVoteCount}F
+                {state.resolvedOutcome ? String(state.resolvedOutcome).toLowerCase() : t("trade.awaiting")} · {releaseVoteCount}R / {refundVoteCount}F
               </span>
               <span style={{ marginLeft: "auto", color: T.muted, fontSize: 11, fontFamily: T.mono }}>{votesOpen ? "▾" : "▸"}</span>
             </div>
@@ -3405,7 +3410,7 @@ export function TradeDetail({
               const releaseChip = (
                 <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.green)}>
                   <strong style={voteDecisionValueStyle()}>{releaseVoteCount}</strong>
-                  <span style={voteDecisionLabelStyle()}>release votes</span>
+                  <span style={voteDecisionLabelStyle()}>{t("trade.releaseVotesLabel")}</span>
                 </div>
               );
               const centerChip = (
@@ -3417,7 +3422,7 @@ export function TradeDetail({
               const refundChip = (
                 <div className="trade-vote-decision-chip" style={voteDecisionChipStyle(T.amber)}>
                   <strong style={voteDecisionValueStyle()}>{refundVoteCount}</strong>
-                  <span style={voteDecisionLabelStyle()}>refund votes</span>
+                  <span style={voteDecisionLabelStyle()}>{t("trade.refundVotesLabel")}</span>
                 </div>
               );
               return state.category === "marketplace"
@@ -3436,11 +3441,11 @@ export function TradeDetail({
           color: T.amber, fontFamily: T.sans, fontSize: 12, lineHeight: 1.5,
         }}>
           <div style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 800, letterSpacing: 0.5, marginBottom: 6 }}>
-            ⚠ OVERSOLD ORDER{state.participants[Role.BUYER] ? ` · buyer ${shortParticipantPubkey(state.participants[Role.BUYER]!)}` : ""}
+            {t("trade.oversoldTitle")}{state.participants[Role.BUYER] ? ` · ${t("trade.oversoldBuyer", { pubkey: shortParticipantPubkey(state.participants[Role.BUYER]!) })}` : ""}
           </div>
           {myRole === Role.SELLER
-            ? "This unit was already sold to an earlier buyer (a last-unit race), so it's safe to refund. Use “Refund duplicate order” below — don't release it. Your real sale is the order without this banner."
-            : "This unit went to an earlier buyer in a last-unit race — tap Refund below to get your sats back. The seller's side refunds too, so you're made whole."}
+            ? t("trade.oversoldSellerBody")
+            : t("trade.oversoldBuyerBody")}
         </div>
       )}
 
@@ -3450,8 +3455,7 @@ export function TradeDetail({
           borderRadius: T.r, padding: 14, marginBottom: 16,
           color: T.red, fontFamily: T.sans, fontSize: 12, lineHeight: 1.45,
         }}>
-          This trade has the same key in more than one role. Do not fund it;
-          cancel it or create a fresh trade.
+          {t("trade.duplicateKeyWarning")}
         </div>
       )}
 
@@ -3461,8 +3465,7 @@ export function TradeDetail({
           borderRadius: T.r, padding: 14, marginBottom: 16,
           color: T.amber, fontFamily: T.sans, fontSize: 12, lineHeight: 1.45,
         }}>
-          No eligible arbiter is available for this buyer and seller pair.
-          A participant cannot also be the arbiter, so this trade should not be funded.
+          {t("trade.noArbiterPairWarning")}
         </div>
       )}
 
@@ -3476,11 +3479,11 @@ export function TradeDetail({
             fontSize: 11, fontWeight: 800, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 6,
           }}>
-            LOCK WINDOW EXPIRED
+            {t("trade.lockWindowExpired")}
           </div>
           {samePubkey(expiredJoinHold.pubkey, pubkey)
-            ? `Your ${roleDisplayName(expiredJoinHold.role).toLowerCase()} reservation expired before the trade locked. Join again when you are ready. No sats moved.`
-            : `${roleDisplayName(expiredJoinHold.role)} ${expiredJoinHold.pubkey.slice(0, 8)}... joined, but the trade didn't lock before the window closed. Ask them to join again. No sats moved.`}
+            ? t("trade.yourReservationExpired", { role: roleDisplayName(expiredJoinHold.role, t).toLowerCase() })
+            : t("trade.theirReservationExpired", { role: roleDisplayName(expiredJoinHold.role, t), pubkey: `${expiredJoinHold.pubkey.slice(0, 8)}...` })}
         </div>
       )}
 
@@ -3490,8 +3493,7 @@ export function TradeDetail({
           borderRadius: T.r, padding: 14, marginBottom: 16,
           color: T.amber, fontFamily: T.sans, fontSize: 12, lineHeight: 1.45,
         }}>
-          This listing is already tied to your key. Use a different Chama key
-          only if you are deliberately testing the other side.
+          {t("trade.listingTiedToKey")}
         </div>
       )}
 
@@ -3509,7 +3511,7 @@ export function TradeDetail({
             fontSize: 11, fontWeight: 600, color: T.muted,
             fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
           }}>
-            PAYMENT HANDLE
+            {t("trade.paymentHandle")}
             {state.lock.handle.rail && (
               <span style={{ color: T.amber, marginLeft: 8 }}>
                 · {getRailByKey(state.lock.handle.rail)?.displayName || state.lock.handle.rail}
@@ -3536,7 +3538,7 @@ export function TradeDetail({
                 fontSize: 9, color: T.muted, fontFamily: T.mono,
                 letterSpacing: 0.3, marginBottom: 5,
               }}>
-                ACCEPTS
+                {t("trade.accepts")}
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {state.lock.handle.networks.map(networkKey => (
@@ -3558,8 +3560,8 @@ export function TradeDetail({
             marginTop: 8, lineHeight: 1.4,
           }}>
             {myRole
-              ? "Revealed only to the three trade participants via the LOCK event."
-              : "Hidden — only the buyer, seller, and arbiter can see the full handle."}
+              ? t("trade.revealedToParticipants")
+              : t("trade.handleHidden")}
           </div>
         </div>
       )}
@@ -3588,10 +3590,10 @@ export function TradeDetail({
             display: "grid", placeItems: "center", fontSize: 12,
           }}>⚙</span>
           <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: T.muted }}>
-            TRADE TIMELINE
+            {t("trade.tradeTimeline")}
           </span>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.muted, opacity: 0.7 }}>
-            · {state.eventChain.length} step{state.eventChain.length !== 1 ? "s" : ""} · {state.chatMessages.length} msg
+            · {state.eventChain.length !== 1 ? t("trade.stepCountMany", { count: state.eventChain.length }) : t("trade.stepCountOne", { count: state.eventChain.length })} · {t("trade.msgCount", { count: state.chatMessages.length })}
           </span>
           <span className="td-tl-chev" aria-hidden="true" style={{
             marginLeft: "auto", width: 25, height: 25, borderRadius: 999, flex: "0 0 auto",
@@ -3606,13 +3608,13 @@ export function TradeDetail({
               <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.green }} />
               <span style={{ fontSize: 11, fontFamily: T.sans, color: T.muted }}>
                 {({
-                  "escrow:create": "Listing created",
-                  "escrow:join": "Joined the trade",
-                  "escrow:lock": "Sats locked in escrow",
-                  "escrow:vote": "Voted on the outcome",
-                  "escrow:resolve": "Outcome resolved",
-                  "escrow:claim": "Payout claimed",
-                  "escrow:cancel": "Cancelled",
+                  "escrow:create": t("trade.evtCreate"),
+                  "escrow:join": t("trade.evtJoin"),
+                  "escrow:lock": t("trade.evtLock"),
+                  "escrow:vote": t("trade.evtVote"),
+                  "escrow:resolve": t("trade.evtResolve"),
+                  "escrow:claim": t("trade.evtClaim"),
+                  "escrow:cancel": t("trade.evtCancel"),
                 } as Record<string, string>)[evt.payload.type]
                   ?? evt.payload.type.replace("escrow:", "").replace(/_/g, " ")}
               </span>
@@ -3634,7 +3636,7 @@ export function TradeDetail({
                 try {
                   const { published, total } = await onRebroadcast(state.id);
                   if (total === 0) {
-                    setRebroadcastResult("Nothing cached to re-broadcast on this device — re-open the trade so its full history loads, then try again.");
+                    setRebroadcastResult(t("trade.nothingToRebroadcast"));
                   } else {
                     // Show the ID-to-share whenever we have a chain. Relays may
                     // not re-ACK events they already store (published can be 0
@@ -3642,8 +3644,8 @@ export function TradeDetail({
                     // actually heals it, so never hide that on the ACK count.
                     setRebroadcastResult(
                       published > 0
-                        ? `Re-published ${published}/${total} events to today's relays.`
-                        : `Sent ${total} events — relays may already store them. Share the trade ID below either way.`,
+                        ? t("trade.republished", { published, total })
+                        : t("trade.sentEventsShareId", { total }),
                     );
                     setRebroadcastDone(true);
                   }
@@ -3668,19 +3670,19 @@ export function TradeDetail({
                 width: "100%",
               }}
             >
-              {rebroadcasting ? "RE-SENDING…" : "↻ RE-SEND TO RELAYS · HEAL THIS TRADE"}
+              {rebroadcasting ? t("trade.resending") : t("trade.resendHeal")}
             </button>
             <p style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, margin: "8px 2px 0" }}>
               {rebroadcastResult
-                ?? "Re-sends this trade's full history to today's relays. Your sats stay safely in escrow either way."}
+                ?? t("trade.resendNote")}
             </p>
             {rebroadcastDone && (
               <div style={{ marginTop: 10, padding: "10px 12px", background: T.card, border: `1px solid ${T.accent}`, borderRadius: T.r }}>
                 <div style={{ color: T.text, fontSize: 10, fontWeight: 700, fontFamily: T.mono, letterSpacing: 0.5, marginBottom: 6 }}>
-                  NEXT — SEND THIS TRADE ID TO THE OTHER PARTY
+                  {t("trade.sendTradeIdNext")}
                 </div>
                 <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginBottom: 8 }}>
-                  The events are on the relays now, but their app only fetches trades it already knows. Have them paste this ID into “Load a trade” to pull it in and claim.
+                  {t("trade.sendTradeIdBody")}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <code style={{ flex: 1, color: T.text, fontSize: 10, fontFamily: T.mono, wordBreak: "break-all", background: T.border, padding: "6px 8px", borderRadius: 6, userSelect: "all", WebkitUserSelect: "all" }}>
@@ -3688,8 +3690,8 @@ export function TradeDetail({
                   </code>
                   <CopyButton
                     value={state.id}
-                    label="COPY"
-                    copiedLabel="COPIED ✓"
+                    label={t("trade.copyUpper")}
+                    copiedLabel={t("trade.copiedUpper")}
                     style={{
                       background: T.accent, border: "none", borderRadius: 6, color: "#fff",
                       cursor: "pointer", fontFamily: T.mono, fontSize: 10, fontWeight: 700,
@@ -3712,8 +3714,7 @@ export function TradeDetail({
                 color: T.muted, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
                 padding: "8px 10px",
               }}>
-                🔒 This trade still has sats in escrow — claim or resolve it first.
-                You can hide it once it's settled or refunded.
+                {t("trade.satsStillInEscrow")}
               </div>
             ) : !forgetArmed ? (
               <button
@@ -3732,12 +3733,12 @@ export function TradeDetail({
                   textDecoration: "underline",
                 }}
               >
-                FORGET THIS TRADE LOCALLY
+                {t("trade.forgetTradeLocally")}
               </button>
             ) : (
               <div style={{ background: T.card, border: `1px solid ${T.red}`, borderRadius: T.r, padding: "10px 12px" }}>
                 <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginBottom: 8 }}>
-                  Hide this trade on this device? Your money stays in 2-of-3 escrow — nothing is cancelled or lost, and you can re-load it anytime by its ID.
+                  {t("trade.forgetConfirmBody")}
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button
@@ -3749,7 +3750,7 @@ export function TradeDetail({
                       letterSpacing: 0.5, padding: "7px 12px",
                     }}
                   >
-                    FORGET IT
+                    {t("trade.forgetIt")}
                   </button>
                   <button
                     type="button"
@@ -3760,7 +3761,7 @@ export function TradeDetail({
                       fontWeight: 700, letterSpacing: 0.5, padding: "7px 12px",
                     }}
                   >
-                    CANCEL
+                    {t("trade.cancelUpper")}
                   </button>
                 </div>
               </div>
@@ -3786,6 +3787,54 @@ export function TradeDetail({
 // assignment for this escrow id; someone hand-picked it) and SELF-ROSTERED
 // (the pool is recognized only via a kind:38120 roster signed by a party to
 // this very trade). Both stay informed-consent, never a reducer reject; the
+// Arbiter insurance (task #53 E1): the 0.25%-per-side premium line. Shows
+// from LOCKED onward for a principal on a trade with a BONDED seated
+// arbiter: a prechecked include-toggle pre-settlement (one uncheck to
+// decline — the durable preference the pay sweep respects), a calm
+// "insurance sent" line once the outbox records paid. Disclosed at lock
+// time, never a settle-time surprise.
+function ArbiterInsuranceRow({ state, pubkey }: { state: EscrowState; pubkey: string }) {
+  const { t } = useT();
+  const [, forceRefresh] = useState(0);
+  const decision = computeArbiterPremium(state, pubkey);
+  if (!decision.payable) return null;
+  const showFrom = new Set<EscrowStatus>([
+    EscrowStatus.LOCKED, EscrowStatus.APPROVED, EscrowStatus.CLAIMED, EscrowStatus.COMPLETED,
+  ]);
+  if (!showFrom.has(state.status)) return null;
+
+  const record = getPremiumOutboxRecord(state.id);
+  if (record?.status === "paid") {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", marginBottom: 12, background: `${T.green}12`, border: `1px solid ${T.green}44`, borderRadius: T.rs, fontFamily: T.mono, fontSize: 11, color: T.green }}>
+        <span>🛡</span>
+        <span>{t("trade.insuranceSent")}</span>
+      </div>
+    );
+  }
+  if (record?.status === "sending") return null;
+
+  const included = record?.status !== "declined";
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 12px", marginBottom: 12, background: T.card, border: `1px solid ${T.border}`, borderRadius: T.rs, cursor: "pointer" }}>
+      <input
+        type="checkbox"
+        checked={included}
+        onChange={(e) => {
+          setPremiumDeclined(state.id, !e.target.checked);
+          forceRefresh((x) => x + 1);
+        }}
+        style={{ accentColor: T.accent, width: 15, height: 15, flexShrink: 0 }}
+      />
+      <span style={{ fontFamily: T.mono, fontSize: 11, color: included ? T.text : T.muted, lineHeight: 1.45, display: "flex", alignItems: "baseline", gap: 5, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 800 }}>🛡 {t("trade.insuranceLabel")}</span>
+        <BitcoinAmount sats={decision.amountSats} size={11} gap={3} glyphScale={1.15} color="inherit" glyphColor="inherit" />
+        <span style={{ color: T.muted }}>{t("trade.insuranceSuffix")}</span>
+      </span>
+    </label>
+  );
+}
+
 // performer's vote gate carries the matching two-tap acknowledge.
 function ArbiterProvenanceBanner({ state, prov, assignment, selfRostered }: {
   state: EscrowState;
@@ -3793,11 +3842,12 @@ function ArbiterProvenanceBanner({ state, prov, assignment, selfRostered }: {
   assignment: ArbiterAssignment;
   selfRostered: boolean;
 }) {
+  const { t } = useT();
   const pool = state.communityArbiters ?? [];
   if (pool.length === 0) return null;
   const communityName = state.community
-    ? getCommunityBySlug(state.community)?.displayName ?? "this community"
-    : "this community";
+    ? getCommunityBySlug(state.community)?.displayName ?? t("trade.thisCommunity")
+    : t("trade.thisCommunity");
 
   const blocks: React.ReactNode[] = [];
 
@@ -3811,15 +3861,14 @@ function ArbiterProvenanceBanner({ state, prov, assignment, selfRostered }: {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <span style={{ fontSize: 12, color: T.red }}>⚠</span>
           <span style={{ fontSize: 10, color: T.red, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
-            ARBITER OFF-ASSIGNMENT
+            {t("trade.offAssignmentTitle")}
           </span>
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
-          The arbiter on this trade{seated ? ` (${shortParticipantPubkey(seated)})` : ""} isn't
-          the one it should have been assigned
+          {t("trade.offAssignBody1", { seated: seated ? ` (${shortParticipantPubkey(seated)})` : "" })}
           {assignment.accepted.length > 0 && (
-            <> (expected {assignment.accepted.map(shortParticipantPubkey).join(" or ")})</>
-          )}. Whoever locked the sats picked it by hand — proceed only if you trust it.
+            <> {t("trade.offAssignExpected", { list: assignment.accepted.map(shortParticipantPubkey).join(" or ") })}</>
+          )}{t("trade.offAssignBody2")}
         </div>
       </div>
     );
@@ -3834,13 +3883,11 @@ function ArbiterProvenanceBanner({ state, prov, assignment, selfRostered }: {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <span style={{ fontSize: 12, color: T.amber }}>⚠</span>
           <span style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
-            SELF-ROSTERED ARBITERS
+            {t("trade.selfRosteredTitle")}
           </span>
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
-          These arbiters are vouched for only by a roster signed by a party to this
-          trade — a vouch from your counterparty is not a vouch. Treat them as
-          unverified before putting anything at risk.
+          {t("trade.selfRosteredBody")}
         </div>
       </div>
     );
@@ -3856,16 +3903,21 @@ function ArbiterProvenanceBanner({ state, prov, assignment, selfRostered }: {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <span style={{ fontSize: 12, color: T.amber }}>⚠</span>
           <span style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, fontWeight: 800, letterSpacing: 0.5 }}>
-            UNRECOGNIZED ARBITER{prov.unrecognized.length !== 1 ? "S" : ""}
+            {prov.unrecognized.length !== 1 ? t("trade.unrecognizedMany") : t("trade.unrecognizedOne")}
           </span>
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5 }}>
-          {prov.unrecognized.length} of {pool.length} arbiter{pool.length !== 1 ? "s" : ""} on this trade
-          {prov.unrecognized.length !== 1 ? " are" : " is"} not in {communityName}'s known pool
+          {t(
+            pool.length === 1
+              ? "trade.unrecognizedBodyOneOfOne"
+              : prov.unrecognized.length === 1
+                ? "trade.unrecognizedBodyOneOfMany"
+                : "trade.unrecognizedBodyMany",
+            { count: prov.unrecognized.length, total: pool.length, community: communityName },
+          )}
           {prov.unrecognized.length > 0 && (
-            <> ({prov.unrecognized.map(shortParticipantPubkey).join(", ")})</>
-          )}. A neutral arbiter is what protects a dispute — if you don't know who set
-          these, treat the trade with extra care before locking sats.
+            <> {t("trade.unrecognizedList", { list: prov.unrecognized.map(shortParticipantPubkey).join(", ") })}</>
+          )}{t("trade.unrecognizedAdvice")}
         </div>
       </div>
     );
@@ -3880,10 +3932,9 @@ function ArbiterProvenanceBanner({ state, prov, assignment, selfRostered }: {
       }}>
         <span style={{ fontSize: 11, color: T.green }}>✓</span>
         <span style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.4 }}>
-          Community-verified arbiters — every name here is in {communityName}'s known pool.
+          {t("trade.verifiedArbiters", { community: communityName })}
           {pool.length < 3 && (
-            <> {pool.length === 1 ? "1 arbiter backs" : `${pool.length} arbiters back`} this
-            trade — a small pool means fewer backups if a dispute needs a substitute.</>
+            <> {pool.length === 1 ? t("trade.smallPoolOne") : t("trade.smallPoolMany", { count: pool.length })}</>
           )}
         </span>
       </div>
@@ -3916,6 +3967,7 @@ const TD_PANE_PLACEHOLDER: React.CSSProperties = {
 type DetailNextStepTone = "accent" | "green" | "red" | "purple" | "teal";
 
 function detailNextStep({
+  t,
   state,
   myRole,
   canILock,
@@ -3934,6 +3986,7 @@ function detailNextStep({
   claimRetryBlocked,
   canJoinTrade,
 }: {
+  t: TFunc;
   state: EscrowState;
   myRole: Role | null;
   canILock: boolean;
@@ -3987,27 +4040,27 @@ function detailNextStep({
       if (!canJoinTrade) {
         if (hasMenu && participantsBuyer && !savedOrderFinalized) {
           return {
-            kicker: "ORDER PENDING",
-            title: `${roleDisplayName(menuSelectorRole)} is still choosing what they want.`,
-            body: "The trade is reserved. The final order snapshot will appear once they press Ready.",
+            kicker: t("trade.nsOrderPending"),
+            title: t("trade.nsStillChoosing", { role: roleDisplayName(menuSelectorRole, t) }),
+            body: t("trade.nsReservedSnapshot"),
             tone: "accent",
             color: T.accent,
             amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
           };
         }
         return {
-          kicker: "WAITING",
-          title: "Waiting for the locking side to fund.",
-          body: "This trade is already reserved. Once sats enter escrow, the vote and claim path opens from this same trade room.",
+          kicker: t("trade.nsWaiting"),
+          title: t("trade.nsWaitingLockerFund"),
+          body: t("trade.nsReservedVotePath"),
           tone: "purple",
           color: T.purple,
           amountMsats: savedOrderAmountMsats || state.amountMsats,
         };
       }
       return {
-        kicker: "CHECKOUT",
-        title: "Join when you are ready to build an order.",
-        body: "Joining reserves your side of the listing and starts the short lock window. No sats move until the locking side funds.",
+        kicker: t("trade.nsCheckout"),
+        title: t("trade.nsJoinWhenReady"),
+        body: t("trade.nsJoiningReserves"),
         tone: "teal",
         color: T.teal,
         amountMsats: hasMenu ? null : state.amountMsats,
@@ -4017,9 +4070,9 @@ function detailNextStep({
       // v3.2: the arbiter is the watchful guardian from minute one — present
       // for both sides the whole way, but acts ONLY if they disagree.
       return {
-        kicker: "STANDING BY",
-        title: "You're this trade's arbiter.",
-        body: "You watch over both sides the whole way — but you only act if they disagree. Nothing is needed from you yet.",
+        kicker: t("trade.nsStandingBy"),
+        title: t("trade.nsYouAreArbiter"),
+        body: t("trade.nsArbiterWatch"),
         tone: "teal",
         color: ROLE_COLOR.arbiter,
         amountMsats: state.amountMsats,
@@ -4031,9 +4084,9 @@ function detailNextStep({
     if (isMarketplaceCell && myRole === Role.SELLER) {
       if (!participantsBuyer) {
         return {
-          kicker: "STOREFRONT LIVE",
-          title: "Waiting for a buyer to start an order.",
-          body: "Your listing is visible on Browse. When a buyer joins and funds, deliver the order — you're paid on release.",
+          kicker: t("trade.nsStorefrontLive"),
+          title: t("trade.nsWaitingBuyerOrder"),
+          body: t("trade.nsListingVisibleBrowse"),
           tone: "teal",
           color: T.teal,
           amountMsats: hasMenu ? null : state.amountMsats,
@@ -4041,9 +4094,9 @@ function detailNextStep({
       }
       if (hasMenu && !savedOrderFinalized) {
         return {
-          kicker: "ORDER FORMING",
-          title: "The buyer is choosing what they want.",
-          body: "Nothing to do yet. Once they fund, deliver the order — you're paid on release.",
+          kicker: t("trade.nsOrderForming"),
+          title: t("trade.nsBuyerChoosing"),
+          body: t("trade.nsNothingYetDeliver"),
           tone: "teal",
           color: T.teal,
           amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
@@ -4052,15 +4105,15 @@ function detailNextStep({
     }
     if (hasMenu && myRole === menuSelectorRole && !savedOrderFinalized) {
       return {
-        kicker: "YOUR ORDER",
+        kicker: t("trade.nsYourOrder"),
         title: savedOrderAmountMsats > 0
-          ? "Review your cart, then mark it ready."
+          ? t("trade.nsReviewCart")
           // v3.2 review fix: only a selector who ALSO locks is told to lock —
           // in p2p/bill-pay the selector builds the order and the OTHER side funds.
-          : canILock ? "Build your cart, then lock it." : "Build your order, then press Ready.",
+          : canILock ? t("trade.nsBuildCartLock") : t("trade.nsBuildOrderReady"),
         body: canILock
-          ? "Pick your items and save — press Ready when it's final. When you fund, the sats drop straight into 2-of-3 escrow."
-          : "Pick your items and save — press Ready when it's final. The funding side locks that exact snapshot into 2-of-3 escrow.",
+          ? t("trade.nsPickItemsFund")
+          : t("trade.nsPickItemsOther"),
         tone: "accent",
         color: T.accent,
         amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
@@ -4069,9 +4122,9 @@ function detailNextStep({
     if (canILock) {
       if (!participantsBuyer) {
         return {
-          kicker: "WAITING",
-          title: "Waiting for the buyer to enter the trade.",
-          body: "Your listing stays visible. Funding opens once a buyer joins and, for menu listings, finalizes the order.",
+          kicker: t("trade.nsWaiting"),
+          title: t("trade.nsWaitingBuyerEnter"),
+          body: t("trade.nsListingStaysVisible"),
           tone: "teal",
           color: T.teal,
           amountMsats: null,
@@ -4079,27 +4132,27 @@ function detailNextStep({
       }
       if (menuSelectionMissing || menuOrderNotFinal) {
         return {
-          kicker: "ORDER PENDING",
-          title: `${roleDisplayName(menuSelectorRole)} is still choosing what they want.`,
-          body: "Do not fund early. The final order snapshot will appear here once they press Ready.",
+          kicker: t("trade.nsOrderPending"),
+          title: t("trade.nsStillChoosing", { role: roleDisplayName(menuSelectorRole, t) }),
+          body: t("trade.nsDontFundEarly"),
           tone: "accent",
           color: T.accent,
           amountMsats: savedOrderAmountMsats > 0 ? savedOrderAmountMsats : null,
         };
       }
       return {
-        kicker: "READY TO FUND",
-        title: "Fund it — your sats drop straight into 2-of-3 escrow.",
-        body: "Locked sats move only when 2 of the 3 agree. Chama never holds your money.",
+        kicker: t("trade.nsReadyToFund"),
+        title: t("trade.nsFundIt"),
+        body: t("trade.nsLockedSatsMove"),
         tone: "accent",
         color: T.accent,
         amountMsats: lockAmountMsats,
       };
     }
     return {
-      kicker: "RESERVED",
-      title: "Waiting for the locking side to fund.",
-      body: "Stay nearby. Once sats enter escrow, the vote and claim path opens from this same trade room.",
+      kicker: t("trade.nsReserved"),
+      title: t("trade.nsWaitingLockerFund"),
+      body: t("trade.nsStayNearby"),
       tone: "purple",
       color: T.purple,
       amountMsats: savedOrderAmountMsats || state.amountMsats,
@@ -4126,20 +4179,20 @@ function detailNextStep({
       if (actsAsArbiter) {
         if (arbiterRuled) {
           return {
-            kicker: "RULING SENT",
-            title: "Your ruling is in — settling now.",
-            body: "The resolve lands as soon as a participant's Chama syncs it. Nothing more is needed from you.",
+            kicker: t("trade.nsRulingSent"),
+            title: t("trade.nsRulingSettling"),
+            body: t("trade.nsResolveLands"),
             tone: "teal",
             color: ROLE_COLOR.arbiter,
             amountMsats: state.amountMsats,
           };
         }
         return {
-          kicker: "YOUR RULING",
-          title: "Both sides voted — and they disagree.",
+          kicker: t("trade.nsYourRuling"),
+          title: t("trade.nsBothVotedDisagree"),
           body: myRole === Role.ARBITER
-            ? "Weigh the chat and evidence, then send the sats one way. Your ruling settles it on the spot."
-            : "The assigned arbiter is absent — you hold the third key now. Weigh the evidence, then send the sats one way.",
+            ? t("trade.nsWeighChat")
+            : t("trade.nsAssignedAbsent"),
           tone: "teal",
           color: ROLE_COLOR.arbiter,
           amountMsats: state.amountMsats,
@@ -4147,13 +4200,13 @@ function detailNextStep({
       }
       if (myRole === Role.BUYER || myRole === Role.SELLER) {
         return {
-          kicker: "IN DISPUTE",
+          kicker: t("trade.nsInDispute"),
           title: myVote === Outcome.REFUND
-            ? "You asked for a refund. The arbiter decides."
+            ? t("trade.nsAskedRefund")
             : myVote === Outcome.RELEASE
-              ? "You asked for release. The arbiter decides."
-              : "The two sides disagree. The arbiter decides.",
-          body: "Add anything that helps your case in chat — it moves the moment they rule.",
+              ? t("trade.nsAskedRelease")
+              : t("trade.nsSidesDisagree"),
+          body: t("trade.nsAddCaseChat"),
           tone: "purple",
           color: T.amber,
           amountMsats: state.amountMsats,
@@ -4162,9 +4215,9 @@ function detailNextStep({
     }
     if (healOnly) {
       return {
-        kicker: "PAST DEADLINE",
-        title: "This trade expired unresolved — a refund vote heals it.",
-        body: "The deadline passed without settlement, so the one path left is the refund below: the locked sats route straight back to the locker.",
+        kicker: t("trade.nsPastDeadline"),
+        title: t("trade.nsExpiredHeal"),
+        body: t("trade.nsDeadlinePassed"),
         tone: "accent",
         color: T.amber,
         amountMsats: state.amountMsats,
@@ -4172,9 +4225,9 @@ function detailNextStep({
     }
     if (myRole === Role.ARBITER && votePromptKind !== "buttons") {
       return {
-        kicker: "LIVE TRADE",
-        title: "Locked and quiet. Nothing for you yet.",
-        body: "You're the watchful third key — you protect both sides throughout, but you only step in if they disagree.",
+        kicker: t("trade.nsLiveTrade"),
+        title: t("trade.nsLockedQuiet"),
+        body: t("trade.nsWatchfulThirdKey"),
         tone: "teal",
         color: ROLE_COLOR.arbiter,
         amountMsats: state.amountMsats,
@@ -4185,11 +4238,11 @@ function detailNextStep({
     // is mostly the waiting phase, which the old gate skipped entirely.
     if (isMarketplaceCell && myRole === Role.SELLER) {
       return {
-        kicker: "LIVE TRADE",
-        title: "Deliver the order — you're paid on release.",
+        kicker: t("trade.nsLiveTrade"),
+        title: t("trade.nsDeliverOrder"),
         body: votePromptKind === "buttons"
-          ? "The buyer's sats are locked in escrow. Use chat for proof and timing."
-          : "You've confirmed your side — waiting on the buyer to release.",
+          ? t("trade.nsBuyerSatsLocked")
+          : t("trade.nsConfirmedWaitingBuyer"),
         tone: "purple",
         color: T.purple,
         amountMsats: state.amountMsats,
@@ -4197,11 +4250,11 @@ function detailNextStep({
     }
     if (isMarketplaceCell && myRole === Role.BUYER) {
       return {
-        kicker: "LIVE TRADE",
-        title: "Sats locked. Your order's on the way.",
+        kicker: t("trade.nsLiveTrade"),
+        title: t("trade.nsOrderOnWay"),
         body: votePromptKind === "buttons"
-          ? "Release when it arrives. An arbiter only steps in if you two disagree."
-          : "The seller is getting it to you — you'll confirm here when it arrives.",
+          ? t("trade.nsReleaseWhenArrives")
+          : t("trade.nsSellerGetting"),
         tone: "purple",
         color: T.purple,
         amountMsats: state.amountMsats,
@@ -4209,20 +4262,20 @@ function detailNextStep({
     }
     if (votePromptKind === "buttons") {
       return {
-        kicker: "YOUR NEXT STEP",
-        title: "Confirm the outcome when the off-chain side is complete.",
+        kicker: t("trade.nsYourNextStep"),
+        title: t("trade.nsConfirmOutcome"),
         // v3.2 review fix: no protocol jargon at the highest-stakes tap — the
         // buttons below carry the exact per-category direction labels.
-        body: "The buttons below say exactly where the sats go — confirm your side when it's done.",
+        body: t("trade.nsButtonsSayWhere"),
         tone: "purple",
         color: T.purple,
         amountMsats: state.amountMsats,
       };
     }
     return {
-      kicker: "LIVE TRADE",
-      title: "Sats are locked. Waiting on the next confirmation.",
-      body: "Use chat for proof, receipts, and timing. The arbiter only matters if the two sides disagree.",
+      kicker: t("trade.nsLiveTrade"),
+      title: t("trade.nsSatsLockedWaiting"),
+      body: t("trade.nsUseChatProof"),
       tone: "purple",
       color: T.purple,
       amountMsats: state.amountMsats,
@@ -4232,17 +4285,17 @@ function detailNextStep({
   if (state.status === EscrowStatus.APPROVED || state.status === EscrowStatus.CLAIMED) {
     if (iAmWinner) {
       return {
-        kicker: claimRetryBlocked ? "CLAIM BLOCKED" : "READY TO CLAIM",
+        kicker: claimRetryBlocked ? t("trade.nsClaimBlocked") : t("trade.nsReadyToClaim"),
         // v3.2 review fix: outcome-honest — a refund winner is getting their
         // OWN sats back, not a payout.
         title: claimRetryBlocked
-          ? "This claim needs recovery, not another retry."
+          ? t("trade.nsClaimNeedsRecovery")
           : state.resolvedOutcome === Outcome.REFUND
-            ? "Refunded — your sats are back."
-            : "Released — the sats are yours.",
+            ? t("trade.nsRefundedSatsBack")
+            : t("trade.nsReleasedSatsYours"),
         body: claimRetryBlocked
-          ? "The federation consumed the notes before local settlement finished. Use the recovery surface if a balance appears."
-          : "Chama pulls them out of escrow and sends them the best way available.",
+          ? t("trade.nsFederationConsumed")
+          : t("trade.nsChamaPulls"),
         tone: claimRetryBlocked ? "red" : "accent",
         color: claimRetryBlocked ? T.red : T.accent,
         amountMsats: state.amountMsats,
@@ -4254,22 +4307,22 @@ function detailNextStep({
     // and full-amount pill would both mislead) and keep the generic fallback.
     if (myRole === Role.ARBITER) {
       return {
-        kicker: "SETTLED",
-        title: arbiterRuled ? "Your ruling is in — settling now." : "Both sides agreed — settling now.",
-        body: "The outcome is on record and the winner is claiming. Nothing more is needed from you.",
+        kicker: t("trade.nsSettled"),
+        title: arbiterRuled ? t("trade.nsRulingSettling") : t("trade.nsBothAgreedSettling"),
+        body: t("trade.nsOutcomeOnRecord"),
         tone: "teal",
         color: ROLE_COLOR.arbiter,
         amountMsats: state.amountMsats,
       };
     }
     if (!state.subscription && (myRole === Role.BUYER || myRole === Role.SELLER)) {
-      const winnerLabel = settledWinnerRole === Role.SELLER ? "seller" : "buyer";
+      const winnerLabel = settledWinnerRole === Role.SELLER ? t("trade.sellerNoun") : t("trade.buyerNoun");
       return {
-        kicker: "SETTLING",
+        kicker: t("trade.nsSettling"),
         title: state.resolvedOutcome === Outcome.REFUND
-          ? `Refunded back to the ${winnerLabel}.`
-          : `Released to the ${winnerLabel}.`,
-        body: "Nothing left to do here — the trade closes out when they claim.",
+          ? t("trade.nsRefundedBackTo", { party: winnerLabel })
+          : t("trade.nsReleasedTo", { party: winnerLabel }),
+        body: t("trade.nsNothingLeftClose"),
         tone: "purple",
         color: T.purple,
         amountMsats: state.amountMsats,
@@ -4280,15 +4333,15 @@ function detailNextStep({
   if (state.status === EscrowStatus.COMPLETED) {
     if (myRole === Role.SELLER) {
       return {
-        kicker: "COMPLETE",
+        kicker: t("trade.nsComplete"),
         // v3.2 review fix: "you were paid" only on a RELEASE outcome — a
         // refunded seller merely got their own locked sats back.
         title: !state.subscription && state.resolvedOutcome === Outcome.RELEASE && settledWinnerRole === Role.SELLER
-          ? "Trade complete — you were paid."
+          ? t("trade.nsCompletePaid")
           : state.resolvedOutcome === Outcome.REFUND && settledWinnerRole === Role.SELLER
-            ? "Trade complete — your sats came back."
-            : "Trade complete.",
-        body: "Saved to your history below. Rate the buyer anytime — reputation is the backbone here.",
+            ? t("trade.nsCompleteSatsBack")
+            : t("trade.nsCompletePlain"),
+        body: t("trade.nsSellerHistoryRate"),
         tone: "green",
         color: T.green,
         amountMsats: state.amountMsats,
@@ -4296,9 +4349,9 @@ function detailNextStep({
     }
     if (myRole === Role.BUYER) {
       return {
-        kicker: "COMPLETE",
-        title: "Trade complete.",
-        body: "Saved to your history below — and your rating of the seller lives right here.",
+        kicker: t("trade.nsComplete"),
+        title: t("trade.nsCompletePlain"),
+        body: t("trade.nsBuyerHistoryRate"),
         tone: "green",
         color: T.green,
         amountMsats: state.amountMsats,
@@ -4306,20 +4359,20 @@ function detailNextStep({
     }
     if (myRole === Role.ARBITER) {
       return {
-        kicker: "COMPLETE",
-        title: "Trade complete.",
+        kicker: t("trade.nsComplete"),
+        title: t("trade.nsCompletePlain"),
         body: arbiterRuled
-          ? "Your ruling helped settle it. Saved to history."
-          : "Settled by mutual agreement — no ruling was ever needed. Saved to history.",
+          ? t("trade.nsRulingHelped")
+          : t("trade.nsMutualAgreement"),
         tone: "green",
         color: T.green,
         amountMsats: state.amountMsats,
       };
     }
     return {
-      kicker: "COMPLETE",
-      title: "This trade is settled.",
-      body: "Your full trade history is saved below. Ratings plug into this moment.",
+      kicker: t("trade.nsComplete"),
+      title: t("trade.nsTradeSettled"),
+      body: t("trade.nsHistorySavedRatings"),
       tone: "green",
       color: T.green,
       amountMsats: state.amountMsats,
@@ -4344,18 +4397,18 @@ function detailNextStep({
         ).length;
         if (voteCount > 0) {
           return {
-            kicker: "HEALING",
-            title: "Expired with votes on record — refund confirming.",
-            body: "The locked sats route back to the locker as soon as any participant's Chama syncs the resolve. Nothing is lost — reload shortly.",
+            kicker: t("trade.nsHealing"),
+            title: t("trade.nsExpiredVotesRefund"),
+            body: t("trade.nsLockedSatsRoute"),
             tone: "accent",
             color: T.accent,
             amountMsats: state.amountMsats,
           };
         }
         return {
-          kicker: "EXPIRED · HEALABLE",
-          title: "This trade expired unresolved.",
-          body: "An arbiter can still heal it: one refund vote returns the locked sats to the locker automatically. This happens on its own when an arbiter signs in.",
+          kicker: t("trade.nsExpiredHealable"),
+          title: t("trade.nsExpiredUnresolved"),
+          body: t("trade.nsArbiterCanHeal"),
           tone: "accent",
           color: T.accent,
           amountMsats: state.amountMsats,
@@ -4363,9 +4416,9 @@ function detailNextStep({
       }
     }
     return {
-      kicker: "CLOSED",
-      title: "This trade is no longer active.",
-      body: "No new funding or claim action is available on this escrow.",
+      kicker: t("trade.nsClosed"),
+      title: t("trade.nsNoLongerActive"),
+      body: t("trade.nsNoNewFunding"),
       tone: "red",
       color: T.red,
       amountMsats: null,
@@ -4373,9 +4426,9 @@ function detailNextStep({
   }
 
   return {
-    kicker: "TRADE ROOM",
+    kicker: t("trade.nsTradeRoom"),
     title: STATUS[state.status]?.l ?? state.status,
-    body: "Follow the controls below. Your full trade history stays available.",
+    body: t("trade.nsFollowControls"),
     tone: "teal",
     color: T.teal,
     amountMsats: state.amountMsats,
@@ -4568,13 +4621,21 @@ function voteOutcomeLabel(outcome: "Release" | "Refund", label: string): string 
     : `${outcome} · ${label}`;
 }
 
-function menuPickLabel(category: string): string {
-  if (category === "bill-pay") return "Pick bill";
-  if (category === "lending") return "Pick loan";
-  return "Pick";
+function menuPickLabel(category: string, t: TFunc): string {
+  if (category === "bill-pay") return t("trade.pickBill");
+  if (category === "lending") return t("trade.pickLoan");
+  return t("trade.pick");
 }
 
-function roleDisplayName(role: Role): string {
+// i18n: `t` is optional so the many call sites that only need the English noun
+// (or apply their own .toUpperCase()/.toLowerCase() before their surrounding
+// copy is extracted) keep compiling; pass t to translate. Un-t'd callers are
+// tracked as remaining extraction work.
+function roleDisplayName(role: Role, t?: TFunc): string {
+  const key = role === Role.BUYER ? "trade.roleBuyer"
+    : role === Role.SELLER ? "trade.roleSeller"
+    : "trade.roleArbiter";
+  if (t) return t(key);
   if (role === Role.BUYER) return "Buyer";
   if (role === Role.SELLER) return "Seller";
   return "Arbiter";
@@ -4615,24 +4676,24 @@ function tradeHoldsUnresolvedSats(state: EscrowState): boolean {
 /** 3.5.1 #7: category-aware "did you already do your part?" prompt for the
  *  back-out guard, steering a deed-doer who already performed off the refund
  *  hatch and onto the RELEASE vote (which the arbiter can still settle). */
-function deedDonePrompt(category: string | undefined): string {
-  if (category === "bill-pay") return "Already paid the bill?";
-  if (category === "p2p-trade") return "Already sent the fiat?";
-  if (category === "marketplace") return "Already delivered?";
-  if (category === "lending") return "Already disbursed the loan?";
-  return "Already did your part?";
+function deedDonePrompt(category: string | undefined, t: TFunc): string {
+  if (category === "bill-pay") return t("trade.deedPaidBill");
+  if (category === "p2p-trade") return t("trade.deedSentFiat");
+  if (category === "marketplace") return t("trade.deedDelivered");
+  if (category === "lending") return t("trade.deedDisbursed");
+  return t("trade.deedDefault");
 }
 
-function partyNoun(category: string | undefined, role: Role): string {
+function partyNoun(category: string | undefined, role: Role, t: TFunc): string {
   if (category === "bill-pay") {
-    if (role === Role.BUYER) return "volunteer";
-    if (role === Role.SELLER) return "bill owner";
+    if (role === Role.BUYER) return t("trade.volunteer");
+    if (role === Role.SELLER) return t("trade.billOwner");
   }
   if (category === "lending") {
-    if (role === Role.BUYER) return "borrower";
-    if (role === Role.SELLER) return "lender";
+    if (role === Role.BUYER) return t("trade.borrower");
+    if (role === Role.SELLER) return t("trade.lender");
   }
-  return roleDisplayName(role).toLowerCase();
+  return roleDisplayName(role, t).toLowerCase();
 }
 
 function parsePositiveWholeSats(value: string): number {
@@ -4696,15 +4757,19 @@ function detailEstimatedHeroFiatAmount({
 function detailPremiumCheckoutLine(
   state: EscrowState,
   heroFiat: { amount: number; currency: string } | null,
+  t: TFunc,
 ): string | null {
   if (state.category !== "p2p-trade" && state.category !== "bill-pay") return null;
   if (state.premiumBps === undefined || !heroFiat || heroFiat.amount <= 0) return null;
   if (state.category === "bill-pay") {
-    return `Fiat due stays ${formatFiatAmount(heroFiat.amount, heroFiat.currency)}; premium is locked in sats`;
+    return t("trade.premiumBillPayLine", { fiat: formatFiatAmount(heroFiat.amount, heroFiat.currency) });
   }
   const checkoutFiat = heroFiat.amount * (1 + state.premiumBps / 10_000);
   if (!Number.isFinite(checkoutFiat) || checkoutFiat < 0) return null;
-  return `${formatFiatAmount(heroFiat.amount, heroFiat.currency)} -> ${formatFiatAmount(checkoutFiat, heroFiat.currency)} at checkout`;
+  return t("trade.premiumCheckoutLine", {
+    base: formatFiatAmount(heroFiat.amount, heroFiat.currency),
+    checkout: formatFiatAmount(checkoutFiat, heroFiat.currency),
+  });
 }
 
 function sumFiatRows(rows: readonly { fiatAmount?: number; fiatCurrency?: string; quantity?: number }[]): { amount: number; currency: string } | null {
@@ -4758,40 +4823,40 @@ function menuAmountLabel(item: { amountMsats: number; minAmountMsats?: number; m
   );
 }
 
-function menuHeaderTitle(category: string, isListing: boolean): string {
-  if (!isListing) return "ORDER";
-  if (category === "p2p-trade") return "AMOUNT OPTIONS";
-  if (category === "bill-pay") return "BILL BUNDLE";
-  if (category === "lending") return "LOAN OFFERS";
-  if (category === "marketplace") return "STORE";
-  return "MENU";
+function menuHeaderTitle(category: string, isListing: boolean, t: TFunc): string {
+  if (!isListing) return t("trade.menuOrder");
+  if (category === "p2p-trade") return t("trade.menuAmountOptions");
+  if (category === "bill-pay") return t("trade.menuBillBundle");
+  if (category === "lending") return t("trade.menuLoanOffers");
+  if (category === "marketplace") return t("trade.menuStore");
+  return t("trade.menuMenu");
 }
 
 function shortParticipantPubkey(pubkey: string): string {
   return pubkey.length > 13 ? `${pubkey.slice(0, 6)}...${pubkey.slice(-4)}` : pubkey;
 }
 
-function menuSelectionHint(category: string): string {
-  if (category === "bill-pay") return "pick bills";
-  if (category === "lending") return "pick loans";
-  if (category === "marketplace") return "build cart";
-  return "choose";
+function menuSelectionHint(category: string, t: TFunc): string {
+  if (category === "bill-pay") return t("trade.hintPickBills");
+  if (category === "lending") return t("trade.hintPickLoans");
+  if (category === "marketplace") return t("trade.hintBuildCart");
+  return t("trade.hintChoose");
 }
 
-function menuSelectionTitle(category: string): string {
-  if (category === "p2p-trade") return "Enter an exact sats amount inside one option.";
-  if (category === "bill-pay") return "Pick at least one bill before locking.";
-  if (category === "lending") return "Pick at least one loan offer before locking.";
-  if (category === "marketplace") return "Add at least one store item before locking.";
-  return "Select at least one menu item.";
+function menuSelectionTitle(category: string, t: TFunc): string {
+  if (category === "p2p-trade") return t("trade.selectionTitleP2p");
+  if (category === "bill-pay") return t("trade.selectionTitleBillPay");
+  if (category === "lending") return t("trade.selectionTitleLending");
+  if (category === "marketplace") return t("trade.selectionTitleMarketplace");
+  return t("trade.selectionTitleDefault");
 }
 
-function menuSelectionButtonLabel(category: string): string {
-  if (category === "p2p-trade") return "Choose amount";
-  if (category === "bill-pay") return "Pick bills";
-  if (category === "lending") return "Pick loans";
-  if (category === "marketplace") return "Add item";
-  return "Select item";
+function menuSelectionButtonLabel(category: string, t: TFunc): string {
+  if (category === "p2p-trade") return t("trade.selBtnP2p");
+  if (category === "bill-pay") return t("trade.selBtnBillPay");
+  if (category === "lending") return t("trade.selBtnLending");
+  if (category === "marketplace") return t("trade.selBtnMarketplace");
+  return t("trade.selBtnDefault");
 }
 
 function menuMetaLine(item: {
@@ -4801,14 +4866,14 @@ function menuMetaLine(item: {
   trustTier?: number;
   fiatAmount?: number;
   fiatCurrency?: string;
-}): string | null {
+}, t: TFunc): string | null {
   const parts: string[] = [];
   if (item.fiatAmount !== undefined && item.fiatCurrency) {
     parts.push(`${item.fiatCurrency} ${item.fiatAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
   }
-  if (item.dueAt) parts.push(`due ${new Date(item.dueAt * 1000).toLocaleDateString()}`);
-  if (item.termDays) parts.push(`${item.termDays}d`);
-  if (item.aprBps) parts.push(`${(item.aprBps / 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}% APR`);
-  if (item.trustTier) parts.push(`tier ${item.trustTier}`);
+  if (item.dueAt) parts.push(t("trade.dueDate", { date: new Date(item.dueAt * 1000).toLocaleDateString() }));
+  if (item.termDays) parts.push(t("trade.termDaysShort", { count: item.termDays }));
+  if (item.aprBps) parts.push(t("trade.aprLabel", { rate: (item.aprBps / 100).toLocaleString(undefined, { maximumFractionDigits: 2 }) }));
+  if (item.trustTier) parts.push(t("trade.tierLabel", { tier: item.trustTier }));
   return parts.length > 0 ? parts.join(" · ") : null;
 }

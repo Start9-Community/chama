@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 export function LoadTradeInput({ onLoad }: { onLoad: (id: string) => void }) {
+  const { t } = useT();
   const [id, setId] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -21,7 +23,7 @@ export function LoadTradeInput({ onLoad }: { onLoad: (id: string) => void }) {
         value={id}
         onChange={e => setId(e.target.value)}
         onKeyDown={e => e.key === "Enter" && handleLoad()}
-        placeholder="Paste escrow ID to join a trade..."
+        placeholder={t("browse.loadTradePlaceholder")}
         style={{
           flex: 1, padding: "8px 12px",
           background: T.card, border: `1px solid ${T.border}`,
@@ -42,7 +44,7 @@ export function LoadTradeInput({ onLoad }: { onLoad: (id: string) => void }) {
           transition: "all 0.2s", whiteSpace: "nowrap",
         }}
       >
-        {loading ? "Loading..." : "Load"}
+        {loading ? t("browse.loading") : t("browse.load")}
       </button>
     </div>
   );

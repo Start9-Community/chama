@@ -65,14 +65,14 @@ perception. Three moves convert that demand:
   communities as **Live** so US/Germany/Benin users see availability where they actually are. Pairs with
   C1 (same perception, same fix surface).
 
-### C3. Strike US off-ramp — the one-tap USD cash-out
+### C3. Strike US off-ramp — guided USD cash-out
 - Per **DECISIONS 2026-06-26** ("US fiat off-ramp = pay a fiat-converting Lightning Address") + the
   matching BACKLOG entry: build a **lighter mirror of `tando-offramp.ts`** → `strike-offramp.ts`. A
   Strike username is a LUD-16 address; paying it (the **existing** claim BOLT11-OUT path) converts
   sats→USD in the **user's own** Strike account. **Zero new custody / money-transmitter surface.**
   Build: `isStrikeLightningAddress()`, `isUSPayoutContext()` (analog to `isKenyaPayoutContext` —
-  match `us-usd`/GBF/USD), a one-time "flip Strike to receive **Cash**" hint, saved in the
-  payout-destinations store; provider-agnostic (Cash App / Bitcoin Well are drop-in siblings). Show
+  match `us-usd`/GBF/USD), guided Cash receive confirmation, saved in the payout-destinations store;
+  provider-agnostic (Cash App / Bitcoin Well are drop-in siblings). Show
   "≈ $X at Strike's rate," never a guarantee. The DECISIONS + BACKLOG entries are the full spec.
 
 ## D. Other queued items

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties } from "react";
 import { type ChatImageAttachment, type EscrowState, EscrowStatus, Role } from "../../escrow-engine/types.js";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { RatingTap } from "../components/RatingTap.js";
 import type { RatingThumb } from "../../reputation/ratings.js";
 import { randomId } from "../../storage/random-id.js";
@@ -241,6 +242,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
    *  (display-only), woven into the message feed by time. */
   systemBubbles?: SystemBubble[];
 }) {
+  const { t } = useT();
   const [msg, setMsg] = useState("");
   const [attachment, setAttachment] = useState<ChatImageAttachment | null>(null);
   const [viewer, setViewer] = useState<ChatImageAttachment | null>(null);
@@ -284,7 +286,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
     try {
       setAttachment(await prepareChatImage(file));
     } catch (error: any) {
-      setErr(error?.message || "Couldn't attach that image");
+      setErr(error?.message || t("chat.couldNotAttachImage"));
     } finally {
       setImageBusy(false);
     }
@@ -294,7 +296,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
     role === "buyer" ? "#BF5AF2" : role === "seller" ? "#F7931A" : role === "arbiter" ? "#5AC8FA" : T.muted;
 
   const roleName = (role: string) =>
-    role === "buyer" ? "Buyer" : role === "seller" ? "Seller" : role === "arbiter" ? "Arbiter" : "Unknown";
+    role === "buyer" ? t("chat.roleBuyer") : role === "seller" ? t("chat.roleSeller") : role === "arbiter" ? t("chat.roleArbiter") : t("chat.roleUnknown");
 
   const canSend = (!!msg.trim() || !!attachment) && !sending && !imageBusy;
 
@@ -321,11 +323,12 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
         display: "flex", justifyContent: "space-between", alignItems: "center",
       }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>
-          CHAT
+          {t("chat.chatHeader")}
         </div>
         <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>
-          {state.chatMessages.length} message{state.chatMessages.length !== 1 ? "s" : ""}
-          {" · private"}
+          {state.chatMessages.length !== 1
+            ? t("chat.messageCountMany", { count: state.chatMessages.length })
+            : t("chat.messageCountOne", { count: state.chatMessages.length })}
         </div>
       </div>
       )}
@@ -342,7 +345,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
             textAlign: "center", padding: "20px 0",
             color: T.muted, fontFamily: T.mono, fontSize: 11,
           }}>
-            No messages yet.
+            {t("chat.noMessagesYet")}
           </div>
         ) : (
           feed.map((item) => {
@@ -370,7 +373,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
                   fontSize: 9, color, fontFamily: T.mono,
                   fontWeight: 600, marginBottom: 2,
                 }}>
-                  {isMe ? "You" : roleName(payload.senderRole)}
+                  {isMe ? t("chat.you") : roleName(payload.senderRole)}
                 </div>
                 <div style={{
                   padding: attachments.length > 0 ? 6 : "9px 13px",
@@ -393,7 +396,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
                     >
                       <img
                         src={image.dataUrl}
-                        alt={image.name || "chat attachment"}
+                        alt={image.name || t("chat.altChatAttachment")}
                         style={{
                           display: "block", width: "100%", maxHeight: 180,
                           objectFit: "cover", borderRadius: 8,
@@ -460,7 +463,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
           textAlign: "center" as const,
         }}>
           <span style={{ fontFamily: T.mono, fontSize: 10.5, color: T.muted, letterSpacing: 0.3 }}>
-            💬 Chat is closed — this trade is settled.
+            {t("chat.closed")}
           </span>
         </div>
       )}
@@ -489,7 +492,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
             }}>
               <img
                 src={attachment.dataUrl}
-                alt={attachment.name || "selected receipt"}
+                alt={attachment.name || t("chat.altSelectedReceipt")}
                 style={{
                   width: 56, height: 56, objectFit: "cover",
                   borderRadius: 8, border: `1px solid ${T.border}`,
@@ -501,10 +504,10 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
                   fontSize: 11, color: T.text, fontFamily: T.sans,
                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                 }}>
-                  {attachment.name || "Image ready"}
+                  {attachment.name || t("chat.imageReady")}
                 </div>
                 <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-                  encrypted receipt image
+                  {t("chat.encryptedReceiptImage")}
                 </div>
               </div>
               <button
@@ -539,7 +542,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
             <button
               onClick={() => fileRef.current?.click()}
               disabled={imageBusy || sending}
-              title="Attach receipt image"
+              title={t("chat.attachTitle")}
               style={{
                 width: 38, height: 38, borderRadius: 20,
                 background: imageBusy ? T.surface : T.tealDim,
@@ -556,7 +559,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
               value={msg}
               onChange={e => setMsg(e.target.value)}
               onKeyDown={e => e.key === "Enter" && !e.shiftKey && handleSend()}
-              placeholder={attachment ? "Add a note..." : "Type a message..."}
+              placeholder={attachment ? t("chat.notePlaceholder") : t("chat.typeMessagePlaceholder")}
               style={{
                 flex: 1, minWidth: 0, padding: "9px 12px",
                 background: T.surface, border: `1px solid ${T.border}`,
@@ -578,7 +581,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
                 flex: "0 0 auto",
               }}
             >
-              Send
+              {t("chat.send")}
             </button>
           </div>
         </div>
@@ -609,7 +612,7 @@ export function ChatPanel({ state, myRole, onSend, embedded = false, hideHeader 
           <img
             onClick={(e) => e.stopPropagation()}
             src={viewer.dataUrl}
-            alt={viewer.name || "chat attachment"}
+            alt={viewer.name || t("chat.altChatAttachment")}
             style={{
               maxWidth: "100%", maxHeight: "100%",
               objectFit: "contain", borderRadius: 8,

@@ -1,0 +1,219 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Chama — Payout Destinations (localStorage)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// Payout destinations are where the user sends sats after a claim or
+// recovery. They are NOT counterparty payment handles and must never flow
+// into listing/payment-handle reveal surfaces.
+//
+// Storage format (localStorage["chama_payout_destinations[:pubkey]"] is JSON):
+//   [{ id, address, createdAt, lastUsedAt }, ...]
+
+import {
+  SAVED_HANDLES_STORAGE_KEY,
+  SAVED_HANDLES_BACKUP_STORAGE_KEY,
+  LIGHTNING_RAIL,
+  type SavedHandle,
+} from "./saved-handles.js";
+import { randomId } from "../storage/random-id.js";
+import {
+  getScopedStorageItem,
+  setScopedStorageItem,
+} from "../storage/user-scope.js";
+
+export const PAYOUT_DESTINATIONS_STORAGE_KEY = "chama_payout_destinations";
+export const PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY = "chama_payout_destinations_backup";
+
+export interface PayoutDestination {
+  id: string;
+  /** Lightning Address, normalized lowercase. */
+  address: string;
+  /** Unix seconds — first saved. */
+  createdAt: number;
+  /** Unix seconds — last successful claim/recovery use. */
+  lastUsedAt?: number;
+}
+
+function isPayoutDestination(x: any): x is PayoutDestination {
+  return (
+    x && typeof x === "object" &&
+    typeof x.id === "string" &&
+    typeof x.address === "string" &&
+    typeof x.createdAt === "number"
+  );
+}
+
+function isLegacyLightningHandle(x: any): x is SavedHandle {
+  return (
+    x && typeof x === "object" &&
+    typeof x.id === "string" &&
+    x.rail === LIGHTNING_RAIL &&
+    typeof x.handle === "string" &&
+    typeof x.createdAt === "number"
+  );
+}
+
+function generateId(): string {
+  // SECURITY: payout-destination IDs are opaque storage keys; use
+  // crypto randomness so they stay unguessable if ever exposed.
+  return `pd_${Date.now().toString(36)}_${randomId(8)}`;
+}
+
+function normalizeDestination(destination: PayoutDestination): PayoutDestination {
+  return {
+    ...destination,
+    address: normalizeAddress(destination.address),
+  };
+}
+
+function dedupeDestinations(destinations: PayoutDestination[]): PayoutDestination[] {
+  const seen = new Set<string>();
+  const out: PayoutDestination[] = [];
+  for (const destination of destinations) {
+    const normalized = normalizeDestination(destination);
+    const key = normalized.address.toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function readStored(key: string): PayoutDestination[] {
+  try {
+    const raw = getScopedStorageItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return dedupeDestinations(parsed.filter(isPayoutDestination));
+  } catch {
+    return [];
+  }
+}
+
+function readRaw(): PayoutDestination[] {
+  const primary = readStored(PAYOUT_DESTINATIONS_STORAGE_KEY);
+  if (primary.length > 0) return primary;
+
+  const backup = readStored(PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY);
+  if (backup.length > 0) {
+    writeRaw(backup, { allowEmptyOverwrite: true });
+    return backup;
+  }
+
+  return [];
+}
+
+function writeRaw(
+  destinations: PayoutDestination[],
+  opts: { allowEmptyOverwrite?: boolean } = {},
+): void {
+  const normalized = dedupeDestinations(destinations);
+  try {
+    if (normalized.length === 0 && !opts.allowEmptyOverwrite) {
+      const existing = readStored(PAYOUT_DESTINATIONS_STORAGE_KEY);
+      const backup = readStored(PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY);
+      if (existing.length > 0 || backup.length > 0) {
+        console.warn("[chama] Refusing to overwrite payout destinations with an empty list");
+        return;
+      }
+    }
+    const serialized = JSON.stringify(normalized);
+    setScopedStorageItem(PAYOUT_DESTINATIONS_STORAGE_KEY, serialized);
+    setScopedStorageItem(PAYOUT_DESTINATIONS_BACKUP_STORAGE_KEY, serialized);
+  } catch {
+    // localStorage unavailable / quota exceeded — cosmetic persistence
+    // failure. The payout itself has already happened.
+  }
+}
+
+function normalizeAddress(address: string): string {
+  return address.trim().toLowerCase();
+}
+
+/** One-time lazy migration from pre-v0.6.3 saved_handles rows where
+ *  rail="lightning". After migration, the legacy rows are removed so
+ *  trade-time handle reveal cannot accidentally offer a payout address. */
+export function migrateLegacyLightningHandles(): number {
+  try {
+    const raw = getScopedStorageItem(SAVED_HANDLES_STORAGE_KEY);
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return 0;
+
+    const existing = readRaw();
+    const seen = new Set(existing.map(d => d.address.toLowerCase()));
+    const migrated: PayoutDestination[] = [];
+    const keptHandles: unknown[] = [];
+
+    for (const item of parsed) {
+      if (!isLegacyLightningHandle(item)) {
+        keptHandles.push(item);
+        continue;
+      }
+      const address = normalizeAddress(item.handle);
+      if (!address) continue;
+      if (!seen.has(address)) {
+        seen.add(address);
+        migrated.push({
+          id: `pd_${item.id}`,
+          address,
+          createdAt: item.createdAt,
+          lastUsedAt: item.lastUsedAt ?? item.createdAt,
+        });
+      }
+    }
+
+    if (migrated.length === 0 && keptHandles.length === parsed.length) return 0;
+    writeRaw([...migrated, ...existing]);
+    const keptSerialized = JSON.stringify(keptHandles);
+    setScopedStorageItem(SAVED_HANDLES_STORAGE_KEY, keptSerialized);
+    setScopedStorageItem(SAVED_HANDLES_BACKUP_STORAGE_KEY, keptSerialized);
+    return migrated.length;
+  } catch {
+    return 0;
+  }
+}
+
+export function listPayoutDestinations(): PayoutDestination[] {
+  migrateLegacyLightningHandles();
+  return readRaw().sort((a, b) => {
+    const aTime = a.lastUsedAt ?? a.createdAt;
+    const bTime = b.lastUsedAt ?? b.createdAt;
+    return bTime - aTime;
+  });
+}
+
+export function deletePayoutDestination(id: string): void {
+  migrateLegacyLightningHandles();
+  writeRaw(readRaw().filter(d => d.id !== id), { allowEmptyOverwrite: true });
+}
+
+/** Idempotent save/touch for a Lightning Address used as a payout
+ *  destination. First use creates a row; later uses bump lastUsedAt. */
+export function addOrTouchPayoutDestination(address: string): PayoutDestination {
+  const normalized = normalizeAddress(address);
+  if (!normalized) {
+    throw new Error("Lightning Address cannot be empty");
+  }
+
+  migrateLegacyLightningHandles();
+  const destinations = readRaw();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const idx = destinations.findIndex(d => d.address.toLowerCase() === normalized);
+  if (idx !== -1) {
+    const next: PayoutDestination = { ...destinations[idx], lastUsedAt: nowSec };
+    destinations[idx] = next;
+    writeRaw(destinations);
+    return next;
+  }
+
+  const entry: PayoutDestination = {
+    id: generateId(),
+    address: normalized,
+    createdAt: nowSec,
+    lastUsedAt: nowSec,
+  };
+  writeRaw([entry, ...destinations]);
+  return entry;
+}

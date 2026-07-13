@@ -1,13 +1,15 @@
 import { useState, useEffect } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 export function CountdownTimer({
   expiresAt,
-  label = "EXPIRES IN",
+  label,
 }: {
   expiresAt: number;
   label?: string;
 }) {
+  const { t } = useT();
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
 
   useEffect(() => {
@@ -31,7 +33,7 @@ export function CountdownTimer({
         maxWidth: "100%",
         margin: "0 auto",
       }}>
-        DEADLINE PASSED
+        {t("card.deadlinePassed")}
       </div>
     );
   }
@@ -59,7 +61,7 @@ export function CountdownTimer({
       width: "fit-content",
       maxWidth: "100%",
     }}>
-      <span style={{ color: T.muted, fontSize: 9, letterSpacing: 1 }}>{label}</span>
+      <span style={{ color: T.muted, fontSize: 9, letterSpacing: 1 }}>{label ?? t("card.expiresIn")}</span>
       <span style={{ color, fontWeight: 700, fontSize: 13 }}>{timeStr}</span>
     </div>
   );

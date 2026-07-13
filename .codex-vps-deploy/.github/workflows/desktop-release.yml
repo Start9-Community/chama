@@ -1,0 +1,212 @@
+name: Desktop release
+
+# #57 — Desktop builds for the Tauri shell (macOS + Linux).
+#
+# Trigger: pushing a release tag (the `scripts/release.sh` lane tags vX.Y.Z),
+# or manually via workflow_dispatch for a smoke build (no release upload).
+#
+# Versioning: src-tauri/tauri.conf.json points its `version` at
+# ../package.json, so the bundle version always equals the npm version that
+# release.sh bumped — drift is structurally impossible. The gates job still
+# asserts the tag matches package.json so a hand-rolled tag can't ship a
+# mislabeled binary.
+#
+# SECURITY: same posture as ci.yml — third-party actions are avoided
+# entirely; the only actions used are the same SHA-pinned checkout and
+# setup-node that ci.yml already trusts. Rust comes from the runner's
+# rustup, releases are managed with the preinstalled `gh` CLI.
+#
+# Publishing policy: Windows (NSIS) + Linux (deb/AppImage) bundles are
+# attached to the release. The macOS dmg is BUILD-ONLY — it still compiles on
+# every tag as a validation gate, but it is NOT staged or uploaded, because an
+# unsigned, un-notarized dmg hits Gatekeeper's "damaged" dead-end on modern
+# macOS with no click-through for a normal user (unlike Windows SmartScreen,
+# which the user CAN bypass via More info → Run anyway). Flip the macOS upload
+# back on once Developer-ID signing + notarization land (#107).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    name: Gates (typecheck + tests + version guard)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Version guard (tag == package.json == tauri.conf source)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          CONF="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "tag=$TAG package.json=$PKG tauri.conf.version=$CONF"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag v$TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          if [ "$CONF" != "../package.json" ]; then
+            echo "::error::tauri.conf.json version must point at ../package.json (got: $CONF)"
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+  build:
+    name: Build (${{ matrix.label }})
+    needs: gates
+    defaults:
+      run:
+        # bash exists on all three runner OSes (git-bash on Windows) and the
+        # sidecar script + upload globs are written for it.
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS (Apple Silicon, build-only)
+            bundles: dmg
+            # Build-only validation: the dmg compiles every tag but is not
+            # staged or uploaded (see header — unsigned dmg = "damaged" wall).
+            upload_glob: ""
+          - os: ubuntu-22.04
+            label: Linux (x86_64)
+            bundles: deb,appimage
+            upload_glob: src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/appimage/*.AppImage
+          # Windows leg validated end-to-end by the windows-bridge-probe run
+          # (docs/WINDOWS-DESKTOP-BUILD.md): bridge compiles on stock MSVC
+          # runners, sidecar spawns, NSIS bundles. MSI/WiX not yet validated —
+          # NSIS only until it is.
+          - os: windows-latest
+            label: Windows (x86_64, NSIS)
+            bundles: nsis
+            upload_glob: src-tauri/target/release/bundle/nsis/*.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # rocksdb + aws-lc are slow cold compiles (Windows ~25 min uncached).
+      # SHA pin field-verified green by the windows-bridge-probe run.
+      - name: Cache cargo + build targets
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            native/fedimint-bridge/target
+            src-tauri/target
+          key: desktop-${{ runner.os }}-${{ hashFiles('native/fedimint-bridge/Cargo.lock', 'src-tauri/Cargo.lock') }}
+          restore-keys: |
+            desktop-${{ runner.os }}-
+
+      - name: Linux system deps (WebKitGTK + bundler tooling)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential curl wget file \
+            libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # Tauri runs beforeBuildCommand through cmd.exe on Windows, which can't
+      # execute the .sh sidecar script. Route npm run-scripts through git-bash
+      # (workaround proven by the windows-bridge-probe).
+      - name: Route npm run-scripts through git-bash (Windows)
+        if: runner.os == 'Windows'
+        run: npm config set script-shell "C:\\Program Files\\Git\\bin\\bash.exe"
+
+      - name: Rust toolchain (runner rustup, no third-party action)
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Install dependencies
+        run: npm install
+
+      # `tauri build` runs beforeBuildCommand (sidecar cargo build + vite
+      # build) itself, then bundles with the version read from package.json.
+      - name: Build Tauri bundles
+        run: npx tauri build --bundles ${{ matrix.bundles }}
+
+      - name: List bundle output
+        run: find src-tauri/target/release/bundle -maxdepth 2 -type f | sort
+
+      # GitHub's release page lists assets ALPHABETICALLY by filename and
+      # offers no manual reorder, so the filename IS the sort key. Stage each
+      # bundle under a plain-language name with a leading ordinal that forces
+      # the desktop group into: macOS, Windows, then the two Linux adjacent —
+      # legible for non-technical downloaders. Each leg only emits its own
+      # bundles; nullglob skips the rest. (The "1-/2-/3-/4-" prefix is the
+      # only lever that beats Linux's natural alphabetical lead.)
+      # macOS is build-only (see header): skip staging so its dmg never reaches
+      # the upload. Windows + Linux stage under plain-language, ordinal-prefixed
+      # names — GitHub sorts release assets alphabetically with no manual
+      # reorder, so the filename IS the sort key (force Windows ahead of the two
+      # Linux files). Each leg only emits its own bundles; nullglob skips the
+      # rest. Ordinals start at 1-Windows now that macOS isn't published.
+      - name: Stage bundles with ordered, friendly names
+        if: runner.os != 'macOS'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          VER="${GITHUB_REF_NAME#v}"
+          mkdir -p release-assets
+          for f in src-tauri/target/release/bundle/nsis/*.exe; do
+            cp "$f" "release-assets/Chama-${VER}-1-Windows-x64-Setup.exe"
+          done
+          for f in src-tauri/target/release/bundle/deb/*.deb; do
+            cp "$f" "release-assets/Chama-${VER}-2-Linux-Debian-Ubuntu.deb"
+          done
+          for f in src-tauri/target/release/bundle/appimage/*.AppImage; do
+            cp "$f" "release-assets/Chama-${VER}-3-Linux-AppImage-any-distro.AppImage"
+          done
+          echo "Staged:"; ls -la release-assets
+
+      - name: Upload to draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os != 'macOS'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --draft --verify-tag \
+              --title "Chama desktop $TAG" \
+              --notes "Desktop bundles for $TAG: Windows (NSIS) + Linux (deb/AppImage). These are unsigned — Windows shows a one-time SmartScreen 'unrecognized app' notice you can click through (More info -> Run anyway). The macOS dmg is held until it's signed + notarized (#107). APK + web remain the primary surfaces; see the zapstore notes for the release story."
+          gh release upload "$TAG" release-assets/* --clobber

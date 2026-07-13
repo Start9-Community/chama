@@ -12,15 +12,17 @@
 
 import { useState, useRef, useEffect, useLayoutEffect, type ReactNode } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 const POPOVER_WIDTH = 248;
 
-export function HelpTip({ title, children, label = "What is this?" }: {
+export function HelpTip({ title, children, label }: {
   title?: string;
   children: ReactNode;
-  /** Accessible name for the trigger. */
+  /** Accessible name for the trigger. Defaults to a localized "What is this?". */
   label?: string;
 }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -61,7 +63,7 @@ export function HelpTip({ title, children, label = "What is this?" }: {
       <button
         ref={triggerRef}
         type="button"
-        aria-label={label}
+        aria-label={label ?? t("browse.helpTipLabel")}
         aria-expanded={open}
         onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
         style={{

@@ -1,9 +1,11 @@
 import { T, STATUS } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 // v0.1.66.33: pill treatment depends on mode.
 // Resolved → outlined, no dot. Active → filled, pulsing dot.
 // Working → filled, static dot.
 export function Badge({ status }: { status: string }) {
+  const { t } = useT();
   const s = STATUS[status] || STATUS.CREATED;
   const isResolved = s.mode === "resolved";
   const isActive = s.mode === "active";
@@ -24,7 +26,7 @@ export function Badge({ status }: { status: string }) {
           animation: isActive ? "pulse 2s ease-in-out infinite" : "none",
         }} />
       )}
-      {s.l}
+      {t(s.l)}
     </span>
   );
 }

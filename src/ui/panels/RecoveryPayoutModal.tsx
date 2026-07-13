@@ -15,6 +15,7 @@
 
 import { useState } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { DestinationPicker } from "../components/DestinationPicker.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
@@ -89,6 +90,7 @@ export function RecoveryPayoutModal({
   addOrTouchPayoutDestination,
   onClose,
 }: RecoveryPayoutModalProps) {
+  const { t } = useT();
   const maxPayoutSats = maxLightningPayoutSats(balanceMsats);
   const [manualPayoutSats, setManualPayoutSats] = useState<number | null>(null);
   const payoutSats = manualPayoutSats === null
@@ -99,7 +101,7 @@ export function RecoveryPayoutModal({
     : Math.max(0, Math.ceil((Math.max(0, balanceMsats) - payoutSats * 1000) / 1000));
   const feeReserveNote = reserveSats > 0 ? (
     <>
-      About <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+      {t("claim.feeReserveBefore")} <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.feeReserveAfter")}
     </>
   ) : null;
   const pickerSubtitle =
@@ -107,7 +109,7 @@ export function RecoveryPayoutModal({
       ? <>{subtitle}{feeReserveNote && <> {feeReserveNote}</>}</>
       : (
           <>
-            Send <BitcoinAmount sats={payoutSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> to your Lightning address
+            {t("claim.sendToAddressBefore")} <BitcoinAmount sats={payoutSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.sendToAddressAfter")}
             {feeReserveNote && <>. {feeReserveNote}</>}
           </>
         );
@@ -229,6 +231,7 @@ export function RecoveryPayoutModal({
 }
 
 function RunningPanel() {
+  const { t } = useT();
   return (
     <div style={{
       padding: "32px 16px", textAlign: "center",
@@ -240,7 +243,7 @@ function RunningPanel() {
         margin: "0 auto 12px",
       }} />
       <div style={{ fontSize: 11, fontWeight: 600, color: T.amber, fontFamily: T.mono, letterSpacing: 1 }}>
-        SENDING TO YOUR WALLET…
+        {t("claim.sendingToWalletCaps")}
       </div>
     </div>
   );
@@ -255,6 +258,7 @@ function TerminalPanel({
   retrySmallerSats: number;
   onClose: () => void;
 }) {
+  const { t } = useT();
   if (terminal.kind === "done") {
     return (
       <div style={{
@@ -264,10 +268,10 @@ function TerminalPanel({
       }}>
         <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
         <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
-          Recovered to your wallet
+          {t("claim.recoveredToWallet")}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
-          Closing…
+          {t("claim.closing")}
         </div>
       </div>
     );
@@ -285,13 +289,13 @@ function TerminalPanel({
         }}>
           <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
           <div style={{ fontSize: 12, fontWeight: 700, color: T.amber, fontFamily: T.sans, marginBottom: 4 }}>
-            Payout sent — confirming
+            {t("claim.titlePayoutSentConfirming")}
           </div>
           <div style={{
             fontSize: 10, color: T.muted, fontFamily: T.mono,
             whiteSpace: "pre-wrap", wordBreak: "break-word",
           }}>
-            {terminal.error ?? "Your payout was sent and is confirming. Don't retry — check your destination wallet."}
+            {terminal.error ?? t("claim.recoveryConfirmingBody")}
           </div>
         </div>
         <button
@@ -323,13 +327,13 @@ function TerminalPanel({
       }}>
         <div style={{ fontSize: 24, marginBottom: 8 }}>✕</div>
         <div style={{ fontSize: 12, fontWeight: 700, color: T.red, fontFamily: T.sans, marginBottom: 4 }}>
-          Recovery couldn't be sent
+          {t("claim.recoveryCouldntBeSent")}
         </div>
         <div style={{
           fontSize: 10, color: T.muted, fontFamily: T.mono,
           whiteSpace: "pre-wrap", wordBreak: "break-word",
         }}>
-          {terminal.error}{"\n\n"}Your sats are still in your Chama. Try again with a fresh invoice.
+          {terminal.error}{"\n\n"}{t("claim.recoverySatsStillSafe")}
         </div>
       </div>
       <button
@@ -341,7 +345,7 @@ function TerminalPanel({
           cursor: "pointer", marginBottom: 8,
         }}
       >
-        Try again
+        {t("claim.tryAgain")}
       </button>
       {canRetrySmaller && (
         <button
@@ -353,7 +357,7 @@ function TerminalPanel({
             cursor: "pointer", marginBottom: 8,
           }}
         >
-          Try <BitcoinAmount sats={retrySmallerSats} size={12} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
+          {t("claim.tryAmountBefore")} <BitcoinAmount sats={retrySmallerSats} size={12} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
         </button>
       )}
       <button
@@ -365,7 +369,7 @@ function TerminalPanel({
           cursor: "pointer",
         }}
       >
-        Close
+        {t("common.close")}
       </button>
     </div>
   );

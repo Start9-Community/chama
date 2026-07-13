@@ -123,15 +123,18 @@ export function applyThemeMode(mode: ThemeMode): void {
 //   mode "resolved" → outlined pill, no dot    (done)
 export type StatusMode = "active" | "working" | "resolved";
 
+// `l` holds an i18n KEY (card.badge*), resolved with t() where the Badge
+// renders it (Badge.tsx) — this module isn't a component so it can't call the
+// hook. `.c`/`.bg`/`.mode` are style-only and stay literal.
 export const STATUS = {
-  CREATED:   { c: T.teal,   bg: T.tealDim,   l: "Open",            mode: "working"  as StatusMode },
-  LOCKED:    { c: T.purple, bg: T.purpleDim, l: "Sats in escrow",  mode: "working"  as StatusMode },
-  APPROVED:  { c: T.accent, bg: T.accentDim, l: "Ready to claim",  mode: "active"   as StatusMode },
-  CLAIMED:   { c: T.amber,  bg: T.amberDim,  l: "Settling",        mode: "working"  as StatusMode },
-  CLAIM_FAILED: { c: T.red, bg: T.redDim, l: "Claim failed",        mode: "active"   as StatusMode },
-  COMPLETED: { c: T.green,  bg: T.greenDim,  l: "Done",            mode: "resolved" as StatusMode },
-  EXPIRED:   { c: T.red,    bg: T.redDim,    l: "Timed out",       mode: "active"   as StatusMode },
-  CANCELLED: { c: T.muted,  bg: T.surface,   l: "Cancelled",       mode: "resolved" as StatusMode },
+  CREATED:   { c: T.teal,   bg: T.tealDim,   l: "card.badgeOpen",        mode: "working"  as StatusMode },
+  LOCKED:    { c: T.purple, bg: T.purpleDim, l: "card.badgeInEscrow",    mode: "working"  as StatusMode },
+  APPROVED:  { c: T.accent, bg: T.accentDim, l: "card.badgeReadyClaim",  mode: "active"   as StatusMode },
+  CLAIMED:   { c: T.amber,  bg: T.amberDim,  l: "card.badgeSettling",    mode: "working"  as StatusMode },
+  CLAIM_FAILED: { c: T.red, bg: T.redDim, l: "card.badgeClaimFailed",     mode: "active"   as StatusMode },
+  COMPLETED: { c: T.green,  bg: T.greenDim,  l: "card.badgeDone",        mode: "resolved" as StatusMode },
+  EXPIRED:   { c: T.red,    bg: T.redDim,    l: "card.badgeTimedOut",    mode: "active"   as StatusMode },
+  CANCELLED: { c: T.muted,  bg: T.surface,   l: "card.badgeCancelled",   mode: "resolved" as StatusMode },
 } as Record<string, { c: string; bg: string; l: string; mode: StatusMode }>;
 
 // Brand-pack role colors (PHILOSOPHY.md §5.2, sacred — reserved for role
@@ -175,12 +178,15 @@ export const CAT_LABEL: Record<string, string> = {
 
 // Browse tab category filter pills. `id` matches state.category values
 // (or "all" as a cross-cutting filter).
+// `l` holds an i18n KEY (browse.*), resolved with t() at the render sites in
+// BrowseView (the filter chips + the section headers) — this module is not a
+// React component so it can't call the hook itself.
 export const BROWSE_CATS: { id: string; l: string; i: string }[] = [
-  { id: "all",          l: "All",          i: "" },
-  { id: "p2p-trade",    l: "Exchange",     i: "⚡" },
-  { id: "bill-pay",     l: "Com. Bill Pay", i: "🧾" },
-  { id: "marketplace",  l: "Market",       i: "🏪" },
-  { id: "lending",      l: "Lending",      i: "🤝" },
+  { id: "all",          l: "browse.catAll",      i: "" },
+  { id: "p2p-trade",    l: "browse.catExchange", i: "⚡" },
+  { id: "bill-pay",     l: "browse.catBillPay",  i: "🧾" },
+  { id: "marketplace",  l: "browse.catMarket",   i: "🏪" },
+  { id: "lending",      l: "browse.catLending",  i: "🤝" },
 ];
 
 export const fmtSats = (ms: number) => Math.floor(ms / 1000).toLocaleString();

@@ -129,12 +129,21 @@ Direct from ChapSmart (buy-sats pulls money from a phone via M-Pesa collection, 
   a privacy app — can't use it. Fine as an OPT-IN fallback (they have Lightning/NWC); just never present ChapSmart as the
   PRIMARY funding path.
 
-### ⚠⚠ THE CRITICAL GOTCHA — device fingerprint × the proxy collide (Jetty ↔ ChapSmart, resolve BEFORE launch)
-ChapSmart caps **2 accounts per device per day** using TWO fingerprints: **server-side** (IP + User-Agent hash) and
-**client-side** (browser `visitorId`). But **all Chama traffic flows through your single VPS proxy** — so the
-**server-side fingerprint is IDENTICAL for every Chama user** (the proxy's IP+UA). If ChapSmart keys the device limit on
-that, your **entire userbase shares one "device" → only 2 Chama accounts can be created per day, globally.** That kills
-the integration at scale. Resolution (BOTH required):
+### ✅ RESOLVED 2026-07-10 — device fingerprint × the proxy (ChapSmart CONFIRMED the fix)
+**ChapSmart agreed** to key the 2-accounts/device/day limit on the **client-side `visitorId` Chama sends**, NOT the
+server-side VPS IP+UA — so the proxy collision (whole userbase capped at 2/day) is off the table.
+⭐ **NEW constraint, same reply:** each client `visitorId` is **permanently bound to ONE phone number** — a device can
+only ever onboard one M-Pesa line (on top of the existing phone↔account permanence). Jetty will **clearly disclose the
+no-Tor/VPN restriction** on the M-Pesa onboarding path; the rest of Chama stays private ("everything else, freedom ⚡").
+⇒ The client `visitorId` is now **LOAD-BEARING**: it must be a *stable* per-device browser fingerprint (FingerprintJS or
+similar), NOT a per-session random, because BOTH the device cap and the one-phone binding key off it. A changed
+fingerprint (cleared storage / new browser / new device) reads as a new device — a fresh 2/day allowance but ALSO a new
+phone-binding slot, so a genuine device change may require re-binding a number. Generate it ONLY on the "Fund with
+M-Pesa" opt-in (never ambiently), disclosed as ChapSmart's anti-fraud.
+
+**Background (the now-resolved collision):** ChapSmart caps 2 accounts/device/day via a server-side (IP+UA) AND a
+client-side (`visitorId`) fingerprint. All Chama traffic shares the one VPS proxy → the server-side print is identical
+for everyone, so keying on it would cap the whole userbase at 2/day. The agreed fix (BOTH sides):
 1. **Chama sends a distinct client-side `visitorId` per user/device** — a lightweight browser fingerprint (FingerprintJS
    or similar), generated ONLY when the user opts into "Fund with M-Pesa" (never ambiently), disclosed as *ChapSmart's*
    anti-fraud (not Chama's). Forward it through the proxy → ChapSmart.
@@ -142,11 +151,16 @@ the integration at scale. Resolution (BOTH required):
    explicitly (same convo as the geo-IP whitelist + `X-Forwarded-For`): "every Chama request shares my VPS IP+UA, so your
    server-side device fingerprint is useless for me — enforce the device limit on the client visitorId I send, or you cap
    my whole userbase at 2/day."
-This is the ONE item that can silently break the integration; everything else is bounded error-handling.
+This *was* the one item that could silently break the integration at scale — now agreed with ChapSmart (2026-07-10).
+Everything else is bounded error-handling.
 
 ### Net (for CC / the build)
 Not a detour — a scoping tighten. ChapSmart stays exactly what it's best at: a **small-amount TZ fiat on-ramp for a
 fiat-only newbie's first trade** (bills, small marketplace, chip-in — all inside the 100k-TZS band). CC's built module
-needs: (a) the [1k, 100k] TZS trade-size bound on the option, (b) a client `visitorId` sent on account-create/quote,
-(c) friendly 429/409/410 copy for the daily/device/reuse limits, (d) the opt-in fingerprint disclosure. Stays flag-
-dormant (`CHAPSMART_ONRAMP_ENABLED=false`) until the key + proxy + the device-fingerprint agreement all land.
+needs: (a) the [1k, 100k] TZS trade-size bound on the option, (b) a **STABLE** client `visitorId` (a real browser
+fingerprint — FingerprintJS or similar, NOT a per-session random) sent on account-create/quote/send-sats, since
+ChapSmart's device cap AND the one-phone binding both key off it, (c) friendly 429/409/410 copy for the daily/device/
+reuse limits + a clear "this device is bound to one M-Pesa number" note, (d) the opt-in fingerprint disclosure + the
+no-Tor/VPN network-restriction notice on the M-Pesa path. The **device-fingerprint agreement is now DONE** (2026-07-10) —
+remaining blockers are just Jetty's infra: the API key (IP-scoped to the VPS, 1-yr expiry) + the proxy deploy. Stays
+flag-dormant (`CHAPSMART_ONRAMP_ENABLED=false`) until those two land.

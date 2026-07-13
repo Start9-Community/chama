@@ -41,6 +41,10 @@ export interface Rail {
   /** Placeholder hint for the input field — "+221 77 123 4567",
    *  "@username", "your.bank@email.com", etc. */
   placeholder?: string;
+  /** i18n key for a PROSE placeholder (not a phone-number example). When set,
+   *  the render sites show t(placeholderKey); `placeholder` stays for search
+   *  indexing + phone-rail detection. */
+  placeholderKey?: string;
 }
 
 /** v1 seed list. Bias toward mobile-first + honest: enumerate the rails
@@ -411,6 +415,7 @@ export const RAIL_REGISTRY: Rail[] = [
     allowPublicHandle: false,
     countries: ["MX"],
     placeholder: "CLABE / phone / bank alias",
+    placeholderKey: "claim.railPlaceholderSpei",
   },
   {
     key: "sinpe-movil",
@@ -492,6 +497,7 @@ export const RAIL_REGISTRY: Rail[] = [
     displayName: "Bank transfer",
     allowPublicHandle: false,
     placeholder: "Account number / IBAN",
+    placeholderKey: "claim.railPlaceholderBank",
   },
 ];
 

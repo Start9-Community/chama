@@ -1,4 +1,5 @@
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import {
   lightningPayoutReserveSats,
@@ -58,12 +59,13 @@ export function DestroyEcashConfirmModal({
    *  and-switch CTA hides and Cancel becomes the primary action. */
   hasPendingNativeLock?: boolean;
 }) {
+  const { t } = useT();
   const totalSats = Math.floor(Math.max(0, balanceMsats) / 1000);
   const recoverableSats = maxLightningPayoutSats(balanceMsats);
   const reserveSats = lightningPayoutReserveSats(balanceMsats);
   const recoveryLabel = recoverableSats > 0
     ? <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
-    : "your recoverable balance";
+    : t("recovery.recoverableBalanceFallback");
   return (
     <div style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
@@ -78,30 +80,27 @@ export function DestroyEcashConfirmModal({
           fontSize: 11, fontWeight: 700, color: T.amber, fontFamily: T.mono,
           letterSpacing: 1, marginBottom: 12,
         }}>
-          ⚠ FUNDS AT RISK
+          {t("recovery.fundsAtRiskTag")}
         </div>
         <div style={{
           fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55,
           marginBottom: 16,
         }}>
-          Switching to <strong>{targetLabel}</strong> will move you to a
-          different Chama. Your local wallet has{" "}
-          <strong>{totalSats > 0 ? <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> : "a balance"}</strong>{" "}
-          on this Chama; <strong>{recoveryLabel}</strong> can be recovered to
-          your Lightning wallet first.
+          {t("recovery.switchBody1")} <strong>{targetLabel}</strong> {t("recovery.switchBody2")}{" "}
+          <strong>{totalSats > 0 ? <BitcoinAmount sats={totalSats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> : t("recovery.aBalance")}</strong>{" "}
+          {t("recovery.switchBody3")} <strong>{recoveryLabel}</strong> {t("recovery.switchBody4")}
         </div>
         <div style={{
           fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5,
           marginBottom: 16,
         }}>
-          This guard is based on local wallet balance, not trade history.
+          {t("recovery.guardNote")}
           {reserveSats > 0 && (
             <>
-              {" "}About <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> are reserved for Lightning fees.
+              {" "}{t("recovery.reservedBefore")} <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("recovery.reservedAfter")}
             </>
           )}
-          {" "}Fedimint ecash is bearer cash — once your local Chama is wiped,
-          those sats cannot be recovered from this device.
+          {" "}{t("recovery.bearerWarning")}
         </div>
         {/* #37: while a lock attempt is mid-recovery on this Chama, the
             balance belongs to that trade — a Lightning drain would abandon
@@ -111,8 +110,7 @@ export function DestroyEcashConfirmModal({
             fontSize: 12, color: T.amber, fontFamily: T.sans, lineHeight: 1.5,
             marginBottom: 16,
           }}>
-            These sats belong to a trade you were locking on this Chama.
-            Finish that lock (or let recovery complete) before switching.
+            {t("recovery.pendingLockNote")}
           </div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -129,7 +127,7 @@ export function DestroyEcashConfirmModal({
                 cursor: "pointer", letterSpacing: 0.3,
               }}
             >
-              ⚡ Recover{recoverableSats > 0 ? <> <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /></> : ""} and switch →
+              {t("recovery.recoverSwitchBefore")}{recoverableSats > 0 ? <> <BitcoinAmount sats={recoverableSats} size={13} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" /></> : ""} {t("recovery.recoverSwitchAfter")}
             </button>
           )}
           {/* Secondary (primary when a pending lock owns the balance):
@@ -146,7 +144,7 @@ export function DestroyEcashConfirmModal({
               cursor: "pointer",
             }}
           >
-            Cancel — keep my Chama
+            {t("recovery.cancelKeepChama")}
           </button>
         </div>
       </div>

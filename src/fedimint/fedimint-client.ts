@@ -1186,6 +1186,33 @@ export class FedimintClient {
   }
 
   /**
+   * Generic OOB spend with an explicit try_cancel horizon (task #53 E1:
+   * arbiter-premium notes ride this with a 14-day horizon so an absent
+   * arbiter auto-refunds the payer). Serializes on the cross-tab mint
+   * lock like every other mint op; wallets without the detailed spend
+   * fall back to the plain spend (SDK-default horizon, no id).
+   */
+  async spendNotesWithHorizon(
+    totalMsats: number,
+    tryCancelAfterSecs: number,
+    meta?: ChamaOperationMeta,
+  ): Promise<{ oobNotes: string; operationId?: string }> {
+    const wallet = this.requireWallet();
+    return withMintLock("premium-spend", async () => {
+      if (wallet.mint.spendNotesDetailed) {
+        const detailed = await wallet.mint.spendNotesDetailed(
+          totalMsats,
+          { tryCancelAfterSecs },
+          meta,
+        );
+        return { oobNotes: detailed.notes, operationId: detailed.operationId };
+      }
+      const oobNotes = await wallet.mint.spendNotes(totalMsats, meta);
+      return { oobNotes };
+    });
+  }
+
+  /**
    * #37 lock crash-safety, half 2: hash + SSS-split already-spent notes
    * into the lock bundle. Pure w.r.t. the wallet (no spend, no mint lock).
    * Unlike `createEscrowLockFromNotes` (the Fedi path) this does NOT

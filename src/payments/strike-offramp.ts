@@ -3,17 +3,18 @@
 // ══════════════════════════════════════════════════════════════════════════
 //
 // A Strike username IS a LUD-16 Lightning Address: `<username>@strike.me`. With
-// the user's Strike "default receive currency" set to **Cash (USD)**, inbound
-// Lightning auto-converts to USD in their Strike balance (withdrawable to a US
-// bank by ACH). So the US off-ramp is "pay a fiat-converting Lightning Address"
-// — exactly the Tando pattern, lighter: there's no phone→MSISDN step, a Strike
-// address is already a valid destination. Chama just pays it via the existing
-// LUD-16 client path (`resolveLightningAddressToInvoice`, lnurl.ts) — NOT a
-// redirect, so it also dodges the Tauri `window.open` opener bug (#16).
+// the user's Strike receive currency set to Cash, passive inbound Lightning
+// arrives in their cash balance. So the US off-ramp is "pay a fiat-converting
+// Lightning Address" — exactly the Tando pattern, lighter: there's no phone→
+// MSISDN step, a Strike address is already a valid destination. Chama just pays
+// it via the existing LUD-16 client path (`resolveLightningAddressToInvoice`,
+// lnurl.ts) — NOT a redirect, so it also dodges the Tauri `window.open` opener
+// bug (#16).
 //
 // NO new custody and NO money-transmitter surface: Chama sends sats; the
-// conversion + rate + ACH all happen inside the user's OWN Strike account.
-// Chama can't set the receive currency for them, hence the one-time hint.
+// conversion + rate + bank withdrawal all happen inside the user's OWN Strike
+// account. Chama can't set the receive currency for them, hence the guided
+// confirmation in the claim picker.
 // Provider-agnostic by design — Cash App / Bitcoin Well are drop-in siblings
 // on the same seam (v1 ships Strike only).
 //
@@ -23,11 +24,25 @@
 /** Strike's live Lightning-Address host. */
 export const STRIKE_LNADDRESS_DOMAIN = "strike.me";
 
-/** One-time hint shown when a user saves a Strike destination. Chama cannot
- *  flip this setting for them — left on Bitcoin, they just receive sats. */
+/** Cash-receive guidance shown on the Strike claim picker. Chama cannot flip
+ *  this setting for them: if Strike is set to Bitcoin, the same payment lands
+ *  as bitcoin instead of cash. Steps match Strike's public Lightning Address
+ *  guide: Account screen → Bitcoin settings → Receive currency → Cash. */
 export const STRIKE_CASH_HINT =
-  "In Strike, set your default receive currency to Cash (USD) so incoming " +
-  "Lightning lands as dollars. Left on Bitcoin, you'll just receive sats.";
+  "Before sending, set passive Lightning receives in Strike to Cash.";
+
+/** Short step list for the claim-picker how-to. */
+export const STRIKE_CASH_STEPS: readonly string[] = [
+  "Open Strike and go to Account",
+  "Bitcoin settings → Receive currency",
+  "Choose Cash",
+];
+
+/** Strike's own caveat for tiny passive receives: they may still settle as
+ *  bitcoin. Chama's claims are usually far above this, but the wording keeps
+ *  the rail honest. */
+export const STRIKE_CASH_CAVEAT =
+  "If Strike is set to Bitcoin, this payment lands as bitcoin. Strike may also deliver payments below $0.01 as bitcoin.";
 
 /**
  * Normalize a user-typed Strike identity to a bare lowercase username, or null
@@ -37,21 +52,23 @@ export const STRIKE_CASH_HINT =
  *   - `username`                    (bare handle)
  *   - `@username`                   (leading @, as people often type it)
  *   - `username@strike.me`          (full Lightning Address)
- *   - `https://strike.me/username`  (profile URL — we extract the handle and
- *                                    resolve via LNURL, never load the page)
+ *   - `https://strike.me/username`  (profile/tipping URL — we extract the
+ *                                    handle and resolve via LNURL, never load
+ *                                    the page)
  *
- * Strike usernames are alphanumeric and may contain `.`, `_` or `-`; they must
- * start with an alphanumeric and be 2–30 chars. Case-insensitive (lowercased
- * so it dedupes cleanly in the payout-destinations store, which keys by
- * lowercased address).
+ * We intentionally keep client-side validation light: Strike is the authority
+ * on which usernames exist, and the LNURL resolve gives the final answer. We
+ * only require a safe LUD-16-ish local part (alphanumeric first char, then
+ * alphanumeric / dot / underscore / dash) so typos like whitespace, extra `@`,
+ * or a foreign host fail before the network call.
  */
 export function normalizeStrikeUsername(raw: string): string | null {
   if (typeof raw !== "string") return null;
   let s = raw.trim().toLowerCase();
   if (!s) return null;
 
-  // Profile URL → take the first path segment as the handle.
-  const urlMatch = s.match(/^https?:\/\/strike\.me\/([^/?#]+)/);
+  // Profile/tipping URL → take the first path segment as the handle.
+  const urlMatch = s.match(/^(?:https?:\/\/)?(?:www\.)?strike\.me\/([^/?#]+)/);
   if (urlMatch) s = urlMatch[1]!;
 
   // Leading-@ form (people type `@alice`) — strip it BEFORE host parsing so it
@@ -66,7 +83,7 @@ export function normalizeStrikeUsername(raw: string): string | null {
     s = local ?? "";
   }
 
-  if (!/^[a-z0-9][a-z0-9._-]{1,29}$/.test(s)) return null;
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(s)) return null;
   return s;
 }
 
@@ -88,10 +105,12 @@ export function buildStrikeLightningAddress(rawUsername: string): string | null 
 
 /** True iff a (saved) Lightning Address is a Strike address. */
 export function isStrikeLightningAddress(address: string): boolean {
-  return (
-    typeof address === "string" &&
-    address.trim().toLowerCase().endsWith(`@${STRIKE_LNADDRESS_DOMAIN}`)
-  );
+  if (typeof address !== "string") return false;
+  const trimmed = address.trim().toLowerCase();
+  const parts = trimmed.split("@");
+  if (parts.length !== 2) return false;
+  const [local, host] = parts;
+  return host === STRIKE_LNADDRESS_DOMAIN && normalizeStrikeUsername(local ?? "") === local;
 }
 
 /**
@@ -107,22 +126,30 @@ export function strikeUsernameFromAddress(address: string): string | null {
 
 /**
  * True when a claim/payout context is a US-dollar one, so the Strike USD
- * offramp should be offered. Matches the `us-` community family (GBF "USA ·
- * USD", us-usd shells) or a USD fiat currency. USD-currency contexts include
- * dollarized economies (e.g. Ecuador, El Salvador) where Strike also operates,
- * so they qualify too — Strike, not Chama, enforces its own availability.
- * Independent of EXTERNAL_SWAPS_ENABLED — Strike rides the always-available
- * Lightning-Address payout path (Tando precedent).
+ * offramp should be offered. Matches the US-leaning community family
+ * (`us-gbf` / `us-blf` / `us-*` shells + `global-usd`) or a USD fiat currency.
+ * USD-currency contexts include dollarized economies (e.g. Ecuador, El
+ * Salvador) where Strike also operates — Strike, not Chama, enforces its own
+ * availability. Independent of EXTERNAL_SWAPS_ENABLED — Strike rides the
+ * always-available Lightning-Address payout path (Tando precedent).
+ *
+ * TRADE context is authoritative (mirrors isKenyaPayoutContext): a US-home
+ * user cashing out a Kenya (KES) trade must NOT see Strike; home is only the
+ * fallback when the claim carries no community AND no currency tag.
  */
 export function isUSPayoutContext(input: {
   homeCommunity?: string | null;
   tradeCommunity?: string | null;
   fiatCurrency?: string | null;
 }): boolean {
-  const isUSSlug = (slug?: string | null): boolean =>
-    !!slug && slug.toLowerCase().startsWith("us-");
-  if (isUSSlug(input.tradeCommunity) || isUSSlug(input.homeCommunity)) {
-    return true;
+  const isUSSlug = (slug?: string | null): boolean => {
+    if (!slug) return false;
+    const s = slug.toLowerCase();
+    return s.startsWith("us-") || s === "global-usd";
+  };
+  const currency = (input.fiatCurrency ?? "").trim().toUpperCase();
+  if (input.tradeCommunity || currency) {
+    return isUSSlug(input.tradeCommunity) || currency === "USD";
   }
-  return (input.fiatCurrency ?? "").trim().toUpperCase() === "USD";
+  return isUSSlug(input.homeCommunity);
 }

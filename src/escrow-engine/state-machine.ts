@@ -38,6 +38,7 @@ import {
   type CompletePayload,
   type CancelPayload,
   type ChatPayload,
+  type PremiumPayload,
   type SubscribePayload,
   type PeriodReleasePayload,
   type ValidationError,
@@ -122,6 +123,7 @@ function cloneState(state: EscrowState): EscrowState {
     claim: { ...state.claim },
     eventChain: [...state.eventChain],
     chatMessages: [...state.chatMessages],
+    premiumNotes: state.premiumNotes ? [...state.premiumNotes] : undefined,
   };
 }
 
@@ -1398,6 +1400,35 @@ function handleChat(state: EscrowState, event: ParsedEscrowEvent<ChatPayload>): 
   return { ok: true, state: next };
 }
 
+// ── PREMIUM ───────────────────────────────────────────────────────────────
+// Arbiter-premium notes (task #53 E1) don't change state but ride the
+// trade's channel so the seated arbiter (a subscriber by construction)
+// receives them. Unlike CHAT this is ACCEPTED in terminal states —
+// premiums are paid at settlement, when the trade is already COMPLETED.
+
+function handlePremium(state: EscrowState, event: ParsedEscrowEvent<PremiumPayload>): TransitionResult {
+  // Self-dedup: PREMIUM never enters eventChain, so applyEvent's
+  // chain-based idempotency guard can't catch relay echoes of it.
+  const existing = state.premiumNotes ?? [];
+  if (existing.some(e => e.raw.id === event.raw.id)) {
+    return { ok: true, state };
+  }
+
+  // Only the trade principals pay premiums. Raw participants (not the
+  // effective-at-timestamp view): by settlement the seats are final, and
+  // join-hold expiry semantics don't apply post-terminal.
+  const buyer = state.participants[Role.BUYER];
+  const seller = state.participants[Role.SELLER];
+  if (event.pubkey !== buyer && event.pubkey !== seller) {
+    return err("NOT_PARTICIPANT", "Only trade principals can send an arbiter premium", event.raw.id);
+  }
+
+  const next = cloneState(state);
+  next.premiumNotes = [...existing, event];
+  // Don't add to eventChain — premium is non-consensus, like chat.
+  return { ok: true, state: next };
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // MAIN STATE MACHINE — applyEvent
 // ══════════════════════════════════════════════════════════════════════════
@@ -1427,6 +1458,16 @@ export function applyEvent(
   // ── All other events require existing state ──
   if (state === null) {
     return err("NO_STATE", "Non-CREATE event received but no escrow state exists", event.raw.id);
+  }
+
+  // ── PREMIUM bypasses terminal/expiry/chain checks entirely ──
+  // Premiums are paid AT settlement: COMPLETED is truly-terminal (rejected
+  // below) and the expiry auto-flip isn't COMPLETED-aware, so a premium
+  // routed through the normal gauntlet would either be dropped or flip a
+  // COMPLETED trade to EXPIRED. It is non-consensus (never touches
+  // eventChain or status) and self-dedups, so the early dispatch is safe.
+  if (event.kind === EscrowEventKind.PREMIUM) {
+    return handlePremium(state, event as ParsedEscrowEvent<PremiumPayload>);
   }
 
   // ── SECURITY: event-ID idempotency ──
@@ -1591,6 +1632,10 @@ export function replayEventChain(events: ParsedEscrowEvent[]): TransitionResult 
       // history unloadable from relays; keep rejecting it on live send/apply,
       // but skip it during full-chain replay.
       if (event.kind === EscrowEventKind.CHAT && result.error.code === "NOT_PARTICIPANT") {
+        continue;
+      }
+      // Same for PREMIUM — auxiliary, a bad one must never brick replay.
+      if (event.kind === EscrowEventKind.PREMIUM && result.error.code === "NOT_PARTICIPANT") {
         continue;
       }
       // Real error — fail the replay

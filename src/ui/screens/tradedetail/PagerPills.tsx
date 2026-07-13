@@ -10,6 +10,7 @@
 // scroll; this reflects `active` and reports taps via `onSelect`.
 
 import { T } from "../../theme.js";
+import { useT } from "../../../i18n/index.js";
 
 export function PagerPills({ tabs, active, onSelect, badges }: {
   tabs: string[];
@@ -20,6 +21,7 @@ export function PagerPills({ tabs, active, onSelect, badges }: {
    *  on the pill when its count > 0 (e.g. unread chat while you're on Details). */
   badges?: (number | null | undefined)[];
 }) {
+  const { t } = useT();
   const n = Math.max(1, tabs.length);
   const clamped = Math.min(Math.max(0, active), n - 1);
   return (
@@ -29,7 +31,7 @@ export function PagerPills({ tabs, active, onSelect, badges }: {
     }}>
       <button
         type="button"
-        aria-label="Previous pane"
+        aria-label={t("trade.prevPaneAria")}
         disabled={clamped === 0}
         onClick={() => onSelect(clamped - 1)}
         style={{
@@ -43,7 +45,7 @@ export function PagerPills({ tabs, active, onSelect, badges }: {
 
       <div
         role="tablist"
-        aria-label="Trade panes"
+        aria-label={t("trade.tradePanesAria")}
         style={{
           position: "relative",
           display: "grid", gridTemplateColumns: `repeat(${n}, 1fr)`,
@@ -86,7 +88,7 @@ export function PagerPills({ tabs, active, onSelect, badges }: {
             >
               {label}
               {badge > 0 && (
-                <span aria-label={`${badge} unread`} style={{
+                <span aria-label={t("trade.unreadAria", { count: badge })} style={{
                   position: "absolute", top: 0, right: 2,
                   minWidth: 14, height: 14, padding: "0 3px", boxSizing: "border-box",
                   borderRadius: 999, background: T.accent, color: "#fff",
@@ -103,7 +105,7 @@ export function PagerPills({ tabs, active, onSelect, badges }: {
 
       <button
         type="button"
-        aria-label="Next pane"
+        aria-label={t("trade.nextPaneAria")}
         disabled={clamped === n - 1}
         onClick={() => onSelect(clamped + 1)}
         style={{

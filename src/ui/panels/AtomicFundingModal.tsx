@@ -16,6 +16,7 @@
 
 import { useEffect, useRef, useState, lazy, Suspense } from "react";
 import { T, inputStyle } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { CopyButton } from "../components/CopyButton.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { isSimModeOn, setSimMode } from "../../sim/simMode.js";
@@ -38,11 +39,12 @@ import {
   lookupMpesaTransaction,
   sendBuySats,
   normalizeMpesaConfirmationCode,
-  chapsmartMpesaPaySteps,
   formatTzs,
   friendlyChapsmartError,
   ChapsmartApiError,
   CHAPSMART_MPESA_AGENT_NUMBER,
+  CHAPSMART_MPESA_AGENT_NAME,
+  CHAPSMART_MPESA_USSD,
   type ChapsmartBuyQuote,
 } from "../../payments/chapsmart-onramp.js";
 import type { OnchainInfo } from "../../fedimint/fedimint-client.js";
@@ -152,6 +154,7 @@ export function AtomicFundingModal({
   disableNwc = false,
   onClose,
 }: AtomicFundingModalProps) {
+  const { t } = useT();
   const amountSats = Math.floor(amountMsats / 1000);
   const [phase, setPhase] = useState<ModalPhase>({ kind: "choose-method" });
   const [fundingMethod, setFundingMethod] = useState<"lightning" | "onchain" | "nwc" | null>(null);
@@ -349,7 +352,7 @@ export function AtomicFundingModal({
 
     run().catch((e) => {
       // runFundAndLock catches its own errors; this is defensive.
-      setPhase({ kind: "lock-failed", error: (e as Error).message || "Unexpected error" });
+      setPhase({ kind: "lock-failed", error: (e as Error).message || t("fund.unexpectedError") });
     });
 
     return () => {
@@ -418,7 +421,7 @@ export function AtomicFundingModal({
       setPhase({ kind: "locked" });
       setTimeout(() => onClose({ kind: "locked" }), 1200);
     } catch (e: any) {
-      setPhase({ kind: "lock-failed", error: e?.message || "LOCK failed" });
+      setPhase({ kind: "lock-failed", error: e?.message || t("fund.lockFailedFallback") });
     } finally {
       setTryLockBusy(false);
     }
@@ -585,7 +588,7 @@ export function AtomicFundingModal({
               fontSize: 12, color: T.muted, fontFamily: T.mono,
               letterSpacing: 1,
             }}>
-              CANCELLED
+              {t("fund.cancelled")}
             </div>
           </div>
         )}
@@ -622,11 +625,12 @@ function FundingMethodChooser({
   onSelectNwc: (connectionString: string, remember: boolean) => void;
   disableNwc?: boolean;
 }) {
+  const { t } = useT();
   const onchainGate = (() => {
     if (onchainInfoState.kind === "loading") {
       return {
         disabled: true,
-        detail: "Checking federation onchain fee...",
+        detail: t("fund.checkingOnchainFee"),
         pegInFeeSats: undefined,
         depositAmountSats: undefined,
       };
@@ -634,7 +638,7 @@ function FundingMethodChooser({
     if (onchainInfoState.kind === "error") {
       return {
         disabled: true,
-        detail: "Onchain unavailable until federation fees load.",
+        detail: t("fund.onchainUnavailable"),
         pegInFeeSats: undefined,
         depositAmountSats: undefined,
       };
@@ -648,14 +652,14 @@ function FundingMethodChooser({
     if (amountSats < minimumDepositSats) {
       return {
         disabled: true,
-        detail: <>Minimum <BitcoinAmount sats={minimumDepositSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />. Use LN for this trade.</>,
+        detail: <>{t("fund.onchainMinBefore")} <BitcoinAmount sats={minimumDepositSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />{t("fund.onchainMinAfter")}</>,
         pegInFeeSats,
         depositAmountSats: undefined,
       };
     }
     return {
       disabled: false,
-      detail: <>Send <BitcoinAmount sats={amountSats + pegInFeeSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> total; wallet adds miner fee.</>,
+      detail: <>{t("fund.onchainSendBefore")} <BitcoinAmount sats={amountSats + pegInFeeSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("fund.onchainSendAfter")}</>,
       pegInFeeSats,
       depositAmountSats: amountSats + pegInFeeSats,
     };
@@ -673,14 +677,13 @@ function FundingMethodChooser({
             fontSize: 9, color: T.teal, fontFamily: T.mono,
             letterSpacing: 1, fontWeight: 900, marginBottom: 8,
           }}>
-            FEDI WALLET FUNDING
+            {t("fund.fediWalletFunding")}
           </div>
           <div style={{
             fontSize: 11, color: T.text, fontFamily: T.mono,
             lineHeight: 1.55,
           }}>
-            Chama asks Fedi for ecash and locks the trade directly. No
-            Lightning receive invoice or NWC wallet is used here.
+            {t("fund.fediEcashBody")}
           </div>
         </div>
 
@@ -690,7 +693,7 @@ function FundingMethodChooser({
           fontSize: 10, color: T.muted, fontFamily: T.mono,
           lineHeight: 1.45, textAlign: "center",
         }}>
-          Trade amount: <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />
+          {t("fund.tradeAmountBefore")} <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />
         </div>
 
         <button
@@ -703,7 +706,7 @@ function FundingMethodChooser({
             fontWeight: 900, letterSpacing: 0.5,
           }}
         >
-          Use Fedi wallet · <BitcoinAmount sats={amountSats} size={13} gap={4} glyphScale={1.18} color="#000" glyphColor="#000" />
+          {t("fund.useFediWalletBefore")} <BitcoinAmount sats={amountSats} size={13} gap={4} glyphScale={1.18} color="#000" glyphColor="#000" />
         </button>
       </div>
     );
@@ -715,8 +718,7 @@ function FundingMethodChooser({
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         lineHeight: 1.5, marginBottom: 12,
       }}>
-        Choose how the external wallet funds this trade. Chama locks the
-        credited ecash into SSS automatically after funding lands.
+        {t("fund.chooseMethodIntro")}
       </div>
 
       {/* The 2026-06-24 fiat-ramps pass removed the pre-LOCK external-swap
@@ -735,7 +737,7 @@ function FundingMethodChooser({
             fontSize: 9, color: T.accent, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 6, fontWeight: 800,
           }}>
-            ⚡ FASTEST · AUTO-PAY FROM SAVED NWC WALLET
+            {t("fund.fastestAutoPay")}
           </div>
           <div style={{ display: "grid", gap: 6 }}>
             {savedNwcConnections.map((connection) => (
@@ -761,7 +763,7 @@ function FundingMethodChooser({
                   color: T.accent, flexShrink: 0, fontSize: 9,
                   fontWeight: 800, letterSpacing: 1,
                 }}>
-                  AUTO-PAY →
+                  {t("fund.autoPayArrow")}
                 </span>
               </button>
             ))}
@@ -780,10 +782,10 @@ function FundingMethodChooser({
         >
           <div style={{ fontSize: 20, marginBottom: 8 }}>⚡</div>
           <div style={{ fontSize: 12, fontWeight: 800, color: T.accent, fontFamily: T.mono, marginBottom: 6 }}>
-            LN · FAST
+            {t("fund.lnFast")}
           </div>
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
-            Best for almost everyone. Usually settles in seconds.
+            {t("fund.bestForAlmostEveryone")}
           </div>
         </button>
         <button
@@ -800,7 +802,7 @@ function FundingMethodChooser({
         >
           <div style={{ fontSize: 20, marginBottom: 8 }}>₿</div>
           <div style={{ fontSize: 12, fontWeight: 800, color: T.amber, fontFamily: T.mono, marginBottom: 6 }}>
-            ONCHAIN · SLOW
+            {t("fund.onchainSlow")}
           </div>
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
             {onchainGate.detail}
@@ -810,7 +812,7 @@ function FundingMethodChooser({
               marginTop: 8, fontSize: 9, color: T.amber,
               fontFamily: T.mono, lineHeight: 1.35,
             }}>
-              Federation deposit fee: <BitcoinAmount sats={onchainGate.pegInFeeSats} size={9} gap={3} glyphScale={1.18} color={T.amber} glyphColor={T.amber} />
+              {t("fund.federationDepositFeeBefore")} <BitcoinAmount sats={onchainGate.pegInFeeSats} size={9} gap={3} glyphScale={1.18} color={T.amber} glyphColor={T.amber} />
             </div>
           )}
         </button>
@@ -821,7 +823,7 @@ function FundingMethodChooser({
         fontSize: 10, color: T.muted, fontFamily: T.mono,
         lineHeight: 1.45, textAlign: "center",
       }}>
-        Trade amount: <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />
+        {t("fund.tradeAmountBefore")} <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />
       </div>
 
       {!disableNwc && (
@@ -831,8 +833,8 @@ function FundingMethodChooser({
           cursor: "pointer", listStyle: "none",
         }}>
           {savedNwcConnections.length > 0
-            ? "Add another NWC wallet"
-            : "More options · NWC auto-pay"}
+            ? t("fund.addAnotherNwcWallet")
+            : t("fund.moreOptionsNwc")}
         </summary>
         <div style={{
           marginTop: 10, padding: 12, borderRadius: T.rs,
@@ -845,7 +847,7 @@ function FundingMethodChooser({
             fontSize: 9, color: T.muted, fontFamily: T.mono,
             letterSpacing: 1, marginBottom: 6,
           }}>
-            PASTE NWC CONNECTION
+            {t("fund.pasteNwcConnection")}
           </div>
           <textarea
             value={nwcInput}
@@ -864,7 +866,7 @@ function FundingMethodChooser({
               checked={rememberNwc}
               onChange={(e) => onRememberNwcChange(e.target.checked)}
             />
-            Remember this NWC wallet
+            {t("fund.rememberNwcWallet")}
           </label>
           <button
             disabled={!nwcReady}
@@ -878,7 +880,7 @@ function FundingMethodChooser({
               cursor: nwcReady ? "pointer" : "not-allowed",
             }}
           >
-            Auto-pay with NWC
+            {t("fund.autoPayWithNwc")}
           </button>
         </div>
       </details>
@@ -888,6 +890,7 @@ function FundingMethodChooser({
 }
 
 function CreatingOnchainAddress() {
+  const { t } = useT();
   return (
     <div style={{
       padding: "32px 16px", textAlign: "center",
@@ -907,7 +910,7 @@ function CreatingOnchainAddress() {
         fontSize: 12, fontWeight: 700, color: T.amber,
         fontFamily: T.mono, letterSpacing: 0,
       }}>
-        CREATING ONCHAIN ADDRESS…
+        {t("fund.creatingOnchainAddress")}
       </div>
     </div>
   );
@@ -938,6 +941,7 @@ function OnchainAddressDisplay({
   pegInFeeSats: number;
   finalityDelay: number;
 }) {
+  const { t } = useT();
   const [amountUnit, setAmountUnit] = useState<"btc" | "sats">("btc");
   const qrPayload = makeBitcoinUri(address, depositAmountSats);
   const totalPrimary = amountUnit === "btc"
@@ -952,7 +956,7 @@ function OnchainAddressDisplay({
         fontSize: 9, color: T.amber, fontFamily: T.mono,
         letterSpacing: 0, marginBottom: 8, textAlign: "center",
       }}>
-        ONCHAIN FUNDING · SLOW PATH
+        {t("fund.onchainSlowPath")}
       </div>
       <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
         <Suspense fallback={<div style={{ width: 280, height: 280, background: "#fff", borderRadius: T.rs }} />}>
@@ -962,7 +966,7 @@ function OnchainAddressDisplay({
             fgColor="#050505"
             bgColor="#ffffff"
             margin={4}
-            alt="Bitcoin onchain address QR code"
+            alt={t("fund.onchainQrAlt")}
           />
         </Suspense>
       </div>
@@ -978,7 +982,7 @@ function OnchainAddressDisplay({
             fontSize: 9, color: T.amber, fontFamily: T.mono,
             letterSpacing: 1, fontWeight: 800,
           }}>
-            QR INCLUDES FULL TOTAL
+            {t("fund.qrIncludesFullTotal")}
           </div>
           <div style={{
             display: "inline-flex", padding: 2, borderRadius: T.rs,
@@ -1030,7 +1034,7 @@ function OnchainAddressDisplay({
           animation: "pulse 1.4s ease-in-out infinite",
         }} />
         <span style={{ fontSize: 10, fontFamily: T.mono, color: T.amber, letterSpacing: 0 }}>
-          Waiting for {finalityDelay} confirmations before LOCK
+          {t("fund.waitingConfirmations", { count: finalityDelay })}
         </span>
       </div>
       <div style={{
@@ -1047,15 +1051,14 @@ function OnchainAddressDisplay({
         fontFamily: T.mono, fontSize: 10, color: T.amber,
         lineHeight: 1.45, textAlign: "center",
       }}>
-        Scan this QR or send <BitcoinAmount sats={depositAmountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> total:{" "}
-        <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> trade +{" "}
-        <BitcoinAmount sats={pegInFeeSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> federation deposit fee.
-        Your wallet shows and pays the Bitcoin miner fee separately.
+        {t("fund.onchainScanBefore")} <BitcoinAmount sats={depositAmountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> {t("fund.onchainScanMid1")}{" "}
+        <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> {t("fund.onchainScanMid2")}{" "}
+        <BitcoinAmount sats={pegInFeeSats} size={10} gap={4} glyphScale={1.18} color={T.amber} glyphColor={T.amber} /> {t("fund.onchainScanAfter")}
       </div>
       <CopyButton
         value={address}
-        label="Copy address"
-        copiedLabel="✓ Copied"
+        label={t("fund.copyAddress")}
+        copiedLabel={t("common.copied")}
         style={{
           width: "100%", padding: "10px 16px", borderRadius: T.rs,
           background: T.amberDim, border: `1px solid ${T.amber}55`,
@@ -1074,6 +1077,7 @@ function RequestingFediEcash({
   amountSats: number;
   onCancel: () => void;
 }) {
+  const { t } = useT();
   return (
     <div style={{
       padding: "24px 16px", textAlign: "center",
@@ -1092,14 +1096,13 @@ function RequestingFediEcash({
         fontSize: 12, fontWeight: 700, color: T.accent,
         fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
       }}>
-        REQUESTING FEDI ECASH…
+        {t("fund.requestingFediEcash")}
       </div>
       <div style={{
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         lineHeight: 1.5, marginBottom: 12,
       }}>
-        Approve <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> in Fedi. Chama will
-        lock the ecash notes directly, without a Lightning receive QR.
+        {t("fund.approveInFediBefore")} <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("fund.approveInFediAfter")}
       </div>
       <button
         onClick={onCancel}
@@ -1110,7 +1113,7 @@ function RequestingFediEcash({
           fontWeight: 700, cursor: "pointer", letterSpacing: 0.3,
         }}
       >
-        Cancel
+        {t("common.cancel")}
       </button>
     </div>
   );
@@ -1123,6 +1126,7 @@ function CreatingInvoice({
   slow: boolean;
   onCancel?: () => void;
 }) {
+  const { t } = useT();
   // v0.6.5: pre-this-fix the tiny 8x8 dot + 9px text was hard to spot
   // at all, and at the modal scale read as "empty modal." Bumped to a
   // visible spinner + larger label so users know we're actively
@@ -1151,7 +1155,7 @@ function CreatingInvoice({
         fontFamily: T.mono, letterSpacing: 1,
         marginBottom: slow ? 8 : 0,
       }}>
-        {slow ? "FEDERATION IS SLOW…" : "GENERATING INVOICE…"}
+        {slow ? t("fund.federationIsSlow") : t("fund.generatingInvoice")}
       </div>
       {slow && (
         <>
@@ -1159,8 +1163,7 @@ function CreatingInvoice({
             fontSize: 11, color: T.text, fontFamily: T.sans,
             lineHeight: 1.5, marginTop: 6, marginBottom: 12,
           }}>
-            Still trying to reach your federation's Lightning gateway.
-            We'll keep at it for a few more seconds.
+            {t("fund.federationSlowBody")}
           </div>
           {onCancel && (
             <button
@@ -1172,7 +1175,7 @@ function CreatingInvoice({
                 fontWeight: 700, cursor: "pointer", letterSpacing: 0.3,
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
           )}
         </>
@@ -1182,6 +1185,7 @@ function CreatingInvoice({
 }
 
 function PayingWithNwc({ amountSats }: { amountSats: number }) {
+  const { t } = useT();
   return (
     <div style={{
       padding: "32px 16px", textAlign: "center",
@@ -1199,14 +1203,13 @@ function PayingWithNwc({ amountSats }: { amountSats: number }) {
         fontSize: 12, fontWeight: 800, color: T.accent,
         fontFamily: T.mono, letterSpacing: 1, marginBottom: 8,
       }}>
-        REQUESTING NWC PAYMENT…
+        {t("fund.requestingNwcPayment")}
       </div>
       <div style={{
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         lineHeight: 1.5,
       }}>
-        Asking your wallet to pay <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />.
-        Your NWC budget and wallet approval rules still apply.
+        {t("fund.askingWalletBefore")} <BitcoinAmount sats={amountSats} size={10} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />{t("fund.askingWalletAfter")}
       </div>
     </div>
   );
@@ -1223,6 +1226,7 @@ function InvoiceDisplay({
    *  non-Exchange, enabled, not sim). Opens the pay-with-M-Pesa sub-flow. */
   onFundWithMpesa?: () => void;
 }) {
+  const { t } = useT();
   const remainingSec = Math.max(0, Math.floor((expiresAt - now) / 1000));
   const mins = Math.floor(remainingSec / 60);
   const secs = remainingSec % 60;
@@ -1235,7 +1239,7 @@ function InvoiceDisplay({
         fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1,
         marginBottom: 8, textAlign: "center",
       }}>
-        {isMintConfirming ? "PAYMENT DETECTED · CREDITING…" : "SCAN OR COPY TO PAY"}
+        {isMintConfirming ? t("fund.paymentDetected") : t("fund.scanOrCopyToPay")}
       </div>
       <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
         <Suspense fallback={<div style={{ width: 280, height: 280, background: "#fff", borderRadius: T.rs }} />}>
@@ -1245,7 +1249,7 @@ function InvoiceDisplay({
             fgColor="#050505"
             bgColor="#ffffff"
             margin={4}
-            alt="Lightning invoice QR code"
+            alt={t("fund.lightningQrAlt")}
           />
         </Suspense>
       </div>
@@ -1266,8 +1270,8 @@ function InvoiceDisplay({
           color: isMintConfirming ? T.amber : T.muted, letterSpacing: 0.5,
         }}>
           {isMintConfirming
-            ? "Confirming with the federation…"
-            : `Waiting for payment · ${mins}:${secs.toString().padStart(2, "0")}`}
+            ? t("fund.confirmingFederation")
+            : t("fund.waitingForPayment", { time: `${mins}:${secs.toString().padStart(2, "0")}` })}
         </span>
       </div>
       <div style={{
@@ -1289,14 +1293,14 @@ function InvoiceDisplay({
           fontFamily: T.mono, fontSize: 10, color: T.amber,
           lineHeight: 1.5, textAlign: "center",
         }}>
-          ▲ Sim mode — auto-credits in 3-8s.<br />
-          Do not fund this invoice with real sats.
+          {t("fund.simAutoCredit")}<br />
+          {t("fund.simDoNotFund")}
         </div>
       )}
       <CopyButton
         value={bolt11}
-        label="Copy invoice"
-        copiedLabel="✓ Copied"
+        label={t("fund.copyInvoice")}
+        copiedLabel={t("common.copied")}
         style={{
           width: "100%", padding: "10px 16px", borderRadius: T.rs,
           background: T.accentDim, border: `1px solid ${T.accent}44`,
@@ -1315,7 +1319,7 @@ function InvoiceDisplay({
             cursor: "pointer",
           }}
         >
-          🇹🇿 No sats? Fund with M-Pesa →
+          {t("fund.fundWithMpesa")}
         </button>
       )}
     </>
@@ -1346,6 +1350,7 @@ function ChapsmartMpesaPanel({
   now: number;
   onBack: () => void;
 }) {
+  const { t } = useT();
   const [state, setState] = useState<MpesaPanelState>({ kind: "quoting" });
   const [codeInput, setCodeInput] = useState("");
   const aliveRef = useRef(true);
@@ -1382,7 +1387,7 @@ function ChapsmartMpesaPanel({
     const quote = state.quote;
     const mpesaId = normalizeMpesaConfirmationCode(codeInput);
     if (!mpesaId) {
-      setState({ ...state, inlineError: "That doesn't look like an M-Pesa confirmation code — copy it from the SMS." });
+      setState({ ...state, inlineError: t("fund.mpesaCodeInvalid") });
       return;
     }
     setState({ ...state, busy: true, inlineError: null });
@@ -1395,14 +1400,14 @@ function ChapsmartMpesaPanel({
         if (!seen.found) {
           if (aliveRef.current) {
             setState({ ...state, busy: false, inlineError:
-              "ChapSmart hasn't seen that payment yet. Wait for the M-Pesa SMS, then check the code and try again." });
+              t("fund.mpesaNotSeen") });
           }
           return;
         }
         if (typeof seen.amount === "number" && Math.round(seen.amount) !== Math.round(quote.amountTZS)) {
           if (aliveRef.current) {
             setState({ ...state, busy: false, inlineError:
-              `That payment was TZS ${formatTzs(seen.amount)} but the quote needs exactly TZS ${formatTzs(quote.amountTZS)}.` });
+              t("fund.mpesaAmountMismatch", { paid: formatTzs(seen.amount), needed: formatTzs(quote.amountTZS) }) });
           }
           return;
         }
@@ -1425,7 +1430,7 @@ function ChapsmartMpesaPanel({
       <div style={{ padding: "24px 16px", textAlign: "center" }}>
         <div style={{ fontSize: 24, marginBottom: 10 }}>🇹🇿</div>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, letterSpacing: 0.5 }}>
-          Getting the M-Pesa price from ChapSmart…
+          {t("fund.gettingMpesaPrice")}
         </div>
       </div>
     );
@@ -1448,7 +1453,7 @@ function ChapsmartMpesaPanel({
             color: T.muted, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
             cursor: "pointer",
           }}>
-            ← Back to invoice
+            {t("fund.backToInvoice")}
           </button>
           <button onClick={() => void loadQuote()} style={{
             padding: "10px 16px", borderRadius: T.rs,
@@ -1456,7 +1461,7 @@ function ChapsmartMpesaPanel({
             color: T.teal, fontFamily: T.mono, fontSize: 11, fontWeight: 700,
             cursor: "pointer",
           }}>
-            {state.quoteExpired ? "Get new quote" : "Try again"}
+            {state.quoteExpired ? t("fund.getNewQuote") : t("fund.tryAgain")}
           </button>
         </div>
       </div>
@@ -1468,12 +1473,10 @@ function ChapsmartMpesaPanel({
       <div style={{ padding: "24px 16px", textAlign: "center" }}>
         <div style={{ fontSize: 28, marginBottom: 10 }}>⚡</div>
         <div style={{ fontSize: 13, fontWeight: 700, color: T.teal, fontFamily: T.sans, marginBottom: 6 }}>
-          ChapSmart is paying the invoice
+          {t("fund.chapsmartPaying")}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.55 }}>
-          Your M-Pesa payment was accepted. The sats arrive in your own
-          wallet and the trade locks automatically — this screen updates
-          the moment the payment lands.
+          {t("fund.chapsmartPayingBody")}
         </div>
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "center",
@@ -1485,7 +1488,7 @@ function ChapsmartMpesaPanel({
             background: T.teal, animation: "pulse 1.4s ease-in-out infinite",
           }} />
           <span style={{ fontSize: 10, fontFamily: T.mono, color: T.teal, letterSpacing: 0.5 }}>
-            Waiting for the payment…
+            {t("fund.stillWaitingPayment")}
           </span>
         </div>
       </div>
@@ -1494,7 +1497,32 @@ function ChapsmartMpesaPanel({
 
   // ready
   const { quote, busy, inlineError } = state;
-  const steps = chapsmartMpesaPaySteps(quote.amountTZS);
+  // i18n: the Kutoa-Pesa agent steps render Swahili + English side by side.
+  // The Sw keys are ALREADY localized content (they stay Swahili in every
+  // language); fr/es adapt only the En half. Mirrors chapsmartMpesaPaySteps
+  // (chapsmart-onramp.ts) — the exact TZS amount / agent number / USSD code
+  // arrive as {params} so translations can never drift from the real rail.
+  const tzsAmount = formatTzs(quote.amountTZS);
+  const steps: { sw: string; en: string }[] = [
+    {
+      sw: t("fund.mpesaStep1Sw", { ussd: CHAPSMART_MPESA_USSD }),
+      en: t("fund.mpesaStep1En", { ussd: CHAPSMART_MPESA_USSD }),
+    },
+    { sw: t("fund.mpesaStep2Sw"), en: t("fund.mpesaStep2En") },
+    {
+      sw: t("fund.mpesaStep3Sw", { agent: CHAPSMART_MPESA_AGENT_NUMBER }),
+      en: t("fund.mpesaStep3En", { agent: CHAPSMART_MPESA_AGENT_NUMBER }),
+    },
+    {
+      sw: t("fund.mpesaStep4Sw", { amount: tzsAmount }),
+      en: t("fund.mpesaStep4En", { amount: tzsAmount }),
+    },
+    {
+      sw: t("fund.mpesaStep5Sw", { name: CHAPSMART_MPESA_AGENT_NAME }),
+      en: t("fund.mpesaStep5En", { name: CHAPSMART_MPESA_AGENT_NAME }),
+    },
+    { sw: t("fund.mpesaStep6Sw"), en: t("fund.mpesaStep6En") },
+  ];
   return (
     <div>
       <div style={{
@@ -1502,13 +1530,13 @@ function ChapsmartMpesaPanel({
         background: T.tealDim, border: `1px solid ${T.teal}66`, textAlign: "center",
       }}>
         <div style={{ fontSize: 9, color: T.teal, fontFamily: T.mono, letterSpacing: 1, fontWeight: 900, marginBottom: 4 }}>
-          PAY EXACTLY
+          {t("fund.payExactly")}
         </div>
         <div style={{ fontSize: 20, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
           TZS {formatTzs(quote.amountTZS)}
         </div>
         <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 4 }}>
-          for <BitcoinAmount sats={amountSats} size={9} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> · a different amount will be rejected
+          {t("fund.quoteForBefore")} <BitcoinAmount sats={amountSats} size={9} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("fund.quoteForAfter")}
         </div>
       </div>
 
@@ -1529,8 +1557,8 @@ function ChapsmartMpesaPanel({
 
       <CopyButton
         value={CHAPSMART_MPESA_AGENT_NUMBER}
-        label={`Copy agent number · ${CHAPSMART_MPESA_AGENT_NUMBER}`}
-        copiedLabel="✓ Copied"
+        label={t("fund.copyAgentNumber", { agent: CHAPSMART_MPESA_AGENT_NUMBER })}
+        copiedLabel={t("common.copied")}
         style={{
           width: "100%", marginBottom: 10, padding: "8px 12px", borderRadius: T.rs,
           background: T.surface, border: `1px solid ${T.border}`,
@@ -1540,13 +1568,12 @@ function ChapsmartMpesaPanel({
       />
 
       <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 6, lineHeight: 1.5 }}>
-        After you confirm, M-Pesa sends an SMS with a confirmation code —
-        paste it here:
+        {t("fund.mpesaPasteCode")}
       </div>
       <input
         value={codeInput}
         onChange={(e) => setCodeInput(e.target.value)}
-        placeholder="e.g. XKR4MPT9QZN"
+        placeholder={t("fund.mpesaCodePlaceholder")}
         autoCapitalize="characters"
         autoCorrect="off"
         spellCheck={false}
@@ -1574,7 +1601,7 @@ function ChapsmartMpesaPanel({
           opacity: busy || !normalizeMpesaConfirmationCode(codeInput) ? 0.55 : 1,
         }}
       >
-        {busy ? "Verifying with ChapSmart…" : "I paid — send the sats"}
+        {busy ? t("fund.verifyingChapsmart") : t("fund.iPaidSendSats")}
       </button>
 
       <div style={{
@@ -1585,10 +1612,10 @@ function ChapsmartMpesaPanel({
           background: "none", border: "none", color: T.muted,
           fontFamily: T.mono, fontSize: 10, cursor: "pointer", padding: 0,
         }}>
-          ← Pay with Lightning instead
+          {t("fund.payWithLightningInstead")}
         </button>
         <span style={{ fontSize: 9, color: remainingSec < 300 ? T.amber : T.muted, fontFamily: T.mono }}>
-          invoice expires {mins}:{secs.toString().padStart(2, "0")}
+          {t("fund.invoiceExpiresIn", { time: `${mins}:${secs.toString().padStart(2, "0")}` })}
         </span>
       </div>
     </div>
@@ -1598,6 +1625,7 @@ function ChapsmartMpesaPanel({
 function MintConfirmingSlowState({
   amountSats, onCancel,
 }: { amountSats: number; onCancel: () => void }) {
+  const { t } = useT();
   // v0.5.1: the federation has acknowledged the inbound payment but
   // hasn't finished crediting our wallet within mintSlowWarnMs (60s by
   // default). We flip from the optimistic "crediting…" surface to this
@@ -1612,15 +1640,13 @@ function MintConfirmingSlowState({
       }}>
         <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>
         <div style={{ fontSize: 13, fontWeight: 700, color: T.amber, fontFamily: T.sans, marginBottom: 4 }}>
-          Federation is taking its time
+          {t("fund.federationTakingItsTime")}
         </div>
         <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, marginBottom: 6 }}>
-          +<BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> inbound
+          +<BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> {t("fund.inbound")}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, wordBreak: "break-word" }}>
-          Your payment was received. The federation's mint protocol can
-          take a few minutes to finish crediting on slow days. We'll
-          keep waiting and LOCK as soon as the credit lands.
+          {t("fund.mintConfirmingSlowBody")}
         </div>
       </div>
       <div style={{
@@ -1634,7 +1660,7 @@ function MintConfirmingSlowState({
           background: T.amber, animation: "pulse 1.4s ease-in-out infinite",
         }} />
         <span style={{ fontSize: 10, fontFamily: T.mono, color: T.amber, letterSpacing: 0.5 }}>
-          Still waiting for the mint to settle…
+          {t("fund.mintStillSettling")}
         </span>
       </div>
       <button
@@ -1646,7 +1672,7 @@ function MintConfirmingSlowState({
           cursor: "pointer",
         }}
       >
-        Cancel & recover later
+        {t("fund.cancelRecoverLater")}
       </button>
     </div>
   );
@@ -1655,6 +1681,7 @@ function MintConfirmingSlowState({
 function ReceiveRejectedState({
   amountSats, reason, onCancel,
 }: { amountSats: number; reason: string; onCancel: () => void }) {
+  const { t } = useT();
   return (
     <div>
       <div style={{
@@ -1664,15 +1691,13 @@ function ReceiveRejectedState({
       }}>
         <div style={{ fontSize: 28, marginBottom: 8 }}>✕</div>
         <div style={{ fontSize: 13, fontWeight: 700, color: T.red, fontFamily: T.sans, marginBottom: 4 }}>
-          Federation rejected the payment
+          {t("fund.federationRejectedPayment")}
         </div>
         <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, marginBottom: 6 }}>
-          <BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> not credited
+          <BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} /> {t("fund.notCredited")}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, wordBreak: "break-word" }}>
-          Gateway status is canceled:{reason}. Chama is checking briefly
-          for late wallet credit. If no recovery banner appears, check
-          the sending wallet for a failed or refunded payment.
+          {t("fund.gatewayCanceledBody", { reason })}
         </div>
       </div>
       <div style={{
@@ -1686,7 +1711,7 @@ function ReceiveRejectedState({
           background: T.red, animation: "pulse 1.4s ease-in-out infinite",
         }} />
         <span style={{ fontSize: 10, fontFamily: T.mono, color: T.red, letterSpacing: 0.5 }}>
-          Checking Chama balance before stopping…
+          {t("fund.checkingBalanceBeforeStopping")}
         </span>
       </div>
       <button
@@ -1698,13 +1723,14 @@ function ReceiveRejectedState({
           cursor: "pointer",
         }}
       >
-        Close and check later
+        {t("fund.closeAndCheckLater")}
       </button>
     </div>
   );
 }
 
 function PaymentConfirmed({ amountSats }: { amountSats: number }) {
+  const { t } = useT();
   return (
     <div style={{
       padding: "28px 16px", textAlign: "center",
@@ -1712,19 +1738,20 @@ function PaymentConfirmed({ amountSats }: { amountSats: number }) {
     }}>
       <div style={{ fontSize: 36, marginBottom: 8 }}>⚡</div>
       <div style={{ fontSize: 13, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 4 }}>
-        Payment received
+        {t("fund.paymentReceived")}
       </div>
       <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
         +<BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
       </div>
       <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 10, letterSpacing: 1 }}>
-        SEALING THE TRADE…
+        {t("fund.sealingTrade")}
       </div>
     </div>
   );
 }
 
 function Locking() {
+  const { t } = useT();
   return (
     <div style={{
       padding: "32px 16px", textAlign: "center",
@@ -1736,13 +1763,14 @@ function Locking() {
         margin: "0 auto 12px",
       }} />
       <div style={{ fontSize: 11, fontWeight: 600, color: T.purple, fontFamily: T.mono, letterSpacing: 1 }}>
-        SPLITTING SHARES · PUBLISHING LOCK
+        {t("fund.splittingShares")}
       </div>
     </div>
   );
 }
 
 function LockedSuccess({ amountSats }: { amountSats: number }) {
+  const { t } = useT();
   return (
     <div style={{
       padding: "32px 16px", textAlign: "center",
@@ -1751,13 +1779,13 @@ function LockedSuccess({ amountSats }: { amountSats: number }) {
     }}>
       <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
       <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
-        Locked in escrow
+        {t("fund.lockedInEscrow")}
       </div>
       <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
         <BitcoinAmount sats={amountSats} size={18} gap={5} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
       </div>
       <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
-        Trade is live · closing…
+        {t("fund.tradeLiveClosing")}
       </div>
     </div>
   );
@@ -1766,6 +1794,7 @@ function LockedSuccess({ amountSats }: { amountSats: number }) {
 function ExpiredState({
   onRegenerate, onCancel,
 }: { onRegenerate: () => void; onCancel: () => void }) {
+  const { t } = useT();
   return (
     <div>
       <div style={{
@@ -1775,10 +1804,10 @@ function ExpiredState({
       }}>
         <div style={{ fontSize: 28, marginBottom: 8 }}>⌛</div>
         <div style={{ fontSize: 12, fontWeight: 700, color: T.red, fontFamily: T.sans, marginBottom: 4 }}>
-          Invoice expired
+          {t("fund.invoiceExpired")}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-          No payment received in the time window. Generate a new one to retry.
+          {t("fund.expiredBody")}
         </div>
       </div>
       <button
@@ -1790,7 +1819,7 @@ function ExpiredState({
           cursor: "pointer", marginBottom: 8,
         }}
       >
-        ⚡ Generate new invoice
+        {t("fund.generateNewInvoice")}
       </button>
       <button
         onClick={onCancel}
@@ -1801,7 +1830,7 @@ function ExpiredState({
           cursor: "pointer",
         }}
       >
-        Cancel
+        {t("common.cancel")}
       </button>
     </div>
   );
@@ -1810,6 +1839,7 @@ function ExpiredState({
 function MintTimeoutState({
   busy, onTryLockNow, onCancel,
 }: { busy: boolean; onTryLockNow: () => void; onCancel: () => void }) {
+  const { t } = useT();
   return (
     <div>
       <div style={{
@@ -1819,10 +1849,10 @@ function MintTimeoutState({
       }}>
         <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>
         <div style={{ fontSize: 12, fontWeight: 700, color: T.amber, fontFamily: T.sans, marginBottom: 4 }}>
-          Mint is taking longer than expected
+          {t("fund.mintTakingLonger")}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-          Your payment landed, but the federation hasn't fully credited your wallet yet. You can try locking now or cancel and recover via the banner.
+          {t("fund.mintSlowBody")}
         </div>
       </div>
       <button
@@ -1836,7 +1866,7 @@ function MintTimeoutState({
           cursor: busy ? "not-allowed" : "pointer", marginBottom: 8,
         }}
       >
-        {busy ? "Locking…" : "Try LOCK now"}
+        {busy ? t("fund.locking") : t("fund.tryLockNow")}
       </button>
       <button
         onClick={onCancel}
@@ -1848,7 +1878,7 @@ function MintTimeoutState({
           cursor: busy ? "not-allowed" : "pointer",
         }}
       >
-        Cancel
+        {t("common.cancel")}
       </button>
     </div>
   );
@@ -1857,6 +1887,7 @@ function MintTimeoutState({
 function LockFailedState({
   error, onCancel,
 }: { error: string; onCancel: () => void }) {
+  const { t } = useT();
   const isNativeBridgeUnavailable =
     /native_fedimint_bridge_unavailable|Native Fedimint bridge is enabled but unreachable/i.test(error);
   const isWalletVerifiableGatewayError =
@@ -1866,16 +1897,16 @@ function LockFailedState({
   const diagnostics = extractChamaDiagnostics(error);
   const showSimFallback = isWalletVerifiableGatewayError && !isNativeBridgeUnavailable && !isSimModeOn();
   const title = isNativeBridgeUnavailable
-    ? "Native Fedimint unavailable"
+    ? t("fund.nativeBridgeUnavailableTitle")
     : isWalletVerifiableGatewayError
-    ? "Funding unavailable here"
+    ? t("fund.fundingUnavailableTitle")
     : isReceiveRejection
-      ? "Receive rejected"
-    : "Couldn't lock the trade";
+      ? t("fund.receiveRejectedTitle")
+    : t("fund.lockFailedTitle");
   const detail = isNativeBridgeUnavailable
-    ? "The Rust Fedimint bridge is enabled but not running or reachable. Start the local bridge and reconnect. Chama did not create an invoice, so no sats were requested."
+    ? t("fund.nativeBridgeUnavailableBody")
     : isWalletVerifiableGatewayError
-    ? "This is the browser Fedimint SDK route, not the Rust bridge. The SDK cannot verify a trusted receive gateway here, so Chama did not create an invoice and no sats were requested. Use nativeFedimint with the local bridge for BLF/GBF."
+    ? t("fund.sdkGatewayBody")
     : error;
 
   return (
@@ -1896,8 +1927,8 @@ function LockFailedState({
       {diagnostics && (
         <CopyButton
           value={diagnostics}
-          label="Copy Fedimint diagnostics"
-          copiedLabel="✓ Copied"
+          label={t("fund.copyDiagnostics")}
+          copiedLabel={t("common.copied")}
           style={{
             width: "100%", padding: "10px 16px", borderRadius: T.rs,
             background: T.redDim, border: `1px solid ${T.red}44`,
@@ -1909,8 +1940,8 @@ function LockFailedState({
       {!diagnostics && isReceiveRejection && (
         <CopyButton
           value={error}
-          label="Copy receive failure"
-          copiedLabel="✓ Copied"
+          label={t("fund.copyReceiveFailure")}
+          copiedLabel={t("common.copied")}
           style={{
             width: "100%", padding: "10px 16px", borderRadius: T.rs,
             background: T.redDim, border: `1px solid ${T.red}44`,
@@ -1929,7 +1960,7 @@ function LockFailedState({
             cursor: "pointer", marginBottom: 8,
           }}
         >
-          Open sim demo
+          {t("fund.openSimDemo")}
         </button>
       )}
       <button
@@ -1941,7 +1972,7 @@ function LockFailedState({
           cursor: "pointer",
         }}
       >
-        Close
+        {t("common.close")}
       </button>
     </div>
   );

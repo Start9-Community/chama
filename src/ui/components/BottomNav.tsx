@@ -1,5 +1,6 @@
 import { T } from "../theme.js";
 import { getSignInEnvironment, shouldApplyCssSafeAreaInsets } from "../sign-in-environment.js";
+import { useT } from "../../i18n/index.js";
 
 export type Tab = "browse" | "dashboard" | "me";
 
@@ -11,14 +12,15 @@ export function BottomNav({ active, onSelect }: {
   active: Tab;
   onSelect: (t: Tab) => void;
 }) {
+  const { t } = useT();
   const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(getSignInEnvironment());
   // v4.2.1: the middle tab is now the Dashboard home (standing / stats /
   // earnings / ratings / the bond land here — placeholder for now). Creating
   // a trade lives on the Browse pencil FAB; this tab is its own destination.
   const items: { id: Tab; label: string; icon: string }[] = [
-    { id: "browse",    label: "Browse",    icon: "🔍" },
-    { id: "dashboard", label: "Dashboard", icon: "📊" },
-    { id: "me",        label: "Me",        icon: "👤" },
+    { id: "browse",    label: t("browse.navBrowse"),    icon: "🔍" },
+    { id: "dashboard", label: t("browse.navDashboard"), icon: "📊" },
+    { id: "me",        label: t("browse.navMe"),        icon: "👤" },
   ];
   return (
     <div style={{

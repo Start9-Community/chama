@@ -17,7 +17,14 @@
 // bytes↔hex, never overwrite good data with nothing, phase-monotonic upsert).
 
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils.js";
-import { buildCommitmentBond, type CommitmentBond } from "./commitment-bond.js";
+import {
+  buildCommitmentBond,
+  deriveBondSigningKey,
+  validateBitcoinAddressForNetwork,
+  type CommitmentBond,
+  type CommitmentReclaimDestination,
+  type ReclaimDestinationKind,
+} from "./commitment-bond.js";
 import { SIGNET, type BtcNetwork, type BondUtxo } from "./multisig.js";
 import * as btc from "@scure/btc-signer";
 import {
@@ -55,6 +62,14 @@ export interface CommitmentRecord {
   utxos?: BondUtxo[];
   /** Set once reclaimed. */
   reclaimTxid?: string;
+  /** The user's selected reclaim destination and the actual transaction output. */
+  reclaimDestination?: CommitmentReclaimDestination;
+  /** Set when the reclaimed return output is sent into Chama/Fedimint. */
+  creditTxid?: string;
+  creditOperationId?: string;
+  /** Set once the Fedimint on-chain deposit (peg-in) has confirmed and the ecash
+   *  landed in the spendable Chama balance — the "credit landed" signal the UI shows. */
+  creditConfirmedAt?: number;
   createdAt: number;
 }
 
@@ -69,6 +84,15 @@ interface SerializedCommitment {
   keyIndex?: number;    // BIP86 address index (default 0 for legacy records)
   utxos?: { txid: string; index: number; amountSats: string }[];
   reclaimTxid?: string;
+  reclaimDestination?: {
+    requested: ReclaimDestinationKind;
+    actual: ReclaimDestinationKind;
+    address: string;
+    fallbackReason?: string;
+  };
+  creditTxid?: string;
+  creditOperationId?: string;
+  creditConfirmedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -90,6 +114,10 @@ export function serializeCommitment(rec: CommitmentRecord): SerializedCommitment
     ...(typeof rec.keyIndex === "number" ? { keyIndex: rec.keyIndex } : {}),
     ...(rec.utxos && rec.utxos.length ? { utxos: rec.utxos.map((u) => ({ txid: u.txid, index: u.index, amountSats: u.amountSats.toString() })) } : {}),
     ...(rec.reclaimTxid ? { reclaimTxid: rec.reclaimTxid } : {}),
+    ...(rec.reclaimDestination ? { reclaimDestination: rec.reclaimDestination } : {}),
+    ...(rec.creditTxid ? { creditTxid: rec.creditTxid } : {}),
+    ...(rec.creditConfirmedAt ? { creditConfirmedAt: rec.creditConfirmedAt } : {}),
+    ...(rec.creditOperationId ? { creditOperationId: rec.creditOperationId } : {}),
     createdAt: rec.createdAt,
     updatedAt: Date.now(),
   };
@@ -107,6 +135,20 @@ export function deserializeCommitment(s: SerializedCommitment): CommitmentRecord
     // address MUST reproduce, else reject (catches an address-only tamper).
     const bond = buildCommitmentBond(ownerXonly, s.lockUntil, network);
     if (bond.address !== s.address) return null;
+    let reclaimDestination: CommitmentReclaimDestination | undefined;
+    if (s.reclaimDestination) {
+      const { requested, actual, address, fallbackReason } = s.reclaimDestination;
+      const validKinds: ReclaimDestinationKind[] = ["chama", "external", "bond-key"];
+      if (!validKinds.includes(requested) || !validKinds.includes(actual)) return null;
+      const validAddress = validateBitcoinAddressForNetwork(address, network);
+      if (!validAddress.ok) return null;
+      reclaimDestination = {
+        requested,
+        actual,
+        address: validAddress.address,
+        ...(typeof fallbackReason === "string" && fallbackReason ? { fallbackReason } : {}),
+      };
+    }
     let utxos: BondUtxo[] | undefined;
     if (s.utxos && s.utxos.length) {
       for (const u of s.utxos) if (!/^\d+$/.test(u.amountSats)) return null;
@@ -120,6 +162,10 @@ export function deserializeCommitment(s: SerializedCommitment): CommitmentRecord
       keyIndex: typeof s.keyIndex === "number" ? s.keyIndex : 0, // legacy ⇒ 0
       ...(utxos ? { utxos } : {}),
       ...(s.reclaimTxid ? { reclaimTxid: s.reclaimTxid } : {}),
+      ...(reclaimDestination ? { reclaimDestination } : {}),
+      ...(s.creditTxid ? { creditTxid: s.creditTxid } : {}),
+      ...(s.creditOperationId ? { creditOperationId: s.creditOperationId } : {}),
+      ...(s.creditConfirmedAt ? { creditConfirmedAt: s.creditConfirmedAt } : {}),
       createdAt: s.createdAt,
     };
   } catch {
@@ -173,14 +219,85 @@ function writeRaw(map: StoreMap, opts: { allowEmptyOverwrite?: boolean } = {}): 
 
 // ── public API ───────────────────────────────────────────────────────────────
 export function listCommitmentBonds(): CommitmentRecord[] {
+  // Mainnet-only display: drop any stale cross-network record — e.g. a pre-v5.0
+  // signet/Mutinynet test bond persisted on a dev device. A mainnet Taproot bond
+  // address is bc1p…, a signet/testnet one is tb1p…, so this hides foreign-chain
+  // leftovers (without deleting them) so the Dashboard + ceremony only ever show
+  // live mainnet bonds. deserialize is left network-agnostic (tests round-trip signet).
   return Object.values(readRaw())
     .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
     .map(deserializeCommitment)
-    .filter((r): r is CommitmentRecord => r !== null);
+    .filter((r): r is CommitmentRecord => r !== null && r.bond.address.startsWith("bc1"));
 }
 export function getCommitmentBond(bondId: string): CommitmentRecord | null {
   const rec = readRaw()[bondId];
   return rec ? deserializeCommitment(rec) : null;
+}
+
+/** Cross-device recovery: rebuild a local bond RECORD from the user's own on-chain
+ *  announcement (kind 38135) + seed — so a bond posted on ONE device shows + reclaims
+ *  on ANOTHER with the same npub. Pure + adversarial: the announced address MUST
+ *  reproduce from (ownerXonly, lockUntil) on the ACTIVE network (a signet leftover
+ *  rebuilt under mainnet mismatches → rejected), and the seed MUST own that key within
+ *  `maxIndex` (else it isn't ours → not reclaimable → skip). The caller supplies the
+ *  on-chain UTXOs, which decide the phase. Returns null if it can't be safely rebuilt. */
+export function reconstructBondRecord(params: {
+  ownerXonlyHex: string;
+  lockUntil: number;
+  claimedSats: bigint;
+  announcedAddress: string;
+  seedWords: string;
+  network: BtcNetwork;
+  /** Confirmed UTXOs at the CLTV bond address (present ⇒ a live/locked bond). */
+  bondUtxos?: BondUtxo[];
+  /** Confirmed UTXOs at the bond-KEY address (present ⇒ reclaimed-not-yet-swept). */
+  bondKeyUtxos?: BondUtxo[];
+  createdAt?: number;
+  maxIndex?: number;
+}): CommitmentRecord | null {
+  const wantHex = params.ownerXonlyHex.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(wantHex)) return null;
+  if (!Number.isInteger(params.lockUntil) || params.lockUntil <= 0) return null;
+  const bond = buildCommitmentBond(hexToBytes(wantHex), params.lockUntil, params.network);
+  // recompute-don't-trust: the announced address must reproduce (this also rejects a
+  // cross-network leftover — a signet key rebuilt under mainnet yields a different addr).
+  if (bond.address !== params.announcedAddress) return null;
+  // Find the derivation index whose bond key equals the announced key (needed to reclaim).
+  let keyIndex = -1;
+  const max = Number.isInteger(params.maxIndex) ? Math.max(0, params.maxIndex as number) : 50;
+  for (let i = 0; i <= max; i++) {
+    if (bytesToHex(deriveBondSigningKey(params.seedWords, { network: params.network, index: i }).xonly) === wantHex) {
+      keyIndex = i;
+      break;
+    }
+  }
+  if (keyIndex < 0) return null;
+  const createdAt = params.createdAt ?? Math.floor(Date.now() / 1000);
+  // Funds at the CLTV bond address ⇒ a LIVE (locked) bond.
+  const bondU = (params.bondUtxos ?? []).filter((u) => u.amountSats > 0n);
+  if (bondU.length > 0) {
+    return {
+      bondId: newBondId(), bond, keyIndex, phase: "locked",
+      amountSats: bondU.reduce((s, u) => s + u.amountSats, 0n),
+      utxos: bondU, createdAt,
+    };
+  }
+  // Else funds at the bond-KEY address ⇒ a RECLAIMED-but-not-yet-swept bond. The tx
+  // that funded that address IS the reclaim, so its txid seeds `reclaimTxid`, and the
+  // record carries the bond-key reclaim destination so the "credit to Chama" sweep
+  // button surfaces + works (creditReclaimedCommitmentBond re-derives the key).
+  const keyU = (params.bondKeyUtxos ?? []).filter((u) => u.amountSats > 0n);
+  if (keyU.length > 0) {
+    const bondKeyAddress = btc.p2tr(hexToBytes(wantHex), undefined, params.network).address as string;
+    return {
+      bondId: newBondId(), bond, keyIndex, phase: "reclaimed",
+      amountSats: keyU.reduce((s, u) => s + u.amountSats, 0n),
+      reclaimTxid: keyU[0].txid,
+      reclaimDestination: { requested: "chama", actual: "bond-key", address: bondKeyAddress, fallbackReason: "Recovered from your on-chain announcement — reclaimed to the bond key; sweep to credit it into Chama." },
+      createdAt,
+    };
+  }
+  return null; // no funds at either address → nothing live to recover
 }
 /** Phase-monotonic upsert: never downgrade (created→locked→reclaimed only), and
  *  carry a funded UTXO forward if an equal-rank re-save omits it. */
@@ -189,7 +306,16 @@ export function upsertCommitmentBond(rec: CommitmentRecord): CommitmentRecord {
   const existing = map[rec.bondId] ? deserializeCommitment(map[rec.bondId]) : null;
   if (existing && PHASE_RANK[rec.phase] < PHASE_RANK[existing.phase]) return existing;
   const merged: CommitmentRecord = existing
-    ? { ...rec, keyIndex: rec.keyIndex ?? existing.keyIndex, utxos: rec.utxos ?? existing.utxos, reclaimTxid: rec.reclaimTxid ?? existing.reclaimTxid }
+    ? {
+        ...rec,
+        keyIndex: rec.keyIndex ?? existing.keyIndex,
+        utxos: rec.utxos ?? existing.utxos,
+        reclaimTxid: rec.reclaimTxid ?? existing.reclaimTxid,
+        reclaimDestination: rec.reclaimDestination ?? existing.reclaimDestination,
+        creditTxid: rec.creditTxid ?? existing.creditTxid,
+        creditOperationId: rec.creditOperationId ?? existing.creditOperationId,
+        creditConfirmedAt: rec.creditConfirmedAt ?? existing.creditConfirmedAt,
+      }
     : rec;
   map[rec.bondId] = serializeCommitment(merged);
   writeRaw(map);

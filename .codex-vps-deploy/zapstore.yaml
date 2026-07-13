@@ -1,0 +1,65 @@
+repository: https://github.com/jesuspirate/chama
+release_source: android/app/build/outputs/apk/release/app-release.apk
+pubkey: npub1ytm3v8mkup6mnc9z2zjy0zz2czdsfd3kal7hcup6jgu5a5lm885qhup3z6
+
+# Per-release short user-facing notes shown in the Zapstore app card.
+# `metadata_sources: - github` below pulls repo-level metadata
+# (description, README, icon paths) but NOT GitHub release bodies, so
+# Zapstore users would otherwise see "No release notes." for every
+# release. This file is gitignored and (re)written by the release flow
+# from --zapstore-notes-file; if none is provided, the script writes a
+# placeholder pointing readers at the full GitHub release notes for
+# the engineering audience.
+release_notes: ./zapstore/release-notes.md
+
+name: Chama
+summary: Trade Bitcoin peer-to-peer with escrow no one can freeze — non-custodial, serverless, no KYC.
+description: |
+  **Trade Bitcoin with anyone. Trust the math, not a middleman.**
+
+  A *chama* is an East African savings circle — neighbors who pool their money
+  and settle on trust. Chama gives that same circle to the whole world, except
+  here the trust is cryptographic. Buy and sell Bitcoin, goods, and services
+  peer-to-peer behind an escrow that no company can freeze, seize, or switch
+  off — because there is no company in the middle. No server. No "Chama Inc."
+  Just you, your counterparty, your community, and Nostr.
+
+  **Your money is never ours to lose.** Every trade is locked into a 2-of-3
+  escrow, split with Shamir Secret Sharing and held as Fedimint ecash. No
+  custodian ever touches the funds. When both sides are happy it settles over
+  Lightning in seconds. If a deal goes sideways, a community arbiter you already
+  trust — not a faceless support queue — helps release the funds to the right
+  side. Two of three keys always decide. Never one.
+
+  **No account. No email. No KYC.** Sign in with your Nostr key and you're in —
+  nothing to sign up for, nothing to be deplatformed from. Trades travel as
+  encrypted Nostr events (NIP-44) across many relays, so the marketplace itself
+  is as censorship-resistant as Nostr.
+
+  **Built for real-world commerce:**
+
+  - 2-of-3 escrow with community arbiters — disputes settled by people, not policies
+  - Lightning-fast settlement via client-side Fedimint ecash
+  - **Cash out to M-Pesa in one tap (Kenya)** — your sats become mobile-money shillings in seconds, no app or account for the recipient; more local rails rolling out
+  - Get paid your way — mobile money, bank transfer, and the local rails that matter where you live (Strike, Cash App, Zelle and more where they apply)
+  - Bring your own Lightning wallet over Nostr Wallet Connect (NWC)
+  - Join community "Chamas" — from Bitcoin Life to Global USD — each with its own arbiters and payment rails
+  - Runs in your browser, on Android, and on desktop — same keys everywhere
+
+  Bitcoin was meant to be peer-to-peer electronic cash. Chama is peer-to-peer
+  electronic *commerce* — sovereign, private, and woven from trust.
+
+  Bring your keys. Bring your circle.
+website: https://getchama.app
+icon: public/icons/chama-woven-trust-mark-transparent-512.png
+images:
+  - zapstore/screenshots/login-kenya.png
+  - zapstore/screenshots/market-east-africa.png
+  - zapstore/screenshots/trade-dashboard.png
+tags:
+  - bitcoin
+  - nostr
+  - fedimint
+  - escrow
+metadata_sources:
+  - github

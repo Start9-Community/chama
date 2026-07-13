@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 // v4.1 C1 "US-activation": a one-time, NymChat-style coach-mark tour shown once
 // after a user's first sign-in. It spotlights the home screen's reachable
@@ -29,8 +30,10 @@ export function markCoachSeen(): void {
 export type CoachStep = {
   /** CSS selector for the element to spotlight (data-coach="…"). */
   selector: string;
-  title: string;
-  body: string;
+  /** i18n dictionary keys — resolved with t() at render (the steps array is a
+   *  module-level constant in App.tsx and can't call hooks). */
+  titleKey: string;
+  bodyKey: string;
 };
 
 type Rect = { top: number; left: number; width: number; height: number };
@@ -47,6 +50,7 @@ export function CoachMarkTour({ steps, onDone }: {
   steps: CoachStep[];
   onDone: () => void;
 }) {
+  const { t } = useT();
   const [i, setI] = useState(0);
   const [rect, setRect] = useState<Rect | null>(null);
 
@@ -104,7 +108,7 @@ export function CoachMarkTour({ steps, onDone }: {
   return (
     <div
       role="dialog"
-      aria-label="Quick tour"
+      aria-label={t("app.coachQuickTour")}
       style={{ position: "fixed", inset: 0, zIndex: 9998 }}
     >
       {/* Spotlight: a transparent ring whose massive box-shadow dims everything
@@ -133,19 +137,19 @@ export function CoachMarkTour({ steps, onDone }: {
           fontFamily: T.mono, fontSize: 10, fontWeight: 800, letterSpacing: 0.8,
           color: T.accent, textTransform: "uppercase", marginBottom: 6,
         }}>
-          Step {i + 1} of {steps.length}
+          {t("app.coachStepOf", { step: i + 1, total: steps.length })}
         </div>
         <div style={{
           fontFamily: T.sans, fontSize: 16, fontWeight: 800, color: T.text,
           lineHeight: 1.2, marginBottom: 5,
         }}>
-          {step.title}
+          {t(step.titleKey)}
         </div>
         <div style={{
           fontFamily: T.sans, fontSize: 13, color: T.muted, lineHeight: 1.5,
           marginBottom: 14,
         }}>
-          {step.body}
+          {t(step.bodyKey)}
         </div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
           <button
@@ -156,7 +160,7 @@ export function CoachMarkTour({ steps, onDone }: {
               padding: "8px 4px",
             }}
           >
-            Skip
+            {t("app.coachSkip")}
           </button>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {i > 0 && (
@@ -169,7 +173,7 @@ export function CoachMarkTour({ steps, onDone }: {
                   cursor: "pointer",
                 }}
               >
-                Back
+                {t("common.back")}
               </button>
             )}
             <button
@@ -181,7 +185,7 @@ export function CoachMarkTour({ steps, onDone }: {
                 fontFamily: T.mono, fontSize: 11, fontWeight: 800, cursor: "pointer",
               }}
             >
-              {isLast ? "Done" : "Next"}
+              {isLast ? t("common.done") : t("app.coachNext")}
             </button>
           </div>
         </div>

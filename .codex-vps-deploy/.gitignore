@@ -1,0 +1,38 @@
+android/.idea/
+node_modules/
+dist/
+*.db
+*.db-journal
+.env
+.DS_Store
+.claude/
+
+# Vite transpiles vite.config.ts to a transient .mjs next to it while loading,
+# then deletes it. If `git add -A` races that delete it aborts with
+# "fatal: unable to stat '...timestamp-...mjs'". Ignore so add never sees them.
+vite.config.ts.timestamp-*.mjs
+*.timestamp-*.mjs
+
+native/fedimint-bridge/target/
+src-tauri/target/
+src-tauri/binaries/chama-fedimint-bridge-*
+
+# Per-release short notes shown in the Zapstore app card. Written by
+# scripts/android-release.sh from --zapstore-notes-file before zsp
+# publishes; treated as a build artifact, not source.
+/zapstore/release-notes.md
+
+# agent / build artifacts — not source
+outputs/
+
+# scratch dir (agent session) — not source
+tmp/
+
+# Mutinynet bond live-attack harness — signet test keys (never commit)
+scripts/.mutinynet-bond-keys.json
+
+# Mutinynet commitment-bond harness — signet test key (never commit)
+scripts/.mutinynet-commitment-keys.json
+
+# Mutinynet commitment-bond adversarial verifier — signet test key (never commit)
+scripts/.mutinynet-verify-keys.json

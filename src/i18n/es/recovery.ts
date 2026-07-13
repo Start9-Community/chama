@@ -1,0 +1,107 @@
+// es/recovery — Session C fills this from src/i18n/en/recovery.ts (key set must match EXACTLY).
+export const recovery: Record<string, string> = {
+  "recovery.aBalance": "un saldo",
+  "recovery.activeTradeMany": "{count} intercambios activos",
+  "recovery.activeTradeOne": "1 intercambio activo",
+  "recovery.barChooseChama": "Elige tu Chama",
+  "recovery.barExternalRoute": "Ruta externa",
+  "recovery.barInTradeAfter": "en custodia",
+  "recovery.barInTradeBefore": "⚡ {trades} ·",
+  "recovery.barReady": "Chama: listo",
+  "recovery.barReconnect": "Reconectar",
+  "recovery.barRecoverCta": "⚠ Recuperar",
+  "recovery.barUnreachableCta": "⚠ Chama inalcanzable · Reconectar →",
+  "recovery.barUnreachableTitle": "Chama inalcanzable — se rechazarán las recepciones",
+  "recovery.bearerWarning":
+    "El ecash de Fedimint es dinero al portador — una vez que borres tu Chama local, esos sats no se pueden recuperar desde este dispositivo.",
+  "recovery.cancelKeepChama": "Cancelar — conservar mi Chama",
+  "recovery.exportClearConfirm":
+    "¿Seguro? Chama olvidará esta nota — toca de nuevo solo si la guardaste",
+  "recovery.exportClearCta": "Ya la importé — borrar",
+  "recovery.exportCopyCta": "Copiar ecash",
+  "recovery.exportErrorTitle": "No se pudo generar la nota",
+  "recovery.exportGenerateCta": "Generar nota de ecash",
+  "recovery.exportGenerateError":
+    "No se pudo generar la nota de ecash. Tus sats están a salvo en tu Chama.",
+  "recovery.exportHeadline": "RETIRAR COMO ECASH · SIN COMISIONES LN",
+  "recovery.exportIntroAfter":
+    "— sin comisiones de Lightning. Perfecto para el polvo que cuesta más mover por Lightning de lo que vale.",
+  "recovery.exportIntroBefore":
+    "Convierte tu saldo en una nota de ecash de Fedimint que puedes importar a Fedi — o a cualquier billetera Fedimint en",
+  "recovery.exportKeepPending": "Déjala pendiente — la termino luego",
+  "recovery.exportMinting": "ACUÑANDO TU NOTA DE ECASH…",
+  "recovery.exportReadyBody":
+    "✓ Ecash de Fedimint · {federation}. Impórtala a Fedi o a cualquier billetera Fedimint en {federation}. Guárdala ahora — es dinero al portador.",
+  "recovery.exportWarnAfter":
+    "tus sats. En cuanto la generes, tu saldo sale de tu Chama y vive solo en esa cadena de texto. Guárdala antes de cerrar — Chama conserva una copia bajo «exportación de ecash pendiente» hasta que confirmes que la importaste. Solo funciona en {federation}, no en billeteras Cashu.",
+  "recovery.exportWarnBefore": "⚠ La nota",
+  "recovery.exportWarnIs": "es",
+  "recovery.finishLockCta": "Terminar bloqueo →",
+  "recovery.finishLockTag": "⏸ Termina de bloquear tu intercambio",
+  "recovery.finishPayoutCta": "Terminar pago →",
+  "recovery.finishPayoutTag": "⚡ Termina tu pago",
+  "recovery.finishing": "Terminando…",
+  "recovery.fundedTradeLabel": "INTERCAMBIO FINANCIADO",
+  "recovery.fundsAtRiskTag": "⚠ FONDOS EN RIESGO",
+  "recovery.fundsReturnedBody1": "Un intercambio que financiaste no se completó, así que tus",
+  "recovery.fundsReturnedBody2": "volvieron a tu billetera — a salvo y tuyos. Envía",
+  "recovery.fundsReturnedBody3": "a tu dirección Lightning",
+  "recovery.fundsReturnedBody4": ", o simplemente déjalos aquí.",
+  "recovery.fundsReturnedReserveAfter": "queda para comisiones)",
+  "recovery.fundsReturnedReserveBefore": "(alrededor de",
+  "recovery.fundsReturnedTag": "↩ Fondos devueltos",
+  "recovery.guardNote":
+    "Esta protección se basa en el saldo local de la billetera, no en el historial de intercambios.",
+  "recovery.headlineFundsReturned": "Tu financiamiento volvió a tu billetera",
+  "recovery.headlineLastTrade": "Tu último intercambio no terminó limpiamente",
+  "recovery.headlineLeftoverSats": "Tienes sats sobrantes de intercambios anteriores",
+  "recovery.headlineTradeWith": "Tu intercambio con {name} no terminó limpiamente",
+  "recovery.keepUsingFooter":
+    "Puedes seguir usando Chama. Recuperar solo saca de OPFS los sats sin explicación.",
+  "recovery.lockFooter":
+    "La recuperación es automática y sin comisiones — no se envía nada por Lightning.",
+  "recovery.lockIntentAfter": "pone tus sats en custodia.",
+  "recovery.lockIntentBefore":
+    "Estabas financiando este intercambio cuando se cerró la app. Retoma donde lo dejaste — bloquear",
+  "recovery.lockSpentAfter": "están a salvo — termina el bloqueo para ponerlos en custodia.",
+  "recovery.lockSpentBefore":
+    "Tu última sesión terminó antes de que se completara el bloqueo. Tus",
+  "recovery.openTrade": "Abrir intercambio",
+  "recovery.openTradeCta": "Abrir intercambio →",
+  "recovery.payoutConfirmingAfter":
+    "fue enviado y se está confirmando. Chama revisa automáticamente — no reclames de nuevo; observa tu billetera de destino.",
+  "recovery.payoutConfirmingBefore": "Tu pago de",
+  "recovery.payoutConfirmingTag": "⏳ Pago confirmando",
+  "recovery.payoutFinishAfter":
+    "están en tu billetera, pero el pago a tu dirección no terminó. Abre el intercambio para enviarlos a donde quieras.",
+  "recovery.payoutFinishBefore": "Ganaste este intercambio — tus",
+  "recovery.payoutFooter":
+    "Reintentar es seguro — Chama nunca paga el mismo intercambio dos veces.",
+  "recovery.pendingLockNote":
+    "Estos sats pertenecen a un intercambio que estabas bloqueando en este Chama. Termina ese bloqueo (o deja que la recuperación se complete) antes de cambiar.",
+  "recovery.recoverCta": "⚡ Recuperar",
+  "recovery.recoverSwitchAfter": "y cambiar →",
+  "recovery.recoverSwitchBefore": "⚡ Recuperar",
+  "recovery.recoverableBalanceFallback": "tu saldo recuperable",
+  "recovery.reservedAfter": "están reservados para comisiones de Lightning.",
+  "recovery.reservedBefore": "Alrededor de",
+  "recovery.roleArbiter": "Árbitro",
+  "recovery.roleBuyer": "Comprador",
+  "recovery.roleSeller": "Vendedor",
+  "recovery.satsLandFooter":
+    "Los sats llegan a tu dirección Lightning · Chama mantiene vacía tu billetera local",
+  "recovery.strandedBody1": "siguen en tu Chama local.",
+  "recovery.strandedBody2": "se pueden enviar a tu dirección Lightning ahora",
+  "recovery.strandedReserveAfter": "guardados para comisiones de Lightning",
+  "recovery.strandedReserveBefore": ", con alrededor de",
+  "recovery.switchBody1": "Cambiar a",
+  "recovery.switchBody2": "te moverá a un Chama diferente. Tu billetera local tiene",
+  "recovery.switchBody3": "en este Chama;",
+  "recovery.switchBody4": "se pueden recuperar a tu billetera Lightning primero.",
+  "recovery.tradeLabel": "INTERCAMBIO",
+  "recovery.tradeNeedsAttention": "⚠ El intercambio necesita atención",
+  "recovery.tryAgain": "Inténtalo de nuevo",
+  "recovery.unknownCounterparty": "una contraparte desconocida",
+  "recovery.youFunded": "Financiaste",
+  "recovery.yourRole": "Tu rol:",
+};

@@ -23,6 +23,7 @@ import {
   type EscrowState, type ChatPayload, type ParsedEscrowEvent,
 } from "../escrow-engine/types.js";
 import { payoutRecipientFor } from "../escrow-engine/recipients.js";
+import { translate, getCurrentLang } from "../i18n/index.js";
 
 export interface TradeNotification {
   escrowId: string;
@@ -80,8 +81,8 @@ export function notificationForTransition(
     if (nonLocker && samePubkey(nonLocker.pubkey, userPubkey)) {
       return {
         escrowId: id,
-        title: "⚡ Sats locked in escrow",
-        body: `Trade ${label} is live — the other side funded it. Your move.`,
+        title: translate(getCurrentLang(), "notify.lockedTitle"),
+        body: translate(getCurrentLang(), "notify.lockedBody", { label }),
         tag: `${id}:locked`,
       };
     }
@@ -93,8 +94,8 @@ export function notificationForTransition(
     if (winner && samePubkey(winner.pubkey, userPubkey)) {
       return {
         escrowId: id,
-        title: "✅ Your claim is ready",
-        body: `Trade ${label} resolved in your favor — open Chama to claim your sats.`,
+        title: translate(getCurrentLang(), "notify.approvedTitle"),
+        body: translate(getCurrentLang(), "notify.approvedBody", { label }),
         tag: `${id}:approved`,
       };
     }
@@ -107,8 +108,8 @@ export function notificationForTransition(
       && next.status === EscrowStatus.LOCKED) {
     return {
       escrowId: id,
-      title: "⚖️ A trade needs your ruling",
-      body: `Buyer and seller disagree on trade ${label}. They're waiting on you — review and vote.`,
+      title: translate(getCurrentLang(), "notify.disputeTitle"),
+      body: translate(getCurrentLang(), "notify.disputeBody", { label }),
       tag: `${id}:dispute`,
     };
   }
@@ -118,8 +119,8 @@ export function notificationForTransition(
       && (role === Role.BUYER || role === Role.SELLER)) {
     return {
       escrowId: id,
-      title: "🎉 Trade complete",
-      body: `Trade ${label} settled — the sats have moved.`,
+      title: translate(getCurrentLang(), "notify.completedTitle"),
+      body: translate(getCurrentLang(), "notify.completedBody", { label }),
       tag: `${id}:completed`,
     };
   }
@@ -129,8 +130,8 @@ export function notificationForTransition(
       && (role === Role.BUYER || role === Role.SELLER)) {
     return {
       escrowId: id,
-      title: "⏰ Trade timed out",
-      body: `Trade ${label} reached its deadline. Open Chama to see where it landed.`,
+      title: translate(getCurrentLang(), "notify.expiredTitle"),
+      body: translate(getCurrentLang(), "notify.expiredBody", { label }),
       tag: `${id}:expired`,
     };
   }
@@ -194,13 +195,16 @@ export function chatNotificationFor(
   const label = shortId(id);
   const senderRole = participantRoleAt(state, message.pubkey, message.timestamp)
     ?? message.payload.senderRole;
-  const who = senderRole ? `The ${senderRole}` : "Someone";
+  const lang = getCurrentLang();
+  const who = senderRole
+    ? translate(lang, "notify.chatSenderRole", { role: senderRole })
+    : translate(lang, "notify.chatSomeone");
   return {
     escrowId: id,
-    title: "💬 New message",
+    title: translate(lang, "notify.chatTitle"),
     // Content stays OUT of the OS buzz — escrow chat can carry payment handles;
     // the notification says who + which trade, the tap opens it to read.
-    body: `${who} messaged you on trade ${label}.`,
+    body: translate(lang, "notify.chatBody", { who, label }),
     tag: `${id}:chat:${message.raw.id}`,
   };
 }

@@ -3,6 +3,8 @@ import { T } from "../theme.js";
 import { BrandHeader } from "../components/BrandHeader.js";
 import { GlobeHero } from "../components/GlobeHero.js";
 import { LivenessSignal } from "../components/LivenessSignal.js";
+import { LanguagePills } from "../components/LanguagePills.js";
+import { useT } from "../../i18n/index.js";
 import type { ChamaLiveness } from "../../arbiters/live-chama.js";
 import {
   getAllPickerCountries,
@@ -34,6 +36,9 @@ import {
 // The arbiter / "run your country's Chama" on-ramp moved OUT of onboarding to
 // the blue Listings FAB (ArbiterApplyForm) — a leader pitch belongs where a
 // self-selecting leader looks, not in every newcomer's first 10 seconds.
+//
+// i18n (Session A): language pills live HERE — language pairs naturally with
+// picking a country, and this is the first screen a fresh npub meets.
 
 // Derive the user's OWN country from the device locale (privacy-clean: no
 // geo-IP, no network call — just navigator.language(s)'s region subtag). We
@@ -75,6 +80,7 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
   /** Blocks/day for the liveness "~D-day" term readout (signet ~2880, mainnet ~144). */
   livenessBlocksPerDay?: number;
 }) {
+  const { t } = useT();
   const countries = useMemo(() => getAllPickerCountries(), []);
   // The user's own country, featured at the top (locale-derived, privacy-clean).
   // No hardcoded "Live" tier any more — liveness is EARNED from bonds (the
@@ -204,7 +210,7 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
     return (
       <>
         <BrandHeader />
-        <BackButton label="All countries" onClick={backToList} />
+        <BackButton label={t("picker.allCountries")} onClick={backToList} />
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, width: "100%", maxWidth: 380 }}>
           <span style={{ fontSize: 34, lineHeight: 1 }}>{selected.flag}</span>
           <div style={{ textAlign: "left" }}>
@@ -213,10 +219,10 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
             </div>
             <div style={{ fontSize: 11, color: multi ? T.muted : T.green, fontFamily: T.mono, marginTop: 2 }}>
               {multi
-                ? "Choose your Chama"
+                ? t("picker.chooseYourChama")
                 : comingSoon
-                  ? `${selected.currency} · coming soon`
-                  : `${selected.currency} · available now`}
+                  ? t("picker.subComingSoon", { currency: selected.currency })
+                  : t("picker.subAvailableNow", { currency: selected.currency })}
             </div>
           </div>
         </div>
@@ -246,7 +252,9 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: T.mono, color: T.muted, fontSize: 10, marginTop: 3 }}>
                     <CheckDot />
-                    {c.currency} · {real ? "local Chama" : "available now"}
+                    {real
+                      ? t("picker.subLocalChama", { currency: c.currency })
+                      : t("picker.subAvailableNow", { currency: c.currency })}
                   </span>
                 </span>
                 <span style={{ fontFamily: T.mono, color: T.accent, fontSize: 16, lineHeight: 1 }}>→</span>
@@ -274,25 +282,23 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
               textAlign: "left",
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, fontFamily: T.mono, fontWeight: 800, fontSize: 11, letterSpacing: 0.5, color: T.green }}>
-                {comingSoon ? "○ Coming soon" : "✓ Available now"}
+                {comingSoon ? t("picker.comingSoonBadge") : t("picker.availableNowBadge")}
               </div>
               {comingSoon ? (
                 <>
-                  A local Chama in {selected.name} is coming. You can start
-                  trading today as{" "}
+                  {t("picker.comingSoonBodyBefore", { name: selected.name })}{" "}
                   <span style={{ fontWeight: 700 }}>
                     {selected.flag} {selected.name} · {selected.currency}
                   </span>{" "}
-                  on Chama's global federation, backed by the cabinet's arbiters.
+                  {t("picker.comingSoonBodyAfter")}
                 </>
               ) : (
                 <>
-                  Trade {selected.name}'s sats now as{" "}
+                  {t("picker.availableBodyBefore", { name: selected.name })}{" "}
                   <span style={{ fontWeight: 700 }}>
                     {selected.flag} {selected.name} · {selected.currency}
                   </span>{" "}
-                  — backed by Chama's global arbiters. Your own local Chama is
-                  coming; switch to it the moment it launches.
+                  {t("picker.availableBodyAfter")}
                 </>
               )}
             </div>
@@ -304,7 +310,7 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
                 fontFamily: T.sans, fontSize: 14, fontWeight: 800, cursor: "pointer",
               }}
             >
-              Continue as {selected.flag} {selected.name} · {selected.currency} →
+              {t("picker.continueAs", { flag: selected.flag, name: selected.name, currency: selected.currency })}
             </button>
           </div>
         )}
@@ -316,12 +322,16 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
   return (
     <>
       <BrandHeader />
+      {/* Language pills — the first screen a fresh npub meets, and the natural
+          moment: language pairs with picking where home is. */}
+      <div style={{ marginBottom: 14 }}>
+        <LanguagePills />
+      </div>
       <div style={{ fontSize: 28, lineHeight: 1.1, color: T.text, fontFamily: T.sans, fontWeight: 900, marginBottom: 8 }}>
-        Where's home?
+        {t("picker.whereHome")}
       </div>
       <div style={{ maxWidth: 340, color: T.muted, fontFamily: T.sans, fontSize: 14, lineHeight: 1.6, marginBottom: 16 }}>
-        Find your country — your currency and local payment methods come with
-        it. You can change it anytime.
+        {t("picker.findCountry")}
       </div>
 
       <div style={{ marginBottom: 18 }}>
@@ -332,11 +342,11 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search 190+ countries…"
+          placeholder={t("picker.searchPlaceholder")}
           autoComplete="off"
           autoCapitalize="off"
           spellCheck={false}
-          aria-label="Search countries"
+          aria-label={t("picker.searchAria")}
           style={{
             width: "100%", boxSizing: "border-box", padding: "12px 14px",
             borderRadius: T.r, border: `1px solid ${T.border}`,
@@ -348,7 +358,11 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
 
       {q ? (
         <>
-          <SectionLabel>{`${results.length} ${results.length === 1 ? "match" : "matches"}`}</SectionLabel>
+          <SectionLabel>
+            {results.length === 1
+              ? t("picker.matchOne")
+              : t("picker.matchMany", { count: results.length })}
+          </SectionLabel>
           <div style={{ display: "grid", gap: 8, width: "100%", maxWidth: 380 }}>
             {results.map((c) => (
               <CountryRow key={c.code} country={c} bonded={bondedForCountry(c)} onTap={() => openCountry(c)} />
@@ -359,7 +373,7 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
                 border: `1px dashed ${T.border}`, color: T.muted,
                 fontFamily: T.sans, fontSize: 13, textAlign: "center",
               }}>
-                No country matches “{query}”. Check the spelling and try again.
+                {t("picker.noMatch", { query })}
               </div>
             )}
           </div>
@@ -369,14 +383,14 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
           {homeCountry && (
             <>
               <SectionLabel accent>
-                <CheckDot /> Your country
+                <CheckDot /> {t("picker.yourCountry")}
               </SectionLabel>
               <div style={{ display: "grid", gap: 8, width: "100%", maxWidth: 380, marginBottom: 18 }}>
                 <CountryRow country={homeCountry} bonded={bondedForCountry(homeCountry)} onTap={() => openCountry(homeCountry)} />
               </div>
             </>
           )}
-          <SectionLabel>Every country</SectionLabel>
+          <SectionLabel>{t("picker.everyCountry")}</SectionLabel>
           <div style={{ display: "grid", gap: 8, width: "100%", maxWidth: 380 }}>
             {restCountries.map((c) => (
               <CountryRow key={c.code} country={c} bonded={bondedForCountry(c)} onTap={() => openCountry(c)} />
@@ -389,6 +403,7 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
 }
 
 function CountryRow({ country, bonded = 0, onTap }: { country: PickerCountry; bonded?: number; onTap: () => void }) {
+  const { t } = useT();
   const tier = country.availability;
   // No "Live" tier: a covered country reads green ("you can trade here"), only a
   // genuinely-uncovered "comingSoon" recedes — never red. Liveness (bonded
@@ -396,10 +411,10 @@ function CountryRow({ country, bonded = 0, onTap }: { country: PickerCountry; bo
   const green = tier !== "comingSoon";
   const subtitle =
     country.realChamas.length > 1
-      ? `${country.currency} · ${country.realChamas.length} Chamas`
+      ? t("picker.subChamas", { currency: country.currency, count: country.realChamas.length })
       : green
-        ? `${country.currency} · available now`
-        : `${country.currency} · coming soon`;
+        ? t("picker.subAvailableNow", { currency: country.currency })
+        : t("picker.subComingSoon", { currency: country.currency });
   return (
     <button
       onClick={onTap}
@@ -428,7 +443,7 @@ function CountryRow({ country, bonded = 0, onTap }: { country: PickerCountry; bo
                 sats back real arbiters here; its absence changes nothing. */}
             {bonded > 0 && (
               <span style={{ color: T.green, fontWeight: 800, whiteSpace: "nowrap" }}>
-                · 🛡 {bonded} bonded
+                {t("picker.bondedNote", { count: bonded })}
               </span>
             )}
           </span>

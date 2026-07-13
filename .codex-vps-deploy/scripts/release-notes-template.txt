@@ -1,0 +1,33 @@
+Chama release-notes template
+============================
+See scripts/ship.sh and the README "Releasing with npm run ship" section.
+
+For each release, save TWO files in $CHAMA_COMMIT_DIR (default /tmp), named for
+the TARGET version (the version you're about to ship, i.e. after the bump):
+
+  /tmp/chama-v<VERSION>_release_notes     (required)
+  /tmp/chama-v<VERSION>_zapstore_notes    (optional)
+
+ship.sh resolves both by name and refuses to start if the required one is
+missing, so a typo can never leave you with a half-bumped tree.
+
+
+── chama-v<VERSION>_release_notes ───────────────────────────────────────────
+Line 1 is the commit subject in the repo convention (the leading vX.Y.Z must
+match the version you're shipping — ship.sh warns if it doesn't). Everything
+below is the commit body, and also the long GitHub release notes when
+release:all is given --notes-file pointing at this same file.
+
+    v<VERSION> — short subject, comma, separated, imperative
+
+    Optional longer body for the engineering audience / GitHub release.
+    - bullet one
+    - bullet two
+
+
+── chama-v<VERSION>_zapstore_notes (separate file) ──────────────────────────
+Short, friendly, user-facing notes shown on the Zapstore app card. One or two
+lines, no version number needed. Omit the file entirely for a dev-only release
+and release:all writes its standard placeholder instead.
+
+    Short, user-facing summary of what changed for the person using the app.

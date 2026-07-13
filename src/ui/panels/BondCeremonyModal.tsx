@@ -14,7 +14,7 @@
 //   are DETECTED, not button-mashed) → locked (live countdown) → reclaimed.
 //
 // Chain-facing rules baked in (not patched on):
-//   • the tip is polled once for the whole modal and is MONOTONIC — Mutinynet's
+//   • the tip is polled once for the whole modal and is MONOTONIC — a
 //     load-balanced Esplora jitters up/down, but a timelock only ever passes;
 //   • the countdown is informational only — CONSENSUS is the reclaim authority
 //     (the hook broadcasts and translates a genuine too-early rejection calmly);
@@ -26,9 +26,17 @@
 
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { T } from "../theme.js";
+import { useT, translate, getCurrentLang } from "../../i18n/index.js";
 import { CopyButton } from "../components/CopyButton.js";
-import { listCommitmentBonds, getCommitmentBond, type CommitmentRecord } from "../../bond-multisig/commitment-store.js";
-import { MIN_COMMITMENT_TERM_BLOCKS } from "../../bond-multisig/commitment-bond.js";
+import { listCommitmentBonds, getCommitmentBond, removeCommitmentBond, type CommitmentRecord } from "../../bond-multisig/commitment-store.js";
+import {
+  MIN_COMMITMENT_TERM_BLOCKS,
+  validateBitcoinAddressForNetwork,
+  type CommitmentReclaimDestination,
+  type ReclaimDestinationChoice,
+  type ReclaimDestinationKind,
+} from "../../bond-multisig/commitment-bond.js";
+import { MAINNET as BOND_NETWORK } from "../../bond-multisig/multisig.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { getAllPickerCountries, type PickerCountry } from "../../communities/countries.js";
 import { countryMatchesSearch, countrySubline, resolveCountryCommunitySlug } from "../../communities/country-resolve.js";
@@ -44,22 +52,39 @@ const SEED_AMOUNT_SATS = 21_000;
 /** Term presets in BLOCKS (what the CLTV leaf commits to). Mainnet mines ~10-min
  *  blocks → ~144/day. The shortest preset IS the enforced minimum — anything shorter
  *  can expire before funding confirms. */
-const TERM_PRESETS: { label: string; blocks: number }[] = [
-  { label: `~1 day (${MIN_COMMITMENT_TERM_BLOCKS} blocks · the minimum)`, blocks: MIN_COMMITMENT_TERM_BLOCKS },
-  { label: "~1 week (1008 blocks)", blocks: 1008 },
-  { label: "~1 month (4320 blocks)", blocks: 4320 },
-  { label: "~3 months (12960 blocks)", blocks: 12960 },
+const TERM_PRESETS: { labelKey: string; labelParams?: Record<string, number>; blocks: number }[] = [
+  { labelKey: "bond.term1Day", labelParams: { blocks: MIN_COMMITMENT_TERM_BLOCKS }, blocks: MIN_COMMITMENT_TERM_BLOCKS },
+  { labelKey: "bond.term1Week", blocks: 1008 },
+  { labelKey: "bond.term1Month", blocks: 4320 },
+  { labelKey: "bond.term3Months", blocks: 12960 },
 ];
 /** Warn on the funding screen when fewer than this many blocks remain. */
 const NEAR_END_BLOCKS = 10;
 const TIP_POLL_MS = 15_000;
 const FUNDING_POLL_MS = 10_000;
+const CREDIT_POLL_MS = 8_000;
+// A "planned" (created-but-unfunded) bond is just a generated address the user
+// never sent sats to. Auto-clear it after this window so drafts don't linger —
+// but ONLY after a fresh on-chain check confirms it's unfunded (a funded draft
+// promotes to LOCKED instead of being removed; funds are never hidden).
+const PLANNED_BOND_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
 export interface BondCeremonyModalProps {
   createCommitmentBond: (p: { amountSats: bigint; termBlocks: number }) =>
     Promise<{ bondId: string; address: string; lockUntil: number; amountSats: bigint; tipAtCreate: number }>;
   checkCommitmentFunding: (bondId: string) => Promise<{ locked: boolean; txid?: string; lockedSats?: bigint; deposits?: number }>;
-  reclaimCommitmentBond: (bondId: string) => Promise<{ txid: string; alreadyReclaimed?: boolean }>;
+  /** Rebuild this device's bond records from the user's own on-chain announcements + seed. */
+  recoverMyBonds: () => Promise<{ recovered: number }>;
+  reclaimCommitmentBond: (bondId: string, destination?: ReclaimDestinationChoice) => Promise<{
+    txid: string;
+    alreadyReclaimed?: boolean;
+    creditedToChama?: boolean;
+    creditOperationId?: string;
+    returnAddress?: string;
+    destinationAddress?: string;
+    reclaimDestination?: CommitmentReclaimDestination;
+  }>;
+  creditReclaimedCommitmentBond: (bondId: string) => Promise<{ txid: string; operationId?: string; amountSats?: bigint; alreadyCredited?: boolean }>;
   getBondChainTip: () => Promise<number>;
   /** Publish the chain-verifiable kind:38135 bond announcement FOR a community —
    *  the data source for that community's live-chama liveness. Optional so the
@@ -74,10 +99,19 @@ type View =
   | { kind: "working"; label: string }
   | { kind: "funding"; bondId: string }
   | { kind: "locked"; bondId: string; foundNote?: string }
-  | { kind: "reclaimed"; bondId: string; txid: string }
+  | {
+      kind: "reclaimed";
+      bondId: string;
+      txid: string;
+      creditedToChama?: boolean;
+      creditTxid?: string;
+      returnAddress?: string;
+      reclaimDestination?: CommitmentReclaimDestination;
+    }
   | { kind: "error"; message: string };
 
-export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding, reclaimCommitmentBond, getBondChainTip, publishBondAnnouncement, onClose }: BondCeremonyModalProps) {
+export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding, recoverMyBonds, reclaimCommitmentBond, creditReclaimedCommitmentBond, getBondChainTip, publishBondAnnouncement, onClose }: BondCeremonyModalProps) {
+  const { t } = useT();
   // Open on the list when any bond exists; straight to describe on a first run.
   const [view, setView] = useState<View>(() => (listCommitmentBonds().length > 0 ? { kind: "list" } : { kind: "describe" }));
   const [amountStr, setAmountStr] = useState(String(SEED_AMOUNT_SATS));
@@ -86,6 +120,8 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
   const [note, setNote] = useState<string | null>(null);
   const [tip, setTip] = useState<number | null>(null);
   const [confirmReclaim, setConfirmReclaim] = useState(false);
+  const [reclaimChoice, setReclaimChoice] = useState<ReclaimDestinationKind>("chama");
+  const [externalReclaimAddress, setExternalReclaimAddress] = useState("");
   // Announce-to-community state (locked screen). Default to the user's own community.
   const [announceSlug, setAnnounceSlug] = useState<string>(() => getUserCommunitySlug());
   const [announcing, setAnnouncing] = useState(false);
@@ -104,8 +140,50 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
   // list doesn't re-fire — only a fresh on-chain lock detection does).
   const autoAnnouncedRef = useRef<Set<string>>(new Set());
 
+  // ── Cross-device recovery: pull my own on-chain bonds into THIS device ────────
+  // A bond posted on another device (same npub) has no local record here; rebuild it
+  // from my kind-38135 announcement + seed so it shows + reclaims on every device.
+  // Once per open, fail-soft (a fetch hiccup just leaves the local list as-is).
+  const recoveredRef = useRef(false);
+  useEffect(() => {
+    if (recoveredRef.current) return;
+    recoveredRef.current = true;
+    void recoverMyBonds()
+      .then((r) => {
+        if (r.recovered > 0) {
+          setStoreRev((n) => n + 1);
+          setView((v) => (v.kind === "describe" && listCommitmentBonds().length > 0 ? { kind: "list" } : v));
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Auto-clear abandoned draft bonds (created-but-unfunded past the TTL) ──────
+  // Fund-safe: each stale draft gets a fresh on-chain check first; a funded one
+  // promotes to LOCKED (checkCommitmentFunding), only a confirmed-unfunded draft
+  // is removed. Runs once per open, fail-soft.
+  const cleanedDraftsRef = useRef(false);
+  useEffect(() => {
+    if (cleanedDraftsRef.current) return;
+    cleanedDraftsRef.current = true;
+    const stale = listCommitmentBonds().filter(
+      (b) => b.phase === "created" && Date.now() - b.createdAt > PLANNED_BOND_TTL_MS,
+    );
+    if (stale.length === 0) return;
+    void (async () => {
+      let changed = false;
+      for (const b of stale) {
+        try { await checkFnRef.current(b.bondId); } catch { /* chain hiccup — keep the draft */ continue; }
+        if (getCommitmentBond(b.bondId)?.phase === "created") { removeCommitmentBond(b.bondId); changed = true; }
+      }
+      if (changed) setStoreRev((n) => n + 1);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── ONE monotonic chain tip for the whole modal ──────────────────────────────
-  // Mutinynet's Esplora is load-balanced across nodes at slightly different
+  // A load-balanced Esplora is served across nodes at slightly different
   // heights, so raw polls jitter up/down; a timelock only ever passes, so never
   // let a lower reading re-lock a ready bond. Informational only — consensus is
   // the reclaim authority.
@@ -131,7 +209,7 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
           const n = r.deposits ?? 1;
           setNote(null);
           autoAnnounceOnLock(fundingBondId);
-          setView({ kind: "locked", bondId: fundingBondId, foundNote: `Found ${n} deposit${n === 1 ? "" : "s"} totaling ${(r.lockedSats ?? 0n).toString()} sats — locked.` });
+          setView({ kind: "locked", bondId: fundingBondId, foundNote: t(n === 1 ? "bond.foundDepositOne" : "bond.foundDepositMany", { count: n, sats: (r.lockedSats ?? 0n).toString() }) });
         }
       } catch { /* transient — keep watching */ }
     };
@@ -140,20 +218,37 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
     return () => { cancelled = true; clearInterval(id); };
   }, [fundingBondId]);
 
+  // ── Credit-landed poll: while a reclaimed bond's peg-in is confirming, re-read
+  // the store so the "on their way" screen flips to "landed" the moment the
+  // watcher (in useEscrow) stamps creditConfirmedAt. Stops once confirmed. ─────
+  const creditPendingBondId =
+    view.kind === "reclaimed" && view.creditedToChama ? view.bondId : null;
+  useEffect(() => {
+    if (!creditPendingBondId) return;
+    if (listCommitmentBonds().find((b) => b.bondId === creditPendingBondId)?.creditConfirmedAt) return;
+    const id = setInterval(() => setStoreRev((n) => n + 1), CREDIT_POLL_MS);
+    return () => clearInterval(id);
+  }, [creditPendingBondId]);
+
   const bonds = (() => { void storeRev; return listCommitmentBonds(); })();
-  const backToList = () => { setNote(null); setConfirmReclaim(false); setAnnouncedTo(null); setAnnounceErr(null); setStoreRev((n) => n + 1); setView({ kind: "list" }); };
+  const resetReclaimForm = () => {
+    setConfirmReclaim(false);
+    setReclaimChoice("chama");
+    setExternalReclaimAddress("");
+  };
+  const backToList = () => { setNote(null); resetReclaimForm(); setAnnouncedTo(null); setAnnounceErr(null); setStoreRev((n) => n + 1); setView({ kind: "list" }); };
 
   const amountSats = (() => { const n = Math.floor(Number(amountStr)); return Number.isFinite(n) && n > 0 ? BigInt(n) : 0n; })();
 
   const post = async () => {
-    if (amountSats <= 0n) { setView({ kind: "error", message: "Enter a bond amount greater than zero." }); return; }
-    setView({ kind: "working", label: "Building your timelock bond…" });
+    if (amountSats <= 0n) { setView({ kind: "error", message: t("bond.enterAmount") }); return; }
+    setView({ kind: "working", label: t("bond.building") });
     try {
       const r = await createCommitmentBond({ amountSats, termBlocks });
       setStoreRev((n) => n + 1);
       setView({ kind: "funding", bondId: r.bondId });
     } catch (e: any) {
-      setView({ kind: "error", message: e?.message || "Couldn’t build the bond. Reconnect and try again." });
+      setView({ kind: "error", message: e?.message || t("bond.buildFailed") });
     }
   };
 
@@ -165,19 +260,53 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
       if (r.locked) {
         const n = r.deposits ?? 1;
         autoAnnounceOnLock(bondId);
-        setView({ kind: "locked", bondId, foundNote: `Found ${n} deposit${n === 1 ? "" : "s"} totaling ${(r.lockedSats ?? 0n).toString()} sats — locked.` });
-      } else setNote("Nothing confirmed at this address yet — Mutinynet confirms in ~30–60s. Watching…");
-    } catch (e: any) { setNote(e?.message || "Couldn’t reach the chain."); }
+        setView({ kind: "locked", bondId, foundNote: t(n === 1 ? "bond.foundDepositOne" : "bond.foundDepositMany", { count: n, sats: (r.lockedSats ?? 0n).toString() }) });
+      } else setNote(t("bond.nothingConfirmed"));
+    } catch (e: any) { setNote(e?.message || t("bond.chainUnreachable")); }
     finally { setBusy(false); }
   };
 
-  const reclaim = async (bondId: string) => {
+  // Discard an unfunded draft. Safe: a draft has no on-chain state until sats
+  // are sent; if the user later funds this address, cross-device recovery /
+  // re-derivation resurfaces it (funds are never lost, only this UI row).
+  const discardDraft = (bondId: string) => {
+    const rec = getCommitmentBond(bondId);
+    if (!rec || rec.phase !== "created") return; // never discard a funded/locked bond
+    removeCommitmentBond(bondId);
+    setStoreRev((n) => n + 1);
+    setView(listCommitmentBonds().length > 0 ? { kind: "list" } : { kind: "describe" });
+  };
+
+  const reclaim = async (bondId: string, destination: ReclaimDestinationChoice) => {
     setBusy(true); setNote(null);
     try {
-      const r = await reclaimCommitmentBond(bondId);
+      const r = await reclaimCommitmentBond(bondId, destination);
       setStoreRev((n) => n + 1);
-      setView({ kind: "reclaimed", bondId, txid: r.txid });
-    } catch (e: any) { setNote(e?.message || "Reclaim failed."); }
+      const rec = getCommitmentBond(bondId);
+      const reclaimDestination = r.reclaimDestination ?? rec?.reclaimDestination;
+      setView({
+        kind: "reclaimed",
+        bondId,
+        txid: r.txid,
+        creditedToChama: r.creditedToChama || !!rec?.creditTxid,
+        creditTxid: rec?.creditTxid,
+        returnAddress: r.returnAddress ?? (reclaimDestination?.actual === "bond-key" ? reclaimDestination.address : undefined),
+        reclaimDestination,
+      });
+    } catch (e: any) { setNote(e?.message || t("bond.reclaimFailed")); }
+    finally { setBusy(false); }
+  };
+
+  const creditToChama = async (bondId: string) => {
+    setBusy(true); setNote(null);
+    try {
+      const r = await creditReclaimedCommitmentBond(bondId);
+      setStoreRev((n) => n + 1);
+      setNote(t("bond.creditSubmitted"));
+      setView((prev) => prev.kind === "reclaimed"
+        ? { ...prev, creditedToChama: true, creditTxid: r.txid }
+        : prev);
+    } catch (e: any) { setNote(e?.message || t("bond.creditFailed")); }
     finally { setBusy(false); }
   };
 
@@ -205,7 +334,7 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
       const r = await publishBondAnnouncement(bondId, slug);
       setAnnouncedTo(getCommunityBySlug(r.community)?.displayName ?? r.community);
     } catch (e: any) {
-      setAnnounceErr(e?.message || "Couldn’t publish the announcement. Reconnect and try again.");
+      setAnnounceErr(e?.message || t("bond.announceFailed"));
     } finally { setAnnouncing(false); }
   };
 
@@ -222,12 +351,20 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
             bonds={bonds}
             tip={tip}
             onOpen={(rec) => {
-              setNote(null); setConfirmReclaim(false);
+              setNote(null); resetReclaimForm();
               if (rec.phase === "created") setView({ kind: "funding", bondId: rec.bondId });
               else if (rec.phase === "locked") setView({ kind: "locked", bondId: rec.bondId });
-              else if (rec.reclaimTxid) setView({ kind: "reclaimed", bondId: rec.bondId, txid: rec.reclaimTxid });
+              else if (rec.reclaimTxid) setView({
+                kind: "reclaimed",
+                bondId: rec.bondId,
+                txid: rec.reclaimTxid,
+                creditedToChama: !!rec.creditTxid,
+                creditTxid: rec.creditTxid,
+                returnAddress: rec.reclaimDestination?.actual === "bond-key" ? rec.reclaimDestination.address : undefined,
+                reclaimDestination: rec.reclaimDestination,
+              });
             }}
-            onPostNew={() => { setNote(null); setView({ kind: "describe" }); }}
+            onPostNew={() => { setNote(null); resetReclaimForm(); setView({ kind: "describe" }); }}
           />
         )}
 
@@ -235,23 +372,21 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
           <>
             {bonds.length > 0 && <BackToBonds onClick={backToList} />}
             <div style={{ fontSize: 12, color: T.text, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 16, background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "12px 14px" }}>
-              You lock <b>your own sats</b>, to <b>your own key</b>, on-chain, for a term. Nobody else can
-              touch it, and <b>you can’t pull it back until the term ends</b> — that’s the whole signal.
-              It’s <b style={{ color: T.accent }}>how much × how long</b> that says you’re serious.
+              {t("bond.introPart1")}<b>{t("bond.introBoldOwnSats")}</b>{t("bond.introPart2")}<b>{t("bond.introBoldOwnKey")}</b>{t("bond.introPart3")}<b>{t("bond.introBoldNoPull")}</b>{t("bond.introPart4")}<b style={{ color: T.accent }}>{t("bond.introBoldHowMuch")}</b>{t("bond.introPart5")}
             </div>
-            <label style={labelStyle}>Bond amount (sats)</label>
+            <label style={labelStyle}>{t("bond.amountLabel")}</label>
             <input value={amountStr} onChange={(e) => setAmountStr(e.target.value.replace(/[^0-9]/g, ""))} inputMode="numeric"
               style={{ width: "100%", boxSizing: "border-box", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, color: T.text, fontFamily: T.mono, fontSize: 15, padding: "10px 12px", marginBottom: 12 }} />
-            <label style={labelStyle}>Term (until you can reclaim)</label>
+            <label style={labelStyle}>{t("bond.termLabel")}</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
               {TERM_PRESETS.map((p) => (
                 <button key={p.blocks} onClick={() => setTermBlocks(p.blocks)}
                   style={{ ...secondaryBtn, marginBottom: 0, textAlign: "left", border: `1px solid ${termBlocks === p.blocks ? T.accent : T.border}`, color: termBlocks === p.blocks ? T.text : T.muted }}>
-                  {termBlocks === p.blocks ? "◉ " : "○ "}{p.label}
+                  {termBlocks === p.blocks ? "◉ " : "○ "}{t(p.labelKey, p.labelParams)}
                 </button>
               ))}
             </div>
-            <button onClick={post} disabled={amountSats <= 0n} style={primaryBtn(amountSats > 0n)}>Post my bond</button>
+            <button onClick={post} disabled={amountSats <= 0n} style={primaryBtn(amountSats > 0n)}>{t("bond.postMyBond")}</button>
           </>
         )}
 
@@ -259,7 +394,7 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
           <div style={{ padding: "28px 0", textAlign: "center" }}>
             <div style={{ fontSize: 26, marginBottom: 12 }}>⚙️</div>
             <div style={{ fontSize: 13, color: T.text, fontFamily: T.mono }}>{view.label}</div>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 6 }}>No sats move — this only builds the address.</div>
+            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 6 }}>{t("bond.noSatsMove")}</div>
           </div>
         )}
 
@@ -270,18 +405,23 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
           return (
             <div>
               <BackToBonds onClick={backToList} />
-              <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono, marginBottom: 4 }}>Fund your bond</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono, marginBottom: 4 }}>{t("bond.fundHeading")}</div>
               <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 12, lineHeight: 1.5 }}>
-                Send <b style={{ color: T.text }}>at least {rec.amountSats.toString()} sats</b> on-chain to this address — more is a bigger bond, and several sends all count. Whatever lands here locks until block <b style={{ color: T.text }}>{rec.bond.lockUntil}</b>.
+                {t("bond.fundSendBefore")}<b style={{ color: T.text }}>{t("bond.fundSendAtLeast", { sats: rec.amountSats.toString() })}</b>{t("bond.fundSendMiddle")}<b style={{ color: T.text }}>{rec.bond.lockUntil}</b>{t("bond.fundSendAfter")}
               </div>
+              {toGo != null && toGo > 0 && (
+                <div style={{ fontSize: 11, color: T.text, fontFamily: T.mono, marginBottom: 12, lineHeight: 1.55, background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "9px 11px" }}>
+                  {t("bond.fundLocksFor", { time: humanTime(toGo) })}
+                </div>
+              )}
               {toGo != null && toGo <= 0 && (
                 <div style={{ fontSize: 10.5, color: T.red, fontFamily: T.mono, marginBottom: 10, lineHeight: 1.5, background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "8px 10px" }}>
-                  ⚠ This bond’s term has <b>already ended</b> — a deposit now would be instantly reclaimable and signals nothing. Post a fresh bond instead.
+                  {t("bond.warnEndedBefore")}<b>{t("bond.warnEndedBold")}</b>{t("bond.warnEndedAfter")}
                 </div>
               )}
               {toGo != null && toGo > 0 && toGo <= NEAR_END_BLOCKS && (
                 <div style={{ fontSize: 10.5, color: T.amber, fontFamily: T.mono, marginBottom: 10, lineHeight: 1.5 }}>
-                  ⚠ Only ~{toGo} block{toGo === 1 ? "" : "s"} (~{humanTime(toGo)}) left on this term — a deposit needs a block to confirm, so it may lock already-reclaimable.
+                  {t(toGo === 1 ? "bond.nearEndOne" : "bond.nearEndMany", { blocks: toGo, time: humanTime(toGo) })}
                 </div>
               )}
               <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
@@ -290,12 +430,16 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
                 </Suspense>
               </div>
               <div style={{ fontSize: 10.5, color: T.text, fontFamily: T.mono, wordBreak: "break-all", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "8px 10px", marginBottom: 8 }}>{rec.bond.address}</div>
-              <CopyButton value={rec.bond.address} label="Copy address" style={secondaryBtn} />
+              <CopyButton value={rec.bond.address} label={t("bond.copyAddress")} style={secondaryBtn} />
               <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, textAlign: "center", marginTop: 4, lineHeight: 1.5 }}>
-                👀 Watching the chain — deposits are detected automatically (checks every {FUNDING_POLL_MS / 1000}s).
+                {t("bond.watchingChain", { secs: FUNDING_POLL_MS / 1000 })}
               </div>
               <button onClick={() => void checkNow(view.bondId)} disabled={busy} style={{ ...secondaryBtn, marginTop: 8 }}>
-                {busy ? "Checking…" : "Check now"}
+                {busy ? t("bond.checking") : t("bond.checkNow")}
+              </button>
+              <button onClick={() => discardDraft(view.bondId)} disabled={busy}
+                style={{ ...secondaryBtn, color: T.muted, borderColor: T.border, marginTop: 2 }}>
+                {t("bond.discardDraft")}
               </button>
               {note && <div style={{ fontSize: 10.5, color: T.amber, fontFamily: T.mono, marginTop: 6, lineHeight: 1.5, textAlign: "center" }}>{note}</div>}
             </div>
@@ -313,15 +457,15 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
             <div style={{ padding: "2px 0", textAlign: "center" }}>
               <BackToBonds onClick={backToList} />
               <div style={{ fontSize: 30, marginBottom: 10 }}>{expired ? "⏳" : "🔒"}</div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: expired ? T.accent : T.green, fontFamily: T.mono, marginBottom: 8 }}>{expired ? "Your bond’s term ended" : "Your bond is locked"}</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: expired ? T.accent : T.green, fontFamily: T.mono, marginBottom: 8 }}>{expired ? t("bond.termEndedTitle") : t("bond.lockedTitle")}</div>
               {view.foundNote && <div style={{ fontSize: 10.5, color: T.green, fontFamily: T.mono, marginBottom: 8 }}>{view.foundNote}</div>}
               <div style={{ fontSize: 11, color: T.text, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 12 }}>
-                <b>{rec.amountSats.toString()} sats</b> committed on-chain{deposits.length > 1 ? <> across <b>{deposits.length} deposits</b></> : null} until block <b>{rec.bond.lockUntil}</b>. It cannot move before then — not by you, not by anyone. After the term, only you can reclaim it.
+                <b>{t("bond.satsAmount", { sats: rec.amountSats.toString() })}</b>{t("bond.lockedCommitted")}{deposits.length > 1 ? <>{t("bond.lockedAcrossBefore")}<b>{t("bond.lockedAcrossDeposits", { count: deposits.length })}</b></> : null}{t("bond.lockedUntilBefore")}<b>{rec.bond.lockUntil}</b>{t("bond.lockedUntilAfter")}
               </div>
               {!expired && <ArbiterDuties />}
               {deposits.length > 0 && (
                 <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "8px 10px", marginBottom: 12 }}>
-                  <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 6 }}>{deposits.length} DEPOSIT{deposits.length === 1 ? "" : "S"} AT THIS ADDRESS</div>
+                  <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 6 }}>{t(deposits.length === 1 ? "bond.depositsAtAddressOne" : "bond.depositsAtAddressMany", { count: deposits.length })}</div>
                   {deposits.map((d) => (
                     <div key={`${d.txid}:${d.index}`} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 10, color: T.text, fontFamily: T.mono, marginBottom: 3 }}>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.txid.slice(0, 10)}…{d.txid.slice(-6)}:{d.index}</span>
@@ -330,7 +474,7 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
                   ))}
                   <button onClick={() => void checkNow(view.bondId)} disabled={busy}
                     style={{ background: "none", border: "none", color: T.muted, fontFamily: T.mono, fontSize: 9.5, cursor: "pointer", padding: "4px 0 0", textDecoration: "underline" }}>
-                    {busy ? "checking…" : "check for more deposits"}
+                    {busy ? t("bond.checkingLower") : t("bond.checkForMore")}
                   </button>
                 </div>
               )}
@@ -340,12 +484,12 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
                   real gate: an early reclaim is rejected and surfaced as "almost". */}
               {notYet && (
                 <div style={{ fontSize: 10.5, color: T.amber, fontFamily: T.mono, marginBottom: 8, lineHeight: 1.5, textAlign: "center" }}>
-                  Unlocks at block {rec.bond.lockUntil} — ~{toGo} block{toGo === 1 ? "" : "s"} to go (~{humanTime(toGo!)}).
+                  {t(toGo === 1 ? "bond.unlocksAtOne" : "bond.unlocksAtMany", { block: rec.bond.lockUntil, blocks: toGo!, time: humanTime(toGo!) })}
                 </div>
               )}
               {!notYet && tip != null && (
                 <div style={{ fontSize: 10.5, color: T.accent, fontFamily: T.mono, marginBottom: 8, lineHeight: 1.5, textAlign: "center" }}>
-                  ⏳ This term is up — the bond no longer counts toward any chama’s liveness. Reclaim your sats, then post a fresh bond to keep arbitrating.
+                  {t("bond.termUpReclaim")}
                 </div>
               )}
               {/* Announce this bond to a community — publishes the chain-verifiable
@@ -359,27 +503,27 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
                 />
               )}
               {confirmReclaim ? (
-                <>
-                  <div style={{ fontSize: 11, color: T.text, fontFamily: T.mono, marginBottom: 8, lineHeight: 1.5 }}>
-                    Reclaim now? This <b>ends the bond</b> and returns your sats to your own key.
-                  </div>
-                  <button onClick={() => { setConfirmReclaim(false); void reclaim(view.bondId); }} disabled={busy} style={{ ...primaryBtn(!busy), background: T.amber, borderColor: T.amber }}>
-                    {busy ? "Reclaiming…" : "Yes, reclaim my bond"}
-                  </button>
-                  <button onClick={() => setConfirmReclaim(false)} disabled={busy} style={{ ...secondaryBtn, marginTop: 6 }}>Cancel</button>
-                </>
+                <ReclaimDestinationPicker
+                  choice={reclaimChoice}
+                  onChoice={setReclaimChoice}
+                  externalAddress={externalReclaimAddress}
+                  onExternalAddress={setExternalReclaimAddress}
+                  busy={busy}
+                  onSubmit={(destination) => { resetReclaimForm(); void reclaim(view.bondId, destination); }}
+                  onCancel={resetReclaimForm}
+                />
               ) : expired ? (
                 <>
                   <button onClick={() => { setNote(null); setConfirmReclaim(true); }}
                     style={{ ...primaryBtn(true), background: T.accent, borderColor: T.accent, boxShadow: `0 0 14px ${T.accent}66` }}>
-                    Reclaim my bond
+                    {t("bond.reclaimMyBond")}
                   </button>
-                  <button onClick={onClose} style={{ ...secondaryBtn, marginTop: 6 }}>Not now</button>
+                  <button onClick={onClose} style={{ ...secondaryBtn, marginTop: 6 }}>{t("bond.notNow")}</button>
                 </>
               ) : (
                 <>
-                  <button onClick={onClose} style={primaryBtn(true)}>Done</button>
-                  <button onClick={() => { setNote(null); setConfirmReclaim(true); }} style={{ ...secondaryBtn, marginTop: 6 }}>Reclaim my bond</button>
+                  <button onClick={onClose} style={primaryBtn(true)}>{t("common.done")}</button>
+                  <button onClick={() => { setNote(null); setConfirmReclaim(true); }} style={{ ...secondaryBtn, marginTop: 6 }}>{t("bond.reclaimMyBond")}</button>
                 </>
               )}
               {note && <div style={{ fontSize: 10.5, color: T.red, fontFamily: T.mono, marginTop: 10, lineHeight: 1.5 }}>{note}</div>}
@@ -387,26 +531,67 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
           );
         })()}
 
-        {view.kind === "reclaimed" && (
-          <div style={{ padding: "6px 0", textAlign: "center" }}>
-            <BackToBonds onClick={backToList} />
-            <div style={{ fontSize: 30, marginBottom: 10 }}>🎉</div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: T.green, fontFamily: T.mono, marginBottom: 8 }}>Bond reclaimed</div>
-            <div style={{ fontSize: 11, color: T.text, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 12 }}>
-              The term is up and your sats are on their way back to your own key.
+        {view.kind === "reclaimed" && (() => {
+          const actual = view.reclaimDestination?.actual;
+          const destinationAddress = view.reclaimDestination?.actual !== "bond-key" ? view.reclaimDestination?.address : undefined;
+          const returnAddress = view.returnAddress ?? (actual === "bond-key" ? view.reclaimDestination?.address : undefined);
+          // Live record catches the peg-in confirmation the watcher stamps (durable
+          // across reloads) so the screen flips from "on their way" → "landed".
+          const liveRec = bonds.find((b) => b.bondId === view.bondId);
+          const creditConfirmed = !!liveRec?.creditConfirmedAt;
+          const creditSubmitted = view.creditedToChama && !creditConfirmed;
+          const canCredit = !view.creditedToChama && (!actual || actual === "bond-key");
+          const bodyKey = creditConfirmed
+            ? "bond.creditLandedBody"
+            : view.creditedToChama
+              ? "bond.reclaimedToChamaBody"
+              : actual === "external"
+                ? "bond.reclaimedExternalBody"
+                : "bond.reclaimedSelfCustodyBody";
+          const emoji = canCredit ? "🔓" : creditSubmitted ? "⏳" : "🎉";
+          const titleColor = canCredit ? T.accent : creditSubmitted ? T.amber : T.green;
+          return (
+            <div style={{ padding: "6px 0", textAlign: "center" }}>
+              <BackToBonds onClick={backToList} />
+              <div style={{ fontSize: 30, marginBottom: 10 }}>{emoji}</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: titleColor, fontFamily: T.mono, marginBottom: 8 }}>{t(creditConfirmed ? "bond.creditLandedTitle" : "bond.bondReclaimed")}</div>
+              <div style={{ fontSize: 11, color: T.text, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 12 }}>
+                {t(bodyKey)}
+              </div>
+              <CopyableValue label={t("bond.copyTxid")} value={view.txid} />
+              {destinationAddress && (
+                <CopyableValue
+                  heading={t(actual === "chama" ? "bond.chamaDepositAddress" : "bond.destinationAddress")}
+                  label={t("bond.copyAddress")}
+                  value={destinationAddress}
+                />
+              )}
+              {view.reclaimDestination?.fallbackReason && (
+                <div style={{ fontSize: 10.5, color: T.amber, fontFamily: T.mono, lineHeight: 1.5, background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "8px 10px", marginBottom: 8, textAlign: "left" }}>
+                  <b>{t("bond.reclaimFallbackNotice")}</b> {view.reclaimDestination.fallbackReason}
+                </div>
+              )}
+              {returnAddress && !view.creditedToChama && (
+                <CopyableValue heading={t("bond.returnAddress")} label={t("bond.copyReturnAddress")} value={returnAddress} />
+              )}
+              {view.creditTxid && (
+                <CopyableValue heading={t("bond.creditTxid")} label={t("bond.copyTxid")} value={view.creditTxid} />
+              )}
+              {canCredit && (
+                <button onClick={() => void creditToChama(view.bondId)} disabled={busy} style={primaryBtn(!busy)}>{busy ? t("bond.creditingToChama") : t("bond.creditToChama")}</button>
+              )}
+              <button onClick={() => setView({ kind: "describe" })} style={view.creditedToChama ? primaryBtn(true) : { ...secondaryBtn, marginTop: 6 }}>{t("bond.postFreshBond")}</button>
+              <button onClick={onClose} style={{ ...secondaryBtn, marginTop: 6 }}>{t("common.done")}</button>
+              {note && <div style={{ fontSize: 10.5, color: view.creditedToChama ? T.green : T.red, fontFamily: T.mono, marginTop: 10, lineHeight: 1.5 }}>{note}</div>}
             </div>
-            <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, wordBreak: "break-all", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "6px 8px", marginBottom: 8 }}>{view.txid}</div>
-            <CopyButton value={view.txid} label="Copy txid" style={secondaryBtn} />
-            <button onClick={() => setView({ kind: "describe" })} style={primaryBtn(true)}>Post a fresh bond</button>
-            <button onClick={onClose} style={{ ...secondaryBtn, marginTop: 6 }}>Done</button>
-          </div>
-        )}
+          );
+        })()}
 
         {view.kind === "error" && (
           <div style={{ padding: "8px 0" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.red, fontFamily: T.mono, marginBottom: 8 }}>Something went wrong</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.red, fontFamily: T.mono, marginBottom: 8 }}>{t("bond.somethingWrong")}</div>
             <div style={{ fontSize: 12, color: T.text, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 16 }}>{view.message}</div>
-            <button onClick={() => setView({ kind: "describe" })} style={primaryBtn(true)}>Back</button>
+            <button onClick={() => setView({ kind: "describe" })} style={primaryBtn(true)}>{t("common.back")}</button>
           </div>
         )}
       </div>
@@ -421,21 +606,22 @@ function BondList({ bonds, tip, onOpen, onPostNew }: {
   onOpen: (rec: CommitmentRecord) => void;
   onPostNew: () => void;
 }) {
+  const { t } = useT();
   const active = bonds.filter((b) => b.phase !== "reclaimed");
   const past = bonds.filter((b) => b.phase === "reclaimed");
   return (
     <div>
-      <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono, marginBottom: 10 }}>Your bonds</div>
+      <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono, marginBottom: 10 }}>{t("bond.yourBonds")}</div>
       {active.length === 0 && (
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 12 }}>
-          No live bond right now. Post one — locked capital, in the open, is the signal.
+          {t("bond.noLiveBond")}
         </div>
       )}
       {active.map((b) => <BondRow key={b.bondId} rec={b} tip={tip} onOpen={onOpen} />)}
-      <button onClick={onPostNew} style={{ ...primaryBtn(true), marginTop: 6 }}>Post a new bond</button>
+      <button onClick={onPostNew} style={{ ...primaryBtn(true), marginTop: 6 }}>{t("bond.postNewBond")}</button>
       {past.length > 0 && (
         <div style={{ marginTop: 14 }}>
-          <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 6 }}>PAST BONDS</div>
+          <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 6 }}>{t("bond.pastBonds")}</div>
           {past.map((b) => <BondRow key={b.bondId} rec={b} tip={tip} onOpen={onOpen} />)}
         </div>
       )}
@@ -444,27 +630,154 @@ function BondList({ bonds, tip, onOpen, onPostNew }: {
 }
 
 function BondRow({ rec, tip, onOpen }: { rec: CommitmentRecord; tip: number | null; onOpen: (rec: CommitmentRecord) => void }) {
+  const { t } = useT();
   const toGo = tip != null ? rec.bond.lockUntil - tip : null;
   const status = (() => {
-    if (rec.phase === "created") return { chip: "AWAITING FUNDING", color: T.amber, line: "send sats to activate" };
-    if (rec.phase === "reclaimed") return { chip: "RECLAIMED", color: T.muted, line: rec.reclaimTxid ? `swept · ${rec.reclaimTxid.slice(0, 10)}…` : "swept" };
-    if (toGo != null && toGo <= 0) return { chip: "TERM ENDED", color: T.accent, line: "reclaimable — or leave it locked" };
-    return { chip: "LOCKED", color: T.green, line: toGo != null ? `unlocks in ~${toGo} blocks (~${humanTime(toGo)})` : `unlocks at block ${rec.bond.lockUntil}` };
+    if (rec.phase === "created") return { chip: t("bond.chipAwaitingFunding"), color: T.amber, line: t("bond.rowLineActivate") };
+    const actual = rec.reclaimDestination?.actual;
+    const requested = rec.reclaimDestination?.requested;
+    if (rec.phase === "reclaimed") return {
+      chip: t("bond.chipReclaimed"),
+      color: rec.creditTxid || actual === "chama" ? T.green : T.muted,
+      line: rec.creditTxid
+        ? t("bond.rowLineCreditedTx", { txid: rec.creditTxid.slice(0, 10) })
+        : rec.reclaimTxid && actual === "external" ? t("bond.rowLineExternalTx", { txid: rec.reclaimTxid.slice(0, 10) })
+        : rec.reclaimTxid && actual === "chama" ? t("bond.rowLineChamaTx", { txid: rec.reclaimTxid.slice(0, 10) })
+        : rec.reclaimTxid && requested === "chama" && actual === "bond-key" ? t("bond.rowLineWaitingCreditTx", { txid: rec.reclaimTxid.slice(0, 10) })
+        : rec.reclaimTxid ? t("bond.rowLineSweptTx", { txid: rec.reclaimTxid.slice(0, 10) }) : t("bond.rowLineSwept"),
+    };
+    if (toGo != null && toGo <= 0) return { chip: t("bond.chipTermEnded"), color: T.accent, line: t("bond.rowLineReclaimable") };
+    return { chip: t("bond.chipLocked"), color: T.green, line: toGo != null ? t("bond.rowLineUnlocksIn", { blocks: toGo, time: humanTime(toGo) }) : t("bond.rowLineUnlocksAt", { block: rec.bond.lockUntil }) };
   })();
   return (
     <button onClick={() => onOpen(rec)}
       style={{ display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "10px 12px", marginBottom: 8, cursor: "pointer" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono }}>
-          {rec.phase === "created" ? `${rec.amountSats.toString()} sats planned` : `${rec.amountSats.toString()} sats`}
+          {rec.phase === "created" ? t("bond.satsPlanned", { sats: rec.amountSats.toString() }) : t("bond.satsAmount", { sats: rec.amountSats.toString() })}
         </span>
         <span style={{ fontSize: 8.5, fontWeight: 800, color: status.color, fontFamily: T.mono, letterSpacing: 1, border: `1px solid ${status.color}`, borderRadius: 99, padding: "2px 8px", flexShrink: 0 }}>
           {status.chip}
         </span>
       </div>
       <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 4 }}>
-        until block {rec.bond.lockUntil} · {status.line}
+        {t("bond.rowUntilBlock", { block: rec.bond.lockUntil, line: status.line })}
       </div>
+    </button>
+  );
+}
+
+function ReclaimDestinationPicker({ choice, onChoice, externalAddress, onExternalAddress, busy, onSubmit, onCancel }: {
+  choice: ReclaimDestinationKind;
+  onChoice: (choice: ReclaimDestinationKind) => void;
+  externalAddress: string;
+  onExternalAddress: (address: string) => void;
+  busy: boolean;
+  onSubmit: (destination: ReclaimDestinationChoice) => void;
+  onCancel: () => void;
+}) {
+  const { t } = useT();
+  const externalValidation = validateBitcoinAddressForNetwork(externalAddress, BOND_NETWORK);
+  const externalReady = choice !== "external" || externalValidation.ok;
+  const canSubmit = !busy && externalReady;
+  const submit = () => {
+    if (!canSubmit) return;
+    const destination: ReclaimDestinationChoice = choice === "external"
+      ? { kind: "external", address: externalValidation.ok ? externalValidation.address : externalAddress.trim() }
+      : { kind: choice };
+    onSubmit(destination);
+  };
+  return (
+    <div style={{ textAlign: "left", marginTop: 4 }}>
+      <div style={{ fontSize: 13, fontWeight: 800, color: T.text, fontFamily: T.mono, marginBottom: 6 }}>
+        {t("bond.reclaimDestinationHeading")}
+      </div>
+      <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 10 }}>
+        {t("bond.confirmReclaimBefore")}<b style={{ color: T.text }}>{t("bond.confirmReclaimBold")}</b>{t("bond.confirmReclaimAfter")} {t("bond.reclaimDestinationBody")}
+      </div>
+      <div style={{ display: "grid", gap: 7, marginBottom: 10 }}>
+        <ReclaimOptionButton
+          selected={choice === "chama"}
+          title={t("bond.reclaimBackToChama")}
+          badge={t("bond.reclaimRecommended")}
+          body={t("bond.reclaimBackToChamaBody")}
+          onClick={() => onChoice("chama")}
+          disabled={busy}
+        />
+        <ReclaimOptionButton
+          selected={choice === "external"}
+          title={t("bond.reclaimExternal")}
+          body={t("bond.reclaimExternalBody")}
+          onClick={() => onChoice("external")}
+          disabled={busy}
+        />
+        {choice === "external" && (
+          <>
+            <input
+              value={externalAddress}
+              onChange={(e) => onExternalAddress(e.target.value)}
+              disabled={busy}
+              placeholder={t("bond.reclaimExternalPlaceholder")}
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              style={{ width: "100%", boxSizing: "border-box", background: T.surface, border: `1px solid ${externalValidation.ok ? T.border : T.amber}`, borderRadius: T.rs, color: T.text, fontFamily: T.mono, fontSize: 11.5, padding: "9px 11px", outline: "none" }}
+            />
+            {!externalValidation.ok && (
+              <div style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, lineHeight: 1.4, marginTop: -3 }}>
+                {externalValidation.message}
+              </div>
+            )}
+          </>
+        )}
+        <ReclaimOptionButton
+          selected={choice === "bond-key"}
+          title={t("bond.reclaimBondKey")}
+          body={t("bond.reclaimBondKeyBody")}
+          onClick={() => onChoice("bond-key")}
+          disabled={busy}
+        />
+      </div>
+      <button onClick={submit} disabled={!canSubmit} style={{ ...primaryBtn(canSubmit), background: canSubmit ? T.amber : T.surface, borderColor: canSubmit ? T.amber : T.border }}>
+        {busy ? t("bond.reclaiming") : t("bond.reclaimSelectedDestination")}
+      </button>
+      <button onClick={onCancel} disabled={busy} style={{ ...secondaryBtn, marginTop: 6 }}>{t("common.cancel")}</button>
+    </div>
+  );
+}
+
+function ReclaimOptionButton({ selected, title, body, badge, onClick, disabled }: {
+  selected: boolean;
+  title: string;
+  body: string;
+  badge?: string;
+  onClick: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        background: T.surface,
+        border: `1px solid ${selected ? T.accent : T.border}`,
+        borderRadius: T.rs,
+        color: T.text,
+        fontFamily: T.mono,
+        padding: "9px 10px",
+        cursor: disabled ? "default" : "pointer",
+      }}
+    >
+      <span style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4 }}>
+        <span style={{ width: 14, color: selected ? T.accent : T.muted, flexShrink: 0 }}>{selected ? "●" : "○"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 800, flex: 1 }}>{title}</span>
+        {badge && <span style={{ fontSize: 8.5, color: T.accent, border: `1px solid ${T.accent}`, borderRadius: 99, padding: "1px 6px", flexShrink: 0 }}>{badge}</span>}
+      </span>
+      <span style={{ display: "block", paddingLeft: 21, fontSize: 10, color: T.muted, lineHeight: 1.45 }}>
+        {body}
+      </span>
     </button>
   );
 }
@@ -473,14 +786,15 @@ function BondRow({ rec, tip, onOpen }: { rec: CommitmentRecord; tip: number | nu
 // so "place your sats here while you perform your duties" states the duties plainly.
 // Your bond is a commitment TO these; it's the stake behind your word.
 function ArbiterDuties() {
+  const { t } = useT();
   const duties: { icon: string; text: string }[] = [
-    { icon: "⚖️", text: "Step in on disputes — when a trade stalls, either side can call you to judge it." },
-    { icon: "💬", text: "Stay reachable — answer in the trade chat when a decision is needed." },
-    { icon: "🤝", text: "Judge honestly — release to whoever the evidence favors. Your ratings and bond ride on it." },
+    { icon: "⚖️", text: t("bond.dutyDisputes") },
+    { icon: "💬", text: t("bond.dutyReachable") },
+    { icon: "🤝", text: t("bond.dutyHonest") },
   ];
   return (
     <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "10px 12px", marginBottom: 12, textAlign: "left" }}>
-      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 8 }}>WHILE IT’S LOCKED, YOU ARBITER</div>
+      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 8 }}>{t("bond.dutiesHeading")}</div>
       <div style={{ display: "grid", gap: 8 }}>
         {duties.map((d) => (
           <div key={d.text} style={{ display: "flex", alignItems: "flex-start", gap: 9 }}>
@@ -507,6 +821,7 @@ function AnnounceBond({ slug, onSlug, announcing, announcedTo, error, onAnnounce
   error: string | null;
   onAnnounce: () => void;
 }) {
+  const { t } = useT();
   const [query, setQuery] = useState("");
   const countries = getAllPickerCountries();
   const selected = getCommunityBySlug(slug);
@@ -515,27 +830,27 @@ function AnnounceBond({ slug, onSlug, announcing, announcedTo, error, onAnnounce
   const pick = (c: PickerCountry) => { onSlug(resolveCountryCommunitySlug(c)); setQuery(""); };
   return (
     <div style={{ marginTop: 12, marginBottom: 6, paddingTop: 12, borderTop: `1px solid ${T.border}`, textAlign: "left" }}>
-      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 6 }}>ANNOUNCE TO A COMMUNITY</div>
+      <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 6 }}>{t("bond.announceHeading")}</div>
       <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 8 }}>
-        Publish this bond so a community counts it toward its <b style={{ color: T.text }}>liveness</b> — proof there’s a bonded arbiter here, verifiable against the chain. Any country, with or without a local fed.
+        {t("bond.announceBodyBefore")}<b style={{ color: T.text }}>{t("bond.announceBodyBold")}</b>{t("bond.announceBodyAfter")}
       </div>
       {/* The chama this bond will announce for (defaults to your home). */}
       <div style={{ display: "flex", alignItems: "center", gap: 9, background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "9px 11px", marginBottom: 8 }}>
         <span style={{ fontSize: 18, lineHeight: 1 }}>{selected?.flagEmoji ?? "🌍"}</span>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 12, color: T.text, fontFamily: T.mono, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selected?.displayName ?? slug}</div>
-          <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>announcing here</div>
+          <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono }}>{t("bond.announcingHere")}</div>
         </div>
       </div>
       <input
         value={query} onChange={(e) => setQuery(e.target.value)} disabled={announcing}
-        placeholder="Search 190+ countries…" autoComplete="off" autoCapitalize="off" spellCheck={false}
+        placeholder={t("bond.searchCountries")} autoComplete="off" autoCapitalize="off" spellCheck={false}
         style={{ width: "100%", boxSizing: "border-box", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, color: T.text, fontFamily: T.mono, fontSize: 12, padding: "9px 11px", marginBottom: 8, outline: "none" }}
       />
       {search && (
         <div style={{ display: "grid", gap: 6, maxHeight: 176, overflowY: "auto", marginBottom: 8, paddingRight: 2 }}>
           {matches.length === 0 ? (
-            <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, padding: "8px 4px" }}>No country matches “{query}”.</div>
+            <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, padding: "8px 4px" }}>{t("bond.noCountryMatch", { query })}</div>
           ) : matches.map((c) => (
             <button key={c.code} onClick={() => pick(c)} disabled={announcing}
               style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "8px 10px", cursor: "pointer" }}>
@@ -549,11 +864,11 @@ function AnnounceBond({ slug, onSlug, announcing, announcedTo, error, onAnnounce
         </div>
       )}
       <button onClick={onAnnounce} disabled={announcing || !slug} style={{ ...secondaryBtn, marginBottom: 0, borderColor: T.accent, color: T.accent }}>
-        {announcing ? "Announcing…" : announcedTo ? "Announce again" : "Announce my bond"}
+        {announcing ? t("bond.announcing") : announcedTo ? t("bond.announceAgain") : t("bond.announceMyBond")}
       </button>
       {announcedTo && (
         <div style={{ fontSize: 10.5, color: T.green, fontFamily: T.mono, marginTop: 6, lineHeight: 1.5 }}>
-          ✓ Announced to <b>{announcedTo}</b> — it now counts toward that chama’s liveness.
+          {t("bond.announcedToBefore")}<b>{announcedTo}</b>{t("bond.announcedToAfter")}
         </div>
       )}
       {error && <div style={{ fontSize: 10.5, color: T.red, fontFamily: T.mono, marginTop: 6, lineHeight: 1.5 }}>{error}</div>}
@@ -562,32 +877,44 @@ function AnnounceBond({ slug, onSlug, announcing, announcedTo, error, onAnnounce
 }
 
 function BackToBonds({ onClick }: { onClick: () => void }) {
+  const { t } = useT();
   return (
     <button onClick={onClick}
       style={{ background: "none", border: "none", color: T.muted, fontFamily: T.mono, fontSize: 10.5, cursor: "pointer", padding: 0, marginBottom: 10, display: "block", textAlign: "left" }}>
-      ← All bonds
+      {t("bond.allBonds")}
     </button>
   );
 }
 
 function MissingBond({ onBack }: { onBack: () => void }) {
+  const { t } = useT();
   return (
     <div style={{ padding: "8px 0" }}>
       <div style={{ fontSize: 12, color: T.text, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 12 }}>
-        This bond isn’t in local storage anymore (its record failed the tamper gate, or storage was cleared).
-        Funded sats are still safe on-chain — they answer only to your key.
+        {t("bond.missingBond")}
       </div>
-      <button onClick={onBack} style={primaryBtn(true)}>Back to bonds</button>
+      <button onClick={onBack} style={primaryBtn(true)}>{t("bond.backToBonds")}</button>
     </div>
   );
 }
 
+function CopyableValue({ heading, label, value }: { heading?: string; label: string; value: string }) {
+  return (
+    <>
+      {heading && <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, margin: "8px 0 5px", textAlign: "left" }}>{heading}</div>}
+      <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, wordBreak: "break-all", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "6px 8px", marginBottom: 8 }}>{value}</div>
+      <CopyButton value={value} label={label} style={secondaryBtn} />
+    </>
+  );
+}
+
 function Header({ onClose, closeable }: { onClose: () => void; closeable: boolean }) {
+  const { t } = useT();
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
       <div>
-        <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 4 }}>ARBITER BOND</div>
-        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.3 }}>Your commitment, on-chain</div>
+        <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 4 }}>{t("bond.headerKicker")}</div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.3 }}>{t("bond.headerTitle")}</div>
       </div>
       {closeable && <button onClick={onClose} style={{ background: "none", border: "none", color: T.muted, fontSize: 20, cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>}
     </div>

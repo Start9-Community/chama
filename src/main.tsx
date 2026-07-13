@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./ui/App.js";
+import { LangProvider } from "./i18n/index.js";
 import { assertProductionEncryption } from "./escrow-engine/encryption-config.js";
 
 // SECURITY: hard-fail at boot if a production build is somehow
@@ -14,6 +15,8 @@ assertProductionEncryption(import.meta.env.PROD);
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <LangProvider>
+      <App />
+    </LangProvider>
   </React.StrictMode>
 );

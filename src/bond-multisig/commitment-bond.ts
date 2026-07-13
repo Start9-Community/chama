@@ -48,6 +48,33 @@ export const DEFAULT_RECLAIM_FEE_RATE = 2n;
 /** P2TR dust threshold — a reclaim output below this is unrelayable. */
 export const P2TR_DUST_SATS = 330n;
 
+export type ReclaimDestinationKind = "chama" | "external" | "bond-key";
+
+export type ReclaimDestinationChoice =
+  | { kind: "chama" }
+  | { kind: "external"; address: string }
+  | { kind: "bond-key" };
+
+export interface CommitmentReclaimDestination {
+  /** What the user asked for in the reclaim confirmation step. */
+  requested: ReclaimDestinationKind;
+  /** Where the reclaim transaction actually paid. */
+  actual: ReclaimDestinationKind;
+  /** The on-chain output address used in the reclaim transaction. */
+  address: string;
+  /** Present when "Back into Chama" fell back to the bond key. */
+  fallbackReason?: string;
+}
+
+export type BitcoinAddressValidation =
+  | { ok: true; address: string }
+  | { ok: false; code: "empty" | "invalid" | "wrong_network"; message: string };
+export type BitcoinAddressValidationCode = Extract<BitcoinAddressValidation, { ok: false }>["code"];
+
+export type ReclaimDestinationResolution =
+  | { ok: true; destination: CommitmentReclaimDestination }
+  | { ok: false; code: BitcoinAddressValidationCode; message: string };
+
 export interface CommitmentBond {
   /** 32-byte x-only key the arbiter controls (their bond key). */
   ownerXonly: Uint8Array;
@@ -106,6 +133,79 @@ export function recomputeCommitmentAddress(
   return buildCommitmentBond(ownerXonly, lockUntil, network).address;
 }
 
+function otherKnownNetwork(network: BtcNetwork): BtcNetwork {
+  return network === SIGNET ? btc.NETWORK as BtcNetwork : SIGNET;
+}
+
+export function validateBitcoinAddressForNetwork(
+  raw: string,
+  network: BtcNetwork = SIGNET,
+): BitcoinAddressValidation {
+  const address = raw.trim();
+  if (!address) {
+    return { ok: false, code: "empty", message: "Enter a Bitcoin address." };
+  }
+  try {
+    btc.Address(network).decode(address);
+    return { ok: true, address };
+  } catch {
+    try {
+      btc.Address(otherKnownNetwork(network)).decode(address);
+      return { ok: false, code: "wrong_network", message: "That address is for the wrong Bitcoin network." };
+    } catch {
+      return { ok: false, code: "invalid", message: "Enter a valid Bitcoin address." };
+    }
+  }
+}
+
+export function resolveReclaimDestination(params: {
+  choice: ReclaimDestinationChoice;
+  bondKeyAddress: string;
+  network?: BtcNetwork;
+  chamaDepositAddress?: string | null;
+  fallbackReason?: string;
+}): ReclaimDestinationResolution {
+  const network = params.network ?? SIGNET;
+  const bondKey = validateBitcoinAddressForNetwork(params.bondKeyAddress, network);
+  if (!bondKey.ok) return { ok: false, code: bondKey.code, message: bondKey.message };
+
+  if (params.choice.kind === "bond-key") {
+    return {
+      ok: true,
+      destination: { requested: "bond-key", actual: "bond-key", address: bondKey.address },
+    };
+  }
+
+  if (params.choice.kind === "external") {
+    const external = validateBitcoinAddressForNetwork(params.choice.address, network);
+    if (!external.ok) return { ok: false, code: external.code, message: external.message };
+    return {
+      ok: true,
+      destination: { requested: "external", actual: "external", address: external.address },
+    };
+  }
+
+  if (params.chamaDepositAddress) {
+    const chama = validateBitcoinAddressForNetwork(params.chamaDepositAddress, network);
+    if (chama.ok) {
+      return {
+        ok: true,
+        destination: { requested: "chama", actual: "chama", address: chama.address },
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    destination: {
+      requested: "chama",
+      actual: "bond-key",
+      address: bondKey.address,
+      fallbackReason: params.fallbackReason ?? "Chama deposit was unavailable; reclaimed to the bond key instead.",
+    },
+  };
+}
+
 /** EXACT vsize of a reclaim sweeping `numInputs` bond UTXOs to one P2TR output.
  *  Computable without signing because a BIP340 sig is always 64 bytes (SIGHASH_DEFAULT
  *  appends no sighash byte) and every input spends the same known leaf. Unit-verified
@@ -133,6 +233,30 @@ export function estimateReclaimFeeSats(
 ): bigint {
   if (feeRatePerVb <= 0n) throw new Error("feeRatePerVb must be positive");
   const sized = BigInt(estimateReclaimVsize(bond, numInputs)) * feeRatePerVb;
+  return sized > 300n ? sized : 300n;
+}
+
+/** EXACT vsize for a normal BIP86/Taproot key-path sweep to one output. This is
+ *  the post-reclaim "make the hidden return UTXO usable" path: after the CLTV
+ *  reclaim lands at the owner's plain p2tr key address, Chama can sweep it into a
+ *  visible destination such as a Fedimint peg-in address. */
+export function estimateKeyPathSweepVsize(numInputs: number): number {
+  if (!Number.isInteger(numInputs) || numInputs <= 0) throw new Error("numInputs must be a positive integer");
+  const varint = (n: number) => (n < 253 ? 1 : 3);
+  // base: version(4) + vin count + n*(outpoint 36 + empty script 1 + sequence 4)
+  //       + vout count(1) + one P2TR/P2WSH-sized output(8 + 1 + 34) + locktime(4)
+  const base = 4 + varint(numInputs) + numInputs * 41 + 1 + 43 + 4;
+  // witness: per input — stack count(1) + sig(1+64)
+  const witness = numInputs * 66;
+  return Math.ceil((base * 4 + 2 + witness) / 4);
+}
+
+export function estimateKeyPathSweepFeeSats(
+  numInputs: number,
+  feeRatePerVb: bigint = DEFAULT_RECLAIM_FEE_RATE,
+): bigint {
+  if (feeRatePerVb <= 0n) throw new Error("feeRatePerVb must be positive");
+  const sized = BigInt(estimateKeyPathSweepVsize(numInputs)) * feeRatePerVb;
   return sized > 300n ? sized : 300n;
 }
 
@@ -187,6 +311,44 @@ export function buildReclaimTx(params: {
     const sig = tx.getInput(i).tapScriptSig![0][1];
     tx.updateInput(i, { finalScriptWitness: [sig, leaf, controlBlock] });
   }
+  return bytesToHex(tx.extract());
+}
+
+/** Spend the owner's normal BIP86 Taproot return output to a chosen destination.
+ *  This is NOT the timelocked bond spend; it is the follow-up sweep of the plain
+ *  return address produced by a reclaim. It lets the app credit already-reclaimed
+ *  sats into a visible Chama/Fedimint deposit instead of leaving them stranded at
+ *  an address only the bond key can spend. */
+export function buildKeyPathSweepTx(params: {
+  ownerXonly: Uint8Array;
+  utxos: BondUtxo[];
+  ownerPriv: Uint8Array;
+  destination: string;
+  feeSats: bigint;
+  network?: BtcNetwork;
+}): string {
+  const network = params.network ?? SIGNET;
+  const { ownerXonly, utxos, ownerPriv, destination, feeSats } = params;
+  if (ownerXonly.length !== 32) throw new Error("ownerXonly must be a 32-byte x-only key");
+  if (utxos.length === 0) throw new Error("No UTXOs to sweep");
+  const total = utxos.reduce((s, u) => s + u.amountSats, 0n);
+  if (feeSats < 0n || feeSats >= total) throw new Error("Bad fee");
+  if (total - feeSats < P2TR_DUST_SATS) {
+    throw new Error(`Sweep output would be dust (${(total - feeSats).toString()} sats < ${P2TR_DUST_SATS.toString()}) — unrelayable`);
+  }
+  const spend = btc.p2tr(ownerXonly, undefined, network);
+  const tx = new btc.Transaction({ allowUnknownOutputs: true });
+  for (const utxo of utxos) {
+    tx.addInput({
+      txid: hexToBytes(utxo.txid),
+      index: utxo.index,
+      witnessUtxo: { script: spend.script, amount: utxo.amountSats },
+      ...spend,
+    });
+  }
+  tx.addOutputAddress(destination, total - feeSats, network);
+  for (let i = 0; i < utxos.length; i++) tx.signIdx(ownerPriv, i);
+  tx.finalize();
   return bytesToHex(tx.extract());
 }
 

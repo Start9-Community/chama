@@ -6,7 +6,10 @@ import { SIM_PILL_HEIGHT } from "../../sim/SimModeBanner.js";
 export function Toast({ message, type, onDone }: {
   message: ReactNode; type: "success" | "error" | "info"; onDone: () => void;
 }) {
-  useEffect(() => { const t = setTimeout(onDone, 4000); return () => clearTimeout(t); }, [onDone]);
+  // Type-aware dwell: a success/info confirmation only needs a glance, so it
+  // shouldn't linger; an error carries more to read, so it stays a touch longer.
+  const dwellMs = type === "error" ? 4500 : type === "info" ? 3000 : 2200;
+  useEffect(() => { const t = setTimeout(onDone, dwellMs); return () => clearTimeout(t); }, [onDone, dwellMs]);
   const colors = { success: T.green, error: T.red, info: T.accent };
   // v0.4.2 hotfix round 2: SIM MODE pill (top:0, z:10000) was clipping
   // the top of the toast (top:16, z:9999). Slide the toast below the

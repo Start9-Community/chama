@@ -22,10 +22,13 @@ straight in your mobile-money account like M-Pesa. Bitcoin is the plumbing; you 
 about it.
 
 ### Is Chama free? What does it cost?
-The app is free to download. A **small platform fee of 0.5%**, taken over Lightning, applies to a completed trade, and if a trade
-goes to a community **arbiter** to settle a dispute, a small arbiter fee may apply. Sellers can also
-set their own **premium** on a listing (e.g. "+25%") — that's the seller's price, not a Chama fee,
-and you always see the final amount before you commit.
+The app is free to download, and **Chama itself takes no cut** — it's non-custodial, so no company
+sits between you and your money. On a completed trade, a small **0.5% insurance premium** goes to the
+community **arbiter** who backs your trade (0.25% from each side), sent as ecash. It's included by
+default and you can turn it off before you settle. If a trade goes to an arbiter to settle a
+**dispute**, a small additional fee applies for that work. Sellers can also set their own **premium**
+on a listing (e.g. "+25%") — that's the seller's price, not a Chama fee — and you always see the
+final amount before you commit.
 
 ### Does Chama hold my money?
 **No.** Chama never touches your money. Your funds sit in a shared escrow **only while a trade is

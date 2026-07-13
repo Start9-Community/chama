@@ -38,6 +38,14 @@ import {
 } from "../fedimint/index.js";
 import { getPayoutRecord } from "../payments/payout-journal.js";
 import {
+  selectPremiumPayTargets,
+  selectPremiumRedeemTargets,
+} from "../arbiters/arbiter-premium.js";
+import {
+  hasPremiumOutboxRecord,
+  isEarningSettled,
+} from "../arbiters/arbiter-earnings.js";
+import {
   getCommunityBySlug,
   communityForInvite,
   DEFAULT_COMMUNITY_SLUG,
@@ -54,6 +62,7 @@ import {
   BROWSE_CATS, T, TRINITY_RING_ORDER,
   applyThemeMode, readThemeMode, writeThemeMode, type ThemeMode,
 } from "./theme.js";
+import { useT, translate, getCurrentLang } from "../i18n/index.js";
 import {
   decideAutoInitTarget,
   decideListingTapEffect,
@@ -203,26 +212,28 @@ const TAB_FOR_VIEW: Record<View, Tab> = {
 // create pencil FAB, the new Dashboard home, and Me — so a newcomer sees what
 // they can do without a redundant second Create stop or a leader pitch they
 // aren't ready for. (The arbiter on-ramp returns with the bond, Phase 2A.)
+// i18n: title/body are DICTIONARY KEYS, resolved with t() at render (module-
+// level constants can't call hooks) — same pattern as INTRO_USE_CASES.
 const COACH_STEPS: CoachStep[] = [
   {
     selector: '[data-coach="nav-browse"]',
-    title: "Browse the marketplace",
-    body: "Every trade your community has posted lives here. Tap a listing to see the deal and chat with the other side.",
+    titleKey: "app.coachBrowseTitle",
+    bodyKey: "app.coachBrowseBody",
   },
   {
     selector: '[data-coach="fab-create"]',
-    title: "Start your own trade",
-    body: "This ✎ button is always one tap away — swap cash for sats, pay a bill, sell something, or lend.",
+    titleKey: "app.coachCreateTitle",
+    bodyKey: "app.coachCreateBody",
   },
   {
     selector: '[data-coach="nav-dashboard"]',
-    title: "Your home base",
-    body: "Your standing, stats, earnings, and ratings are coming here — the place that tracks how you're doing as you trade.",
+    titleKey: "app.coachDashboardTitle",
+    bodyKey: "app.coachDashboardBody",
   },
   {
     selector: '[data-coach="nav-me"]',
-    title: "Your space",
-    body: "Your wallet, active trades, ratings, payout methods, and settings all live under Me.",
+    titleKey: "app.coachMeTitle",
+    bodyKey: "app.coachMeBody",
   },
 ];
 
@@ -393,6 +404,7 @@ function nativeBridgePortLabel(): string | null {
 }
 
 export default function App() {
+  const { t } = useT();
   // Toast state needs to be declared before the hook since we pass
   // onClaimProgress which dispatches toasts. useRef holds the callback
   // so the hook gets a stable reference and doesn't re-wire on every render.
@@ -415,29 +427,31 @@ export default function App() {
     onClaimProgress: (p) => {
       const t = toastRef.current;
       if (!t) return;
+      // i18n: `t` here is the TOAST dispatcher (shadowing the hook's t), and
+      // this callback may be captured once by useEscrow — translate() reads
+      // the live language at fire time instead of a possibly-stale closure.
       if (p.phase === "submitted") {
-        t({ message: "Claiming… reconstructing ecash.", type: "info" });
+        t({ message: translate(getCurrentLang(), "app.claimingReconstructing"), type: "info" });
       } else if (p.phase === "watching") {
         t({
-          message: "Claim submitted. Waiting for your Chama (up to 2 min)…",
+          message: translate(getCurrentLang(), "app.claimSubmittedWatching"),
           type: "info",
         });
       } else if (p.phase === "success") {
         const sats = Math.floor(p.deltaMsats / 1000);
         t({
           message: p.viaWatchdog
-            ? <>Claimed! <BitcoinAmount sats={sats} size={12} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> arrived.</>
-            : "Claimed! Ecash redeemed to your Lightning wallet.",
+            ? <>{translate(getCurrentLang(), "app.claimedBefore")} <BitcoinAmount sats={sats} size={12} gap={3} glyphScale={1.2} color="inherit" glyphColor="inherit" /> {translate(getCurrentLang(), "app.claimedAfter")}</>
+            : translate(getCurrentLang(), "app.claimedRedeemed"),
           type: "success",
         });
       } else if (p.phase === "timeout") {
         t({
-          message:
-            "Still pending on your Chama. Your sats will appear once settled — check back shortly.",
+          message: translate(getCurrentLang(), "app.claimStillPending"),
           type: "info",
         });
       } else if (p.phase === "failure") {
-        t({ message: p.reason || "Claim failed", type: "error" });
+        t({ message: p.reason || translate(getCurrentLang(), "app.claimFailed"), type: "error" });
       }
     },
   });
@@ -625,6 +639,11 @@ export default function App() {
   // Stranded-payout recovery: escrows already swept by the once-per-session
   // background reattachPayout (the boot sweep effect below).
   const payoutReattachSweptRef = useRef<Set<string>>(new Set());
+  // Arbiter premium (task #53 E1): session latches for the pay + redeem
+  // sweeps (durable idempotence lives in the ledger; these just stop
+  // same-session re-fires).
+  const premiumPaySweptRef = useRef<Set<string>>(new Set());
+  const premiumRedeemSweptRef = useRef<Set<string>>(new Set());
   const [kind0Enabled, setKind0Enabled] = useState(false);
   const [nostrProfiles, setNostrProfiles] = useState<NostrProfileNameMap>({});
   const [amountDisplayMode, setAmountDisplayModeState] = useState<AmountDisplayMode>(readAmountDisplayMode);
@@ -723,7 +742,7 @@ export default function App() {
     setPendingSwitchAfterWithdraw(null);
     (async () => {
       try {
-        setToast({ message: `Switching to ${target.label}…`, type: "info" });
+        setToast({ message: t("app.switchingTo", { label: target.label }), type: "info" });
         if (fedimint.federationId) {
           await actions.switchFederation(target.invite, {
             persistCustom: target.persistCustom !== false,
@@ -733,14 +752,14 @@ export default function App() {
             persistCustom: target.persistCustom !== false,
           });
         }
-        setToast({ message: `Joined ${target.label}!`, type: "success" });
+        setToast({ message: t("app.joinedLabel", { label: target.label }), type: "success" });
         if (target.navigateToEscrowAfter) {
           setSelectedId(target.navigateToEscrowAfter);
           setView("detail");
         }
       } catch (e: any) {
         setToast({
-          message: e?.message || `Couldn't switch to ${target.label}. Try again.`,
+          message: e?.message || t("app.couldntSwitchTo", { label: target.label }),
           type: "error",
         });
       }
@@ -777,7 +796,9 @@ export default function App() {
     clearPendingCommunityReport();
     actions.publishCommunityReport(pending)
       .then((r) => setToast({
-        message: `You're on the map — request sent to ${r.sent} Chama arbiter${r.sent === 1 ? "" : "s"}.`,
+        message: r.sent === 1
+          ? t("app.onMapReportSentOne", { count: r.sent })
+          : t("app.onMapReportSentMany", { count: r.sent }),
         type: "success",
       }))
       .catch((e: any) => {
@@ -822,6 +843,18 @@ export default function App() {
   // non-zero and the home fed differs from the OPFS-bound one. v0.2.0
   // will tighten this once the recovery-banner / one-trade-at-a-time
   // gates are in place.
+  // ── Cross-device bond recovery ───────────────────────────────────────────────
+  // Once connected, pull my OWN on-chain bonds into this device's local store (from
+  // my kind-38135 announcements + seed), so a bond posted on another device shows +
+  // reclaims/sweeps here — the Dashboard + ceremony read the same local store. Once
+  // per session, fail-soft.
+  const bondRecoveryDoneRef = useRef(false);
+  useEffect(() => {
+    if (!connected || bondRecoveryDoneRef.current) return;
+    bondRecoveryDoneRef.current = true;
+    void actions.recoverMyBonds().catch(() => {});
+  }, [connected]);
+
   useEffect(() => {
     if (!connected || autoInitDone) return;
     // `connected` flips true synchronously when client.connect() is
@@ -913,7 +946,7 @@ export default function App() {
         ? (getCommunityBySlug(target.slug)?.displayName ?? target.slug)
         : target.kind === "use-default"
           ? (getCommunityBySlug(target.defaultCommunity)?.displayName ?? target.defaultCommunity)
-          : "your previous community";
+          : t("app.fallbackPreviousCommunity");
     actions.initFedimint(target.invite).catch((e: any) => {
       if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE") {
         // Deliberate fund-safety stop — don't re-arm into a modal loop.
@@ -934,7 +967,7 @@ export default function App() {
         console.debug("[chama] auto-init deferred (not ready):", e.code);
       } else {
         setToast({
-          message: e?.message || "Couldn't reconnect. Try again?",
+          message: e?.message || t("app.couldntReconnect"),
           type: "error",
         });
       }
@@ -1105,17 +1138,17 @@ export default function App() {
       // benign stale and resolves with the current state — a trade that
       // just went terminal must not toast a success.
       if (st?.lock?.notesHash) {
-        setToast({ message: "Lock finished — your sats are in escrow.", type: "success" });
+        setToast({ message: t("app.lockFinished"), type: "success" });
       } else {
         setToast({
-          message: "This trade can no longer be locked — your sats are safe in your wallet.",
+          message: t("app.lockNoLongerPossible"),
           type: "info",
         });
       }
       openEscrow(escrowId);
     } catch (e: any) {
       setToast({
-        message: e?.message || "Couldn't finish the lock yet — recovery keeps retrying automatically.",
+        message: e?.message || t("app.lockFinishRetrying"),
         type: "error",
       });
     } finally {
@@ -1146,6 +1179,47 @@ export default function App() {
     }
     // actions.* is a fresh identity each render but reads live refs
     // internally (same pattern as the MeScreen liveness effect).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pubkey, fedimint.initialized, escrows]);
+
+  // Arbiter premium (task #53 E1), payer side: every COMPLETED trade on
+  // which I still owe the 0.25% premium (bonded seated arbiter, no outbox
+  // record — paid/declined/sending all block) gets ONE background pay per
+  // session. Covers both the live settle moment (COMPLETED propagates into
+  // `escrows`) and the boot catch-up (trade settled while I was offline).
+  useEffect(() => {
+    if (!pubkey || !fedimint.initialized) return;
+    if (isSimModeOn() || isTestnetMode()) return;
+    const targets = selectPremiumPayTargets({
+      escrows: escrows.values(),
+      myPubkey: pubkey,
+      hasOutboxRecord: hasPremiumOutboxRecord,
+    });
+    for (const id of targets) {
+      if (premiumPaySweptRef.current.has(id)) continue;
+      premiumPaySweptRef.current.add(id);
+      void actions.payArbiterPremium(id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pubkey, fedimint.initialized, escrows]);
+
+  // Arbiter premium, arbiter side: redeem premium notes addressed to me.
+  // Latched per (trade, note-count) so a NEW note arriving mid-session
+  // re-triggers the sweep for that trade.
+  useEffect(() => {
+    if (!pubkey || !fedimint.initialized) return;
+    if (isSimModeOn() || isTestnetMode()) return;
+    const targets = selectPremiumRedeemTargets({
+      escrows: escrows.values(),
+      myPubkey: pubkey,
+      isSettled: isEarningSettled,
+    });
+    for (const id of targets) {
+      const latch = `${id}:${escrows.get(id)?.premiumNotes?.length ?? 0}`;
+      if (premiumRedeemSweptRef.current.has(latch)) continue;
+      premiumRedeemSweptRef.current.add(latch);
+      void actions.redeemArbiterPremiums(id);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pubkey, fedimint.initialized, escrows]);
 
@@ -1448,14 +1522,14 @@ export default function App() {
       const switchStartedAt = Date.now();
       try {
         setSwitchingToCommunity({ displayName: request.label });
-        setToast({ message: `Switching to ${request.label}...`, type: "info" });
+        setToast({ message: t("app.switchingToDots", { label: request.label }), type: "info" });
         const persistCustom = !("restoreCommunitySlug" in request);
         if (fedimint.federationId) {
           await actions.switchFederation(request.invite, { persistCustom });
         } else {
           await actions.initFedimint(request.invite, { persistCustom });
         }
-        setToast({ message: `On ${request.label}.`, type: "success" });
+        setToast({ message: t("app.onLabel", { label: request.label }), type: "success" });
         if (request.navigateToEscrowAfter) {
           setSelectedId(request.navigateToEscrowAfter);
           setView("detail");
@@ -1479,7 +1553,7 @@ export default function App() {
           setBrowseCommunity(restoreSlug ?? DEFAULT_COMMUNITY_SLUG);
         }
         setToast({
-          message: e?.message || `Couldn't switch to ${request.label}. Try again.`,
+          message: e?.message || t("app.couldntSwitchTo", { label: request.label }),
           type: "error",
         });
       } finally {
@@ -1537,7 +1611,7 @@ export default function App() {
     // trade. Matching listings fall through untouched.
     if (effect.kind === "blocked-active-commitment") {
       setToast({
-        message: "That listing runs on another Chama — finish your live trade here first.",
+        message: t("app.listingOtherChama"),
         type: "info",
       });
       return;
@@ -1563,7 +1637,7 @@ export default function App() {
 
     if (effect.kind === "switch-silent") {
       setSwitchingToCommunity({ displayName: effect.displayName });
-      setToast({ message: `Switching to ${effect.displayName} for this trade...`, type: "info" });
+      setToast({ message: t("app.switchingForTrade", { name: effect.displayName }), type: "info" });
       (async () => {
         const switchStartedAt = Date.now();
         try {
@@ -1580,7 +1654,7 @@ export default function App() {
           setDetailBackView(safeBackView);
           setSelectedId(id);
           setView("detail");
-          setToast({ message: `On ${effect.displayName} for this trade.`, type: "success" });
+          setToast({ message: t("app.onForTrade", { name: effect.displayName }), type: "success" });
         } catch (e: any) {
           if (e?.code === "RECONCILE_REFUSED_NONZERO_BALANCE"
             || e?.code === "SWITCH_REFUSED_NONZERO_BALANCE") {
@@ -1596,7 +1670,7 @@ export default function App() {
             });
           } else {
             setToast({
-              message: e?.message || `Couldn't switch to ${effect.displayName}. Try again.`,
+              message: e?.message || t("app.couldntSwitchTo", { label: effect.displayName }),
               type: "error",
             });
           }
@@ -1628,7 +1702,7 @@ export default function App() {
   // detail render only mounts when `selected` is truthy). Instead: reload,
   // open if it comes back, else stay put and explain honestly.
   const openArchivedTrade = async (id: string) => {
-    setToast({ message: "Reloading trade…", type: "info" });
+    setToast({ message: t("app.reloadingTrade"), type: "info" });
     // Cap the wait: loadEscrow's relay fetch runs to a 15s timeout and can add
     // completeness retries (~45s worst case), so awaiting it raw left the user
     // hanging on a stuck-looking toast. Race a 10s cap — a reloadable trade
@@ -1648,8 +1722,7 @@ export default function App() {
       return;
     }
     setToast({
-      message: "This trade's full history isn't on your Chama relay anymore — "
-        + "the summary here is what's saved on this device.",
+      message: t("app.archivedNotOnRelay"),
       type: "info",
     });
   };
@@ -1666,10 +1739,10 @@ export default function App() {
     setView("detail");
     actions.loadEscrow(id).then((state) => {
       if (!state) {
-        setToast({ message: `Couldn't find trade ${id} on relays yet.`, type: "error" });
+        setToast({ message: t("app.tradeNotFoundYet", { id }), type: "error" });
       }
     }).catch((e: any) => {
-      setToast({ message: e?.message || `Couldn't load trade ${id}.`, type: "error" });
+      setToast({ message: e?.message || t("app.couldntLoadTrade", { id }), type: "error" });
     });
   }, [connected, actions]);
 
@@ -1705,15 +1778,15 @@ export default function App() {
 
   const handleCreate = async (params: any) => {
     try {
-      setToast({ message: "Signing event with NIP-07...", type: "info" });
+      setToast({ message: t("app.signingNip07"), type: "info" });
       const { escrowId } = await actions.createEscrow(params);
-      setToast({ message: `Trade published! ${escrowId}`, type: "success" });
+      setToast({ message: t("app.tradePublished", { escrowId }), type: "success" });
       setDetailBackView("create");
       setView("detail");
       setSelectedId(escrowId);
     } catch (e: any) {
       console.error("[chama] Create failed:", e);
-      setToast({ message: e.message || "Failed to create trade", type: "error" });
+      setToast({ message: e.message || t("app.createFailed"), type: "error" });
       throw e;
     }
   };
@@ -1752,9 +1825,9 @@ export default function App() {
       const switchStartedAt = Date.now();
       try {
         setSwitchingToCommunity({ displayName: home.displayName });
-        setToast({ message: `Returning to ${home.displayName}...`, type: "info" });
+        setToast({ message: t("app.returningTo", { name: home.displayName }), type: "info" });
         await actions.switchFederation(homeInvite);
-        setToast({ message: `Back home in ${home.displayName}.`, type: "info" });
+        setToast({ message: t("app.backHomeIn", { name: home.displayName }), type: "info" });
       } catch (e: any) {
         console.warn("[chama] snap-back to home failed:", e?.message || e);
       } finally {
@@ -1796,6 +1869,13 @@ export default function App() {
   const shellPaddingBottom = useSafeAreaInsets
     ? `calc(${BOTTOM_NAV_HEIGHT}px + env(safe-area-inset-bottom, 0px))`
     : BOTTOM_NAV_HEIGHT;
+  // On a fresh account, `connected` and `pubkey` arrive before the effect above
+  // has a chance to flip `needsHomePick`. Derive the first gate synchronously so
+  // the Browse shell never paints for a frame between account creation and the
+  // globe. Keep `needsHomePick` as the in-flight latch while a selected
+  // community is joining.
+  const shouldShowHomePicker =
+    connected && !!pubkey && (needsHomePick || getUserCommunitySlugRaw() === null);
 
   if (!connected) {
     return (
@@ -1823,13 +1903,13 @@ export default function App() {
                   if (shouldPersistNsecInShell()) {
                     try { await writeSavedNsec(scanned, "imported"); } catch {}
                   }
-                  setToast({ message: "⚡ Key scanned — signing you in.", type: "success" });
+                  setToast({ message: t("app.keyScanned"), type: "success" });
                   actions.connect();
                 } else if (scanned.startsWith("nostrconnect://") || scanned.startsWith("bunker://")) {
                   copyTextRobust(scanned);
-                  setToast({ message: "Signer URI copied to clipboard.", type: "success" });
+                  setToast({ message: t("app.signerUriCopied"), type: "success" });
                 } else {
-                  setToast({ message: "Unrecognized QR code.", type: "error" });
+                  setToast({ message: t("app.unrecognizedQr"), type: "error" });
                 }
               }}
             />
@@ -1889,7 +1969,7 @@ export default function App() {
   // npub is known, so onSelect writes straight to its scope (handleSelectCommunity
   // persists + resolves the federation), and — because the client is connected —
   // the picker's country-detail liveness signal can actually fetch.
-  if (needsHomePick) {
+  if (shouldShowHomePicker) {
     return (
       <div style={{
         background: T.bg, color: T.text, minHeight: "100dvh", fontFamily: T.sans,
@@ -1959,7 +2039,7 @@ export default function App() {
               <div>
                 <div style={{ fontSize: 16, fontWeight: 700, fontFamily: T.mono, letterSpacing: -0.5 }}>Chama</div>
                 <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1.5, textTransform: "uppercase" }}>
-                  Local money · Bitcoin rails
+                  {t("app.headerTagline")}
                 </div>
               </div>
             </div>
@@ -2037,7 +2117,7 @@ export default function App() {
               hasPendingClaimPayout,
             })}
             onTapStranded={() => setPendingRecovery({
-              title: "Recover sats",
+              title: t("app.recoverSatsTitle"),
               traceContext: recoveryTraceContext,
             })}
             showReconnect={getUserCommunitySlugRaw() !== null || !!(storedActiveInvite || liveActiveInvite)}
@@ -2049,7 +2129,7 @@ export default function App() {
               // seed round-trip into.
               actions.recoverRelays();
               actions.initFedimint().catch(
-                (e: any) => setToast({ message: e.message || "Couldn't join your Chama. Try again?", type: "error" })
+                (e: any) => setToast({ message: e.message || t("app.couldntJoinChama"), type: "error" })
               );
             }}
           />
@@ -2119,7 +2199,7 @@ export default function App() {
             const { resolve } = pendingFundAndLock;
             setPendingFundAndLock(null);
             if (terminal.kind === "locked") {
-              setToast({ message: "⚡ Sats locked in escrow — vote buttons are live.", type: "success" });
+              setToast({ message: t("app.satsLocked"), type: "success" });
             } else if (terminal.kind === "lock-failed") {
               // v1.2.5: translate NWC FAILURE_REASON_* / NIP-47 codes
               // into human-readable copy so the user knows what to do
@@ -2127,10 +2207,10 @@ export default function App() {
               // "INTERNAL: FAILURE_REASON_NO_ROUTE".
               setToast({ message: humanizeNwcError(terminal.error), type: "error" });
             } else if (terminal.kind === "expired") {
-              setToast({ message: "Invoice expired — no payment received.", type: "info" });
+              setToast({ message: t("app.invoiceExpired"), type: "info" });
             } else if (terminal.kind === "mint-timeout") {
               setToast({
-                message: "Mint stalled. If sats need recovery, use Me or the Browse recovery prompt.",
+                message: t("app.mintStalled"),
                 type: "info",
               });
             }
@@ -2155,7 +2235,7 @@ export default function App() {
           federationLabel={
             getCommunityBySlug(routeCommunitySlug)?.displayName
             ?? fedimint.federationName
-            ?? "your federation"
+            ?? t("app.yourFederation")
           }
           spendNotes={(amountMsats) => actions.spendNotes(amountMsats)}
           onExported={() => { actions.refreshBalance().catch(() => {}); }}
@@ -2174,16 +2254,16 @@ export default function App() {
           federationLabel={
             getCommunityBySlug(routeCommunitySlug)?.displayName
             ?? fedimint.federationName
-            ?? "your federation"
+            ?? t("app.yourFederation")
           }
           spendNotes={(amountMsats) => actions.spendNotes(amountMsats)}
           preset={{
             notes: strandedClaimExport.oobNotes,
             amountMsats: strandedClaimExport.amountMsats,
-            headline: "STRANDED CLAIM · BEARER NOTE",
+            headline: t("app.strandedClaimHeadline"),
             body: strandedClaimExport.stranded === "unresolved-credit"
-              ? "⚠ This note was reported already-redeemed, but Chama couldn't confirm YOUR wallet was credited. Save it anyway, then check your balance — if the sats aren't there, this string is your evidence and recovery path."
-              : "⚠ This note IS the sats from your settled trade. Chama couldn't redeem it automatically — import it into Fedi or any Fedimint wallet on this federation, or save it somewhere safe NOW. Clearing browser data destroys the only copy.",
+              ? t("app.strandedClaimUnresolvedBody")
+              : t("app.strandedClaimBody"),
             onConfirmCleared: () => {
               clearPendingRedemption(strandedClaimExport.escrowId);
               setStrandedClaimExport(null);
@@ -2197,7 +2277,9 @@ export default function App() {
         <BondCeremonyModal
           createCommitmentBond={actions.createCommitmentBond}
           checkCommitmentFunding={actions.checkCommitmentFunding}
+          recoverMyBonds={actions.recoverMyBonds}
           reclaimCommitmentBond={actions.reclaimCommitmentBond}
+          creditReclaimedCommitmentBond={actions.creditReclaimedCommitmentBond}
           getBondChainTip={actions.getBondChainTip}
           publishBondAnnouncement={actions.publishBondAnnouncement}
           onClose={() => setShowBondCeremony(false)}
@@ -2233,8 +2315,8 @@ export default function App() {
               const wasRefund = escrows.get(pendingClaim.escrowId)?.resolvedOutcome === Outcome.REFUND;
               setToast({
                 message: wasRefund
-                  ? "⚡ Refunded — your locked sats are back in your wallet."
-                  : "⚡ Released — the sats just landed in your wallet.",
+                  ? t("app.refundedToast")
+                  : t("app.releasedToast"),
                 type: "success",
               });
             } else if (terminal.kind === "claim-failed") {
@@ -2253,7 +2335,7 @@ export default function App() {
               setToast({ message: terminal.error, type: "error" });
             } else if (terminal.kind === "claim-pending") {
               setToast({
-                message: "⚡ Claim is in flight — your sats are on the way.",
+                message: t("app.claimInFlight"),
                 type: "info",
               });
             } else if (terminal.kind === "payout-failed") {
@@ -2265,18 +2347,18 @@ export default function App() {
               const payoutSatsForCopy = Math.floor(pendingClaim.payoutMsats / 1000);
               if (terminal.claimCompleted === false) {
                 setToast({
-                  message: "⚡ Payout couldn't be sent — your sats are safe. Tap Claim again to retry.",
+                  message: t("app.payoutRetryClaim"),
                   type: "error",
                 });
               } else if (payoutSatsForCopy < MAIN_SURFACE_RECOVERY_MIN_SATS) {
                 setToast({
-                  message: "Payout couldn't be sent — your sats are safe in your Chama.",
+                  message: t("app.payoutSafeInChama"),
                   type: "error",
                 });
               } else {
                 setView("me");
                 setToast({
-                  message: "Payout failed. Your sats are safe — recover them from Me.",
+                  message: t("app.payoutRecoverFromMe"),
                   type: "error",
                 });
               }
@@ -2315,8 +2397,8 @@ export default function App() {
             });
             setPendingDestroyConfirm(null);
             setPendingRecovery({
-              title: "Recover & switch Chama",
-              subtitle: `Send to your Lightning wallet, then switch to ${pendingDestroyConfirm.label}.`,
+              title: t("app.recoverAndSwitchTitle"),
+              subtitle: t("app.recoverAndSwitchSubtitle", { label: pendingDestroyConfirm.label }),
               traceContext: recoveryTraceContext,
             });
           }}
@@ -2329,7 +2411,7 @@ export default function App() {
             }
             setPendingDestroyConfirm(null);
             actions.initFedimint(pendingDestroyConfirm.activeInvite).catch((e: any) =>
-              setToast({ message: e?.message || "Re-init failed", type: "error" })
+              setToast({ message: e?.message || t("app.reinitFailed"), type: "error" })
             );
           }}
         />
@@ -2348,10 +2430,10 @@ export default function App() {
             <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, borderRadius: T.r, width: "100%", maxWidth: 360, padding: 22 }}>
               <div style={{ fontSize: 26, marginBottom: 10, textAlign: "center" }}>🔀</div>
               <div style={{ fontSize: 16, fontWeight: 800, color: T.text, fontFamily: T.sans, textAlign: "center", marginBottom: 10 }}>
-                This trade lives in {flag} {name}
+                {t("app.fedSwitchTitle", { flag, name })}
               </div>
               <div style={{ fontSize: 13, color: T.muted, fontFamily: T.sans, lineHeight: 1.55, textAlign: "center", marginBottom: 18 }}>
-                Your wallet is on a different Chama right now. Switch to <b style={{ color: T.text }}>{name}</b> to pick up this trade where you left off — your sats are safe either way.
+                {t("app.fedSwitchBodyBefore")} <b style={{ color: T.text }}>{name}</b> {t("app.fedSwitchBodyAfter")}
               </div>
               <button
                 onClick={async () => {
@@ -2360,17 +2442,17 @@ export default function App() {
                   try {
                     await handleSelectCommunity(target.community);
                     await target.retry();
-                    setToast({ message: `On ${name} — trade picked up.`, type: "success" });
+                    setToast({ message: t("app.fedSwitchPickedUp", { name }), type: "success" });
                   } catch (err: any) {
-                    setToast({ message: err?.message || `Couldn't switch to ${name}. If you have another live trade, finish that one first.`, type: "error" });
+                    setToast({ message: err?.message || t("app.fedSwitchFailed", { name }), type: "error" });
                   }
                 }}
                 style={{ width: "100%", padding: "13px", borderRadius: T.rs, background: T.accent, border: "none", color: T.bg, fontFamily: T.sans, fontSize: 14, fontWeight: 800, cursor: "pointer", marginBottom: 8 }}>
-                Switch to {flag} {name} →
+                {t("app.fedSwitchCta", { flag, name })}
               </button>
               <button onClick={() => setPendingFedSwitch(null)}
                 style={{ width: "100%", padding: "11px", borderRadius: T.rs, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontFamily: T.mono, fontSize: 12, cursor: "pointer" }}>
-                Not now
+                {t("app.notNow")}
               </button>
             </div>
           </div>
@@ -2409,7 +2491,7 @@ export default function App() {
               // v0.2.0 Q4 semantics — stays the same in Phase 4).
               setPendingSwitchAfterWithdraw(null);
             } else if (terminal.kind === "done") {
-              setToast({ message: "Recovered to your wallet!", type: "success" });
+              setToast({ message: t("app.recoveredToWallet"), type: "success" });
               // Balance reaching zero will trigger the watcher
               // useEffect (line ~187) which dispatches the queued
               // switch automatically. No extra wiring needed here.
@@ -2444,10 +2526,10 @@ export default function App() {
           {/* Readable-first fed-switch banner: big bold DM Sans so it reads at a
               glance, with a calm reassurance line beneath. */}
           <div style={{ fontSize: 18, fontWeight: 800, color: T.text, fontFamily: T.sans, textAlign: "center", padding: "0 24px", lineHeight: 1.3 }}>
-            Switching to <span style={{ color: T.accent }}>{switchingToCommunity.displayName}</span>…
+            {t("app.switchOverlayBefore")} <span style={{ color: T.accent }}>{switchingToCommunity.displayName}</span>{t("app.switchOverlayAfter")}
           </div>
           <div style={{ fontSize: 12.5, fontWeight: 600, color: T.muted, fontFamily: T.sans }}>
-            no sats move while switching
+            {t("app.noSatsMoveWhileSwitching")}
           </div>
         </div>
       )}
@@ -2487,7 +2569,7 @@ export default function App() {
             disableNwc={fediWebView}
             onBack={() => { setView(detailBackView); setSelectedId(null); maybeSnapBackHome(); }}
             onVote={(outcome) => actions.vote(selectedId!, outcome).then(
-              () => setToast({ message: `Voted ${outcome}!`, type: "success" }),
+              () => setToast({ message: t("app.votedOutcome", { outcome }), type: "success" }),
               (e: any) => {
                 // v1.2.2 vote-freeze fix: distinguish "your vote was
                 // already on chain" (info, neutral) from "the publish
@@ -2497,12 +2579,12 @@ export default function App() {
                 // tap, see nothing, tap again, see nothing again.
                 if (e?.voteSuppressed) {
                   setToast({
-                    message: e?.message || "Vote already recorded for this trade.",
+                    message: e?.message || t("app.voteAlreadyRecorded"),
                     type: "info",
                   });
                   return;
                 }
-                setToast({ message: e?.message || "Vote failed.", type: "error" });
+                setToast({ message: e?.message || t("app.voteFailed"), type: "error" });
               },
             )}
             // R3-1b: re-attach to a submitted payout on view → complete a
@@ -2532,19 +2614,19 @@ export default function App() {
               try {
                 setToast({
                   message: joinOpts?.orderFinalized
-                    ? "Confirming order..."
+                    ? t("app.confirmingOrder")
                     : joinOpts?.selectedItems?.length
-                      ? "Saving cart..."
-                      : `Joining as ${role}...`,
+                      ? t("app.savingCart")
+                      : t("app.joiningAsRole", { role }),
                   type: "info",
                 });
                 await actions.joinEscrow(selectedId!, role, joinOpts);
                 setToast({
                   message: joinOpts?.orderFinalized
-                    ? "Order ready!"
+                    ? t("app.orderReady")
                     : joinOpts?.selectedItems?.length
-                      ? "Cart saved!"
-                      : `Joined as ${role}!`,
+                      ? t("app.cartSaved")
+                      : t("app.joinedAsRole", { role }),
                   type: "success",
                 });
               } catch (e: any) {
@@ -2557,20 +2639,20 @@ export default function App() {
                   });
                   return;
                 }
-                setToast({ message: e.message || "Failed to join", type: "error" });
+                setToast({ message: e.message || t("app.joinFailed"), type: "error" });
               }
             }}
             onReleasePeriod={async (periodIndex: number) => {
               try {
                 await actions.releasePeriod(selectedId!, periodIndex);
-                setToast({ message: "Period " + (periodIndex + 1) + " released!", type: "success" });
+                setToast({ message: t("app.periodReleased", { n: periodIndex + 1 }), type: "success" });
               } catch (e: any) {
-                setToast({ message: e.message || "Release failed", type: "error" });
+                setToast({ message: e.message || t("app.releaseFailed"), type: "error" });
               }
             }}
             onSendChat={(message) => {
               actions.sendChat(selectedId!, message).catch((e: any) =>
-                setToast({ message: e.message || "Failed to send", type: "error" })
+                setToast({ message: e.message || t("app.sendFailed"), type: "error" })
               );
             }}
             // Re-broadcast / heal a "ghost" trade: re-publish its cached event
@@ -2581,7 +2663,7 @@ export default function App() {
             // detail view. Money stays in escrow; re-loadable by ID.
             onForget={(escrowId) => {
               actions.forgetEscrow(escrowId);
-              setToast({ message: "Trade forgotten on this device — money stays in escrow.", type: "success" });
+              setToast({ message: t("app.tradeForgotten"), type: "success" });
               setView(detailBackView);
               setSelectedId(null);
               maybeSnapBackHome();
@@ -2595,11 +2677,11 @@ export default function App() {
             onPurchase={async (_parentId, quantity) => {
               if (!selected) return;
               try {
-                setToast({ message: "Starting your order…", type: "info" });
+                setToast({ message: t("app.startingOrder"), type: "info" });
                 const { escrowId } = await actions.purchaseFromListing(selected, quantity);
                 openEscrow(escrowId);
               } catch (e: any) {
-                setToast({ message: e?.message || "Couldn't start the order.", type: "error" });
+                setToast({ message: e?.message || t("app.couldntStartOrder"), type: "error" });
               }
             }}
             stockLeft={selected ? stockByListing.get(selected.id) : undefined}
@@ -2613,18 +2695,18 @@ export default function App() {
             onLockDirectNwc={async (opts) => {
               if (fediWebView) {
                 setToast({
-                  message: "Fedi uses its built-in ecash flow here — NWC is disabled.",
+                  message: t("app.fediNwcDisabledFund"),
                   type: "info",
                 });
                 return { ok: false, error: "NWC disabled in Fedi" };
               }
               if (!fedimint.joined) {
-                setToast({ message: "Join a Chama first — tap a community pill.", type: "error" });
+                setToast({ message: t("app.joinChamaFirst"), type: "error" });
                 return { ok: false, error: "Join a Chama first" };
               }
               if (midFunding) {
                 setToast({
-                  message: "Another funding operation is in progress. Complete it first.",
+                  message: t("app.anotherFundingInProgress"),
                   type: "error",
                 });
                 return { ok: false, error: "Mid-funding" };
@@ -2636,7 +2718,7 @@ export default function App() {
                 opts.amountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
               ) {
                 setToast({
-                  message: `${minimumAtomicFundingMessage()} Enter a positive amount for a real Lightning escrow.`,
+                  message: `${minimumAtomicFundingMessage()} ${t("app.enterPositiveAmount")}`,
                   type: "error",
                 });
                 return { ok: false, error: "Amount too small" };
@@ -2644,7 +2726,7 @@ export default function App() {
               const probe = await actions.probeFederation();
               if (!probe.ok) {
                 setToast({
-                  message: probe.error || "Chama wallet disconnected. Tap Reconnect and try again.",
+                  message: probe.error || t("app.walletDisconnectedReconnect"),
                   type: "error",
                 });
                 return { ok: false, error: probe.error || "Probe failed" };
@@ -2666,22 +2748,22 @@ export default function App() {
                   onPhase: (phase) => {
                     // Map engine phase kinds to compact button labels.
                     const label =
-                      phase.kind === "creating-invoice" ? "Creating invoice…"
-                      : phase.kind === "creating-invoice-slow" ? "Still creating invoice…"
-                      : phase.kind === "awaiting-payment" ? "Waiting for payment…"
-                      : phase.kind === "paying-with-nwc" ? "Paying via NWC…"
-                      : phase.kind === "mint-confirming" ? "Confirming with federation…"
-                      : phase.kind === "mint-confirming-slow" ? "Federation slow to confirm…"
-                      : phase.kind === "payment-confirmed" ? "Locking…"
-                      : phase.kind === "locking" ? "Locking…"
-                      : phase.kind === "locked" ? "Locked!"
-                      : phase.kind === "invoice-created" ? "Invoice ready…"
-                      : "Funding…";
+                      phase.kind === "creating-invoice" ? t("app.phaseCreatingInvoice")
+                      : phase.kind === "creating-invoice-slow" ? t("app.phaseStillCreatingInvoice")
+                      : phase.kind === "awaiting-payment" ? t("app.phaseAwaitingPayment")
+                      : phase.kind === "paying-with-nwc" ? t("app.phasePayingNwc")
+                      : phase.kind === "mint-confirming" ? t("app.phaseMintConfirming")
+                      : phase.kind === "mint-confirming-slow" ? t("app.phaseMintConfirmingSlow")
+                      : phase.kind === "payment-confirmed" ? t("app.phaseLocking")
+                      : phase.kind === "locking" ? t("app.phaseLocking")
+                      : phase.kind === "locked" ? t("app.phaseLocked")
+                      : phase.kind === "invoice-created" ? t("app.phaseInvoiceReady")
+                      : t("app.phaseFunding");
                     opts.onPhase?.(label);
                   },
                 });
                 if (terminal.kind === "locked") {
-                  setToast({ message: "⚡ Sats locked in escrow — vote buttons are live.", type: "success" });
+                  setToast({ message: t("app.satsLocked"), type: "success" });
                   return { ok: true };
                 }
                 if (terminal.kind === "lock-failed") {
@@ -2689,12 +2771,12 @@ export default function App() {
                   return { ok: false, error: terminal.error };
                 }
                 if (terminal.kind === "expired") {
-                  setToast({ message: "Invoice expired — no payment received.", type: "info" });
+                  setToast({ message: t("app.invoiceExpired"), type: "info" });
                   return { ok: false, error: "Invoice expired" };
                 }
                 if (terminal.kind === "mint-timeout") {
                   setToast({
-                    message: "Mint stalled. If sats need recovery, use Me or the Browse recovery prompt.",
+                    message: t("app.mintStalled"),
                     type: "info",
                   });
                   return { ok: false, error: "Mint timeout" };
@@ -2702,7 +2784,7 @@ export default function App() {
                 // aborted = silent
                 return { ok: false, error: "Aborted" };
               } catch (e: any) {
-                const msg = humanizeNwcError(e?.message || "Funding failed");
+                const msg = humanizeNwcError(e?.message || t("app.fundingFailed"));
                 setToast({ message: msg, type: "error" });
                 return { ok: false, error: msg };
               }
@@ -2713,7 +2795,7 @@ export default function App() {
             onClaimDirectNwc={async (opts) => {
               if (fediWebView) {
                 setToast({
-                  message: "Fedi claims directly into your Fedi wallet — NWC is disabled.",
+                  message: t("app.fediNwcDisabledClaim"),
                   type: "info",
                 });
                 return { ok: false, error: "NWC disabled in Fedi" };
@@ -2725,7 +2807,7 @@ export default function App() {
               const { resolveNwcConnectionToInvoice } = await import("../payments/nwc.js");
               const { claimPayoutSats } = await import("../payments/lightning-fees.js");
               const payoutSats = claimPayoutSats(payoutMsats, "lightning");
-              opts.onPhase?.("Asking your NWC wallet for an invoice…");
+              opts.onPhase?.(t("app.askingNwcInvoice"));
               let invoice: string;
               try {
                 invoice = await resolveNwcConnectionToInvoice(
@@ -2734,11 +2816,11 @@ export default function App() {
                   { description: "Chama claim payout" },
                 );
               } catch (e: any) {
-                const msg = humanizeNwcError(e?.message || "NWC wallet refused");
+                const msg = humanizeNwcError(e?.message || t("app.nwcWalletRefused"));
                 setToast({ message: msg, type: "error" });
                 return { ok: false, error: msg };
               }
-              opts.onPhase?.("Claiming…");
+              opts.onPhase?.(t("app.phaseClaiming"));
               try {
                 const terminal = await actions.claimAndPayout(selectedId!, {
                   bolt11: invoice,
@@ -2746,10 +2828,10 @@ export default function App() {
                   saveAfter: false,
                   onPhase: (phase) => {
                     const label =
-                      phase.kind === "claiming" ? "Recovering your share…"
-                      : phase.kind === "confirming" ? "Confirming with federation…"
-                      : phase.kind === "paying-invoice" ? "Sending to NWC…"
-                      : "Claiming…";
+                      phase.kind === "claiming" ? t("app.phaseRecoveringShare")
+                      : phase.kind === "confirming" ? t("app.phaseMintConfirming")
+                      : phase.kind === "paying-invoice" ? t("app.phaseSendingNwc")
+                      : t("app.phaseClaiming");
                     opts.onPhase?.(label);
                   },
                 });
@@ -2761,18 +2843,18 @@ export default function App() {
                 if (terminal.kind === "done" || terminal.kind === "payout-confirming") {
                   setToast({
                     message: terminal.kind === "done"
-                      ? "Payout sent!"
-                      : "Payout sent — confirming. Check your wallet; the trade finishes once it lands.",
+                      ? t("app.payoutSent")
+                      : t("app.payoutSentConfirming"),
                     type: "success",
                   });
                   try { addOrTouchSavedNwcConnection(opts.nwcConnectionString); } catch {}
                   return { ok: true };
                 }
-                const msg = humanizeNwcError(terminal.error || "Claim failed");
+                const msg = humanizeNwcError(terminal.error || t("app.claimFailed"));
                 setToast({ message: msg, type: "error" });
                 return { ok: false, error: msg };
               } catch (e: any) {
-                const msg = humanizeNwcError(e?.message || "Claim failed");
+                const msg = humanizeNwcError(e?.message || t("app.claimFailed"));
                 setToast({ message: msg, type: "error" });
                 return { ok: false, error: msg };
               }
@@ -2781,7 +2863,7 @@ export default function App() {
               const savedHandleId = lockOpts.savedHandleId;
               const selectedItems = lockOpts.selectedItems;
               if (!fedimint.joined) {
-                setToast({ message: "Join a Chama first — tap a community pill.", type: "error" });
+                setToast({ message: t("app.joinChamaFirst"), type: "error" });
                 return;
               }
               // v0.6.5: the only Fund gate is mid-funding — multiple
@@ -2789,7 +2871,7 @@ export default function App() {
               // funding flows would race the shared OPFS wallet.
               if (midFunding) {
                 setToast({
-                  message: "Another funding operation is in progress. Complete it first.",
+                  message: t("app.anotherFundingInProgress"),
                   type: "error",
                 });
                 return;
@@ -2802,7 +2884,7 @@ export default function App() {
                 lockAmountMsats < MIN_REAL_ATOMIC_FUNDING_MSATS
               ) {
                 setToast({
-                  message: `${minimumAtomicFundingMessage()} Enter a positive amount for a real Lightning escrow.`,
+                  message: `${minimumAtomicFundingMessage()} ${t("app.enterPositiveAmount")}`,
                   type: "error",
                 });
                 return;
@@ -2810,7 +2892,7 @@ export default function App() {
               const probe = await actions.probeFederation();
               if (!probe.ok) {
                 setToast({
-                  message: probe.error || "Chama wallet disconnected. Tap Reconnect and try again.",
+                  message: probe.error || t("app.walletDisconnectedReconnect"),
                   type: "error",
                 });
                 return;
@@ -2886,7 +2968,7 @@ export default function App() {
                 // queued follow-up since this path isn't gated by a
                 // pending federation switch.
                 setPendingRecovery({
-                  title: "Recover sats",
+                  title: t("app.recoverSatsTitle"),
                   traceContext: recoveryTraceContext,
                 });
               }}
@@ -2918,6 +3000,7 @@ export default function App() {
           loadLiveness={actions.getChamaLiveness}
           livenessBlocksPerDay={BOND_LIVENESS_BLOCKS_PER_DAY}
           onOpenBondCeremony={() => setShowBondCeremony(true)}
+          balanceMsats={fedimint.balanceMsats ?? 0}
         />
       ) : view === "me" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
@@ -2949,7 +3032,7 @@ export default function App() {
             hasPendingClaimPayout={hasPendingClaimPayout}
             stuckNativeLocks={nativeLockSummary.stuck}
             onRecoverSats={() => setPendingRecovery({
-              title: "Recover sats",
+              title: t("app.recoverSatsTitle"),
               traceContext: recoveryTraceContext,
             })}
             onOpenTrade={(id) => openEscrow(id, "me")}
@@ -2957,15 +3040,17 @@ export default function App() {
               const added = await actions.refreshMyTrades();
               setToast({
                 message: added > 0
-                  ? `Found ${added} trade${added === 1 ? "" : "s"} from relays.`
-                  : "Your trades are up to date.",
+                  ? (added === 1
+                      ? t("app.foundTradesOne", { count: added })
+                      : t("app.foundTradesMany", { count: added }))
+                  : t("app.tradesUpToDate"),
                 type: added > 0 ? "success" : "info",
               });
               return added;
             }}
             onSellerEditListing={(id) => {
               setToast({
-                message: "Edit will clone, cancel, and republish soon. Opening listing for now.",
+                message: t("app.editComingSoon"),
                 type: "info",
               });
               openEscrow(id, "me");
@@ -2974,16 +3059,16 @@ export default function App() {
               const armed = pendingDeleteRef.current;
               if (!armed || armed.id !== id || Date.now() - armed.at > 5000) {
                 pendingDeleteRef.current = { id, at: Date.now() };
-                setToast({ message: "Tap Delete again to confirm — this cancels the listing and removes it from Browse.", type: "info" });
+                setToast({ message: t("app.tapDeleteAgain"), type: "info" });
                 return;
               }
               pendingDeleteRef.current = null;
               try {
                 await actions.cancel(id, "seller_deleted_listing");
-                setToast({ message: "Listing deleted.", type: "success" });
+                setToast({ message: t("app.listingDeleted"), type: "success" });
               } catch (e: any) {
                 setToast({
-                  message: e?.message || "Couldn't delete listing.",
+                  message: e?.message || t("app.couldntDeleteListing"),
                   type: "error",
                 });
               }
@@ -3062,7 +3147,7 @@ export default function App() {
             }
             onSwitchFederation={async (inviteCode, opts) => {
               try {
-                setToast({ message: "Joining Chama…", type: "info" });
+                setToast({ message: t("app.joiningChama"), type: "info" });
                 // Dispatch: init for first-time join (no fed loaded yet),
                 // switch when already joined. Mirrors the community-tap
                 // handler's logic so Sandbox works pre-join.
@@ -3071,19 +3156,19 @@ export default function App() {
                 } else {
                   await actions.initFedimint(inviteCode, opts);
                 }
-                setToast({ message: "Joined!", type: "success" });
+                setToast({ message: t("app.joined"), type: "success" });
               } catch (e: any) {
-                setToast({ message: e?.message || "Join failed", type: "error" });
+                setToast({ message: e?.message || t("app.joinFailedShort"), type: "error" });
                 throw e;
               }
             }}
             onResetLocalWallet={async () => {
               try {
-                setToast({ message: "Resetting local Chama…", type: "info" });
+                setToast({ message: t("app.resettingLocalChama"), type: "info" });
                 await actions.resetLocalWallet();
-                setToast({ message: "Local Chama reset.", type: "success" });
+                setToast({ message: t("app.localChamaReset"), type: "success" });
               } catch (e: any) {
-                setToast({ message: e.message || "Reset failed", type: "error" });
+                setToast({ message: e.message || t("app.resetFailed"), type: "error" });
               }
             }}
           />
@@ -3118,7 +3203,7 @@ export default function App() {
                 // queued follow-up since this path isn't gated by a
                 // pending federation switch.
                 setPendingRecovery({
-                  title: "Recover sats",
+                  title: t("app.recoverSatsTitle"),
                   traceContext: recoveryTraceContext,
                 });
               }}
@@ -3146,18 +3231,18 @@ export default function App() {
               onOpenEscrow={openEscrow}
               onLoadById={async (id) => {
                 try {
-                  setToast({ message: "Loading from relays...", type: "info" });
+                  setToast({ message: t("app.loadingFromRelays"), type: "info" });
                   const state = await actions.loadEscrow(id);
                   if (state) {
-                    setToast({ message: "Trade loaded!", type: "success" });
+                    setToast({ message: t("app.tradeLoaded"), type: "success" });
                     setDetailBackView("browse");
                     setSelectedId(id);
                     setView("detail");
                   } else {
-                    setToast({ message: "Trade not found on relays", type: "error" });
+                    setToast({ message: t("app.tradeNotFound"), type: "error" });
                   }
                 } catch (e: any) {
-                  setToast({ message: e.message || "Failed to load", type: "error" });
+                  setToast({ message: e.message || t("app.loadFailed"), type: "error" });
                 }
               }}
             />
@@ -3314,6 +3399,7 @@ const globalCss = () => `
 `;
 
 function LoginSuccessSplash() {
+  const { t } = useT();
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 9999,
@@ -3331,10 +3417,10 @@ function LoginSuccessSplash() {
         <span style={{ fontSize: 36 }}>✓</span>
       </div>
       <div style={{ fontSize: 18, fontWeight: 700, color: T.green, fontFamily: T.mono, marginBottom: 8 }}>
-        Connected!
+        {t("app.connectedSplash")}
       </div>
       <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
-        Signer authenticated via Nostr
+        {t("app.signerAuthenticated")}
       </div>
     </div>
   );

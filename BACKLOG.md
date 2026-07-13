@@ -18,18 +18,20 @@ table" is right here:
 
 ## 🔜 Now / Next — open work at a glance
 
-- **Bond = single-key timelock COMMITMENT — BUILT + wired + Mutinynet-proven (2026-07-03).**
-  Ceremony (post→fund→lock→reclaim), multi-UTXO funding, tests green. Next: Jetty's real-sats
-  app walk-through; then vestigial 2-of-3 cleanup (manifest in DECISIONS/STATUS). No cabinet.
+**Recently completed (folded out of this glance — see sections below):**
+bond commitment LIVE on **mainnet** (v5.0, ceremony open to all, 2-of-3 vestige deleted,
+bonded arbiters seat + read green) · picker/Me/Dashboard **liveness signal** (kind-38135 +
+`LivenessSignal`; "Live" tier removed) · **Strike USD** claim picker (username →
+@strike.me + Cash-tab how-to) · **Lending**
+retired from Create/landing/splash (Work/Chip In/Stack shown as Soon).
+
 - 🔥 **Private community federations over Nostr** (encrypted `#p`-scoped fed invite; the
   "ultra-private chamas" + recruitment on-ramp; cross-fed lockdown LOCKED). HIGH — Jetty's pick.
   (`chama-private-community-feds-brief.md`; DECISIONS 2026-07-03.)
-- **Onboarding "Live" chama signal** — represent a chama's liveness by # arbiters × combined
-  ratings × bond length; don't auto-list the OG as default arbiter (incentivize applications).
-  (Design open — see the 2026-07-03 note / Q3.)
-- **Work** + **Chip In** (CPS) + **Stack** (savings) — the post-launch verticals (Product
-  Expansion; DECISIONS 2026-07-01/03).
-- **Notifications grand finale** + the rest of the open **Current Priority** items below.
+- **Bond track remainder:** flip `BONDS_ENFORCED` (2B part 2 / #47) + real-world bond adoption.
+- **Work** + **Chip In** (CPS) + **Stack** (savings) — engines not built yet (splash/Create
+  cards are honest "Soon" only; DECISIONS 2026-07-01/03).
+- **Notifications grand finale** + `Rail.settlement` reversibility (Current Priority below).
 - Deeper open queues: **Product Expansion · Later Protocol Work · OSS Contributions ·
   Investigation Queue · Field-test asks** — each still has open `- [ ]` items.
 
@@ -41,7 +43,7 @@ These are the highest-leverage items after consolidating the old v0.4.x
 candidate list with the older roadmap.
 
 <details>
-<summary>✅ <b>Shipped — 16 completed items</b> (click to expand the history)</summary>
+<summary>✅ <b>Shipped — 17 completed items</b> (click to expand the history)</summary>
 
 - [x] **LN addresses are payout destinations, not payment handles.**
       Counterparty handles (Wave, Zelle, Revtag, Orange Money, etc.)
@@ -203,6 +205,16 @@ candidate list with the older roadmap.
       NIP-94-backed blobs remain the scale-up path if relay event-size
       pressure shows up.
 
+- [x] **US fiat off-ramp via a fiat-converting Lightning Address (Strike
+      flagship).** **[✅ DONE — module + claim picker.]** Existing Strike users
+      type their username; Chama completes `<username>@strike.me` and pays that
+      LUD-16 address from the claim (`StrikeUsdPicker` in ClaimPayoutModal).
+      Guided how-to: Account → Bitcoin settings → Receive currency → Cash, plus
+      an explicit confirmation before send so dollars land in Strike's cash
+      balance. Paste-path via payout destinations still works.
+      Fast-follow siblings (Bitcoin Well, Cash App invoice) remain open on the
+      same seam. Source: 2026-06-26 design session; claim picker 2026-07-10.
+
 </details>
 
 ### Open — the actual current priority
@@ -216,39 +228,11 @@ candidate list with the older roadmap.
       notification center, and graceful fallback when push is unavailable.
       Target after onboarding/NWC and dispute polish are shaped.
 
-- [ ] **US fiat off-ramp via a fiat-converting Lightning Address (Strike
-      flagship).** Port the Tando pattern to the US. A Strike username IS a
-      LUD-16 Lightning Address (`username@strike.me`); with the user's Strike
-      "default receive currency" set to **Cash**, inbound Lightning
-      auto-converts to **USD** in their Strike balance (ACH to bank). Chama
-      just pays that address via the existing `resolveLightningAddressToInvoice`
-      path — no redirect, no Strike-for-Business, no incorporation, no custody.
-      Confirmed against Strike's FAQ + NYDFS license (NMLS 1902919). See
-      DECISIONS 2026-06-26.
-
-      - **Module:** mirror `tando-offramp.ts` (e.g. `strike-offramp.ts`), but
-        lighter — `username@strike.me` is already a valid destination, so no
-        phone→MSISDN normalization. Provide `isStrikeLightningAddress()` + an
-        `isUSPayoutContext()` analog to `isKenyaPayoutContext` (match the
-        `us-usd` / GBF "USA · USD" community family or USD `fiatCurrency`).
-        Reuse the shared payout-destinations store — a Strike address IS a
-        Lightning Address.
-      - **UX:** save your Strike Lightning Address as a payout destination; a
-        one-time "set Strike to receive **Cash (USD)**" hint (Chama can't set
-        it for you — left on Bitcoin you just receive sats); show "≈ $X at
-        Strike's rate" (Chama sends sats; rate/spread are Strike's at receipt).
-        Resolve via LNURL-pay, never the captcha-gated web page.
-      - **Rides** the claim gateway pay path (#9 family) — needs a reachable LN
-        gateway. Independent of `EXTERNAL_SWAPS_ENABLED` (Tando precedent).
-        Dodges the Tauri `window.open` opener bug (#16) — a paste is a Lightning
-        destination, not a redirect.
-      - **Availability:** Strike isn't in every US state/country + has limits —
-        carry availability metadata; degrade gracefully to paste-invoice.
-      - **Fast-follow siblings (same seam):** Bitcoin Well (non-custodial,
-        sell-to-US-bank over Lightning, live Apr 2025) and Cash App (Lightning
-        receive via invoice — no static LUD-16 address). v1 = Strike only.
-
-      Source: 2026-06-26 design session (Tando → US generalization).
+      **Progress (2026-06-25, not the finale):** app-side firing + cold-start
+      catch-up + diagnosable Tauri IPC landed (`notify-service.ts`);
+      on-device confirmed the app fires correctly — macOS buzz silence is
+      signing/identity, not app logic. Remaining = the full polish layer
+      above (center, opt-in push, invoice-expiry alerts, etc.).
 
 - [ ] **`Rail.settlement` reversibility field — chargeback-aware payment rails.**
       The `Rail` interface (`rail-registry.ts:23`) models privacy
@@ -349,6 +333,13 @@ codebase. Keep these here briefly so the consolidation has memory.
       arbiter pool: assigned disputes, vote-needed trades, inactivity
       signals, and settlement history. Hidden for non-arbiters.
 
+- [x] **Live-chama liveness signal (picker + Me + Dashboard).** **[✅ DONE
+      2026-07-05/07.]** Chama liveness = funded+active bonded arbiters ×
+      commitment × trade-verified ratings (`computeChamaLiveness` + kind
+      38135 announce). `LivenessSignal` on Me / Dashboard / country-detail;
+      list shows "🛡 N bonded"; hardcoded "⚡ Live now" tier removed.
+      Prefer-bonded seating staged (2B); `BONDS_ENFORCED` flip still open.
+
 - [ ] **Persistent storefront listings with child orders.** Menu listings
       should stay open until the seller edits or deletes them, across
       Exchange, Community Bill Pay, Marketplace, and Lending. Buyer checkout
@@ -356,12 +347,13 @@ codebase. Keep these here briefly so the consolidation has memory.
       without consuming or hiding the parent storefront. Seller dashboards
       manage quantities, availability, and paused/deleted state.
 
-- [ ] **Cut the Lending vertical** (DECISIONS 2026-07-01). Escrow solves
-      simultaneous-exchange trust, not future-promise trust — once a loan
-      disburses the machinery has no grip, and Chama lacks the tight social
-      graph that makes real chamas' lending work. Gut-check any usage/default
-      data first, then remove it as a category (leave a v3 door only for a
-      community-internal form). Frees the vertical slot for Work + CPS below.
+- [x] **Cut the Lending vertical** (DECISIONS 2026-07-01). **[✅ DONE 2026-07-05/07 —
+      user-facing cut.]** Escrow solves simultaneous-exchange trust, not
+      future-promise trust. Lending retired from Create picker, onboarding
+      splash, and landing (`#36`); Work / Chip In / Stack occupy the slot as
+      honest "Soon" cards. The `"lending"` Vertical + logic stay in code for
+      back-compat of any existing lending listings (not a live create path).
+      Full code deletion / v3 community-internal door = later cleanup if wanted.
 
 - [ ] **"Work" vertical (replaces Lending).** Services/labor as a first-class
       category, named simply **Work**: small discrete jobs (fix / build / tutor

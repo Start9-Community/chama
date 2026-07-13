@@ -33,8 +33,8 @@ export interface EsploraUtxo {
  *  it's a fake. */
 export type EsploraFetch = (path: string) => Promise<any>;
 
-/** The default Esplora base per network. Signet (our bond network) → Mutinynet, the
- *  same endpoint the live-attack harness used. Mainnet → mempool.space. */
+/** The default Esplora base per network. Mainnet (our bond network as of v5.0) →
+ *  mempool.space. Signet → the endpoint the live-attack harness used. */
 export function defaultEsploraBase(network: BtcNetwork): string {
   return network === SIGNET ? "https://mutinynet.com/api" : "https://mempool.space/api";
 }
@@ -45,7 +45,7 @@ export function defaultMinConfs(network: BtcNetwork): number {
   // Jetty (2026-07-09): 1-conf funding on mainnet too. A bond locks the POSTER'S
   // OWN capital (not a payment we accept), so the "one conf, done" ceremony UX wins
   // over a ~1h 6-conf wait — a deep reorg would only un-fund the poster's own
-  // deposit, which they'd simply re-post. Signet (Mutinynet) is 1 as well.
+  // deposit, which they'd simply re-post. Signet is 1 as well.
   return network === SIGNET ? 1 : 1;
 }
 

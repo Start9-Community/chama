@@ -46,6 +46,8 @@ import {
   type ChatBody,
   type ChatImageAttachment,
   type ChatPayload,
+  type PremiumBody,
+  type PremiumPayload,
   type EscrowPayload,
 } from "./types.js";
 
@@ -1317,6 +1319,117 @@ export class EscrowClient {
           this.callbacks.onStateUpdate?.(escrowId, chatResult.state);
         }
       }
+    }
+  }
+
+  // ── Arbiter premium (kind 38113, task #53 E1) ───────────────────────────
+
+  /**
+   * Publish an arbiter-premium note on the trade's own channel: the OOB
+   * ecash rides inside a NIP-44 envelope encrypted to the seated arbiter
+   * only. Non-consensus (like CHAT) and valid post-COMPLETED — premiums
+   * are paid at settlement. Caller is responsible for having already
+   * spent the notes (with a long try_cancel horizon so an absent arbiter
+   * auto-refunds the payer).
+   */
+  async sendPremium(
+    escrowId: string,
+    input: { amountSats: number; oobNotes: string; noteKind?: "ambient" | "dispute" },
+  ): Promise<void> {
+    const state = this.states.get(escrowId);
+    if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
+
+    const pubkey = await this.getPubkey();
+    const payerRole =
+      pubkey === state.participants[Role.BUYER] ? Role.BUYER
+      : pubkey === state.participants[Role.SELLER] ? Role.SELLER
+      : null;
+    if (!payerRole) throw new Error("Only trade principals can send an arbiter premium");
+
+    const arbiter = state.participants[Role.ARBITER];
+    if (!arbiter) throw new Error("No seated arbiter on this trade");
+
+    const now = Math.floor(Date.now() / 1000);
+    const noteKind = input.noteKind ?? "ambient";
+    const body: PremiumBody = {
+      escrowId,
+      payerRole,
+      amountSats: input.amountSats,
+      oobNotes: input.oobNotes,
+      kind: noteKind,
+      createdAt: now,
+    };
+    const noteEnvelope = await createEnvelope(
+      JSON.stringify(body),
+      [arbiter],
+      (pt, pk) => this.signer.nip44Encrypt(pt, pk),
+    );
+
+    const payload: PremiumPayload = {
+      type: "escrow:premium",
+      noteEnvelope,
+      payerRole,
+      noteKind,
+      sentAt: now,
+    };
+
+    const unsigned: UnsignedEvent = {
+      kind: EscrowEventKind.PREMIUM,
+      created_at: now,
+      tags: [
+        [TAGS.ESCROW_ID, escrowId],
+        [TAGS.TYPE, "escrow:premium"],
+        // #p the arbiter so their #p discovery probe reaches the premium
+        // even when the trade itself has aged off their loaded set.
+        [TAGS.PARTICIPANT, arbiter],
+      ],
+      content: JSON.stringify(payload),
+    };
+
+    const signed = await this.signWithSimTag(unsigned);
+    await this.relayManager.publish(signed);
+
+    // Apply locally + durably cache the raw. PREMIUM is not in eventChain,
+    // so (like CHAT) this local write is the only cache entry for our own
+    // premium until a relay echo arrives.
+    const parsed = parseEscrowEvent(signed, JSON.stringify(payload), true);
+    if (parsed.ok) {
+      const current = this.states.get(escrowId);
+      if (current) {
+        const result = applyEvent(current, parsed.event);
+        if (result.ok) {
+          this.states.set(escrowId, result.state);
+          const cached = this.rawEvents.get(escrowId) || [];
+          cached.push(signed);
+          this.rawEvents.set(escrowId, cached);
+          this.callbacks.onStateUpdate?.(escrowId, result.state);
+        }
+      }
+    }
+  }
+
+  /**
+   * Arbiter side: decrypt a PREMIUM event's note body. Returns null when
+   * we are not the envelope recipient or the body doesn't parse — never
+   * throws (a malformed premium must not break a redeem sweep).
+   */
+  async decryptPremiumBody(event: ParsedEscrowEvent<PremiumPayload>): Promise<PremiumBody | null> {
+    try {
+      const pubkey = await this.getPubkey();
+      const cleartext = await decryptFromEnvelope(
+        event.payload.noteEnvelope,
+        pubkey,
+        event.raw.pubkey,
+        (ct, pk) => this.signer.nip44Decrypt(ct, pk),
+      );
+      if (!cleartext) return null;
+      const body = JSON.parse(cleartext) as PremiumBody;
+      if (typeof body?.oobNotes !== "string" || body.oobNotes.length === 0) return null;
+      if (typeof body.amountSats !== "number" || !Number.isFinite(body.amountSats) || body.amountSats <= 0) return null;
+      if (typeof body.escrowId !== "string") return null;
+      return body;
+    } catch {
+      return null;
     }
   }
 

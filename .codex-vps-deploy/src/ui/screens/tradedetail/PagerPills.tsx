@@ -1,0 +1,119 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Chama — TradeView pager pills (Chat · Details · Parties)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// The same sliding segmented control language as Create's single↔storefront
+// toggle (CreateForm.tsx): a pill-shaped track with one filled indicator that
+// slides under the active segment. Generalized here from 2 → N segments and
+// flanked by a gentle nudging ‹ › swipe hint, so the control teaches the
+// horizontal pager gesture. Purely presentational — the parent owns the pager
+// scroll; this reflects `active` and reports taps via `onSelect`.
+
+import { T } from "../../theme.js";
+
+export function PagerPills({ tabs, active, onSelect, badges }: {
+  tabs: string[];
+  /** Index of the live pane (driven by the pager's scroll position). */
+  active: number;
+  onSelect: (index: number) => void;
+  /** v4.1 (#15): optional unread count per tab index — a small accent badge sits
+   *  on the pill when its count > 0 (e.g. unread chat while you're on Details). */
+  badges?: (number | null | undefined)[];
+}) {
+  const n = Math.max(1, tabs.length);
+  const clamped = Math.min(Math.max(0, active), n - 1);
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      gap: 8, padding: "2px 0 9px", flex: "0 0 auto",
+    }}>
+      <button
+        type="button"
+        aria-label="Previous pane"
+        disabled={clamped === 0}
+        onClick={() => onSelect(clamped - 1)}
+        style={{
+          background: "none", border: "none", padding: "4px 6px",
+          color: T.muted, fontSize: 30, lineHeight: 1, fontWeight: 700,
+          opacity: clamped === 0 ? 0.18 : 0.6,
+          cursor: clamped === 0 ? "default" : "pointer",
+          animation: clamped === 0 ? "none" : "pagerNudgeL 2.6s ease-in-out infinite",
+        }}
+      >‹</button>
+
+      <div
+        role="tablist"
+        aria-label="Trade panes"
+        style={{
+          position: "relative",
+          display: "grid", gridTemplateColumns: `repeat(${n}, 1fr)`,
+          background: T.surface, border: `1px solid ${T.border}`,
+          borderRadius: 999, padding: 4, minWidth: 248, maxWidth: 360, flex: "0 1 auto",
+        }}
+      >
+        {/* Sliding indicator — one button-width wide, translated by whole
+            button-widths so it tracks the active pane (same motion grammar as
+            Create's toggle). */}
+        <div aria-hidden="true" style={{
+          position: "absolute", top: 4, bottom: 4, left: 4,
+          width: `calc((100% - 8px) / ${n})`,
+          borderRadius: 999,
+          background: T.card, border: `1px solid ${T.borderHi}`,
+          boxShadow: "0 1px 0 #0006",
+          transform: `translateX(calc(${clamped} * 100%))`,
+          transition: "transform .24s cubic-bezier(.4,0,.2,1)",
+        }} />
+        {tabs.map((label, i) => {
+          const on = i === clamped;
+          const badge = badges?.[i] ?? 0;
+          return (
+            <button
+              key={label}
+              type="button"
+              role="tab"
+              aria-selected={on}
+              onClick={() => onSelect(i)}
+              style={{
+                position: "relative", zIndex: 1,
+                background: "transparent", border: "none",
+                padding: "7px 10px", borderRadius: 999,
+                cursor: "pointer",
+                fontFamily: T.sans, fontSize: 12, fontWeight: 700,
+                color: on ? T.text : T.muted,
+                transition: "color .2s",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {label}
+              {badge > 0 && (
+                <span aria-label={`${badge} unread`} style={{
+                  position: "absolute", top: 0, right: 2,
+                  minWidth: 14, height: 14, padding: "0 3px", boxSizing: "border-box",
+                  borderRadius: 999, background: T.accent, color: "#fff",
+                  fontFamily: T.mono, fontSize: 8.5, fontWeight: 800,
+                  lineHeight: "14px", textAlign: "center",
+                }}>
+                  {badge > 9 ? "9+" : badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <button
+        type="button"
+        aria-label="Next pane"
+        disabled={clamped === n - 1}
+        onClick={() => onSelect(clamped + 1)}
+        style={{
+          background: "none", border: "none", padding: "4px 6px",
+          color: T.muted, fontSize: 30, lineHeight: 1, fontWeight: 700,
+          opacity: clamped === n - 1 ? 0.18 : 0.6,
+          cursor: clamped === n - 1 ? "default" : "pointer",
+          animation: clamped === n - 1 ? "none" : "pagerNudgeR 2.6s ease-in-out infinite",
+        }}
+      >›</button>
+    </div>
+  );
+}

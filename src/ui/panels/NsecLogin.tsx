@@ -4,6 +4,7 @@ import { T } from "../theme.js";
 import { CopyButton } from "../components/CopyButton.js";
 import { isTauriRuntime } from "../sign-in-environment.js";
 import { validateRecoveryKeyInput } from "../../escrow-engine/nsec-signer.js";
+import { useT } from "../../i18n/index.js";
 
 export function NsecLogin({
   onSubmit,
@@ -31,6 +32,7 @@ export function NsecLogin({
   // that's asking for an existing one.
   choiceFooter?: ReactNode;
 }) {
+  const { t } = useT();
   const isNative = Capacitor.isNativePlatform() || isTauriRuntime();
   const [showNsec, setShowNsec] = useState(isNative || defaultOpen || friendly);
   const [mode, setMode] = useState<"choice" | "create" | "paste">(
@@ -66,7 +68,7 @@ export function NsecLogin({
       setBackupConfirmed(false);
       setShowKey(true);
     } catch (e: any) {
-      setGenerateError(e?.message || "Could not create key");
+      setGenerateError(e?.message || t("chat.couldNotCreateKey"));
     } finally {
       setGenerating(false);
     }
@@ -135,7 +137,7 @@ export function NsecLogin({
         onMouseEnter={(e) => (e.currentTarget.style.color = T.text)}
         onMouseLeave={(e) => (e.currentTarget.style.color = T.muted)}
       >
-        Use an existing account
+        {t("chat.useExistingAccount")}
       </div>
     );
   }
@@ -155,7 +157,7 @@ export function NsecLogin({
             marginBottom: 10,
           }}
         >
-          {generating ? "Creating..." : "Create my account"}
+          {generating ? t("chat.creating") : t("chat.createMyAccount")}
         </button>
         <button
           onClick={friendlySecondary
@@ -177,16 +179,13 @@ export function NsecLogin({
             cursor: friendlySecondary?.disabled ? "default" : "pointer",
           }}
         >
-          {friendlySecondary?.label ?? "I already have a key"}
+          {friendlySecondary?.label ?? t("chat.haveKey")}
         </button>
         <div style={{
           fontSize: 10, color: T.muted, fontFamily: T.sans,
           textAlign: "center", marginTop: 12, lineHeight: 1.5,
         }}>
-          {choiceFooter ?? (
-            <>Chama creates a private recovery key on this device. Save it once
-            so you can restore your account later.</>
-          )}
+          {choiceFooter ?? t("chat.keyChoiceFooter")}
         </div>
         {generateError && <InlineError>{generateError}</InlineError>}
       </div>
@@ -200,7 +199,7 @@ export function NsecLogin({
           fontSize: 10, color: T.muted, fontFamily: T.mono,
           letterSpacing: 1, marginBottom: 8, textAlign: "center",
         }}>
-          SIGN IN
+          {t("chat.signIn")}
         </div>
       )}
 
@@ -219,7 +218,7 @@ export function NsecLogin({
             marginBottom: 10,
           }}
         >
-          ← Back
+          {t("chat.back")}
         </button>
       )}
 
@@ -236,7 +235,7 @@ export function NsecLogin({
               }
             }}
             onKeyDown={(e) => e.key === "Enter" && void handleSubmit()}
-            placeholder="Paste recovery key"
+            placeholder={t("chat.pasteRecoveryKey")}
             type={showKey ? "text" : "password"}
             autoComplete="off"
             autoCapitalize="off"
@@ -266,7 +265,7 @@ export function NsecLogin({
                   cursor: generating ? "default" : "pointer",
                 }}
               >
-                {generating ? "Creating..." : "Create new account"}
+                {generating ? t("chat.creating") : t("chat.createNewAccount")}
               </button>
             )}
             <button
@@ -280,7 +279,7 @@ export function NsecLogin({
                 cursor: nsecInput.trim() ? "pointer" : "default",
               }}
             >
-              {showKey ? "Hide" : "Show"}
+              {showKey ? t("chat.hide") : t("chat.show")}
             </button>
           </div>
         </>
@@ -298,19 +297,17 @@ export function NsecLogin({
           <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
             <span style={{ fontSize: 18, lineHeight: 1 }}>🔑</span>
             <span style={{ fontSize: 15, fontWeight: 800, color: T.text, fontFamily: T.sans }}>
-              Save your recovery key
+              {t("chat.saveRecoveryKey")}
             </span>
           </div>
           <div style={{
             fontSize: 13, color: T.muted, fontFamily: T.sans,
             lineHeight: 1.55, marginBottom: 12,
           }}>
-            This is the{" "}
+            {t("chat.keyOnlyBefore")}
             <span style={{ color: T.text, fontWeight: 700 }}>
-              only key to your account and the money in it
-            </span>. Chama never sees it and can't reset it — if you lose it,
-            no one can get your account back. Keep it somewhere safe, like a
-            password manager.
+              {t("chat.keyOnlyBold")}
+            </span>{t("chat.keyOnlyAfter")}
           </div>
           <div style={{
             fontSize: 11, color: T.text, fontFamily: T.mono,
@@ -324,8 +321,8 @@ export function NsecLogin({
             <CopyButton
               value={generatedNsec ?? ""}
               disabled={!generatedNsec}
-              label="Copy key"
-              copiedLabel="Copied ✓"
+              label={t("chat.copyKey")}
+              copiedLabel={t("chat.copiedKey")}
               style={{
                 padding: "9px 14px", flexShrink: 0,
                 background: T.surface, border: `1px solid ${T.borderHi}`,
@@ -345,7 +342,7 @@ export function NsecLogin({
                 onChange={(e) => setBackupConfirmed(e.target.checked)}
                 style={{ accentColor: T.accent, width: 16, height: 16, cursor: "pointer" }}
               />
-              I've saved it
+              {t("chat.savedIt")}
             </label>
           </div>
         </div>
@@ -372,7 +369,7 @@ export function NsecLogin({
             transition: "all 0.2s",
           }}
         >
-          {generatedActive ? "Continue with this key" : "Continue"}
+          {generatedActive ? t("chat.continueWithKey") : t("chat.continue")}
         </button>
       )}
       {!minimalPaste && (
@@ -382,11 +379,11 @@ export function NsecLogin({
         }}>
           {generatedActive
             ? (isNative
-                ? "Saved on this device, encrypted — but keep your own copy too, in case you lose the phone."
-                : "Chama doesn't keep this for you — your saved copy is the only way back in.")
+                ? t("chat.footerGeneratedNative")
+                : t("chat.footerGeneratedWeb"))
             : (isNative
-                ? "Your recovery key stays on this device, encrypted in secure storage."
-                : "Your recovery key stays in this browser.")}
+                ? t("chat.footerPasteNative")
+                : t("chat.footerPasteWeb"))}
         </div>
       )}
     </div>

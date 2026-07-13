@@ -10,6 +10,7 @@ import {
   normalizeFiatCurrency,
   type AmountDisplayMode,
 } from "../amount-display.js";
+import { useT } from "../../i18n/index.js";
 
 // Scoped interaction/animation CSS — inline styles can't do :active/@keyframes.
 // The WHOLE hero rectangle is the button (pressable anywhere): it springs down
@@ -82,6 +83,7 @@ export function BitcoinPricePill({
   onAmountModeChange?: (mode: AmountDisplayMode) => void;
   quoteCurrency?: string | null;
 }) {
+  const { t } = useT();
   const price = useBitcoinPrice();
   const fiatRates = useFiatRates();
   const normalizedQuoteCurrency = normalizeFiatCurrency(quoteCurrency) ?? "USD";
@@ -98,30 +100,33 @@ export function BitcoinPricePill({
   const displayIsUsd = displayCurrency === "USD";
   const label = displayAmount
     ? `${displayIsUsd ? formatUsdBtcPrice(displayAmount) : formatFiatAmount(displayAmount, displayCurrency)} BTC`
-    : "BTC price…";
+    : t("browse.btcPriceLoading");
   const fullLabel = displayAmount
     ? (displayIsUsd ? formatUsdBtcPriceFull(displayAmount) : formatFiatAmount(displayAmount, displayCurrency))
-    : "BTC price…";
+    : t("browse.btcPriceLoading");
   // Split price into ticker (left) + digits (right) for the hero's two-column
   // layout. A BTC price is huge, so drop decimals entirely — cents are noise.
   const priceTicker = displayAmount != null ? displayCurrency : "";
   const priceDigits = displayAmount != null
     ? Math.round(displayAmount).toLocaleString()
-    : "price…";
+    : t("browse.priceLoadingShort");
   const stale = price.source !== "live";
   const title = price.updatedAt
     ? `BTC/${displayCurrency} ${new Date(price.updatedAt).toLocaleTimeString()}`
-    : `Loading BTC/${displayCurrency}`;
+    : t("browse.loadingBtcPair", { currency: displayCurrency });
   const providerCount = price.source === "live" ? price.providers?.length ?? 0 : 0;
   const btcSourceLabel = price.source === "live"
     ? providerCount > 1
-      ? `median of ${providerCount} sources`
-      : "live source"
+      ? t("browse.medianOfSources", { count: providerCount })
+      : t("browse.liveSource")
     : price.source === "cache"
-      ? "cached quote"
-      : "waiting for sources";
+      ? t("browse.cachedQuote")
+      : t("browse.waitingForSources");
   const sourceLabel = displayCurrency !== "USD" && displayAmount
-    ? `${btcSourceLabel} · FX ${fiatRates.source === "live" ? "live" : fiatRates.source === "cache" ? "cached" : "waiting"}`
+    ? t("browse.sourceWithFx", {
+        source: btcSourceLabel,
+        fx: fiatRates.source === "live" ? t("browse.fxLive") : fiatRates.source === "cache" ? t("browse.fxCached") : t("browse.fxWaiting"),
+      })
     : btcSourceLabel;
   const content = (
     <>
@@ -177,7 +182,7 @@ export function BitcoinPricePill({
         <button
           type="button"
           className="chama-price-btn"
-          title={`${title}. Tap to switch listing amounts to ${nextMode}.`}
+          title={t("browse.tapToSwitch", { title, mode: nextMode })}
           onClick={() => onAmountModeChange(nextMode)}
           style={{
             width: "100%",
@@ -300,7 +305,7 @@ export function BitcoinPricePill({
         <button
           type="button"
           className="chama-price-btn"
-          title={`${title}. Tap to switch listing amounts to ${nextMode}.`}
+          title={t("browse.tapToSwitch", { title, mode: nextMode })}
           onClick={() => onAmountModeChange(nextMode)}
           style={{
             ...pillStyle,

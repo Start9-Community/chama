@@ -1,10 +1,12 @@
 import { T } from "../theme.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
+import { useT } from "../../i18n/index.js";
 
 export function SubscriptionTimeline({ subscription, onRelease }: {
   subscription: any;
   onRelease: (periodIndex: number) => void;
 }) {
+  const { t } = useT();
   const now = Math.floor(Date.now() / 1000);
   const sub = subscription;
   if (!sub) return null;
@@ -18,7 +20,7 @@ export function SubscriptionTimeline({ subscription, onRelease }: {
         fontSize: 11, fontWeight: 600, color: T.purple, fontFamily: T.mono,
         letterSpacing: 1, marginBottom: 12,
       }}>
-        🔄 SUBSCRIPTION · {sub.releasedCount}/{sub.totalPeriods} RELEASED
+        {t("card.subscriptionHeader", { released: sub.releasedCount, total: sub.totalPeriods })}
       </div>
 
       {/* Period blocks */}
@@ -46,7 +48,7 @@ export function SubscriptionTimeline({ subscription, onRelease }: {
               animation: isActive ? "pulse 2s ease-in-out infinite" : "none",
               cursor: (isActive || isPast) && status === "pending" ? "pointer" : "default",
             }}
-              title={`Period ${i + 1}: ${status}`}
+              title={t("card.periodTitle", { number: i + 1, status })}
             >
               {i + 1}
             </div>
@@ -57,10 +59,10 @@ export function SubscriptionTimeline({ subscription, onRelease }: {
       {/* Legend */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
         {[
-          { c: T.green, l: "Released" },
-          { c: T.purple, l: "Active" },
-          { c: T.border, l: "Pending" },
-          { c: T.red, l: "Disputed" },
+          { c: T.green, l: t("card.legendReleased") },
+          { c: T.purple, l: t("card.legendActive") },
+          { c: T.border, l: t("card.legendPending") },
+          { c: T.red, l: t("card.legendDisputed") },
         ].map(item => (
           <div key={item.l} style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <div style={{ width: 8, height: 8, borderRadius: 2, background: item.c + "66" }} />
@@ -92,11 +94,11 @@ export function SubscriptionTimeline({ subscription, onRelease }: {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
                 <div style={{ fontSize: 11, color: T.purple, fontFamily: T.mono, fontWeight: 600 }}>
-                  Period {i + 1} · <BitcoinAmount msats={sub.periodAmountMsats} size={11} gap={3} glyphScale={1.18} color={T.purple} glyphColor={T.purple} />
+                  {t("card.periodLabel", { number: i + 1 })} · <BitcoinAmount msats={sub.periodAmountMsats} size={11} gap={3} glyphScale={1.18} color={T.purple} glyphColor={T.purple} />
                 </div>
                 {remaining > 0 && (
                   <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-                    Auto-releases in {days > 0 ? `${days}d ` : ""}{hours}h
+                    {t("card.autoReleasesIn", { time: `${days > 0 ? `${days}d ` : ""}${hours}h` })}
                   </div>
                 )}
               </div>
@@ -106,7 +108,7 @@ export function SubscriptionTimeline({ subscription, onRelease }: {
                 color: T.green, fontFamily: T.mono, fontSize: 10, fontWeight: 600,
                 cursor: "pointer",
               }}>
-                Release
+                {t("card.release")}
               </button>
             </div>
           </div>
@@ -116,7 +118,7 @@ export function SubscriptionTimeline({ subscription, onRelease }: {
       {/* Summary */}
       <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, textAlign: "center" }}>
         <BitcoinAmount msats={sub.totalReleasedMsats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> /{" "}
-        <BitcoinAmount msats={sub.totalPeriods * sub.periodAmountMsats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> released
+        <BitcoinAmount msats={sub.totalPeriods * sub.periodAmountMsats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("card.releasedSuffix")}
       </div>
     </div>
   );

@@ -22,6 +22,7 @@
 //                second send.
 
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
 import type { PendingClaimPayout } from "../decisions.js";
 
@@ -34,6 +35,7 @@ export function PendingPayoutCard({
    *  there owns the actual money path. */
   onOpenTrade: () => void;
 }) {
+  const { t } = useT();
   const confirming = entry.kind === "confirming";
   return (
     <div style={{ padding: "12px 16px 0", maxWidth: 560, margin: "0 auto" }}>
@@ -45,7 +47,7 @@ export function PendingPayoutCard({
           fontSize: 10, fontWeight: 700, color: T.accent, fontFamily: T.mono,
           letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8,
         }}>
-          {confirming ? "⏳ Payout confirming" : "⚡ Finish your payout"}
+          {confirming ? t("recovery.payoutConfirmingTag") : t("recovery.finishPayoutTag")}
         </div>
 
         <div style={{
@@ -53,14 +55,12 @@ export function PendingPayoutCard({
           lineHeight: 1.5, marginBottom: 4,
         }}>
           {confirming
-            ? <>Your payout of{" "}
+            ? <>{t("recovery.payoutConfirmingBefore")}{" "}
                 <BitcoinAmount msats={entry.amountMsats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />{" "}
-                was sent and is confirming. Chama checks automatically —
-                don't claim again; watch your destination wallet.</>
-            : <>You won this trade — your{" "}
+                {t("recovery.payoutConfirmingAfter")}</>
+            : <>{t("recovery.payoutFinishBefore")}{" "}
                 <BitcoinAmount msats={entry.amountMsats} size={13} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />{" "}
-                are in your wallet, but the payout to your address didn't
-                finish. Open the trade to send them where you want.</>}
+                {t("recovery.payoutFinishAfter")}</>}
         </div>
 
         {entry.description && (
@@ -84,7 +84,7 @@ export function PendingPayoutCard({
               cursor: "pointer", letterSpacing: 0.5,
             }}
           >
-            {confirming ? "Open trade →" : "Finish payout →"}
+            {confirming ? t("recovery.openTradeCta") : t("recovery.finishPayoutCta")}
           </button>
         </div>
 
@@ -92,7 +92,7 @@ export function PendingPayoutCard({
           marginTop: 8, fontSize: 9, color: T.muted, fontFamily: T.mono,
           lineHeight: 1.5,
         }}>
-          Retrying is safe — Chama never pays the same trade out twice.
+          {t("recovery.payoutFooter")}
         </div>
       </div>
     </div>

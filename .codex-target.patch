@@ -1,0 +1,7 @@
+diff --git a/src/ui/App.tsx b/src/ui/App.tsx
+index d775d3b..0000000 100644
+--- a/src/ui/App.tsx
++++ b/src/ui/App.tsx
+@@ -1899,1 +1899,1 @@
+-  if (needsHomePick) {
++  if (shouldShowHomePicker) {

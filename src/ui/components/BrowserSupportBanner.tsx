@@ -1,4 +1,5 @@
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 
 // One-time-per-account positive runtime announcement.
 // v1.1.0: the production-safe real-sats paths are the shells that ship
@@ -6,6 +7,7 @@ import { T } from "../theme.js";
 // The component keeps the old name so callsites/storage migration stay
 // small, but the copy is no longer browser-specific.
 export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
+  const { t } = useT();
   return (
     <div style={{
       margin: "12px 16px", padding: "14px 16px",
@@ -17,15 +19,13 @@ export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
         fontSize: 11, fontWeight: 700, color: T.amber, fontFamily: T.mono,
         letterSpacing: 1,
       }}>
-        REAL MONEY TRADES
+        {t("browse.realMoneyTrades")}
       </div>
       <div style={{
         fontSize: 13, color: T.text, fontFamily: T.sans,
         lineHeight: 1.55,
       }}>
-        Safe to use directly in Fedi, the desktop app, and the Android app.
-        Browser mode is best for browsing, demos, and testing. For live sats,
-        use one of the supported apps.
+        {t("browse.realMoneyBody")}
       </div>
       <details style={{
         color: T.muted, fontFamily: T.sans, fontSize: 12, lineHeight: 1.55,
@@ -34,11 +34,10 @@ export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
           cursor: "pointer", color: T.amber, fontFamily: T.mono,
           fontSize: 10, fontWeight: 800, letterSpacing: 0.6,
         }}>
-          Technical details
+          {t("browse.technicalDetails")}
         </summary>
         <div style={{ marginTop: 8 }}>
-          Fedi, desktop, and Android include Chama's supported wallet path.
-          Browser support depends on wallet APIs that can vary by device.
+          {t("browse.technicalDetailsBody")}
         </div>
       </details>
       <button
@@ -51,7 +50,7 @@ export function BrowserSupportBanner({ onDismiss }: { onDismiss: () => void }) {
           cursor: "pointer", letterSpacing: 0.5,
         }}
       >
-        Got it
+        {t("browse.gotIt")}
       </button>
     </div>
   );

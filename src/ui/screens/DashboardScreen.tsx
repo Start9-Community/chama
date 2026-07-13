@@ -15,10 +15,12 @@
 
 import { useMemo } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { LivenessSignal, useLiveness } from "../components/LivenessSignal.js";
 import type { ChamaLiveness } from "../../arbiters/live-chama.js";
 import { listCommitmentBonds } from "../../bond-multisig/commitment-store.js";
+import { summarizeArbiterEarnings } from "../../arbiters/arbiter-earnings.js";
 import { SHOW_BOND_CEREMONY } from "../panels/BondCeremonyModal.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { EscrowStatus, Role, type EscrowState } from "../../escrow-engine/types.js";
@@ -36,6 +38,7 @@ export function DashboardScreen({
   loadLiveness,
   livenessBlocksPerDay = 144,
   onOpenBondCeremony,
+  balanceMsats = 0,
 }: {
   pubkey: string;
   /** The user's own trade-verified public rating (null until it can verify any). */
@@ -46,7 +49,10 @@ export function DashboardScreen({
   livenessBlocksPerDay?: number;
   /** Open the bond ceremony (dev-gated). */
   onOpenBondCeremony?: () => void;
+  /** The user's spendable Chama (Fedimint ecash) balance, in msats. */
+  balanceMsats?: number;
 }) {
+  const { t } = useT();
   const lower = pubkey.toLowerCase();
   const community = communitySlug ? getCommunityBySlug(communitySlug) : null;
 
@@ -63,6 +69,10 @@ export function DashboardScreen({
   }, [myTrades, lower]);
 
   const bonds = useMemo(() => listCommitmentBonds(), []);
+  // Arbiter earnings (task #53 E1): sync ledger read, recomputed when the
+  // trade set changes (a redeem lands via the App sweep → escrows update →
+  // myTrades identity changes → fresh summary).
+  const earnings = useMemo(() => summarizeArbiterEarnings(), [myTrades]);
   const activeBonds = bonds.filter((b) => b.phase !== "reclaimed");
 
   const { liveness, loading: livenessLoading } = useLiveness(communitySlug ?? null, loadLiveness, { intervalMs: 90_000 });
@@ -72,30 +82,72 @@ export function DashboardScreen({
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto", animation: "fadeIn 0.3s ease" }}>
       <div style={{ fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 4 }}>
-        DASHBOARD
+        {t("bond.dashHeading")}
       </div>
       <div style={{ fontSize: 22, fontWeight: 900, color: T.text, fontFamily: T.sans, marginBottom: 16 }}>
-        Your standing
+        {t("bond.dashTitle")}
       </div>
+
+      {/* 0. YOUR SATS — spendable balance where earnings, reclaimed bonds, and
+          payouts land. Deliberately NOT called a "Wallet" (PHILOSOPHY §2.1 Option B
+          killed that mental model): framed as transient sats to sweep out, never a
+          store of value. The number users look for first. */}
+      <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 14 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 10 }}>
+          {t("bond.dashWallet")}
+        </div>
+        <BitcoinAmount sats={Math.floor(Math.max(0, balanceMsats) / 1000)} size={30} gap={7} glyphScale={1.15} color={T.text} glyphColor={T.accent} />
+        <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginTop: 10 }}>
+          {t("bond.dashWalletHint")}
+        </div>
+      </div>
+
+      {/* 0b. EARNINGS (task #53 E1) — insurance premiums redeemed as a bonded
+          arbiter. THE recruitment ad: shown whenever the ceremony is exposed,
+          with honest zero-state copy until the first premium lands. */}
+      {(earnings.noteCount > 0 || SHOW_BOND_CEREMONY) && (
+        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 14 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 10 }}>
+            {t("bond.dashEarnings")}
+          </div>
+          {earnings.noteCount > 0 ? (
+            <>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+                <BitcoinAmount sats={Math.floor(earnings.totalMsats / 1000)} size={24} gap={6} glyphScale={1.15} color={T.green} glyphColor={T.green} />
+                <span style={{ fontSize: 12, color: T.muted, fontFamily: T.mono }}>
+                  {t("bond.dashEarningsCovered", { count: earnings.tradeCount })}
+                </span>
+              </div>
+              <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginTop: 10 }}>
+                {t("bond.dashEarningsHint")}
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 12.5, color: T.muted, fontFamily: T.sans, lineHeight: 1.55 }}>
+              {t("bond.dashEarningsEmpty")}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 1. STANDING — the hero. Public, trade-verified trust. */}
       <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 14 }}>
         <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 12 }}>
-          STANDING
+          {t("bond.dashStanding")}
         </div>
         {ratePct !== null ? (
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
             <span style={{ fontSize: 34, fontWeight: 900, color: T.green, fontFamily: T.sans, lineHeight: 1 }}>
               {ratePct}%
             </span>
-            <span style={{ fontSize: 13, color: T.muted, fontFamily: T.mono }}>positive</span>
+            <span style={{ fontSize: 13, color: T.muted, fontFamily: T.mono }}>{t("bond.dashPositive")}</span>
             <span style={{ marginLeft: "auto", fontSize: 12, color: T.muted, fontFamily: T.mono }}>
-              👍 {ratings!.positive} · 👎 {ratings!.negative} · {ratings!.count} rated
+              {t("bond.dashRatedLine", { positive: ratings!.positive, negative: ratings!.negative, count: ratings!.count })}
             </span>
           </div>
         ) : (
           <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
-            New here. <span style={{ color: T.muted }}>Complete trades honestly and your public rating builds — that's the trust others read before dealing with you.</span>
+            {t("bond.dashNewHereBefore")}<span style={{ color: T.muted }}>{t("bond.dashNewHereBody")}</span>
           </div>
         )}
       </div>
@@ -106,12 +158,12 @@ export function DashboardScreen({
         <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, fontFamily: T.mono, letterSpacing: 1 }}>
-              YOUR BOND
+              {t("bond.dashYourBond")}
             </div>
             {onOpenBondCeremony && (
               <button onClick={onOpenBondCeremony}
                 style={{ background: T.accentDim, border: `1px solid ${T.accent}66`, color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 800, letterSpacing: 0.5, padding: "5px 10px", borderRadius: T.rs, cursor: "pointer" }}>
-                {activeBonds.length > 0 ? "Manage" : "Post a bond"}
+                {activeBonds.length > 0 ? t("bond.dashManage") : t("bond.dashPostABond")}
               </button>
             )}
           </div>
@@ -125,18 +177,18 @@ export function DashboardScreen({
                       <BitcoinAmount sats={Number(b.amountSats)} size={14} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
                     </span>
                     <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, fontFamily: T.mono, color: locked ? T.green : T.amber, border: `1px solid ${locked ? T.green : T.amber}`, borderRadius: 99, padding: "2px 8px" }}>
-                      {locked ? "🔒 LOCKED" : "AWAITING FUNDING"}
+                      {locked ? t("bond.chipLockedEmoji") : t("bond.chipAwaitingFunding")}
                     </span>
                   </div>
                 );
               })}
               <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginTop: 2 }}>
-                Locked capital, in the open — how much × how long you'll stand behind your word. It makes you a bonded arbiter for your chama.
+                {t("bond.dashLockedCapital")}
               </div>
             </div>
           ) : (
             <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
-              No bond yet. <span style={{ color: T.muted }}>Lock your own sats, to your own key, for a term — a public commitment that makes you an arbiter for your chama. Nobody can touch it; you reclaim it when the term ends.</span>
+              {t("bond.dashNoBondBefore")}<span style={{ color: T.muted }}>{t("bond.dashNoBondBody")}</span>
             </div>
           )}
         </div>
@@ -154,13 +206,13 @@ export function DashboardScreen({
 
       {/* 4. STATS — trade activity at a glance. */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-        <StatTile label="Trades" value={stats.total} />
-        <StatTile label="Completed" value={stats.completed} accent={T.green} />
-        <StatTile label="Live now" value={stats.live} accent={stats.live > 0 ? T.accent : undefined} />
+        <StatTile label={t("bond.dashStatTrades")} value={stats.total} />
+        <StatTile label={t("bond.dashStatCompleted")} value={stats.completed} accent={T.green} />
+        <StatTile label={t("bond.dashStatLive")} value={stats.live} accent={stats.live > 0 ? T.accent : undefined} />
       </div>
       {stats.asArbiter > 0 && (
         <div style={{ marginTop: 10, fontSize: 12, color: T.muted, fontFamily: T.mono, textAlign: "center" }}>
-          Arbitrated <span style={{ color: T.text, fontWeight: 700 }}>{stats.asArbiter}</span> trade{stats.asArbiter === 1 ? "" : "s"}.
+          {t("bond.dashArbitratedBefore")}<span style={{ color: T.text, fontWeight: 700 }}>{stats.asArbiter}</span>{t(stats.asArbiter === 1 ? "bond.dashArbitratedAfterOne" : "bond.dashArbitratedAfterMany")}
         </div>
       )}
     </div>

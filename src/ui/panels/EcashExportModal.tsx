@@ -15,6 +15,7 @@
 
 import { useState } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { CopyButton } from "../components/CopyButton.js";
 import { QRCode } from "../QRCode.js";
@@ -58,6 +59,7 @@ export function EcashExportModal({
     onConfirmCleared: () => void;
   };
 }) {
+  const { t } = useT();
   // Resume a prior unconfirmed export if one is stashed (the balance may now
   // read 0, so this modal is the only way back to it).
   const stashed = preset ? null : getEcashExport();
@@ -84,7 +86,7 @@ export function EcashExportModal({
       setPhase("ready");
       onExported?.();
     } catch (e: any) {
-      setError(e?.message || "Couldn't generate the ecash note. Your sats are safe in your Chama.");
+      setError(e?.message || t("recovery.exportGenerateError"));
       setPhase("error");
     }
   };
@@ -124,7 +126,7 @@ export function EcashExportModal({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 9, color: preset ? T.amber : T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 4 }}>
-              {preset ? preset.headline : "WITHDRAW AS ECASH · NO LN FEES"}
+              {preset ? preset.headline : t("recovery.exportHeadline")}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
               <BitcoinAmount sats={phase === "ready" ? exportedSats : sats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -141,19 +143,16 @@ export function EcashExportModal({
         {phase === "intro" && (
           <>
             <div style={{ fontSize: 12, color: T.muted, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 12 }}>
-              Turn your balance into a Fedimint ecash note you can import into
-              Fedi — or any Fedimint wallet on <strong style={{ color: T.text }}>{federationLabel}</strong> —
-              with no Lightning fees. Perfect for dust that costs more to move over Lightning than it's worth.
+              {t("recovery.exportIntroBefore")} <strong style={{ color: T.text }}>{federationLabel}</strong>{" "}
+              {t("recovery.exportIntroAfter")}
             </div>
             <div style={{
               padding: "10px 12px", borderRadius: T.rs, marginBottom: 14,
               background: T.amberDim, border: `1px solid ${T.amber}44`,
               color: T.amber, fontFamily: T.mono, fontSize: 10, lineHeight: 1.6,
             }}>
-              ⚠ The note <strong>is</strong> your sats. The moment you generate it, your
-              balance leaves your Chama and lives only in that string. Save it before
-              closing — Chama keeps a copy under "pending ecash export" until you confirm
-              you've imported it. It only works on {federationLabel}, not Cashu wallets.
+              {t("recovery.exportWarnBefore")} <strong>{t("recovery.exportWarnIs")}</strong>{" "}
+              {t("recovery.exportWarnAfter", { federation: federationLabel })}
             </div>
             <button
               onClick={generate}
@@ -164,7 +163,7 @@ export function EcashExportModal({
                 cursor: "pointer", letterSpacing: 0.5,
               }}
             >
-              Generate ecash note
+              {t("recovery.exportGenerateCta")}
             </button>
           </>
         )}
@@ -180,7 +179,7 @@ export function EcashExportModal({
               margin: "0 auto 12px",
             }} />
             <div style={{ fontSize: 11, fontWeight: 600, color: T.purple, fontFamily: T.mono, letterSpacing: 1 }}>
-              MINTING YOUR ECASH NOTE…
+              {t("recovery.exportMinting")}
             </div>
           </div>
         )}
@@ -196,8 +195,7 @@ export function EcashExportModal({
             }}>
               {preset
                 ? preset.body
-                : <>✓ Fedimint ecash · {federationLabel}. Import this into Fedi or any
-                   Fedimint wallet on {federationLabel}. Save it now — it's bearer money.</>}
+                : t("recovery.exportReadyBody", { federation: federationLabel })}
             </div>
 
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
@@ -216,8 +214,8 @@ export function EcashExportModal({
             <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
               <CopyButton
                 value={notes}
-                label="Copy ecash"
-                copiedLabel="✓ Copied"
+                label={t("recovery.exportCopyCta")}
+                copiedLabel={t("common.copied")}
                 style={{
                   flex: 1, padding: "11px 12px", borderRadius: T.rs,
                   background: T.accent, border: `1px solid ${T.accent}`, color: "#000",
@@ -237,8 +235,8 @@ export function EcashExportModal({
               }}
             >
               {confirmClear
-                ? "Sure? Chama will forget this note — tap again only if it's saved"
-                : "I've imported it — clear"}
+                ? t("recovery.exportClearConfirm")
+                : t("recovery.exportClearCta")}
             </button>
             <button
               onClick={onClose}
@@ -248,7 +246,7 @@ export function EcashExportModal({
                 fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
               }}
             >
-              Keep it pending — I'll finish later
+              {t("recovery.exportKeepPending")}
             </button>
           </>
         )}
@@ -261,7 +259,7 @@ export function EcashExportModal({
             }}>
               <div style={{ fontSize: 28, marginBottom: 8 }}>✕</div>
               <div style={{ fontSize: 12, fontWeight: 700, color: T.red, fontFamily: T.sans, marginBottom: 4 }}>
-                Couldn't generate the note
+                {t("recovery.exportErrorTitle")}
               </div>
               <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                 {error}
@@ -275,7 +273,7 @@ export function EcashExportModal({
                 color: "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800, cursor: "pointer",
               }}
             >
-              Try again
+              {t("recovery.tryAgain")}
             </button>
             <button
               onClick={onClose}
@@ -285,7 +283,7 @@ export function EcashExportModal({
                 fontFamily: T.mono, fontSize: 11, fontWeight: 700, cursor: "pointer",
               }}
             >
-              Close
+              {t("common.close")}
             </button>
           </>
         )}

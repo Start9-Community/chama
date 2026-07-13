@@ -124,6 +124,12 @@ export enum EscrowEventKind {
   SUBSCRIBE = 38111,
   /** Release one period's sats to the seller */
   PERIOD_RELEASE = 38112,
+  /** Arbiter-premium note (task #53 E1): OOB ecash encrypted to the seated
+   *  arbiter, riding the trade's own channel. NON-CONSENSUS — handled like
+   *  CHAT (own state array, never eventChain) and accepted post-COMPLETED
+   *  (premiums are paid at settlement). MUST stay out of
+   *  EVENT_KIND_TRANSITIONS. */
+  PREMIUM = 38113,
 }
 
 // ── Valid State Transitions ───────────────────────────────────────────────
@@ -592,6 +598,34 @@ export interface ChatPayload {
   sentAt: number;
 }
 
+/** Cleartext body of a PREMIUM note — lives ONLY inside noteEnvelope,
+ *  encrypted to the seated arbiter (task #53 E1). Carries the bearer
+ *  ecash, so it must never appear in plaintext event content. */
+export interface PremiumBody {
+  escrowId: string;
+  payerRole: Role;
+  amountSats: number;
+  /** OOB ecash note string, spendable by whoever redeems it first.
+   *  Spent with a long try_cancel horizon so an absent arbiter's note
+   *  auto-refunds to the payer. */
+  oobNotes: string;
+  kind: "ambient" | "dispute";
+  createdAt: number;
+}
+
+/** Content of a PREMIUM event (kind 38113) — arbiter insurance premium.
+ *  Non-consensus: never touches eventChain or status. The note itself is
+ *  opaque to everyone but the arbiter. */
+export interface PremiumPayload {
+  type: "escrow:premium";
+  /** NIP-44 envelope encrypted to the seated arbiter only; plaintext is
+   *  JSON PremiumBody. */
+  noteEnvelope: HandleEnvelope;
+  payerRole: Role;
+  noteKind: "ambient" | "dispute";
+  sentAt: number;
+}
+
 /** Content of a SUBSCRIBE event — buyer creates subscription terms */
 export interface SubscribePayload {
   type: "escrow:subscribe";
@@ -656,6 +690,7 @@ export type EscrowPayload =
   | CompletePayload
   | CancelPayload
   | ChatPayload
+  | PremiumPayload
   | SubscribePayload
   | PeriodReleasePayload;
 
@@ -879,6 +914,11 @@ export interface EscrowState {
 
   /** Chat messages (separate from state transitions) */
   chatMessages: ParsedEscrowEvent<ChatPayload>[];
+
+  /** Arbiter-premium notes (kind 38113, task #53 E1). Non-consensus,
+   *  separate from state transitions — like chatMessages. Optional so
+   *  pre-premium state literals stay valid; read with `?? []`. */
+  premiumNotes?: ParsedEscrowEvent<PremiumPayload>[];
 }
 
 export function roleUsesJoinHold(role: Role, initiatorRole: Role): boolean {

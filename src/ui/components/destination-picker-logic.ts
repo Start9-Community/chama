@@ -20,6 +20,7 @@
 import type { PayoutDestination } from "../../payments/payout-destinations.js";
 import { isLightningAddress } from "../../payments/lnurl.js";
 import { isNwcConnectionString } from "../../payments/nwc.js";
+import { translate, getCurrentLang } from "../../i18n/index.js";
 
 /** A saved payout destination row decorated with the "default" badge flag.
  *  The first entry (most-recent-used) is the default, rendered with a
@@ -70,7 +71,7 @@ export type InputClassification =
  *  field — the picker should accept and dispatch as bolt11). */
 export function classifyDestinationInput(raw: string): InputClassification {
   if (typeof raw !== "string") {
-    return { kind: "invalid", reason: "Destination must be text" };
+    return { kind: "invalid", reason: translate(getCurrentLang(), "claim.errDestinationMustBeText") };
   }
   const trimmed = raw.trim();
   if (!trimmed) return { kind: "empty" };
@@ -83,7 +84,7 @@ export function classifyDestinationInput(raw: string): InputClassification {
   if (/^lnurl/i.test(payment)) {
     return {
       kind: "invalid",
-      reason: "Raw LNURL isn't supported here. Use a Lightning Address, BOLT11 invoice, or NWC connection.",
+      reason: translate(getCurrentLang(), "claim.errRawLnurl"),
     };
   }
   // BOLT11 starts with "ln" + bech32 hrp prefix (lnbc, lntb, lnbcrt, etc.)
@@ -98,7 +99,7 @@ export function classifyDestinationInput(raw: string): InputClassification {
   }
   return {
     kind: "invalid",
-    reason: "Enter a Lightning Address (you@wallet.app) or paste a BOLT11 invoice or NWC connection",
+    reason: translate(getCurrentLang(), "claim.errEnterDestination"),
   };
 }
 
@@ -223,5 +224,5 @@ export function decideDispatch(inputs: DispatchInputs): DispatchResult {
     }
   }
   // Nothing usable.
-  return { ok: false, reason: "Choose a saved address or enter a destination" };
+  return { ok: false, reason: translate(getCurrentLang(), "claim.errChooseSavedOrEnter") };
 }

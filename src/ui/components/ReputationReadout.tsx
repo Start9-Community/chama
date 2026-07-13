@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { T } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import type { AggregateRatings } from "../../reputation/ratings.js";
 
 // v3.1.1 (#2): the read-only reputation surface. Given a pubkey, fetches that
@@ -12,6 +13,7 @@ export function ReputationReadout({ pubkey, name, fetchSummary }: {
   name?: string | null;
   fetchSummary: (ratee: string) => Promise<AggregateRatings>;
 }) {
+  const { t } = useT();
   const [data, setData] = useState<AggregateRatings | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -37,20 +39,20 @@ export function ReputationReadout({ pubkey, name, fetchSummary }: {
       animation: "fadeIn 0.2s ease",
     }}>
       <div style={{ fontSize: 9.5, color: T.muted, letterSpacing: 0.5, marginBottom: 6, textTransform: "uppercase" }}>
-        Reputation · {who}
+        {t("me.reputationTitle", { who })}
       </div>
       {loading ? (
-        <span style={{ color: T.muted }}>Loading from relays…</span>
+        <span style={{ color: T.muted }}>{t("me.reputationLoading")}</span>
       ) : error ? (
-        <span style={{ color: T.red }}>Couldn't load reputation — tap again to retry.</span>
+        <span style={{ color: T.red }}>{t("me.reputationError")}</span>
       ) : data && data.count > 0 ? (
         <span style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span style={{ color: T.green, fontWeight: 700 }}>👍 {data.positive}</span>
           <span style={{ color: T.amber, fontWeight: 700 }}>👎 {data.negative}</span>
-          <span style={{ color: T.muted }}>· from {data.count} settled trade{data.count !== 1 ? "s" : ""}</span>
+          <span style={{ color: T.muted }}>{data.count !== 1 ? t("me.reputationFromTradesMany", { count: data.count }) : t("me.reputationFromTradesOne", { count: data.count })}</span>
         </span>
       ) : (
-        <span style={{ color: T.muted }}>No ratings yet — new to the community.</span>
+        <span style={{ color: T.muted }}>{t("me.reputationNone")}</span>
       )}
     </div>
   );

@@ -64,7 +64,19 @@ import {
   chapsmartMsisdnFromAddress,
   CHAPSMART_LNADDRESS_DOMAIN,
 } from "../../payments/chapsmart-offramp.js";
+import {
+  buildStrikeLightningAddress,
+  isStrikeLightningAddress,
+  isUSPayoutContext,
+  normalizeStrikeUsername,
+  strikeUsernameFromAddress,
+  STRIKE_CASH_CAVEAT,
+  STRIKE_CASH_HINT,
+  STRIKE_CASH_STEPS,
+  STRIKE_LNADDRESS_DOMAIN,
+} from "../../payments/strike-offramp.js";
 import { resolveLightningAddressToInvoice, LnurlError } from "../../payments/lnurl.js";
+import { useT, translate, getCurrentLang } from "../../i18n/index.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
 import { formatEstimatedFiatForMsats } from "../amount-display.js";
@@ -130,15 +142,16 @@ type Stage =
   | { kind: "terminal"; terminal: ClaimAndPayoutTerminal };
 
 // The picker dispatches into Lightning (direct payout), Onchain (onchain
-// payout), Tando / ChapSmart (native one-tap M-Pesa offramps — LUD-16 Lightning
-// Addresses, NOT redirects: Kenya `<phone>@bitcoin.co.ke`, Tanzania
-// `<phone>@chapsmart.com`), or an external offramp-redirect provider drawn from
-// `external-swap-registry.ts` (Banxaas / Bitika / Bitzed).
+// payout), Tando / ChapSmart / Strike (native LUD-16 offramps — NOT
+// redirects: Kenya `<phone>@bitcoin.co.ke`, Tanzania `<phone>@chapsmart.com`,
+// US `<username>@strike.me`), or an external offramp-redirect provider drawn
+// from `external-swap-registry.ts` (Banxaas / Bitika / Bitzed).
 type PayoutMethod =
   | { kind: "lightning" }
   | { kind: "onchain" }
   | { kind: "tando" }
   | { kind: "chapsmart" }
+  | { kind: "strike"; initialAddress?: string }
   | { kind: "external"; match: ExternalSwapMatch };
 
 /** Stashed dispatch arguments from the initial picker resolve. Used by
@@ -166,6 +179,7 @@ export function ClaimPayoutModal({
   probeFederation,
   onClose,
 }: ClaimPayoutModalProps) {
+  const { t } = useT();
   const payoutSats = claimPayoutSats(payoutMsats, claimTarget);
   const reserveSats = claimPayoutReserveSats(payoutMsats, claimTarget);
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
@@ -207,6 +221,14 @@ export function ClaimPayoutModal({
   // journal/double-pay guard. Mutually exclusive with tandoEligible (Kenya).
   const chapsmartEligible = isTanzaniaPayoutContext({ homeCommunity, tradeCommunity, fiatCurrency });
 
+  // Strike is the easy US cash-out for existing Strike users: type your
+  // username, Chama completes `<username>@strike.me`, pays that Lightning
+  // Address. Strike converts to USD in their cash balance if they've set receive
+  // currency to Cash (we can't flip that — we just show how-to). Independent
+  // of EXTERNAL_SWAPS_ENABLED; rides the same payInvoice journal/double-pay
+  // guard as any other claim.
+  const strikeEligible = isUSPayoutContext({ homeCommunity, tradeCommunity, fiatCurrency });
+
   // Common dispatch helper — used by both the picker's first resolve
   // and the terminal retry path. Updates stage transitions and
   // schedules auto-close on success.
@@ -225,7 +247,7 @@ export function ClaimPayoutModal({
     } catch (e: any) {
       terminal = {
         kind: "claim-bridge-threw",
-        error: e?.message || "Claim could not start. Reconnect your Chama and try again.",
+        error: e?.message || t("claim.errClaimCouldNotStart"),
       };
     }
     setStage({ kind: "terminal", terminal });
@@ -289,7 +311,7 @@ export function ClaimPayoutModal({
         kind: "terminal",
         terminal: {
           kind: "claim-failed",
-          error: e?.message || "NWC wallet couldn't create a destination invoice",
+          error: e?.message || t("claim.errNwcNoInvoice"),
         },
       });
       return;
@@ -302,6 +324,13 @@ export function ClaimPayoutModal({
       nwcConnectionString: connection.connectionString,
       saveNwcAfter: false,
     });
+  };
+
+  // Saved Strike opens the guided Strike picker with the saved username
+  // prefilled. We deliberately do not auto-send from the chooser: Cash receive
+  // is load-bearing for "USD offboard", so the user should see and confirm it.
+  const openSavedStrikeClaim = (address: string) => {
+    setPayoutMethod({ kind: "strike", initialAddress: address });
   };
 
   const resolveOnchainAddress = (address: string) => {
@@ -326,7 +355,7 @@ export function ClaimPayoutModal({
           kind: "terminal",
           terminal: {
             kind: "claim-bridge-threw",
-            error: probe.error || "Federation still unreachable",
+            error: probe.error || t("claim.errFederationUnreachable"),
           },
         });
         return;
@@ -356,14 +385,20 @@ export function ClaimPayoutModal({
     }
 
     if (!payoutMethod) {
+      const savedStrikeDestinations = savedDestinations.filter((d) =>
+        isStrikeLightningAddress(d.address),
+      );
       return (
         <ClaimMethodChooser
           payoutSats={payoutSats}
           externalSwaps={externalSwaps}
           tandoEligible={tandoEligible}
           chapsmartEligible={chapsmartEligible}
+          strikeEligible={strikeEligible}
+          savedStrikeDestinations={savedStrikeDestinations}
           savedNwcConnections={savedNwcConnections}
           onSelect={setPayoutMethod}
+          onSelectSavedStrike={openSavedStrikeClaim}
           onSelectSavedNwc={dispatchSavedNwcClaim}
           onCancel={() => onClose(undefined)}
         />
@@ -390,6 +425,21 @@ export function ClaimPayoutModal({
           payoutSats={payoutSats}
           reserveSats={reserveSats}
           savedDestinations={savedDestinations}
+          onResolve={(bolt11, address) =>
+            resolveDestination(bolt11, { saveAfter: true, addressUsed: address })}
+          onBack={() => setPayoutMethod(null)}
+          onCancel={() => onClose(undefined)}
+        />
+      );
+    }
+
+    if (payoutMethod.kind === "strike") {
+      return (
+        <StrikeUsdPicker
+          payoutSats={payoutSats}
+          reserveSats={reserveSats}
+          savedDestinations={savedDestinations}
+          initialAddress={payoutMethod.initialAddress}
           onResolve={(bolt11, address) =>
             resolveDestination(bolt11, { saveAfter: true, addressUsed: address })}
           onBack={() => setPayoutMethod(null)}
@@ -428,13 +478,13 @@ export function ClaimPayoutModal({
         amountSats={payoutSats}
         savedDestinations={savedDestinations}
         savedNwcConnections={savedNwcConnections}
-        title="Claim your sats"
+        title={t("claim.claimYourSats")}
         subtitle={(
           <>
-            Send <BitcoinAmount sats={payoutSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> to your Lightning wallet
+            {t("claim.sendToWalletBefore")} <BitcoinAmount sats={payoutSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.sendToWalletAfter")}
             {reserveSats > 0 && (
               <>
-                . About <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+                . {t("claim.feeReserveBefore")} <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.feeReserveAfter")}
               </>
             )}
           </>
@@ -471,7 +521,7 @@ export function ClaimPayoutModal({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 4 }}>
-              CLAIM
+              {t("claim.claimKicker")}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
               <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -518,8 +568,11 @@ function ClaimMethodChooser({
   externalSwaps,
   tandoEligible,
   chapsmartEligible,
+  strikeEligible,
+  savedStrikeDestinations,
   savedNwcConnections,
   onSelect,
+  onSelectSavedStrike,
   onSelectSavedNwc,
   onCancel,
 }: {
@@ -531,21 +584,30 @@ function ClaimMethodChooser({
   /** Tanzania context — surface the native one-tap ChapSmart M-Pesa offramp
    *  as the lead cash-out card (the Tando mirror). */
   chapsmartEligible: boolean;
+  /** US / USD context — surface Strike for existing users: type username,
+   *  we complete @strike.me and pay that Lightning Address. */
+  strikeEligible: boolean;
+  /** Previously-used Strike addresses (from payout destinations). Shown as
+   *  NWC-style CLAIM → quick-picks when strikeEligible. */
+  savedStrikeDestinations: PayoutDestination[];
   /** v1.2.5: saved NWC connections, promoted to top-level quick-pick
    *  buttons here just like AtomicFundingModal does on the funding
    *  side. A returning user with a saved wallet can claim straight
    *  to it in one tap — no detour through LN → DestinationPicker. */
   savedNwcConnections: SavedNwcConnection[];
   onSelect: (method: PayoutMethod) => void;
+  onSelectSavedStrike: (address: string) => void;
   onSelectSavedNwc: (connection: SavedNwcConnection) => void;
   onCancel: () => void;
 }) {
-  // Single-column layout once external swaps or Tando are surfaced (they
-  // have taller cards with flag + status badge); two-column when only the
-  // built-in Lightning + Onchain methods are available.
-  const hasTallCards = externalSwaps.length > 0 || tandoEligible || chapsmartEligible;
+  const { t } = useT();
+  // Single-column layout once external swaps or native offramps are
+  // surfaced (they have taller cards with flag + status badge); two-column
+  // when only the built-in Lightning + Onchain methods are available.
+  const hasTallCards = externalSwaps.length > 0 || tandoEligible || chapsmartEligible || strikeEligible;
   const methodGridColumns = hasTallCards ? "1fr" : "1fr 1fr";
   const methodMinHeight = hasTallCards ? 92 : 118;
+  const showSavedStrike = strikeEligible && savedStrikeDestinations.length > 0;
 
   return (
     <div
@@ -566,7 +628,7 @@ function ClaimMethodChooser({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
-              CLAIM
+              {t("claim.claimKicker")}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
               <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -581,8 +643,53 @@ function ClaimMethodChooser({
           fontSize: 11, color: T.muted, fontFamily: T.mono,
           lineHeight: 1.5, marginBottom: 12,
         }}>
-          Choose where Chama sends the rebuilt ecash after your claim settles.
+          {t("claim.chooseWhere")}
         </div>
+
+        {/* Saved Strike — opens the guided cash-out picker prefilled, rather
+            than auto-sending past the Cash receive confirmation. */}
+        {showSavedStrike && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{
+              fontSize: 9, color: T.green, fontFamily: T.mono,
+              letterSpacing: 1, marginBottom: 6, fontWeight: 800,
+            }}>
+              {t("claim.savedStrike")}
+            </div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {savedStrikeDestinations.map((dest) => {
+                const handle = strikeUsernameFromAddress(dest.address) ?? dest.address;
+                return (
+                  <button
+                    key={dest.id}
+                    onClick={() => onSelectSavedStrike(dest.address)}
+                    style={{
+                      width: "100%", padding: "12px 14px", borderRadius: T.r,
+                      background: T.greenDim, border: `1px solid ${T.green}66`,
+                      color: T.text, fontFamily: T.mono, fontSize: 12,
+                      cursor: "pointer", display: "flex",
+                      justifyContent: "space-between", alignItems: "center",
+                      gap: 12,
+                    }}
+                  >
+                    <span style={{
+                      overflow: "hidden", textOverflow: "ellipsis",
+                      whiteSpace: "nowrap", fontWeight: 600,
+                    }}>
+                      @{handle}
+                    </span>
+                    <span style={{
+                      color: T.green, flexShrink: 0, fontSize: 9,
+                      fontWeight: 800, letterSpacing: 1,
+                    }}>
+                      {t("claim.openArrow")}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* v1.2.5: saved NWC connections promoted to top-level quick-
             pick buttons here, matching the AtomicFundingModal pattern
@@ -596,7 +703,7 @@ function ClaimMethodChooser({
               fontSize: 9, color: T.accent, fontFamily: T.mono,
               letterSpacing: 1, marginBottom: 6, fontWeight: 800,
             }}>
-              ⚡ FASTEST · CLAIM STRAIGHT TO SAVED NWC WALLET
+              {t("claim.fastestNwcHeading")}
             </div>
             <div style={{ display: "grid", gap: 6 }}>
               {savedNwcConnections.map((connection) => (
@@ -622,7 +729,7 @@ function ClaimMethodChooser({
                     color: T.accent, flexShrink: 0, fontSize: 9,
                     fontWeight: 800, letterSpacing: 1,
                   }}>
-                    CLAIM →
+                    {t("claim.claimArrow")}
                   </span>
                 </button>
               ))}
@@ -653,7 +760,7 @@ function ClaimMethodChooser({
                   border: `1px solid ${T.green}55`, borderRadius: 4,
                   padding: "2px 6px", textTransform: "uppercase",
                 }}>
-                  one tap
+                  {t("claim.oneTap")}
                 </span>
               </div>
               <div style={{
@@ -663,7 +770,7 @@ function ClaimMethodChooser({
                 M-Pesa · KES
               </div>
               <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
-                Cash out to M-Pesa with Tando. Enter your phone — KES lands in seconds.
+                {t("claim.tandoCardBlurb")}
               </div>
             </button>
           )}
@@ -689,7 +796,7 @@ function ClaimMethodChooser({
                   border: `1px solid ${T.green}55`, borderRadius: 4,
                   padding: "2px 6px", textTransform: "uppercase",
                 }}>
-                  one tap
+                  {t("claim.oneTap")}
                 </span>
               </div>
               <div style={{
@@ -699,7 +806,43 @@ function ClaimMethodChooser({
                 M-Pesa · TZS
               </div>
               <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
-                Cash out to M-Pesa with ChapSmart. Enter your phone — TZS lands in seconds.
+                {t("claim.chapsmartCardBlurb")}
+              </div>
+            </button>
+          )}
+          {/* Strike — guided USD cash-out through username@strike.me. */}
+          {strikeEligible && (
+            <button
+              onClick={() => onSelect({ kind: "strike" })}
+              style={{
+                minHeight: methodMinHeight, padding: 12, borderRadius: T.r,
+                background: T.greenDim, border: `1px solid ${T.green}66`,
+                color: T.text, cursor: "pointer", textAlign: "left",
+              }}
+            >
+              <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                gap: 10, marginBottom: 8,
+              }}>
+                <span style={{ fontSize: 20 }}>🇺🇸</span>
+                <span style={{
+                  fontSize: 8, fontFamily: T.mono, color: T.green,
+                  border: `1px solid ${T.green}55`, borderRadius: 4,
+                  padding: "2px 6px", textTransform: "uppercase",
+                }}>
+                  {showSavedStrike ? t("claim.badgeNew") : t("claim.badgeCash")}
+                </span>
+              </div>
+              <div style={{
+                fontSize: 12, fontWeight: 800, color: T.green,
+                fontFamily: T.mono, marginBottom: 6, textTransform: "uppercase",
+              }}>
+                {t("claim.cashOutStrike")}
+              </div>
+              <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
+                {showSavedStrike
+                  ? t("claim.strikeUseDifferent")
+                  : t("claim.strikeCardBlurb")}
               </div>
             </button>
           )}
@@ -739,7 +882,7 @@ function ClaimMethodChooser({
                     borderRadius: 4, padding: "2px 6px",
                     textTransform: "uppercase",
                   }}>
-                    {recommended ? "top pick" : (isLive ? "live" : "soon")}
+                    {recommended ? t("claim.badgeTopPick") : (isLive ? t("claim.badgeLive") : t("claim.badgeSoon"))}
                   </span>
                 </div>
                 <div style={{
@@ -753,8 +896,8 @@ function ClaimMethodChooser({
                   fontSize: 10, color: T.muted, fontFamily: T.mono,
                   lineHeight: 1.45,
                 }}>
-                  {provider.blurb ||
-                    `Opens ${provider.displayName} — cash out to ${provider.currency}, paste the invoice back.`}
+                  {(provider.blurbKey && t(provider.blurbKey)) || provider.blurb ||
+                    t("claim.externalBlurbFallback", { provider: provider.displayName, currency: provider.currency })}
                 </div>
               </button>
             );
@@ -769,10 +912,10 @@ function ClaimMethodChooser({
           >
             <div style={{ fontSize: 20, marginBottom: 8 }}>⚡</div>
             <div style={{ fontSize: 12, fontWeight: 800, color: T.accent, fontFamily: T.mono, marginBottom: 6 }}>
-              LN · FAST
+              {t("claim.lnFast")}
             </div>
             <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
-              Best path. Send to a Lightning address, invoice, or NWC.
+              {t("claim.bestPathLn")}
             </div>
           </button>
           <button
@@ -785,10 +928,10 @@ function ClaimMethodChooser({
           >
             <div style={{ fontSize: 20, marginBottom: 8 }}>₿</div>
             <div style={{ fontSize: 12, fontWeight: 800, color: T.amber, fontFamily: T.mono, marginBottom: 6 }}>
-              ONCHAIN · SLOW
+              {t("claim.methodOnchainSlow")}
             </div>
             <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
-              Paste a bitcoin address once. Fees are deducted from payout.
+              {t("claim.onchainBlurb")}
             </div>
           </button>
         </div>
@@ -819,6 +962,7 @@ function ExternalSwapRedirectPicker({
   onBack: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useT();
   // Generic guided-redirect picker: open the provider's swap page,
   // let the user create a Lightning invoice on their side, paste it
   // back here, and route it through the normal claim+payout path.
@@ -853,7 +997,7 @@ function ExternalSwapRedirectPicker({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
-              {provider.displayName.toUpperCase()} CLAIM
+              {t("claim.providerClaimKicker", { provider: provider.displayName.toUpperCase() })}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
               <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -892,7 +1036,7 @@ function ExternalSwapRedirectPicker({
               fontFamily: T.mono, fontSize: 8, fontWeight: 900,
               textTransform: "uppercase",
             }}>
-              {isLive ? "live now" : "coming soon"}
+              {isLive ? t("claim.badgeLiveNow") : t("claim.badgeComingSoon")}
             </span>
           </div>
           <div style={{
@@ -902,20 +1046,17 @@ function ExternalSwapRedirectPicker({
             {isLive
               ? (
                   <>
-                    Opens {provider.displayName} in your browser — cash out to {provider.currency} mobile money there,
-                    make an invoice up to <BitcoinAmount sats={payoutSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />,
-                    then paste it back below.
+                    {t("claim.externalLiveBodyBefore", { provider: provider.displayName, currency: provider.currency })} <BitcoinAmount sats={payoutSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} />{t("claim.externalLiveBodyAfter")}
                     {reserveSats > 0 && (
                       <>
-                        {" "}About <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+                        {" "}{t("claim.feeReserveBefore")} <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.feeReserveAfter")}
                       </>
                     )}
                   </>
                 )
               : (
                   <>
-                    {provider.displayName} lists this country as coming soon.
-                    Use Lightning or onchain for this claim today.
+                    {t("claim.externalSoonBody", { provider: provider.displayName })}
                   </>
                 )}
           </div>
@@ -930,7 +1071,9 @@ function ExternalSwapRedirectPicker({
             fontWeight: 900, cursor: "pointer", marginBottom: 10,
           }}
         >
-          {isLive ? `Open ${provider.displayName} swap` : `Check ${provider.displayName}`}
+          {isLive
+            ? t("claim.openProviderSwap", { provider: provider.displayName })
+            : t("claim.checkProvider", { provider: provider.displayName })}
         </button>
 
         {isLive && (
@@ -961,7 +1104,7 @@ function ExternalSwapRedirectPicker({
                 marginBottom: 8,
               }}
             >
-              Claim via {provider.displayName} invoice
+              {t("claim.claimViaProviderInvoice", { provider: provider.displayName })}
             </button>
           </>
         )}
@@ -975,7 +1118,7 @@ function ExternalSwapRedirectPicker({
             fontWeight: 700, cursor: "pointer",
           }}
         >
-          Back
+          {t("common.back")}
         </button>
       </div>
     </div>
@@ -997,18 +1140,19 @@ function formatTandoLnurlError(e: unknown): string {
   if (e instanceof LnurlError) {
     switch (e.code) {
       case "LnurlAmountOutOfRangeError":
-        return `This amount is outside Tando's M-Pesa limits. ${e.message}`;
+        return translate(getCurrentLang(), "claim.errTandoAmountRange", { message: e.message });
       case "LnurlDnsError":
-        return "Couldn't reach Tando (bitcoin.co.ke). Check your connection and try again.";
+        return translate(getCurrentLang(), "claim.errTandoDns");
       case "LnurlServerError":
-        return "Tando's server is busy right now. Try again in a moment.";
+        return translate(getCurrentLang(), "claim.errTandoServer");
       case "LnurlMalformedError":
-        return "Tando returned an unexpected response. Try again, or use Lightning.";
+        return translate(getCurrentLang(), "claim.errTandoMalformed");
       case "LnurlParseError":
-        return "That number didn't resolve to a valid M-Pesa cash-out address.";
+        return translate(getCurrentLang(), "claim.errMpesaAddressInvalid");
     }
   }
-  return (e as { message?: string })?.message || "Couldn't reach Tando. Try again.";
+  return (e as { message?: string })?.message
+    || translate(getCurrentLang(), "claim.errTandoFallback");
 }
 
 function TandoMpesaPicker({
@@ -1028,6 +1172,7 @@ function TandoMpesaPicker({
   onBack: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useT();
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
 
@@ -1054,12 +1199,12 @@ function TandoMpesaPicker({
 
   const submit = async () => {
     if (!msisdn) {
-      setErr("Enter a valid Kenyan M-Pesa number, e.g. 0712 345 678.");
+      setErr(t("claim.errEnterValidKenyanNumber"));
       return;
     }
     const address = buildTandoLightningAddress(msisdn);
     if (!address) {
-      setErr("Enter a valid Kenyan M-Pesa number, e.g. 0712 345 678.");
+      setErr(t("claim.errEnterValidKenyanNumber"));
       return;
     }
     setErr(null);
@@ -1097,7 +1242,7 @@ function TandoMpesaPicker({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
-              M-PESA CLAIM · TANDO
+              {t("claim.tandoKicker")}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
               <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -1125,7 +1270,7 @@ function TandoMpesaPicker({
                 fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
               }}>
-                Cash out to M-Pesa
+                {t("claim.cashOutMpesa")}
               </span>
             </div>
             <span style={{
@@ -1134,25 +1279,24 @@ function TandoMpesaPicker({
               fontFamily: T.mono, fontSize: 8, fontWeight: 900,
               textTransform: "uppercase",
             }}>
-              one tap
+              {t("claim.oneTap")}
             </span>
           </div>
           <div style={{
             color: T.muted, fontFamily: T.mono, fontSize: 10,
             lineHeight: 1.5,
           }}>
-            Enter your M-Pesa number. Chama pays it straight from your claim and
-            Tando deposits KES in seconds — no redirect, no pasting invoices.
+            {t("claim.tandoBody")}
             {reserveSats > 0 && (
               <>
-                {" "}About <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+                {" "}{t("claim.feeReserveBefore")} <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.feeReserveAfter")}
               </>
             )}
           </div>
         </div>
 
         <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
-          M-PESA PHONE NUMBER
+          {t("claim.mpesaPhoneLabel")}
         </div>
         <input
           type="tel"
@@ -1174,13 +1318,13 @@ function TandoMpesaPicker({
         }}>
           {valid ? (
             <>
-              Paying <span style={{ color: T.green }}>{msisdn}@{TANDO_LNADDRESS_DOMAIN}</span>
+              {t("claim.payingBefore")} <span style={{ color: T.green }}>{msisdn}@{TANDO_LNADDRESS_DOMAIN}</span>
               {kesEstimate && <> · ≈ {kesEstimate}</>}
             </>
           ) : phone.trim().length > 0 ? (
-            "Kenyan mobile numbers look like 0712 345 678 or 254712345678."
+            t("claim.kenyanNumbersHint")
           ) : (
-            kesEstimate ? <>You'll receive ≈ {kesEstimate} to M-Pesa.</> : "Safaricom M-Pesa, Kenya."
+            kesEstimate ? <>{t("claim.youllReceiveMpesa", { estimate: kesEstimate })}</> : t("claim.safaricomKenya")
           )}
         </div>
 
@@ -1197,7 +1341,7 @@ function TandoMpesaPicker({
             marginBottom: 8,
           }}
         >
-          {busy ? "Reaching Tando…" : "Cash out to M-Pesa"}
+          {busy ? t("claim.reachingTando") : t("claim.cashOutMpesa")}
         </button>
 
         {err && (
@@ -1220,7 +1364,7 @@ function TandoMpesaPicker({
             fontWeight: 700, cursor: busy ? "not-allowed" : "pointer",
           }}
         >
-          Back
+          {t("common.back")}
         </button>
       </div>
     </div>
@@ -1242,18 +1386,19 @@ function formatChapsmartLnurlError(e: unknown): string {
   if (e instanceof LnurlError) {
     switch (e.code) {
       case "LnurlAmountOutOfRangeError":
-        return `This amount is outside ChapSmart's M-Pesa limits. ${e.message}`;
+        return translate(getCurrentLang(), "claim.errChapsmartAmountRange", { message: e.message });
       case "LnurlDnsError":
-        return "Couldn't reach ChapSmart (chapsmart.com). Check your connection and try again.";
+        return translate(getCurrentLang(), "claim.errChapsmartDns");
       case "LnurlServerError":
-        return "ChapSmart's server is busy right now. Try again in a moment.";
+        return translate(getCurrentLang(), "claim.errChapsmartServer");
       case "LnurlMalformedError":
-        return "ChapSmart returned an unexpected response. Try again, or use Lightning.";
+        return translate(getCurrentLang(), "claim.errChapsmartMalformed");
       case "LnurlParseError":
-        return "That number didn't resolve to a valid M-Pesa cash-out address.";
+        return translate(getCurrentLang(), "claim.errMpesaAddressInvalid");
     }
   }
-  return (e as { message?: string })?.message || "Couldn't reach ChapSmart. Try again.";
+  return (e as { message?: string })?.message
+    || translate(getCurrentLang(), "claim.errChapsmartFallback");
 }
 
 function ChapsmartMpesaPicker({
@@ -1273,6 +1418,7 @@ function ChapsmartMpesaPicker({
   onBack: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useT();
   const btcPrice = useBitcoinPrice();
   const fiatRates = useFiatRates();
 
@@ -1299,12 +1445,12 @@ function ChapsmartMpesaPicker({
 
   const submit = async () => {
     if (!msisdn) {
-      setErr("Enter a valid Tanzanian Vodacom M-Pesa number, e.g. 0740 034 110.");
+      setErr(t("claim.errEnterValidTanzanianNumber"));
       return;
     }
     const address = buildChapsmartLightningAddress(msisdn);
     if (!address) {
-      setErr("Enter a valid Tanzanian Vodacom M-Pesa number, e.g. 0740 034 110.");
+      setErr(t("claim.errEnterValidTanzanianNumber"));
       return;
     }
     setErr(null);
@@ -1340,7 +1486,7 @@ function ChapsmartMpesaPicker({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
-              M-PESA CLAIM · CHAPSMART
+              {t("claim.chapsmartKicker")}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
               <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -1368,7 +1514,7 @@ function ChapsmartMpesaPicker({
                 fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
               }}>
-                Cash out to M-Pesa
+                {t("claim.cashOutMpesa")}
               </span>
             </div>
             <span style={{
@@ -1377,25 +1523,24 @@ function ChapsmartMpesaPicker({
               fontFamily: T.mono, fontSize: 8, fontWeight: 900,
               textTransform: "uppercase",
             }}>
-              one tap
+              {t("claim.oneTap")}
             </span>
           </div>
           <div style={{
             color: T.muted, fontFamily: T.mono, fontSize: 10,
             lineHeight: 1.5,
           }}>
-            Enter your M-Pesa number. Chama pays it straight from your claim and
-            ChapSmart deposits TZS in seconds — no redirect, no pasting invoices.
+            {t("claim.chapsmartBody")}
             {reserveSats > 0 && (
               <>
-                {" "}About <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> stays available for Lightning fees.
+                {" "}{t("claim.feeReserveBefore")} <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.feeReserveAfter")}
               </>
             )}
           </div>
         </div>
 
         <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
-          M-PESA PHONE NUMBER
+          {t("claim.mpesaPhoneLabel")}
         </div>
         <input
           type="tel"
@@ -1417,13 +1562,13 @@ function ChapsmartMpesaPicker({
         }}>
           {valid ? (
             <>
-              Paying <span style={{ color: T.green }}>{msisdn}@{CHAPSMART_LNADDRESS_DOMAIN}</span>
+              {t("claim.payingBefore")} <span style={{ color: T.green }}>{msisdn}@{CHAPSMART_LNADDRESS_DOMAIN}</span>
               {tzsEstimate && <> · ≈ {tzsEstimate}</>}
             </>
           ) : phone.trim().length > 0 ? (
-            "Tanzanian Vodacom numbers look like 0740 034 110 or 255740034110."
+            t("claim.tanzanianNumbersHint")
           ) : (
-            tzsEstimate ? <>You'll receive ≈ {tzsEstimate} to M-Pesa.</> : "Vodacom M-Pesa, Tanzania."
+            tzsEstimate ? <>{t("claim.youllReceiveMpesa", { estimate: tzsEstimate })}</> : t("claim.vodacomTanzania")
           )}
         </div>
 
@@ -1440,7 +1585,7 @@ function ChapsmartMpesaPicker({
             marginBottom: 8,
           }}
         >
-          {busy ? "Reaching ChapSmart…" : "Cash out to M-Pesa"}
+          {busy ? t("claim.reachingChapsmart") : t("claim.cashOutMpesa")}
         </button>
 
         {err && (
@@ -1463,7 +1608,340 @@ function ChapsmartMpesaPicker({
             fontWeight: 700, cursor: busy ? "not-allowed" : "pointer",
           }}
         >
-          Back
+          {t("common.back")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Strike username → @strike.me cash-out (US / USD) ────────────────────────
+//
+// For existing Strike users: type only the Strike username (or paste
+// `user@strike.me`); Chama completes `<username>@strike.me` and resolves it to
+// a BOLT11 via the same `resolveLightningAddressToInvoice` path as any other
+// Lightning Address. Released escrow sats pay it. Strike delivers passive
+// Lightning to cash only if the user has set Receive currency to Cash — Chama
+// can't flip that, so this picker makes them confirm it before sending. No
+// redirect, no new fund surface; the address is saved as a payout destination.
+function formatStrikeLnurlError(e: unknown): string {
+  if (e instanceof LnurlError) {
+    switch (e.code) {
+      case "LnurlAmountOutOfRangeError":
+        return translate(getCurrentLang(), "claim.errStrikeAmountRange", { message: e.message });
+      case "LnurlDnsError":
+        return translate(getCurrentLang(), "claim.errStrikeDns");
+      case "LnurlServerError":
+        return translate(getCurrentLang(), "claim.errStrikeServer");
+      case "LnurlMalformedError":
+        return translate(getCurrentLang(), "claim.errStrikeMalformed");
+      case "LnurlParseError":
+        return translate(getCurrentLang(), "claim.errStrikeParse");
+    }
+  }
+  return (e as { message?: string })?.message
+    || translate(getCurrentLang(), "claim.errStrikeFallback");
+}
+
+function StrikeUsdPicker({
+  payoutSats,
+  reserveSats,
+  savedDestinations,
+  initialAddress,
+  onResolve,
+  onBack,
+  onCancel,
+}: {
+  payoutSats: number;
+  reserveSats: number;
+  savedDestinations: PayoutDestination[];
+  initialAddress?: string | null;
+  /** Fired with the resolved BOLT11 and the Strike Lightning Address used,
+   *  so the consumer can save it (saveAfter: true) and dispatch the claim. */
+  onResolve: (bolt11: string, address: string) => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useT();
+  const btcPrice = useBitcoinPrice();
+  const fiatRates = useFiatRates();
+
+  // A saved Strike destination is just a saved Lightning Address ending in
+  // @strike.me — pull the most-recent one to pre-fill the username field.
+  const lastSavedUsername = useMemo(() => {
+    const strike = savedDestinations.find((d) => isStrikeLightningAddress(d.address));
+    return strike ? strikeUsernameFromAddress(strike.address) : null;
+  }, [savedDestinations]);
+
+  const initialUsername = useMemo(() => {
+    const selected = initialAddress ? strikeUsernameFromAddress(initialAddress) : null;
+    return selected ?? lastSavedUsername ?? "";
+  }, [initialAddress, lastSavedUsername]);
+
+  const [username, setUsername] = useState(() => initialUsername);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [cashReady, setCashReady] = useState(false);
+
+  const completedAddress = buildStrikeLightningAddress(username);
+  const valid = completedAddress !== null;
+  const readyToSend = valid && cashReady && !busy;
+  const usdEstimate = formatEstimatedFiatForMsats({
+    amountMsats: payoutSats * 1000,
+    currency: "USD",
+    usdPerBtc: btcPrice.usd,
+    usdFiatRates: fiatRates.rates,
+  });
+
+  const submit = async () => {
+    const address = buildStrikeLightningAddress(username);
+    if (!address) {
+      setErr(t("claim.errEnterStrikeUsername"));
+      return;
+    }
+    if (!cashReady) {
+      setErr(t("claim.errConfirmCashReceive"));
+      return;
+    }
+    setErr(null);
+    setBusy(true);
+    try {
+      // Pre-resolves .well-known/lnurlp/<username> (validating the address +
+      // checking the claim amount against Strike's min/max) then fetches the
+      // BOLT11. Throws LnurlAmountOutOfRangeError if out of bounds.
+      const bolt11 = await resolveLightningAddressToInvoice(address, payoutSats);
+      onResolve(bolt11, address);
+    } catch (e) {
+      setErr(formatStrikeLnurlError(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0, background: "#000c", zIndex: 9998,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16, animation: "fadeIn 0.2s ease",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: T.card, border: `1px solid ${T.borderHi}`,
+          borderRadius: T.r, padding: 24, maxWidth: 420, width: "100%",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
+              {t("claim.strikeKicker")}
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
+              <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
+            </div>
+          </div>
+          <button onClick={onCancel} style={{
+            background: "none", border: "none", color: T.muted,
+            fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
+          }}>×</button>
+        </div>
+
+        <div style={{
+          padding: "12px", borderRadius: T.r,
+          background: T.greenDim, border: `1px solid ${T.green}44`,
+          color: T.text, marginBottom: 12,
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 10, marginBottom: 8,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <span style={{ fontSize: 20 }}>🇺🇸</span>
+              <span style={{
+                color: T.green, fontFamily: T.mono, fontSize: 11,
+                fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}>
+                {t("claim.strikeTitle")}
+              </span>
+            </div>
+            <span style={{
+              flexShrink: 0, color: T.green, background: T.greenDim,
+              border: `1px solid ${T.green}55`, borderRadius: 4, padding: "2px 6px",
+              fontFamily: T.mono, fontSize: 8, fontWeight: 900,
+              textTransform: "uppercase",
+            }}>
+              {t("claim.badgeNative")}
+            </span>
+          </div>
+          <div style={{
+            color: T.muted, fontFamily: T.mono, fontSize: 10,
+            lineHeight: 1.5,
+          }}>
+            {t("claim.strikeBodyBefore")}{" "}
+            <span style={{ color: T.green }}>@{STRIKE_LNADDRESS_DOMAIN}</span>{t("claim.strikeBodyAfter")}
+            {reserveSats > 0 && (
+              <>
+                {" "}{t("claim.feeReserveBefore")} <BitcoinAmount sats={reserveSats} size={10} gap={3} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.feeReserveAfter")}
+              </>
+            )}
+          </div>
+        </div>
+
+        <div style={{
+          padding: "10px 12px", borderRadius: T.r, marginBottom: 12,
+          background: T.amberDim, border: `1px solid ${T.amber}44`,
+        }}>
+          <div style={{
+            color: T.amber, fontFamily: T.mono, fontSize: 10,
+            fontWeight: 900, lineHeight: 1.4, marginBottom: 6,
+          }}>
+            {t("claim.strikeCashTitle")}
+          </div>
+          <div style={{
+            color: T.muted, fontFamily: T.mono, fontSize: 10,
+            lineHeight: 1.5, marginBottom: 8,
+          }}>
+            {STRIKE_CASH_HINT}
+          </div>
+          <ol style={{
+            margin: "0 0 8px", paddingLeft: 18, color: T.muted,
+            fontFamily: T.mono, fontSize: 10, lineHeight: 1.55,
+          }}>
+            {STRIKE_CASH_STEPS.map((step) => (
+              <li key={step} style={{ marginBottom: 2 }}>{step}</li>
+            ))}
+          </ol>
+          <div style={{
+            color: T.muted, fontFamily: T.mono, fontSize: 9, lineHeight: 1.45,
+          }}>
+            {STRIKE_CASH_CAVEAT} {t("claim.strikeSendsSats")}
+          </div>
+        </div>
+
+        <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
+          {t("claim.strikeUsernameLabel")}
+        </div>
+        <div style={{ position: "relative", marginBottom: 8 }}>
+          <input
+            type="text"
+            inputMode="text"
+            autoComplete="username"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            value={username}
+            onChange={(e) => {
+              const raw = e.target.value;
+              // Paste of alice@strike.me / https://strike.me/alice → collapse
+              // to bare username so the @strike.me suffix doesn't double up.
+              const n = buildStrikeLightningAddress(raw)
+                ? normalizeStrikeUsername(raw)
+                : null;
+              setUsername(
+                n && (raw.includes("@") || /strike\.me/i.test(raw)) ? n : raw,
+              );
+              setErr(null);
+            }}
+            onKeyDown={(e) => { if (e.key === "Enter" && valid && !busy) { e.preventDefault(); void submit(); } }}
+            placeholder="alice"
+            disabled={busy}
+            style={{
+              ...inputStyle,
+              marginBottom: 0,
+              paddingRight: 110,
+            }}
+          />
+          <span style={{
+            position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)",
+            color: valid ? T.green : T.muted, fontFamily: T.mono, fontSize: 12,
+            fontWeight: 700, pointerEvents: "none",
+          }}>
+            @{STRIKE_LNADDRESS_DOMAIN}
+          </span>
+        </div>
+
+        <div style={{
+          fontSize: 10, color: T.muted, fontFamily: T.mono,
+          lineHeight: 1.5, marginBottom: 12, minHeight: 14,
+        }}>
+          {valid && completedAddress ? (
+            <>
+              {t("claim.payingBefore")} <span style={{ color: T.green }}>{completedAddress}</span>
+              {usdEstimate && <> · ≈ {usdEstimate} {t("claim.ifCashReceiveOn")}</>}
+            </>
+          ) : username.trim().length > 0 ? (
+            t("claim.strikeHandleHint")
+          ) : (
+            usdEstimate
+              ? <>{t("claim.strikeEstimate", { estimate: usdEstimate })}</>
+              : t("claim.strikeUsernameOnly")
+          )}
+        </div>
+
+        <label style={{
+          display: "flex", alignItems: "flex-start", gap: 10,
+          padding: "10px 12px", borderRadius: T.rs,
+          background: cashReady ? T.greenDim : T.surface,
+          border: `1px solid ${cashReady ? `${T.green}66` : T.border}`,
+          color: cashReady ? T.text : T.muted,
+          fontFamily: T.mono, fontSize: 10, lineHeight: 1.45,
+          marginBottom: 12, cursor: busy ? "not-allowed" : "pointer",
+        }}>
+          <input
+            type="checkbox"
+            checked={cashReady}
+            disabled={busy}
+            onChange={(e) => {
+              setCashReady(e.target.checked);
+              setErr(null);
+            }}
+            style={{ marginTop: 1, accentColor: T.green }}
+          />
+          <span>
+            {t("claim.strikeCashCheckbox")}
+          </span>
+        </label>
+
+        <button
+          onClick={() => void submit()}
+          disabled={!readyToSend}
+          style={{
+            width: "100%", padding: "12px 16px", borderRadius: T.rs,
+            background: readyToSend ? T.green : T.surface,
+            border: `1px solid ${readyToSend ? T.green : T.border}`,
+            color: readyToSend ? T.bg : T.muted,
+            fontFamily: T.mono, fontSize: 12, fontWeight: 900,
+            cursor: readyToSend ? "pointer" : "default",
+            marginBottom: 8,
+          }}
+        >
+          {busy ? t("claim.reachingStrike") : cashReady ? t("claim.sendToStrike") : t("claim.confirmCashReceive")}
+        </button>
+
+        {err && (
+          <div style={{
+            marginBottom: 8, padding: 10, borderRadius: T.rs,
+            background: T.redDim, border: `1px solid ${T.red}44`,
+            color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5,
+          }}>
+            {err}
+          </div>
+        )}
+
+        <button
+          onClick={onBack}
+          disabled={busy}
+          style={{
+            width: "100%", padding: "10px 16px", borderRadius: T.rs,
+            background: T.surface, border: `1px solid ${T.border}`,
+            color: T.muted, fontFamily: T.mono, fontSize: 11,
+            fontWeight: 700, cursor: busy ? "not-allowed" : "pointer",
+          }}
+        >
+          {t("common.back")}
         </button>
       </div>
     </div>
@@ -1481,6 +1959,7 @@ function OnchainPayoutPicker({
   onBack: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useT();
   const [address, setAddress] = useState("");
   const trimmed = address.trim();
   const looksLikeBitcoinAddress = /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{20,}$/i.test(trimmed);
@@ -1504,7 +1983,7 @@ function OnchainPayoutPicker({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 0, marginBottom: 4 }}>
-              ONCHAIN CLAIM
+              {t("claim.onchainClaimKicker")}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: 0 }}>
               <BitcoinAmount sats={payoutSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
@@ -1521,9 +2000,7 @@ function OnchainPayoutPicker({
           color: T.amber, fontFamily: T.mono, fontSize: 10,
           lineHeight: 1.5, marginBottom: 12,
         }}>
-          Slow path. Paste a fresh bitcoin address. Chama uses it only for
-          this transaction and does not save it. Network and peg-out fees
-          come out of the claimed amount.
+          {t("claim.onchainSlowPath")}
         </div>
         <textarea
           value={address}
@@ -1551,7 +2028,7 @@ function OnchainPayoutPicker({
             marginBottom: 8,
           }}
         >
-          Claim onchain
+          {t("claim.claimOnchain")}
         </button>
         <button
           onClick={onBack}
@@ -1562,7 +2039,7 @@ function OnchainPayoutPicker({
             cursor: "pointer",
           }}
         >
-          Back
+          {t("common.back")}
         </button>
       </div>
     </div>
@@ -1588,6 +2065,7 @@ function RunningPanel({
   payoutMethod: PayoutMethod | null;
   onEscape?: () => void;
 }) {
+  const { t } = useT();
   // v3.5.1 claim-hang: reveal an escape if the in-progress stage runs long.
   // A healthy claim+payout resolves well under this; a stall (cross-fed or
   // unreachable federation) would otherwise trap the user on a spinner with
@@ -1599,18 +2077,20 @@ function RunningPanel({
   }, []);
 
   const message =
-    phase.kind === "claiming" ? "Recovering your share…" :
-    phase.kind === "confirming" ? "Confirming with the federation…" :
-    phase.kind === "paying-onchain" ? "Broadcasting onchain payout…" :
-    phase.kind === "payout-confirming" ? "Confirming your payout…" :
+    phase.kind === "claiming" ? t("claim.phaseClaiming") :
+    phase.kind === "confirming" ? t("claim.phaseConfirming") :
+    phase.kind === "paying-onchain" ? t("claim.phasePayingOnchain") :
+    phase.kind === "payout-confirming" ? t("claim.phasePayoutConfirming") :
     phase.kind === "paying-invoice" && payoutMethod?.kind === "tando"
-      ? "Sending to M-Pesa (Tando)…"
+      ? t("claim.phaseSendingMpesaTando")
       : phase.kind === "paying-invoice" && payoutMethod?.kind === "chapsmart"
-      ? "Sending to M-Pesa (ChapSmart)…"
+      ? t("claim.phaseSendingMpesaChapsmart")
+      : phase.kind === "paying-invoice" && payoutMethod?.kind === "strike"
+      ? t("claim.phaseSendingStrike")
       : phase.kind === "paying-invoice" && payoutMethod?.kind === "external"
-      ? `Sending to ${payoutMethod.match.provider.displayName}…`
-      : phase.kind === "paying-invoice" ? "Sending to your wallet…" :
-    "Working…";
+      ? t("claim.phaseSendingProvider", { provider: payoutMethod.match.provider.displayName })
+      : phase.kind === "paying-invoice" ? t("claim.phaseSendingWallet") :
+    t("claim.phaseWorking");
   const tone =
     phase.kind === "paying-onchain" ? T.amber :
     phase.kind === "paying-invoice" ? T.amber :
@@ -1640,8 +2120,7 @@ function RunningPanel({
       {showEscape && onEscape && (
         <div style={{ marginTop: 18 }}>
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 8, lineHeight: 1.5 }}>
-            Taking longer than expected. Your claim is published and your sats
-            are safe — close and check back, or let it finish in the background.
+            {t("claim.longRunningEscape")}
           </div>
           <button
             onClick={onEscape}
@@ -1652,7 +2131,7 @@ function RunningPanel({
               cursor: "pointer",
             }}
           >
-            Close &amp; check later
+            {t("claim.closeCheckLater")}
           </button>
         </div>
       )}
@@ -1674,6 +2153,7 @@ function TerminalPanel({
   onRetry: () => void;
   onClose: () => void;
 }) {
+  const { t } = useT();
   if (terminal.kind === "done") {
     return (
       <div style={{
@@ -1684,13 +2164,15 @@ function TerminalPanel({
         <div style={{ fontSize: 48, marginBottom: 12 }}>✓</div>
         <div style={{ fontSize: 14, fontWeight: 700, color: T.green, fontFamily: T.sans, marginBottom: 6 }}>
           {payoutMethod?.kind === "tando" || payoutMethod?.kind === "chapsmart"
-            ? "Sent to M-Pesa"
+            ? t("claim.sentToMpesa")
+            : payoutMethod?.kind === "strike"
+              ? t("claim.sentToStrike")
             : payoutMethod?.kind === "external"
-              ? `Sent to ${payoutMethod.match.provider.displayName}`
-              : "Sent to your wallet"}
+              ? t("claim.sentToProvider", { provider: payoutMethod.match.provider.displayName })
+              : t("claim.sentToWallet")}
         </div>
         <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginTop: 12 }}>
-          Closing…
+          {t("claim.closing")}
         </div>
       </div>
     );
@@ -1721,7 +2203,7 @@ function TerminalPanel({
 
   if (terminal.kind === "claim-failed") {
     const settlementFailed = /reissue|consumed|settle/i.test(terminal.error);
-    title = settlementFailed ? "Claim did not settle" : "Couldn't recover your share";
+    title = settlementFailed ? t("claim.titleClaimDidNotSettle") : t("claim.titleCouldntRecoverShare");
     subtitle = humanizedError;
     tone = T.red;
     toneDim = T.redDim;
@@ -1730,14 +2212,14 @@ function TerminalPanel({
     // v0.3.1 Phase 1: retry-able structural failure (FED_PROBE_FAILED
     // / FED_MISMATCH). Surface the actual underlying error and offer
     // Try again. No sats moved — safe to retry.
-    title = "Couldn't reach your Chama";
+    title = t("claim.titleCouldntReachChama");
     subtitle = humanizedError;
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⚠";
     showRetry = true;
   } else if (terminal.kind === "claim-pending") {
-    title = "Your sats are still arriving";
+    title = t("claim.titleSatsStillArriving");
     subtitle = humanizedError;
     tone = T.amber;
     toneDim = T.amberDim;
@@ -1747,20 +2229,20 @@ function TerminalPanel({
     // 3.5.1 — the payout is SUBMITTED but unconfirmed. Deliberately NO retry
     // affordance: re-paying is the double-send this guards against. Chama
     // re-attaches to the payment in the background; the user just waits.
-    title = "Payout sent — confirming";
+    title = t("claim.titlePayoutSentConfirming");
     subtitle = terminal.error
-      ?? "Your payout was sent and is confirming. Don't tap Claim again — check your destination wallet.";
+      ?? t("claim.payoutConfirmingBody");
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⏳";
   } else {
     // payout-failed
-    title = "Payout couldn't be sent";
+    title = t("claim.titlePayoutCouldntBeSent");
     subtitle = claimStillOpen
-      ? `${humanizedError}\n\nYour sats are safe in your Chama. Close this and tap Claim again — the payout retries with a fresh invoice.`
+      ? t("claim.payoutFailedRetryClaim", { error: humanizedError })
       : showRecoveryCta
-        ? `${humanizedError}\n\nYour sats are safe in your Chama. Tap Show recovery now to retry the payout only.`
-        : `${humanizedError}\n\nYour sats are safe in your Chama.`;
+        ? t("claim.payoutFailedShowRecovery", { error: humanizedError })
+        : t("claim.payoutFailedPlain", { error: humanizedError });
     tone = T.amber;
     toneDim = T.amberDim;
     icon = "⏳";
@@ -1805,7 +2287,7 @@ function TerminalPanel({
               background: T.muted, animation: "pulse 1.4s ease-in-out infinite",
             }} />
           )}
-          {retryProbing ? "Checking your Chama…" : "Try again"}
+          {retryProbing ? t("claim.checkingChama") : t("claim.tryAgain")}
         </button>
       )}
       <button
@@ -1821,7 +2303,7 @@ function TerminalPanel({
           boxShadow: showRecoveryCta ? `0 0 24px ${T.amber}33` : "none",
         }}
       >
-        {showRecoveryCta ? "Show recovery now" : "Close"}
+        {showRecoveryCta ? t("claim.showRecoveryNow") : t("common.close")}
       </button>
     </div>
   );

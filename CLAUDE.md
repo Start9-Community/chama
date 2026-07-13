@@ -9,11 +9,14 @@ big/irreversible moves.
 Local-money / P2P Bitcoin marketplace: **Fedimint** (ecash), **Nostr** (identity, chat,
 escrow coordination), **Lightning** (funding). Platforms: web (getchama.app /
 chama.community), **Tauri** desktop, **Android APK** (Zapstore + GitHub). Version: see
-`package.json` (**v4.2.1** "Going Global" shipped 2026-06-26). **NEXT: v5.0** — the ultra-major "finish the bond"
-release (the bond IS the headline). **Phase: post-announcement** (the Nairobi conference is long past — drop that
-framing). The app is announced + live, but arbiter recruitment isn't wired end-to-end yet, so users may be waiting or
-unsure their country is supported. v5.0's job: finish the bond + the arbiter enrollment that makes any chama go live,
-while hardening fund-safety. Benin/Cameroon francophone framing still applies.
+`package.json` (**v5.0.0** "Finish the Bond" shipped 2026-07-09 — Zapstore + GitHub + web, commit cd1d94d). **v5.0 =
+the mainnet-bond release:** the single-key CLTV commitment bond is LIVE on **real mainnet Bitcoin**, the ceremony is
+exposed to ALL users (`SHOW_BOND_CEREMONY = true` — anyone posts a real bond + becomes an assignable arbiter), bonded
+arbiters seat + read "community-verified," with a dense fund-safety net underneath (#37 native-lock crash-safety, V7
+payout-journal, loss-proof history). **Phase: post-v5 launch** (Nairobi framing long dropped). Arbiter recruitment is
+now wired end-to-end — the open frontier is ADOPTION (real bonds posted in the wild) + the deferred tracks: **2B part 2**
+(flip `BONDS_ENFORCED`, #47), ChapSmart on-ramp go-live (#40), Boltz swaps (#48), store-permanence (#49 — gate on the
+BOND not ratings, per #52), the sovereignty ladder (#51). Benin/Cameroon francophone framing still applies.
 
 ## Doc set (read, don't duplicate)
 `PHILOSOPHY.md` ethos · `DECISIONS.md` decision log · `BACKLOG.md` backlog ·
@@ -72,6 +75,14 @@ features, major = breaking/big. Handy flags: `--dry-run` (print plan, run nothin
   (web only) + `release:all --no-web` (Android/Zapstore only).
 - **Tether / quiet network for the Zapstore APK upload** to `cdn.zapstore.dev` (~59 MB; stalls on a saturated
   link). `zsp`'s "Publish now" prompt needs an interactive Enter.
+- **Keep `public/icons/` LEAN (2026-07-10):** everything there ships in dist → the web scp AND inside the Tauri
+  APK — the v5.0.0 APK ~tripled because 91 MB of brand-asset drafts (X-banner v1–v20 etc.) sat in public/icons.
+  Drafts live in `design/brand-assets/icons-archive/` (NOT deployed); public/icons stays app-referenced files +
+  the nostr-hotlinked `profile-pics/` + banners/og only (~8 MB).
+- **The landing page (chama.community) does NOT deploy with a ship** — it's a separate hand-run
+  `./scripts/deploy-landing.sh` (landing/* → `~/chama-landing/`). Run it after landing edits or they never go
+  live. satoshimarket.app is fully RETIRED (DNS dropped at njalla 2026-07-10; the old box's SSH host key
+  CHANGED — never deploy/SSH there again; deploy-landing.sh now targets `satoshi@getchama.app` + `id_chama`).
 
 ## DEV / TEST WORKFLOW
 - **⚠⚠ NEVER edit `src/**` or run `npm test`/`npm run typecheck`/a vite preview WHILE Jetty's `dev-instance.sh`
@@ -158,6 +169,111 @@ trade → M-Pesa in minutes). **Earlier:** storyboard demo · Obsidian vault · 
 **NEXT (the big track):** ~~Phase 2A (SSS-lock custody)~~ **DEAD** (the single-key commitment bond replaced it;
 2-of-3 vestige deleted). Jetty reframed **2A = the real Dashboard** (built below). Remaining bond track: **2B**
 (flip `BONDS_ENFORCED` + prefer-bonded, task #33) — later.
+
+**DONE 2026-07-12 (⭐ ARBITER ECONOMICS E1 — the 0.5% insurance premium, task #53 — uncommitted, typecheck CLEAN,
+FULL suite 3188/3188 green [+~50 asserts, new "ARBITER PREMIUM" block], browser boot clean 0 console errors):**
+built per the frozen brief (`chama-arbiter-economics-brief.md`). Each principal pays **0.25%** (whole-sat note) to the
+seated **BONDED** arbiter at settlement, as OOB ecash riding the trade's own channel — **new non-consensus kind 38113
+(PREMIUM)**, NIP-44-encrypted to the arbiter only, **14-day try_cancel horizon** so an absent arbiter auto-refunds the
+payer. Zero reducer/lock/claim-math change; `BONDS_ENFORCED` untouched.
+- **Pure core `arbiters/arbiter-premium.ts`:** `computeArbiterPremium` (25 bps/side via fees.ts, 10-sat NOTE floor,
+  bonded-only ∈ `state.bondedArbiters` — OG-fallback seats earn NOTHING, pre-2B trades never pay, verdict-neutral by
+  construction) + `selectPremiumPayTargets`/`selectPremiumRedeemTargets`.
+- **Ledger `arbiters/arbiter-earnings.ts`** (user-scoped, best-effort, trade-index clone): payer OUTBOX
+  `chama_premium_outbox_v1` — **V7-style "sending" intent BEFORE the spend** (a crash in the spend→publish gap blocks
+  a re-spend; the stranded note refunds itself; only a spend that never happened clears the intent), `paid` after
+  publish, `declined` = the decline preference (can never clobber paid); arbiter EARNINGS `chama_arbiter_earnings_v1`
+  keyed by event id (redeemed/failed + 6-attempt give-up cap for notes the payer's horizon already refunded).
+- **Wiring:** kind 38113 in types/parser/state-machine — `handlePremium` mirrors CHAT (own `state.premiumNotes` array,
+  never eventChain, self-dedups) BUT dispatches via an **early applyEvent branch bypassing terminal/expiry/chain
+  checks** (COMPLETED is truly-terminal and the expiry auto-flip isn't COMPLETED-safe — routed normally a premium
+  would be dropped or could flip a COMPLETED trade to EXPIRED); replay fail-softs NOT_PARTICIPANT like CHAT.
+  ⚠ **CRITICAL CATCH: `sortEventChain` now buckets PREMIUM with CHAT** — it has no e-tag, so left in the state bucket
+  root-find could pick it over CREATE ⇒ MISSING_CREATE ⇒ trade unloadable (regression-tested).
+  `escrow-client.sendPremium` (envelope to arbiter, tags d/t + `p`-arbiter for discovery, local-apply + rawEvents
+  cache like sendChat) + `decryptPremiumBody` (never throws). `fedimint-client.spendNotesWithHorizon` (mint-mutex,
+  detailed-spend w/ fallback). `useEscrow.payArbiterPremium`/`redeemArbiterPremiums` (fail-soft, sim/testnet no-op) +
+  two App sweep effects mirroring the payout-reattach sweep (pay: COMPLETED+payable+no-record, once/session; redeem:
+  latched per (trade, note-count) so a mid-session note re-triggers). **Both sides pay via the sweep** — covers live
+  settle AND settled-while-offline with one mechanism (deviation from the brief's claimAndPayoutAction hook, noted in
+  the brief's status banner).
+- **UI:** Dashboard **EARNINGS card** (between WALLET and STANDING; zero-state recruitment copy "your bond is the
+  earnings license"); TradeDetail **ArbiterInsuranceRow** under the LOCKED checkout card — prechecked "🛡 INSURANCE
+  ₿X to your arbiter at settlement (0.25%)" toggle from LOCKED onward (uncheck = durable decline), flips to green
+  "Insurance sent" once paid. i18n EN/FR/ES parity (bond.dashEarnings* + trade.insurance*; FR cautionné / ES fianza).
+- ⏳ **Jetty device pass (3-instance, brief step 7):** bonded arbiter earns on a settled trade (both sides' notes land,
+  Dashboard tile updates); OG-fallback seat earns nothing; decline works; ledger+tile update. FAQ "0.5% fee" copy
+  reconcile = a Jetty copy decision (deliberately not edited). E2 (dispute fee) / E3 (CREATE-stamped
+  `arbiterPremiumBps`) / E4 (enforcement) not built.
+
+**DONE 2026-07-12 (bond reclaim→credit UX + Dashboard wallet — verifier chat, uncommitted, typecheck CLEAN, bond i18n parity 180/180/180 EN/FR/ES, DEVICE-VERIFIED by Jetty on mainnet: 30k bond reclaimed → credited → 28,256 landed):**
+- **Reclaim vs credit differentiation** (Jetty: "users will get lost"): "claim" now reserved for TRADE payouts only. A bond is a 2-step sequence with distinct destinations: 🔓 **Reclaim** (unlock on-chain CLTV → your OWN on-chain Bitcoin, self-custody) → **"Move into my Chama wallet"** (Fedimint peg-in → spendable balance). Copy + emoji + headings reworked in en/fr/es bond.ts (creditToChama / creditTxid=CHAMA DEPOSIT TXID / reclaimedSelfCustodyBody 2-step framing).
+- **Credit-landed completion CATCH** (the "no UI flow catching the incoming utxos→ecash" gap): added durable `creditConfirmedAt` to CommitmentRecord (commitment-store schema+serialize+deserialize+merge). `watchBondOnchainCredit(operationId, bondId)` now stamps it on `awaitOnchainDeposit` resolve (durable across reloads) + refreshes balance; all 5 call sites pass bondId. Reclaimed screen is now THREE honest states: 🔓 reclaimed(canCredit) → ⏳ confirming (amber, sets finality expectation "credits after a few on-chain confs, usually well under an hour; safe to close") → 🎉 landed (green, "In your Chama wallet"). Modal polls the store every 8s while confirming so it flips live. New keys creditLandedTitle/creditLandedBody.
+- **Dashboard CHAMA WALLET card** (Jetty kept going to Dashboard expecting the balance — there was NO spendable-balance readout anywhere in the app): new balance card as section 0 of DashboardScreen (above STANDING), live `balanceMsats` BitcoinAmount + hint "Reclaimed bonds, trade payouts, and funding land here." Wired `balanceMsats={fedimint.balanceMsats}` from App. Landed message now points here. DEVICE-VERIFIED (screenshots: ₿0 → ₿28,400).
+- **Fee note (mainnet real):** 30,000 → 28,256 = 1,744 sats (~5.8%) over the bond round-trip, but it's ~FIXED on-chain cost (peg-out + reclaim sweep + peg-in), so negligible % on larger bonds.
+- **⭐ ARBITER ECONOMICS brief E0 FROZEN + handed to CC for v5.1** (`design/mockups/chama-arbiter-economics-brief.md`, task #53): 0.5% premium (0.25%/side, default-on) + 1.5% dispute fee to the seated **BONDED** arbiter, paid as OOB ecash **in-band on the trade channel via NEW non-consensus kind 38113 (PREMIUM)** encrypted to the arbiter (NOT a new global DM inbox — validated: no inbound kind:4 inbox exists; in-band delivery avoids that build + its attack surface). Reuse `arbiters/fees.ts` constants (50/150 bps, currently test-only). ⚠ name `arbiterPremiumBps` NOT `premiumBps` (taken by CBP volunteer bonus). Bonded-only = the bond becomes a yield-bearing EARNINGS LICENSE. Zero reducer change through E3; E4 enforcement rides `BONDS_ENFORCED`. Decisions frozen: dispute fee off the POT (verdict-neutral, capped), premium-size floor (~10 sats), 48-72h on-time window.
+- ⏳ **Left to verify for v5.1 SHIP:** Jetty's `npm run predeploy` on Mac (full suite, expect green — sandbox reaps at loadEscrow); + if CC folds E1 arbiter-premium into 5.1, that adds its own device pass (bonded arbiter earns on a settled trade, OG-fallback earns nothing, decline works, slow-arbiter auto-refund, ledger+tile update).
+
+**DONE 2026-07-11 (i18n SESSION C — SPANISH COMPLETE + a constants-file sweep; FR+ES both DONE, uncommitted, typecheck CLEAN, EN↔FR + EN↔ES parity/param audit 0 problems, ES live-verified in browser):**
+the app is now trilingual EN/FR/ES, all 1,941 keys per language. Spanish register tú LATAM-neutral (billetera not cartera/monedero,
+efectivo, comisión, celular), glossary from the published landing ES (custodia/bloquear/liberar/reembolsar/reclamar/fianza/pago/llaves),
+verticals canonical (Intercambio/Pago comunitario de facturas/Tiendas/Trabajo/Aporta/Ahorro), nav Explorar/Panel/Yo. Same shape as FR: 6
+translator agents (2×3 disjoint) + 3-agent adversarial review. ⭐ **Money-path bug the ES review caught:** trade.ts used **reclamo** (reads
+as *complaint/grievance* in LATAM) for the claim-as-noun while claim.ts used **cobro** — a failed-payout screen read "RECLAMO BLOQUEADO"
+(misreadable as "complaint blocked"). Unified to noun **cobro** + locked verb **reclamar** (buttons); also fixed a real accent/grammar bug
+recláma→reclámalo, and `positivo`→`positivos` standing-% agreement (same class as the FR fix). ⭐ **CONSTANTS-FILE SWEEP (the class of gap
+extraction agents can't see — labels living in non-component `const`s, outside every file scope):** found + fixed **`BROWSE_CATS`** (Browse
+filter chips + section headers) and **`STATUS`** (the `<Badge>` status pills in TradeDetail) in `src/ui/theme.ts` — both were hardcoded
+English; converted to `browse.cat*` / `card.badge*` keys resolved with t() at render (EN+FR+ES filled, +13 keys → 1,941). **Sweep items
+FLAGGED not wired (Jetty decisions, not misses):** country names (registry.ts ~190 → recommend `Intl.DisplayNames`, don't hand-translate);
+bill-types.ts (country-scoped CONTENT like listings — needs francophone/LATAM bill lists, not viewer-translation); 2 rail-registry text
+placeholders + 1 external-swap blurb (prose buried in 54-entry data tables — a cheap dedicated micro-pass later); faq.ts (the tracked
+per-language-FAQ deferral). ⭐ **ARCHITECTURE RULE confirmed with Jetty (load-bearing):** app CHROME translates to the viewer's language;
+LISTING titles/descriptions stay in their ORIGIN chama's language (user-authored content) — a FR user browsing a GBF listing sees FR chrome
+but the listing as written. **⏳ HUMAN NATIVE-SPEAKER flags for launch (all low-risk, left as-is):** ES cobro/reclamar verb-noun split; "el
+polvo" (dust) vs migajas; "Curada"/"coordinador"/"Directo" chip choices; `sectionOpenCount` FR-fem/ES-masc divergence (intentional — offres
+vs anuncios); "ruta/route" road-vs-network ambiguity in both langs; TAE/TAEG vs plain "% anual". **Ops:** the small-batch cadence (1-3 bg
+agents at a time, checkpoint before each wave) held the whole B+C run inside limits — no fleet, no thrash. ✅ **FOLLOWUPS DONE
+(2026-07-11):** (1) **constants micro-pass** — the 3 prose strings buried in data registries now translatable via an optional-key pattern
+(raw `placeholder`/`blurb` kept for search/phone-detection; new `placeholderKey`/`blurbKey` drive display): rail-registry SPEI "CLABE/…" +
+bank-transfer "Account number / IBAN", and the **Banxaas/Senegal** offramp blurb (francophone → real FR win). +3 keys × 3 langs in claim.ts,
+tsc 0. (2) **`landing/faq.es.html`** — full LATAM-Spanish FAQ (25/25 .qa blocks = EN, `lang="es"`, cobro-not-reclamo applied, ¿…? on all 20
+real questions), + the 3-way lang switcher (EN/FR/ES) & footer cross-links wired across all three faq.*.html files. ⏳ Landing deploys via
+`./scripts/deploy-landing.sh` (NOT with a ship). Still-open (Jetty decisions, not misses): country names → Intl.DisplayNames; bill-types.ts
+localized lists (country-scoped content); per-language faq.ts app-content modules (deferred).
+
+**DONE 2026-07-11 (i18n SESSION B — FRENCH translation COMPLETE, uncommitted, typecheck CLEAN, parity/param audit 0 problems, FR live-verified in browser):**
+all 1,928 keys now have French (fr/ restructured into per-namespace files mirroring en/, so Session C = ES fills es/<ns>.ts only). Register
+vous, glossary from FAQ.fr (séquestre/verrouiller/libérer/rembourser/réclamer/caution/versement/vivier), verticals canonical from the
+landing. Built by 6 translator agents (2 batches of 3, disjoint namespaces) + a 3-agent adversarial review wave (money-path / shell /
+bond-create lenses, each fixing its own files). ⭐ **Money-path bug the review caught + fixed:** `{party}` resolves to a BARE article-less
+role noun (partyNoun → vendeur/acheteur/volontaire…), so 5 "to {party}" directional strings (nsReleasedTo/nsRefundedBackTo/satsReturnToParty/
+satsReturnedAuto/ifTimeExpires) were ungrammatical ("à vendeur") — French prepositions need an article (au/à l', gender+vowel mixed) a
+single template can't supply. Fixed with the app's OWN directional idiom **`→ {party}`** (already used by releaseTo/refundTo), unambiguous
+"who receives the sats" + bare-noun-safe (an arrow isn't a preposition). Other review fixes: Basculer switch-verb consistency (me), devis→prix
+for the ChapSmart currency quote, Créditer vers Chama (button-toggle match), BONUS VOLONTAIRE (chip width), n'est pas content→rencontre un
+problème. **⏳ HUMAN NATIVE-SPEAKER flags for Jetty's launch review (all low-risk, left as-is):** `côté`→`→` directionality reads as intended;
+`route Chama` (network sense) may read as road — consider réseau/voie; `changer de Chama` (recoverAndSwitchTitle) is a deliberate basculer
+deviation (basculer needs *vers*); `mint`/CLTV/mainnet kept technical; `Factures com.`/`Boutique` singular chips; TAEG vs plain "% par an";
+`{count} min restantes`/`sélectionnés` read slightly off at count=1 (no EN plural pair). NEXT: Session C = Spanish (same shape, es/<ns>.ts).
+
+**DONE 2026-07-11 (i18n SESSION A — FR/ES translation layer, uncommitted, typecheck CLEAN 0 errors, FR+ES live-verified in browser):**
+the app is now fully internationalized (EN extraction complete; FR/ES content = Sessions B/C). **Zero-dep homegrown layer** `src/i18n/`
+(index.tsx: `useT()` in components, `translate(getCurrentLang(),…)` in pure ts [labels/, notifications/]; fr→en→key fallback; {param}
+interpolation; `chama_lang` device pref + locale autodetect). **EN = source of truth**, ~1,940 keys in per-namespace files
+`src/i18n/en/<ns>.ts` (17 ns — per-ns files so agent fan-out has zero file contention); `fr.ts`/`es.ts` flat, seeded with the FULL
+onboarding path (common+connect+picker, ~74 keys each) — **Sessions B/C fill fr.ts/es.ts ONLY, no component changes**. Switcher:
+`LanguagePills` at the top of GlobeCountryPicker (Jetty's placement) + `LanguageRow` in Me→Settings; root wrapped in `LangProvider`
+(main.tsx). **Register locked from published copy:** FR=vous (FAQ.fr), ES=tú LATAM (landing); vertical names canonical from the landing
+locales (Échange/Boutiques/Cagnotte… · Intercambio/Tiendas/Aporta…). **⚠ LOAD-BEARING SKIPS (never translate):** the kind-38108
+mark-done chat message (cross-client `.includes(" Marked as ")` recognition — `doneEn` raw-English field in trade-progress.ts keeps the
+wire byte-identical); LN invoice/ledger descriptions ("Pay for Item"/"Lock Sats"/"Fund Escrow"/"Chama claim payout"); Lnurl*Error names +
+error-regex matches; all enum/status VALUES. tests.ts label asserts stay green (tests run lang=en, English byte-identical). **Deferred:**
+faq.ts content → per-language modules in B/C (FR exists as docs/FAQ.fr.md) · SettingsAdvanced (diagnostics) · hooks/payments error prose
+(= "A.2", string-match risk — careful pass) · **faq.es.html still owed** (independent). Verified: boot + EN/FR/ES render in browser (0
+console errors), key-coverage audit 0 missing (nothing renders a raw key). ⚠ Ops note: a 26-agent Workflow fleet tripped the account
+session cap 3× (~2M tok/9min); the finish came from 1-3 background agents at a time on a green tree — "failed" agents had often already
+saved their files, so check disk before re-running.
 
 **DONE 2026-07-09 (v5 device-pass fixes + validation — uncommitted, typecheck CLEAN, suite 2932/2932 asserts green [0 fails]):**
 Jetty's v5 device pass (3-instance Tauri + fresh browser npub). ⭐ **2B prefer-bonded + provenance DEVICE-VERIFIED:** a

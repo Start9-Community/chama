@@ -39,6 +39,7 @@ import {
   decideDispatch,
 } from "./destination-picker-logic.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
+import { useT, translate, getCurrentLang } from "../../i18n/index.js";
 
 export interface DestinationPickerResolveOpts {
   /** Whether the consumer should call addOrTouchPayoutDestination. */
@@ -85,6 +86,7 @@ export function DestinationPicker({
   onCancel,
   topSlot,
 }: DestinationPickerProps) {
+  const { t } = useT();
   const [typed, setTyped] = useState("");
   const [bolt11, setBolt11] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -242,14 +244,14 @@ export function DestinationPicker({
     <BitcoinAmount sats={amountSats} size={12} gap={4} glyphScale={1.18} color="inherit" glyphColor="inherit" />
   );
   const submitLabel = busy
-    ? "Resolving…"
+    ? t("claim.resolving")
     : dispatchPreview.ok && dispatchPreview.decision.tier === "pasted-bolt11"
-      ? <>Pay invoice · {submitAmount}</>
+      ? <>{t("claim.payInvoiceBefore")} {submitAmount}</>
       : dispatchPreview.ok && dispatchPreview.decision.tier === "pasted-nwc"
-        ? <>NWC invoice · {submitAmount}</>
+        ? <>{t("claim.nwcInvoiceBefore")} {submitAmount}</>
         : dispatchPreview.ok && dispatchPreview.decision.tier === "typed-address"
-          ? <>Save & send · {submitAmount}</>
-          : <>Send {submitAmount} →</>;
+          ? <>{t("claim.saveAndSendBefore")} {submitAmount}</>
+          : <>{t("claim.submitSendBefore")} {submitAmount} →</>;
 
   const renderPrimarySubmitButton = (marginBottom = 10, saveAfterOverride = true) => (
     <button
@@ -287,7 +289,7 @@ export function DestinationPicker({
             cursor: busy ? "not-allowed" : "pointer",
           }}
         >
-          Send once — don't save
+          {t("claim.sendOnceDontSave")}
         </button>
       </div>
     );
@@ -313,7 +315,7 @@ export function DestinationPicker({
           }}>×</button>
         </div>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 16 }}>
-          {subtitle ?? <>Send <BitcoinAmount sats={amountSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> to your Lightning wallet</>}
+          {subtitle ?? <>{t("claim.sendToWalletBefore")} <BitcoinAmount sats={amountSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.sendToWalletAfter")}</>}
         </div>
 
         {topSlot && (
@@ -328,7 +330,7 @@ export function DestinationPicker({
             {decoratedRows.length > 0 && (
               <>
                 <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
-                  SAVED DESTINATIONS
+                  {t("claim.savedDestinations")}
                 </div>
                 {decoratedRows.map(({ destination, isDefault }) => (
                   <button
@@ -356,7 +358,7 @@ export function DestinationPicker({
                         fontSize: 8, fontFamily: T.mono, letterSpacing: 1,
                         color: T.accent, background: T.accentDim,
                         padding: "2px 6px", borderRadius: 4,
-                      }}>DEFAULT</span>
+                      }}>{t("claim.defaultBadge")}</span>
                     )}
                   </button>
                 ))}
@@ -369,7 +371,7 @@ export function DestinationPicker({
                   margin: decoratedRows.length > 0 ? "10px 0 6px" : "0 0 6px",
                   letterSpacing: 1,
                 }}>
-                  SAVED NWC WALLETS
+                  {t("claim.savedNwcWallets")}
                 </div>
                 {savedNwcConnections.map((connection, i) => (
                   <button
@@ -397,7 +399,7 @@ export function DestinationPicker({
                         fontSize: 8, fontFamily: T.mono, letterSpacing: 1,
                         color: T.accent, background: T.accentDim,
                         padding: "2px 6px", borderRadius: 4,
-                      }}>DEFAULT</span>
+                      }}>{t("claim.defaultBadge")}</span>
                     )}
                   </button>
                 ))}
@@ -408,7 +410,7 @@ export function DestinationPicker({
 
         {/* Tier 2: typed Lightning Address */}
         <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
-          {(decoratedRows.length > 0 || savedNwcConnections.length > 0) ? "OR SEND TO A NEW ADDRESS" : "SEND TO LIGHTNING ADDRESS"}
+          {(decoratedRows.length > 0 || savedNwcConnections.length > 0) ? t("claim.orSendNewAddress") : t("claim.sendToLightningAddress")}
         </div>
         <input
           type="text"
@@ -437,12 +439,12 @@ export function DestinationPicker({
             cursor: "pointer", marginBottom: showAdvanced ? 8 : 0,
           }}
         >
-          {showAdvanced ? "▾ More options" : "▸ More options"}
+          {showAdvanced ? t("claim.moreOptionsOpen") : t("claim.moreOptionsClosed")}
         </button>
         {showAdvanced && (
           <>
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 6, letterSpacing: 1 }}>
-              PASTE BOLT11 INVOICE OR NWC
+              {t("claim.pasteBolt11OrNwc")}
             </div>
             <textarea
               value={bolt11}
@@ -455,7 +457,7 @@ export function DestinationPicker({
               style={{ ...inputStyle, resize: "vertical" as const, minHeight: 60, marginBottom: 8 }}
             />
             <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, marginBottom: 12 }}>
-              For invoice-only wallets or NWC make_invoice.
+              {t("claim.invoiceOnlyHint")}
             </div>
             {bolt11PasteInput?.kind === "nwc" && (
               <label style={{
@@ -469,7 +471,7 @@ export function DestinationPicker({
                   disabled={busy}
                   onChange={(e) => setRememberNwc(e.target.checked)}
                 />
-                Remember this NWC wallet
+                {t("claim.rememberNwcWallet")}
               </label>
             )}
             {renderActionButtons(10)}
@@ -496,11 +498,11 @@ function formatLnurlError(e: unknown): string {
       case "LnurlParseError":
         return e.message;
       case "LnurlDnsError":
-        return `Couldn't reach that wallet's server. ${e.message}`;
+        return translate(getCurrentLang(), "claim.errWalletServerUnreachable", { message: e.message });
       case "LnurlServerError":
-        return `That wallet's server is unhappy. ${e.message}`;
+        return translate(getCurrentLang(), "claim.errWalletServerUnhappy", { message: e.message });
       case "LnurlMalformedError":
-        return `That wallet returned an unexpected response. ${e.message}`;
+        return translate(getCurrentLang(), "claim.errWalletUnexpected", { message: e.message });
       case "LnurlAmountOutOfRangeError":
         return e.message;
     }
@@ -512,14 +514,15 @@ function formatLnurlError(e: unknown): string {
       case "NwcUnsupportedWallet":
         return e.message;
       case "NwcRelayError":
-        return `Couldn't reach that NWC relay. ${e.message}`;
+        return translate(getCurrentLang(), "claim.errNwcRelayUnreachable", { message: e.message });
       case "NwcTimeout":
         return e.message;
       case "NwcWalletError":
-        return `NWC wallet refused the invoice request. ${e.message}`;
+        return translate(getCurrentLang(), "claim.errNwcRefused", { message: e.message });
       case "NwcMalformedResponse":
-        return `NWC wallet returned an unexpected response. ${e.message}`;
+        return translate(getCurrentLang(), "claim.errNwcUnexpected", { message: e.message });
     }
   }
-  return (e as { message?: string })?.message || "Couldn't resolve destination";
+  return (e as { message?: string })?.message
+    || translate(getCurrentLang(), "claim.errResolveDestination");
 }

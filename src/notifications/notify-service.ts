@@ -14,6 +14,7 @@ import {
   type TradeNotification, type DmNotifyPref,
 } from "./trade-notifications.js";
 import { setPendingTradeDeepLink } from "./deep-link.js";
+import { translate, getCurrentLang } from "../i18n/index.js";
 import type { EscrowState, ChatPayload, ParsedEscrowEvent } from "../escrow-engine/types.js";
 
 export type { DmNotifyPref };
@@ -410,8 +411,8 @@ export async function notifySelfTest(): Promise<void> {
   }
   const n: TradeNotification = {
     escrowId: "sm_selftest",
-    title: "Chama notifications OK",
-    body: "If you can see this, OS notification delivery works on this build.",
+    title: translate(getCurrentLang(), "notify.selfTestTitle"),
+    body: translate(getCurrentLang(), "notify.selfTestBody"),
     tag: "selftest",
   };
   notifyDebug(() => `self-test start platform=${platformName()}`);

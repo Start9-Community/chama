@@ -12,12 +12,15 @@
 import { type EscrowState, EscrowStatus } from "../../escrow-engine/types.js";
 import { T } from "../theme.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
+import { useT } from "../../i18n/index.js";
 
-const STATUS_LABEL: Partial<Record<EscrowStatus, string>> = {
-  [EscrowStatus.CREATED]: "open",
-  [EscrowStatus.LOCKED]: "in escrow",
-  [EscrowStatus.APPROVED]: "ready to claim",
-  [EscrowStatus.EXPIRED]: "timed out",
+// i18n: values are DICTIONARY KEYS, resolved with t() at render (module-level
+// constants can't call hooks). The status fallback stays the raw enum value.
+const STATUS_LABEL_KEY: Partial<Record<EscrowStatus, string>> = {
+  [EscrowStatus.CREATED]: "card.pillOpen",
+  [EscrowStatus.LOCKED]: "card.pillInEscrow",
+  [EscrowStatus.APPROVED]: "card.pillReadyToClaim",
+  [EscrowStatus.EXPIRED]: "card.pillTimedOut",
 };
 
 export function ActiveTradePill({
@@ -35,10 +38,11 @@ export function ActiveTradePill({
   activeTradeMsats?: number;
   onTap: () => void;
 }) {
-  const statusLabel = STATUS_LABEL[trade.status] ?? trade.status.toLowerCase();
+  const { t } = useT();
+  const statusLabelKey = STATUS_LABEL_KEY[trade.status];
+  const statusLabel = statusLabelKey ? t(statusLabelKey) : trade.status.toLowerCase();
   const count = Math.max(1, activeTradeCount);
   const amountMsats = activeTradeMsats ?? trade.amountMsats;
-  const tradeWord = count === 1 ? "active trade" : "active trades";
   return (
     <button
       onClick={onTap}
@@ -66,7 +70,7 @@ export function ActiveTradePill({
           fontSize: 11, color: T.purple, fontFamily: T.mono,
           letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700,
         }}>
-          {count} {tradeWord} · <BitcoinAmount msats={amountMsats} size={11} gap={3} glyphScale={1.18} /> total
+          {count === 1 ? t("card.activeTradeOne") : t("card.activeTradeMany", { count })} · <BitcoinAmount msats={amountMsats} size={11} gap={3} glyphScale={1.18} /> {t("card.totalSuffix")}
         </div>
         <div style={{
           fontSize: 13, color: T.text, fontFamily: T.sans,

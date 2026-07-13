@@ -8,6 +8,7 @@ import { ArbiterApplyForm } from "../components/ArbiterApplyForm.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
 import { type NostrProfileNameMap } from "../nostr-profiles.js";
 import { type AmountDisplayMode } from "../amount-display.js";
+import { useT } from "../../i18n/index.js";
 
 // v4.2.1: the arbiter / recruitment on-ramp is hidden for now — it pushes a
 // leader decision at brand-new users before the bond exists. ArbiterApplyForm
@@ -62,6 +63,7 @@ export function BrowseView({
   onCreate: () => void;
   onApplyAsArbiter: (community: string, statement: string) => Promise<void>;
 }) {
+  const { t } = useT();
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showRecruit, setShowRecruit] = useState(false);
@@ -105,8 +107,11 @@ export function BrowseView({
   );
   const filteredTotal = filteredMatchingListings.length + filteredNonMatchingListings.length;
   const browseSummary = totalListings === 0
-    ? "No open offers yet"
-    : `${filteredTotal.toLocaleString()} of ${totalListings.toLocaleString()} open offer${totalListings === 1 ? "" : "s"}`;
+    ? t("browse.noOpenOffers")
+    : t(totalListings === 1 ? "browse.openOfferSummaryOne" : "browse.openOfferSummaryMany", {
+        filtered: filteredTotal.toLocaleString(),
+        total: totalListings.toLocaleString(),
+      });
   const quoteCurrency = homeCommunity?.currency ?? null;
 
   return (
@@ -164,7 +169,7 @@ export function BrowseView({
         <button
           type="button" onClick={() => setShowRecruit(s => !s)}
           data-coach="fab-arbiter"
-          title="Become a community arbiter" aria-label="Arbiter recruitment"
+          title={t("browse.becomeArbiterTitle")} aria-label={t("browse.arbiterRecruitment")}
           style={{
             width: 50, height: 50, borderRadius: "50%", flexShrink: 0,
             background: ROLE_COLOR.arbiter, border: "none", color: "#fff",
@@ -185,7 +190,7 @@ export function BrowseView({
         <button
           type="button" onClick={onCreate}
           data-coach="fab-create"
-          title="Create a trade" aria-label="Create a trade"
+          title={t("browse.createTrade")} aria-label={t("browse.createTrade")}
           style={{
             width: 58, height: 58, borderRadius: "50%", flexShrink: 0,
             background: T.accent, border: "none", color: "#fff",
@@ -209,7 +214,7 @@ export function BrowseView({
             margin: 0, color: T.text, fontFamily: T.sans,
             fontSize: 30, lineHeight: 1.05, fontWeight: 800,
           }}>
-            Listings
+            {t("browse.listings")}
           </h1>
           <div style={{
             marginTop: 6, fontSize: 12, color: T.muted,
@@ -270,7 +275,7 @@ export function BrowseView({
             type="search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search listings..."
+            placeholder={t("browse.searchPlaceholder")}
             style={{
               flex: 1, minWidth: 0, background: "transparent", border: "none",
               outline: "none", color: T.text, fontFamily: T.sans,
@@ -309,7 +314,7 @@ export function BrowseView({
               }}
             >
               {c.i && <span>{c.i}</span>}
-              <span>{c.l}</span>
+              <span>{t(c.l)}</span>
               <span style={{
                 color: active ? T.bg : T.muted,
                 background: active ? T.accent : T.card,
@@ -333,7 +338,7 @@ export function BrowseView({
           background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs,
           marginBottom: 14,
         }}>
-          No listings match "{searchQuery.trim()}".
+          {t("browse.noListingsMatch", { query: searchQuery.trim() })}
         </div>
       )}
 
@@ -345,19 +350,19 @@ export function BrowseView({
             <>
               <div style={{ fontSize: 40, marginBottom: 14, lineHeight: 1 }}>🤝</div>
               <div style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 8 }}>
-                Be the first to post here
+                {t("browse.beFirstTitle")}
               </div>
               <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6, maxWidth: 300, margin: "0 auto" }}>
-                No open offers in your community yet. Tap{" "}
-                <strong style={{ color: T.accent }}>Create</strong> below to post
-                one — buyers and sellers nearby will see it.
+                {t("browse.beFirstBodyBefore")}{" "}
+                <strong style={{ color: T.accent }}>{t("browse.beFirstCreate")}</strong>{" "}
+                {t("browse.beFirstBodyAfter")}
               </div>
             </>
           ) : (
             <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6 }}>
               {homeCommunity
-                ? `Reconnect to ${homeCommunity.disambiguator ?? homeCommunity.displayName} to see what's trading.`
-                : "Pick your Chama above to see what's trading."}
+                ? t("browse.reconnectTo", { community: homeCommunity.disambiguator ?? homeCommunity.displayName })
+                : t("browse.pickChama")}
             </div>
           )}
         </div>
@@ -416,7 +421,7 @@ export function BrowseView({
                   letterSpacing: 0, textTransform: "uppercase",
                   whiteSpace: "nowrap" as const,
                 }}>
-                  {filteredNonMatchingListings.length} listing{filteredNonMatchingListings.length !== 1 ? "s" : ""} in other communities
+                  {t(filteredNonMatchingListings.length === 1 ? "browse.otherCommunitiesOne" : "browse.otherCommunitiesMany", { count: filteredNonMatchingListings.length })}
                 </div>
                 <div style={{ flex: 1, height: 1, background: T.border }} />
               </div>
@@ -468,7 +473,7 @@ export function BrowseView({
             cursor: "pointer", letterSpacing: 0, textTransform: "uppercase",
           }}
         >
-          {showAdvancedTools ? "▲" : "▼"} Advanced tools
+          {showAdvancedTools ? "▲" : "▼"} {t("browse.advancedTools")}
         </button>
         {showAdvancedTools && (
           <div style={{
@@ -503,14 +508,14 @@ export function BrowseView({
                     whiteSpace: "nowrap" as const,
                   }}
                 >
-                  Join
+                  {t("browse.join")}
                 </button>
               </div>
             )}
             <LoadTradeInput onLoad={onLoadById} />
             <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.7, textAlign: "center" }}>
-              Events: kinds 38100-38108 · 2-of-3 SSS<br />
-              NIP-44 encrypted · relay replay · no server custody
+              {t("browse.advancedFooterLine1")}<br />
+              {t("browse.advancedFooterLine2")}
             </div>
           </div>
         )}
@@ -609,6 +614,7 @@ function BrowseSection({
   quoteCurrency?: string | null;
   stockByListing?: Map<string, number>;
 }) {
+  const { t } = useT();
   return (
     <section style={{ marginBottom: 16 }}>
       <div style={{
@@ -630,14 +636,14 @@ function BrowseSection({
           textTransform: "uppercase",
         }}>
           <span style={{ fontSize: 13 }}>{section.icon}</span>
-          {section.label}
+          {t(section.label)}
         </div>
         <div style={{
           color: T.muted,
           fontFamily: T.mono,
           fontSize: 10,
         }}>
-          {section.listings.length} open
+          {t("browse.sectionOpenCount", { count: section.listings.length })}
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>

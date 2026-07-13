@@ -26,6 +26,7 @@
 
 import { useState } from "react";
 import { T, inputStyle } from "../theme.js";
+import { useT } from "../../i18n/index.js";
 import { isNwcConnectionString } from "../../payments/nwc.js";
 import {
   addOrTouchSavedNwcConnection,
@@ -50,6 +51,7 @@ export function NwcStatusBanner({
   onSaved,
   onManage,
 }: NwcStatusBannerProps) {
+  const { t } = useT();
   const [nwcInput, setNwcInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const ready = isNwcConnectionString(nwcInput);
@@ -61,7 +63,7 @@ export function NwcStatusBanner({
       setNwcInput("");
       onSaved?.();
     } catch (e: any) {
-      setError(e?.message || "NWC connection could not be saved");
+      setError(e?.message || t("fund.nwcSaveFailed"));
     }
   };
 
@@ -97,7 +99,7 @@ export function NwcStatusBanner({
               fontSize: 9, color: T.accent, fontFamily: T.mono,
               letterSpacing: 1, fontWeight: 800,
             }}>
-              NWC AUTO-PAY
+              {t("fund.nwcAutoPay")}
             </span>
             <span style={{
               fontSize: 12, color: T.text, fontFamily: T.mono,
@@ -125,7 +127,7 @@ export function NwcStatusBanner({
               letterSpacing: 0.5,
             }}
           >
-            CHANGE
+            {t("fund.change")}
           </button>
         )}
       </div>
@@ -155,10 +157,10 @@ export function NwcStatusBanner({
           lineHeight: 1.4,
         }}>
           <span style={{ color: T.text, fontWeight: 700 }}>
-            One-tap funding with Lightning Wallet Connect
+            {t("fund.nwcOneTapTitle")}
           </span>
-          {" — "}
-          paste an NWC string to auto-pay future trades.
+          {" "}
+          {t("fund.nwcOneTapBody")}
         </div>
       </div>
       <div style={{ display: "flex", gap: 8 }}>
@@ -191,7 +193,7 @@ export function NwcStatusBanner({
             flexShrink: 0,
           }}
         >
-          Save
+          {t("fund.save")}
         </button>
       </div>
       {error && (

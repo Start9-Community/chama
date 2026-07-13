@@ -4,6 +4,7 @@ import { T } from "../theme.js";
 import { CopyButton } from "../components/CopyButton.js";
 import { NsecLogin } from "../panels/NsecLogin.js";
 import { BrandHeader } from "../components/BrandHeader.js";
+import { useT, type TFunc } from "../../i18n/index.js";
 import {
   getSignInEnvironment,
   isFediWebViewSignInEnvironment,
@@ -59,13 +60,15 @@ function markIntroSeen(): void {
 // `soon` marks a vertical that's on the way but not yet a Create option — shown
 // so the splash sells the full vision without promising a button that isn't there
 // (Lending retired; Work replaces it; Chip In + Stack are the community verticals).
-const INTRO_USE_CASES: { icon: string; title: string; blurb: string; tint: string; soon?: boolean }[] = [
-  { icon: "⚡", title: "Exchange",            blurb: "Swap cash for sats with someone local",   tint: T.accent },
-  { icon: "🧾", title: "Community Bill Pay",  blurb: "Pay a bill in exchange for sats",          tint: T.teal },
-  { icon: "🏪", title: "Marketplace",         blurb: "Sell goods, services, or digital items",   tint: T.purple },
-  { icon: "🛠️", title: "Work",               blurb: "Get small jobs done — fix, build, tutor",  tint: T.green,  soon: true },
-  { icon: "🤝", title: "Chip In",             blurb: "Pool sats together with your community",   tint: T.accent, soon: true },
-  { icon: "🪙", title: "Stack",               blurb: "Save toward a goal — your keys, your sats", tint: T.teal,  soon: true },
+// i18n: title/blurb are DICTIONARY KEYS, resolved with t() at render so the
+// splash follows the live language (module-level constants can't call hooks).
+const INTRO_USE_CASES: { icon: string; titleKey: string; blurbKey: string; tint: string; soon?: boolean }[] = [
+  { icon: "⚡", titleKey: "connect.useCaseExchange",    blurbKey: "connect.useCaseExchangeBlurb",    tint: T.accent },
+  { icon: "🧾", titleKey: "connect.useCaseBillPay",     blurbKey: "connect.useCaseBillPayBlurb",     tint: T.teal },
+  { icon: "🏪", titleKey: "connect.useCaseMarketplace", blurbKey: "connect.useCaseMarketplaceBlurb", tint: T.purple },
+  { icon: "🛠️", titleKey: "connect.useCaseWork",        blurbKey: "connect.useCaseWorkBlurb",        tint: T.green,  soon: true },
+  { icon: "🤝", titleKey: "connect.useCaseChipIn",      blurbKey: "connect.useCaseChipInBlurb",      tint: T.accent, soon: true },
+  { icon: "🪙", titleKey: "connect.useCaseStack",       blurbKey: "connect.useCaseStackBlurb",       tint: T.teal,   soon: true },
 ];
 
 export function ConnectScreen({
@@ -79,6 +82,7 @@ export function ConnectScreen({
   nip46Uri?: string | null;
   nip46Waiting?: boolean;
 }) {
+  const { t } = useT();
   const isNative = Capacitor.isNativePlatform() || isTauriRuntime();
   const signInEnvironment = {
     ...getSignInEnvironment(),
@@ -178,7 +182,7 @@ export function ConnectScreen({
                 {homeCommunity.displayName}
               </div>
               <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono }}>
-                Your Chama
+                {t("connect.yourChama")}
               </div>
             </div>
           </div>
@@ -188,7 +192,7 @@ export function ConnectScreen({
       {pendingReport ? (
         <div style={{ width: "100%", maxWidth: 360, marginBottom: 26 }}>
           <InstructionBox>
-            {`Sign in to put yourself on the map. The moment you connect, we'll tell the Chama arbiters that ${pendingReport.requestedChama} wants in.`}
+            {t("connect.pendingReportSignIn", { chama: pendingReport.requestedChama })}
           </InstructionBox>
         </div>
       ) : (
@@ -196,13 +200,13 @@ export function ConnectScreen({
           maxWidth: 330, fontSize: 14, color: T.muted, lineHeight: 1.8,
           fontFamily: T.sans, marginBottom: 26,
         }}>
-          Send money home. Earn with Community Bill Pay.
+          {t("connect.tagline1")}
           <br />
-          <span style={{ color: T.text }}>Trade locally with Bitcoin rails underneath.</span>
+          <span style={{ color: T.text }}>{t("connect.tagline2")}</span>
         </div>
       )}
 
-      {error && <ErrorBox>{friendlySignInError(error)}</ErrorBox>}
+      {error && <ErrorBox>{friendlySignInError(error, t)}</ErrorBox>}
 
       {nip46Uri && (
         <div style={{
@@ -211,7 +215,7 @@ export function ConnectScreen({
           borderRadius: T.r, textAlign: "center",
         }}>
           <div style={{ fontSize: 13, color: T.purple, fontFamily: T.sans, marginBottom: 14, fontWeight: 600 }}>
-            Open your signer app and scan
+            {t("connect.scanWithSigner")}
           </div>
           <div style={{
             display: "flex", justifyContent: "center", marginBottom: 14,
@@ -230,7 +234,7 @@ export function ConnectScreen({
           }}>
             {nip46Uri.slice(0, 60)}...
           </a>
-          <CopyButton value={nip46Uri} label="Copy link" copiedLabel="✓ Copied" style={{
+          <CopyButton value={nip46Uri} label={t("common.copyLink")} copiedLabel={t("common.copied")} style={{
             padding: "8px 20px", borderRadius: T.rs,
             background: T.surface, border: `1px solid ${T.border}`,
             color: T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer",
@@ -240,7 +244,7 @@ export function ConnectScreen({
               marginTop: 12, fontSize: 10, color: T.purple, fontFamily: T.mono,
               animation: "pulse 2s ease-in-out infinite",
             }}>
-              Waiting for your signer...
+              {t("connect.waitingSigner")}
             </div>
           )}
         </div>
@@ -262,10 +266,10 @@ export function ConnectScreen({
               // recovery guidance so the copy matches what the box is asking
               // for. Create mode (paste box hidden) keeps the original line.
               choiceFooter={showRecoveryKey
-                ? "Paste the recovery key you saved when you first set up Chama — it's the only way back into your account."
+                ? t("connect.recoveryFooter")
                 : undefined}
               friendlySecondary={{
-                label: loading ? "Connecting..." : "I'm a returning Chama citizen",
+                label: loading ? t("common.connecting") : t("connect.returningCitizen"),
                 // v2.5: device-aware — desktop browser kicks the NIP-07
                 // extension; APK/Tauri (and the no-extension / extension-
                 // failure cases) drop the clean paste box in attached below.
@@ -285,8 +289,8 @@ export function ConnectScreen({
                 lineHeight: 1.55, background: T.surface, border: `1px solid ${T.amber}44`,
                 borderRadius: T.rs, padding: "10px 12px",
               }}>
-                <span style={{ color: T.amber, fontWeight: 700 }}>Safer with an extension.</span>{" "}
-                A Nostr signer like Alby keeps your key off the page. Only paste below if you don’t have one.
+                <span style={{ color: T.amber, fontWeight: 700 }}>{t("connect.saferExtTitle")}</span>{" "}
+                {t("connect.saferExtBody")}
               </div>
             )}
 
@@ -311,7 +315,7 @@ export function ConnectScreen({
                 cursor: "pointer",
               }}
             >
-              {showAdvanced ? "▲ Hide more sign-in options" : "▼ More sign-in options"}
+              {showAdvanced ? t("connect.hideMoreOptions") : t("connect.moreOptions")}
             </button>
 
             {showAdvanced && (
@@ -328,7 +332,7 @@ export function ConnectScreen({
                       cursor: loading ? "default" : "pointer",
                     }}
                   >
-                    {loading ? "Connecting..." : "Sign in with browser extension"}
+                    {loading ? t("common.connecting") : t("connect.signInExtension")}
                   </button>
                 )}
                 {offerNIP46Signer && !nip46Uri && (
@@ -343,7 +347,7 @@ export function ConnectScreen({
                       cursor: loading || nip46Waiting ? "default" : "pointer",
                     }}
                   >
-                    {nip46Waiting ? "Waiting..." : "Use a signer app"}
+                    {nip46Waiting ? t("common.waiting") : t("connect.useSignerApp")}
                   </button>
                 )}
               </>
@@ -356,9 +360,9 @@ export function ConnectScreen({
         marginTop: 34, fontSize: 9, color: T.muted + "66", fontFamily: T.mono,
         lineHeight: 1.8, maxWidth: 280,
       }}>
-        Chama does not hold your funds.
+        {t("connect.footerNonCustodial")}
         <br />
-        Trade, save, and exchange locally with Bitcoin rails.
+        {t("connect.footerRails")}
       </div>
     </OnboardingShell>
   );
@@ -371,6 +375,7 @@ function FediOnlyConnectButton({
   loading: boolean;
   onConnect: () => void;
 }) {
+  const { t } = useT();
   return (
     <div style={{ width: "100%", maxWidth: 360 }}>
       <button
@@ -383,13 +388,13 @@ function FediOnlyConnectButton({
           cursor: loading ? "default" : "pointer",
         }}
       >
-        {loading ? "Connecting..." : "Welcome home"}
+        {loading ? t("common.connecting") : t("connect.welcomeHome")}
       </button>
       <div style={{
         fontSize: 10, color: T.muted, fontFamily: T.sans,
         textAlign: "center", marginTop: 12, lineHeight: 1.5,
       }}>
-        Chama uses the identity and wallet Fedi already gave you — just step in.
+        {t("connect.fediBody")}
       </div>
     </div>
   );
@@ -409,6 +414,7 @@ function OnboardingShell({ children }: { children: ReactNode }) {
 }
 
 function WelcomeIntro({ onContinue }: { onContinue: () => void }) {
+  const { t } = useT();
   return (
     <>
       <BrandHeader />
@@ -418,24 +424,23 @@ function WelcomeIntro({ onContinue }: { onContinue: () => void }) {
         fontFamily: T.sans, fontWeight: 900, marginBottom: 12,
         maxWidth: 360,
       }}>
-        Trade bitcoin with your community
+        {t("connect.introTitle")}
       </div>
       <div style={{
         maxWidth: 340, color: T.muted, fontFamily: T.sans,
         fontSize: 14, lineHeight: 1.6, marginBottom: 22,
       }}>
-        Swap cash for sats, pay bills, sell, and more — in your
-        local currency. <span style={{ color: T.text }}>Chama never
-        holds your money.</span>
+        {t("connect.introBody")}{" "}
+        <span style={{ color: T.text }}>{t("connect.introNeverHolds")}</span>
       </div>
 
       <div style={{
         display: "grid", gap: 8, width: "100%", maxWidth: 380,
         marginBottom: 16,
       }}>
-        {INTRO_USE_CASES.map(({ icon, title, blurb, tint, soon }) => (
+        {INTRO_USE_CASES.map(({ icon, titleKey, blurbKey, tint, soon }) => (
           <div
-            key={title}
+            key={titleKey}
             style={{
               display: "flex", alignItems: "center", gap: 13,
               padding: "11px 13px", borderRadius: T.r,
@@ -458,14 +463,14 @@ function WelcomeIntro({ onContinue }: { onContinue: () => void }) {
                 display: "flex", alignItems: "center", gap: 7, fontFamily: T.sans,
                 fontSize: 14, fontWeight: 800, color: T.text,
               }}>
-                {title}
+                {t(titleKey)}
                 {soon && (
                   <span style={{
                     fontFamily: T.mono, fontSize: 8.5, fontWeight: 800, letterSpacing: 0.6,
                     color: T.muted, border: `1px solid ${T.border}`, borderRadius: 99,
                     padding: "1px 6px", textTransform: "uppercase", flexShrink: 0,
                   }}>
-                    Soon
+                    {t("common.soon")}
                   </span>
                 )}
               </span>
@@ -473,7 +478,7 @@ function WelcomeIntro({ onContinue }: { onContinue: () => void }) {
                 display: "block", fontFamily: T.sans,
                 fontSize: 12, color: T.muted, marginTop: 1, lineHeight: 1.35,
               }}>
-                {blurb}
+                {t(blurbKey)}
               </span>
             </span>
           </div>
@@ -493,10 +498,9 @@ function WelcomeIntro({ onContinue }: { onContinue: () => void }) {
         <span style={{
           fontFamily: T.sans, fontSize: 12, lineHeight: 1.5, color: T.text,
         }}>
-          <span style={{ fontWeight: 800 }}>Protected by 2-of-3 escrow.</span>{" "}
+          <span style={{ fontWeight: 800 }}>{t("connect.shieldTitle")}</span>{" "}
           <span style={{ color: T.muted }}>
-            Your sats release only when both sides agree — or a community
-            arbiter steps in. Never held by Chama.
+            {t("connect.shieldBody")}
           </span>
         </span>
       </div>
@@ -510,14 +514,14 @@ function WelcomeIntro({ onContinue }: { onContinue: () => void }) {
           cursor: "pointer",
         }}
       >
-        Get started →
+        {t("connect.getStarted")}
       </button>
 
       <div style={{
         marginTop: 14, fontSize: 10, color: T.muted, fontFamily: T.mono,
         letterSpacing: 0.4, lineHeight: 1.6, maxWidth: 300,
       }}>
-        Non-custodial · Nostr-native · No bank, no sign-up
+        {t("connect.footerTagline")}
       </div>
     </>
   );
@@ -549,9 +553,13 @@ function InstructionBox({ children }: { children: string }) {
   );
 }
 
-function friendlySignInError(message: string): string {
+// i18n: takes the live t so the friendly rewrite follows the app language.
+// The regex matches the RAW (English) error messages thrown by the sign-in
+// paths — those stay untranslated internals; only the user-facing rewrite
+// goes through the dictionary.
+function friendlySignInError(message: string, t: TFunc): string {
   if (/No Nostr signer|NIP-07|open in Fedi|Amber|browser signer|No browser environment/i.test(message)) {
-    return "We couldn't find a signer on this device. If you're returning with a recovery key, use More sign-in options below.";
+    return t("connect.errorNoSigner");
   }
   return message;
 }

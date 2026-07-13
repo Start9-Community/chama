@@ -23,16 +23,16 @@ import { T } from "../ui/theme.js";
 import { isSimModeOn, setSimMode } from "./simMode.js";
 
 const ACK_KEY = "chama_sim_modal_ack_v1";
+const ZAPSTORE_URL = "https://zapstore.dev/apps/app.chama.market";
 
 /**
  * Vertical space the fixed-position pill occupies. App roots add
  * paddingTop = SIM_PILL_HEIGHT when sim mode is on so the header
  * doesn't render underneath the banner.
  *
- * Kept in sync with the pill's padding: 6px top + ~14px text line +
- * 6px bottom, plus a 4px buffer for varying font metrics.
+ * Kept in sync with the pill's padding and compact Zapstore affordance.
  */
-export const SIM_PILL_HEIGHT = 30;
+export const SIM_PILL_HEIGHT = 40;
 
 export function SimModePill() {
   // Stay reactive to sim-mode flips (e.g. user clicks "Exit" in the modal)
@@ -63,10 +63,30 @@ export function SimModePill() {
           textAlign: "center",
           padding: "6px 12px",
           boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-          pointerEvents: "none",
+          pointerEvents: "auto",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 10,
+          flexWrap: "wrap",
         }}
       >
-        ▲ SIM MODE — no real sats, no real federation
+        <span>▲ SIM MODE — no real sats, no real federation</span>
+        <a
+          href={ZAPSTORE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            color: "#111",
+            background: "#fff",
+            borderRadius: 999,
+            padding: "2px 8px",
+            textDecoration: "none",
+            letterSpacing: 0.5,
+          }}
+        >
+          📱 real sats: APK
+        </a>
       </div>
       {/* In-flow spacer that reserves the fixed pill's height so the app header
           isn't clipped underneath it. Deliberately a plain-height element rather
@@ -102,10 +122,18 @@ export function SimEntryModal() {
   const exit = () => {
     try { localStorage.removeItem(ACK_KEY); } catch {}
     setSimMode(false);
-    // Surface change to the rest of the app via the storage event.
-    // (Same-tab listeners on the pill won't fire from a direct write,
-    // so we force a reload — cleaner than chasing every consumer.)
-    window.location.reload();
+    // The public sim URL is sticky by design (`?sim=1` re-enables sim mode
+    // on load), so exiting must also remove that URL flag before reloading.
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("sim", "0");
+      window.location.assign(url.toString());
+    } catch {
+      // Surface change to the rest of the app via a reload if URL rewriting
+      // is unavailable. Same-tab listeners on the pill won't fire from a
+      // direct storage write.
+      window.location.reload();
+    }
   };
 
   return (
@@ -159,15 +187,46 @@ export function SimEntryModal() {
           auto-settle after a few seconds. No real sats move.
         </div>
 
-        <div style={{ fontSize: 13, color: T.muted, marginBottom: 24 }}>
+        <div style={{ fontSize: 13, color: T.muted, marginBottom: 16 }}>
           Trades still publish to real Nostr relays so the multi-party
           flow is genuine — they're tagged so the production app and
-          the sim never mix. Your sim balance starts at 0; fund it from
-          Settings → Manual fund and pay the invoice from anywhere
-          (since it's a sim, paying it from this same tab works fine).
+          the sim never mix. There is nothing to set up or fund first:
+          open the sim from any browser and start playing.
         </div>
 
-        <div style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}>
+        <div style={{
+          fontSize: 13,
+          color: T.text,
+          background: T.accentDim,
+          border: `1px solid ${T.accent}`,
+          borderRadius: T.rs,
+          padding: "10px 12px",
+          marginBottom: 24,
+        }}>
+          📱 Ready to try Chama with real sats? Install the Android APK from
+          Zapstore, then trade with your own keys.
+        </div>
+
+        <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", flexWrap: "wrap" }}>
+          <a
+            href={ZAPSTORE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              border: `1px solid ${T.accent}`,
+              color: T.accent,
+              fontFamily: T.mono,
+              fontSize: 12,
+              fontWeight: 700,
+              padding: "10px 16px",
+              borderRadius: T.rs,
+              cursor: "pointer",
+              letterSpacing: 0.5,
+              textDecoration: "none",
+            }}
+          >
+            Get Android APK
+          </a>
           <button
             onClick={exit}
             style={{
