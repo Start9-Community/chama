@@ -527,6 +527,18 @@ if [ ! -f "$APK_PATH" ]; then
   exit 1
 fi
 
+# A normal Chama APK is currently about 53 MiB. Refuse a surprising payload
+# increase before anything can be signed or uploaded (v5.0.0 reached 139 MiB
+# after draft images were accidentally placed under public/).
+APK_BYTES=$(stat -f '%z' "$APK_PATH")
+APK_LIMIT_BYTES=$((75 * 1024 * 1024))
+if [ "$APK_BYTES" -gt "$APK_LIMIT_BYTES" ]; then
+  APK_MIB=$((APK_BYTES / 1024 / 1024))
+  echo "❌ Release APK is ${APK_MIB} MiB; safety limit is 75 MiB."
+  echo "   Check public/ and the APK asset listing before publishing."
+  exit 1
+fi
+
 mkdir -p "$RELEASE_DIR"
 cp "$APK_PATH" "$RELEASE_APK"
 if command -v unzip >/dev/null 2>&1; then

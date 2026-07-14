@@ -7,6 +7,13 @@ dist/
 .DS_Store
 .claude/
 
+# Codex/agent working copies and transfer artifacts are never Chama source.
+# Keep generated visual work in outputs/ (already ignored) until explicitly
+# selected, optimized, and moved into a production asset directory.
+.codex-vps-deploy/
+.codex-target.patch
+.b64tmp/
+
 # Vite transpiles vite.config.ts to a transient .mjs next to it while loading,
 # then deletes it. If `git add -A` races that delete it aborts with
 # "fatal: unable to stat '...timestamp-...mjs'". Ignore so add never sees them.

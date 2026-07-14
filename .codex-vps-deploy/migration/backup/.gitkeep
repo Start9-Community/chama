@@ -1,2 +1,0 @@
-# Keeps backup/ present in git. STEP 2 backups land here and are gitignored.
-# Expect: docroots/, configs/, crontabs/, db/<name>.sql(.gz), letsencrypt/, CHECKSUMS
