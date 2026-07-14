@@ -12,9 +12,13 @@ fail() {
 # These are workspace/transfer artifacts, not application source. Checking the
 # Git index catches them before a release even if a local ignore rule is absent.
 forbidden_tracked=$(git ls-files -- \
+  '.b64tmp/**' \
   '.codex-vps-deploy/**' \
   '.codex-target.patch' \
-  '**/.b64tmp/**')
+  '**/.b64tmp/**' \
+  'design/**' \
+  'migration/**' \
+  'social/**')
 if [ -n "$forbidden_tracked" ]; then
   printf '%s\n' "$forbidden_tracked" >&2
   fail "agent workspace or transfer artifacts are tracked"

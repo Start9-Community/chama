@@ -39,7 +39,6 @@ const STORAGE_USER_PUBKEY = "chama_nip46_user_pubkey";
 // now serves this role — it allowlists 24133 as an ephemeral broadcast.
 const NIP46_RELAYS = [
   "wss://relay.chama.community",     // Chama's own relay (khatru) — the NIP-46 home
-  "wss://relay.satoshimarket.app",   // transitional fallback — drop once the old 1984 box is decommissioned
 ];
 
 const NIP46_CONNECT_TIMEOUT_MS = 90_000;

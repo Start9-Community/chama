@@ -401,7 +401,7 @@ fn main() {
         // HTTP plugin: lets the WebView's market-data fetches (BTC price, FX
         // rates) run from Rust (reqwest) instead of the WebView, which blocks
         // cross-origin requests from the custom tauri:// origin. See
-        // DECISIONS.md 2026-06-06. Scope is locked to the price/FX hosts in
+        // Scope is locked to the price/FX hosts in
         // capabilities/default.json.
         .plugin(tauri_plugin_http::init())
         // #88 desktop notifications: trade-event buzzes (counterparty locked,

@@ -114,18 +114,21 @@ fi
 # Deploy target + key come from the ENVIRONMENT so nothing about the box
 # (key filename, host) lives in committed bytes. Set these in your shell
 # (~/.zshrc) or a gitignored migration/deploy.env — never here:
-#   export CHAMA_DEPLOY_KEY=~/.ssh/id_chama
-#   export CHAMA_DEPLOY_HOST=satoshi@getchama.app   # optional; default below
-# (Migrated off the satoshimarket.app box → getchama.app, 2026-06.)
+#   export CHAMA_DEPLOY_KEY=/path/to/deploy-key
+#   export CHAMA_DEPLOY_HOST=user@example.org
 CHAMA_DEPLOY_KEY="${CHAMA_DEPLOY_KEY:-}"
-CHAMA_DEPLOY_HOST="${CHAMA_DEPLOY_HOST:-satoshi@getchama.app}"
-if [ "${DEPLOY:-1}" = "1" ] && { [ -z "$CHAMA_DEPLOY_KEY" ] || [ ! -f "$CHAMA_DEPLOY_KEY" ]; }; then
-  echo "❌ Deploy key not set or not found: '${CHAMA_DEPLOY_KEY:-<empty>}'"
-  echo "   Set it in your shell (never in the repo), then re-run:"
-  echo "     export CHAMA_DEPLOY_KEY=~/.ssh/id_chama"
-  echo "   Deploy host: ${CHAMA_DEPLOY_HOST:-satoshi@getchama.app}  (override via CHAMA_DEPLOY_HOST)."
-  echo "   Or pass --no-deploy to skip the web push."
-  exit 1
+CHAMA_DEPLOY_HOST="${CHAMA_DEPLOY_HOST:-}"
+if [ "${DEPLOY:-1}" = "1" ]; then
+  if [ -z "$CHAMA_DEPLOY_HOST" ]; then
+    echo "❌ CHAMA_DEPLOY_HOST is required for deployment."
+    echo "   Set it outside the repository or pass --no-deploy."
+    exit 1
+  fi
+  if [ -z "$CHAMA_DEPLOY_KEY" ] || [ ! -f "$CHAMA_DEPLOY_KEY" ]; then
+    echo "❌ CHAMA_DEPLOY_KEY is required and must name an existing file."
+    echo "   Set it outside the repository or pass --no-deploy."
+    exit 1
+  fi
 fi
 
 # ── Git safety checks ──────────────────────────────────────────────────

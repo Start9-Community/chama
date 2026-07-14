@@ -41,7 +41,7 @@ import { isTanzaniaPayoutContext } from "./chapsmart-offramp.js";
  *  TODO(jetty): point at the redeployed proxy (source: ~/Downloads/chapsmart.ts
  *  → IncogNET VPS behind Caddy, CORS open for Chama origins).
  *  Overridable for local dev via `localStorage.chama_chapsmart_base`. */
-const DEFAULT_CHAPSMART_PROXY_BASE = "https://satoshimarket.app/api/chapsmart";
+const DEFAULT_CHAPSMART_PROXY_BASE = "https://getchama.app/api/chapsmart";
 
 export function chapsmartProxyBase(): string {
   try {

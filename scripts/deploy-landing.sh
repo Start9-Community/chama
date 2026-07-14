@@ -13,13 +13,8 @@
 #   ./scripts/deploy-landing.sh --dry-run  # print the command, send nothing
 #
 # Env:
-#   CHAMA_DEPLOY_KEY   SSH key authorised for satoshi@getchama.app
-#                      (default: ~/.ssh/id_chama — the IncogNET box)
-#   CHAMA_DEPLOY_HOST  (default: satoshi@getchama.app)
-#
-# ⚠ 2026-07-10: migrated off satoshimarket.app — that DNS still points at the
-#   RETIRED 1984 box (89.147.108.68, host key CHANGED — possibly reassigned).
-#   Never deploy there again.
+#   CHAMA_DEPLOY_KEY   path to the SSH key used for deployment (required)
+#   CHAMA_DEPLOY_HOST  SSH destination in user@host form (required)
 
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,11 +26,12 @@ case "${1:-}" in
   *) echo "❌ unknown arg: $1 (use --dry-run or nothing)"; exit 1 ;;
 esac
 
-DEPLOY_KEY="${CHAMA_DEPLOY_KEY:-$HOME/.ssh/id_chama}"
-DEPLOY_HOST="${CHAMA_DEPLOY_HOST:-satoshi@getchama.app}"
+DEPLOY_KEY="${CHAMA_DEPLOY_KEY:-}"
+DEPLOY_HOST="${CHAMA_DEPLOY_HOST:-}"
 DEST="$DEPLOY_HOST:~/chama-landing/"
 
-[ -f "$DEPLOY_KEY" ] || { echo "❌ SSH key not found: $DEPLOY_KEY — set CHAMA_DEPLOY_KEY to the key for $DEPLOY_HOST."; exit 1; }
+[ -n "$DEPLOY_HOST" ] || { echo "❌ CHAMA_DEPLOY_HOST is required."; exit 1; }
+[ -f "$DEPLOY_KEY" ] || { echo "❌ CHAMA_DEPLOY_KEY must name an existing SSH key."; exit 1; }
 [ -f landing/index.html ] || { echo "❌ landing/index.html missing — are you at the repo root, and did you 'git stash pop' the landing back?"; exit 1; }
 
 echo "▶ scp -r -i \"$DEPLOY_KEY\" landing/* $DEST"

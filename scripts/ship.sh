@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════════
-# Chama — ship.sh : one-command release kickoff (BACKLOG #10)
+# Chama — ship.sh: one-command release kickoff
 # ══════════════════════════════════════════════════════════════════════════
 #
 # Wraps the maintainer's exact, already-proven flow so a release is a single

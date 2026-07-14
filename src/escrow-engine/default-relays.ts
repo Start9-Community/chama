@@ -20,7 +20,7 @@
 // built; removed once relay.chama.community went live. Re-add a dev-gated local
 // relay only if you ever want fully-offline 3-instance testing.)
 
-// Chama's own production relay (khatru; infra: migration/relay/). Writes restricted
+// Chama's own production relay (khatru). Writes restricted
 // to Chama's event kinds, reads open; stores every event and never collapses chat
 // (escrow/chat live in the addressable 38xxx range).
 const CHAMA_RELAY = "wss://relay.chama.community";
