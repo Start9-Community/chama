@@ -162,6 +162,7 @@ import {
 import { Capacitor } from "@capacitor/core";
 import type { LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
 import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
+import { isNativeBridgeModeOn } from "../fedimint/native-bridge-adapter.js";
 // ── Arbiter bond (sealed v1: single-key timelock COMMITMENT) ──────────────────
 import * as btcSigner from "@scure/btc-signer";
 import { findBondFundingUtxos, esploraFetcher, defaultEsploraBase, defaultMinConfs, esploraTipHeight, esploraBroadcast, esploraOutspend, esploraRecommendedFeeRate } from "../bond-multisig/fund-watcher.js";
@@ -2432,7 +2433,16 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // user's signer. In testnet/sim mode the mock wallets ignore the
       // mnemonic, so we skip the Nostr round-trip.
       const skipMnemonic = isTestnetMode() || isSimModeOn();
-      const mnemonic = skipMnemonic
+      // Native/remote-bridge mode holds its OWN seed in the bridge's own database
+      // and DISCARDS any mnemonic we pass (the wallet factory ignores it), so the
+      // Nostr kind-30078 seed round-trip is dead weight there. Worse: on a degraded
+      // mobile relay pool (the APK's on-device bridge competes for network) its
+      // false-empty result trips the scary "couldn't reach your seed" fund-safety
+      // refusal for a seed the bridge never uses. Skip the fetch in bridge mode too
+      // (result unused) — but DO NOT fold this into skipMnemonic, which also drives
+      // storageScope below; keep storage scoping exactly as it was.
+      const skipSeedFetch = skipMnemonic || isNativeBridgeModeOn();
+      const mnemonic = skipSeedFetch
         ? undefined
         : await getOrCreateSeed(clientRef.current!, signerRef.current!);
       // Sim wallet keys its persisted state by npub so multiple

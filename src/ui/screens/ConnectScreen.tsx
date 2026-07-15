@@ -11,6 +11,7 @@ import {
   isTauriRuntime,
   shouldOfferNIP46Signer,
 } from "../sign-in-environment.js";
+import { isNativeBridgeModeOn } from "../../fedimint/native-bridge-adapter.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import {
   getUserCommunitySlugRaw,
@@ -83,7 +84,11 @@ export function ConnectScreen({
   nip46Waiting?: boolean;
 }) {
   const { t } = useT();
-  const isNative = Capacitor.isNativePlatform() || isTauriRuntime();
+  // A browser pointed at a remote Rust bridge (the VPS "friend wallet" link) is
+  // running in native/bridge mode — no NIP-07 extension exists there, so treat it
+  // like native for login: go straight to the nsec paste box instead of attempting
+  // the extension and surfacing an "extension not found" error.
+  const isNative = Capacitor.isNativePlatform() || isTauriRuntime() || isNativeBridgeModeOn();
   const signInEnvironment = {
     ...getSignInEnvironment(),
     isNativePlatform: isNative,
