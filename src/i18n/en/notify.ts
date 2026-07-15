@@ -12,6 +12,8 @@ export const notify: Record<string, string> = {
   "notify.approvedBody":
     "Trade {label} resolved in your favor — open Chama to claim your sats.",
   "notify.approvedTitle": "✅ Your claim is ready",
+  "notify.buyerInterestBody": "A buyer is looking at your listing {label}. Open Chama to respond.",
+  "notify.buyerInterestTitle": "👀 A buyer is looking at your listing",
   "notify.chatBody": "{who} messaged you on trade {label}.",
   "notify.chatSenderRole": "The {role}",
   "notify.chatSomeone": "Someone",
@@ -26,6 +28,10 @@ export const notify: Record<string, string> = {
   "notify.expiredTitle": "⏰ Trade timed out",
   "notify.lockedBody": "Trade {label} is live — the other side funded it. Your move.",
   "notify.lockedTitle": "⚡ Sats locked in escrow",
+  "notify.newListingBody": "New listing in {community}: {title}",
+  "notify.newListingTitle": "🆕 New listing in your chama",
+  "notify.newOrderBody": "A buyer funded order {label} on your storefront. Open Chama to fulfill it.",
+  "notify.newOrderTitle": "🛒 New order on your storefront",
   "notify.selfTestBody":
     "If you can see this, OS notification delivery works on this build.",
   "notify.selfTestTitle": "Chama notifications OK",

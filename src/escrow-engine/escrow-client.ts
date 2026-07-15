@@ -105,6 +105,16 @@ export interface Signer {
    * Returns the plaintext string.
    */
   nip44Decrypt(ciphertext: string, senderPubkey: string): Promise<string>;
+
+  /**
+   * NIP-04 encrypt content for a recipient. ONLY for kind:4 DMs — the
+   * NIP-04 spec ties kind:4 content to NIP-04 ciphertext, and external
+   * clients (Damus, Amethyst, ChapSmart…) decrypt it as such; NIP-44
+   * ciphertext in a kind:4 renders as a BLANK message there. Every
+   * escrow payload stays on nip44Encrypt. Optional: a signer without
+   * NIP-04 support degrades to the nip44 legacy behavior at call sites.
+   */
+  nip04Encrypt?(plaintext: string, recipientPubkey: string): Promise<string>;
 }
 
 /** Unsigned event template — the client builds these, the signer completes them */
@@ -1247,12 +1257,26 @@ export class EscrowClient {
       message,
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
     };
-    const activeParticipants = getEffectiveParticipantsAt(state, now);
-    const recipients = [
-      activeParticipants.buyer,
-      activeParticipants.seller,
-      activeParticipants.arbiter,
-    ].filter((pk): pk is string => typeof pk === "string" && pk.length > 0);
+    // Chat audience = the NAMED trade parties plus the author themselves, NOT
+    // getEffectiveParticipantsAt(now). The effective-participant helper returns
+    // null for a role whose 5-min JOIN_HOLD has lapsed while still CREATED — but
+    // the hold only governs who may LOCK, never who may READ the conversation
+    // they're part of. Enveloping to the effective set silently EXCLUDED the
+    // author once their own hold expired (a buyer who took an order, let the
+    // deadline pass, then messaged): the message showed via the local cleartext
+    // echo but had no ciphertext entry for the author, so it was dropped on any
+    // reload/re-entry re-decrypt. Named-participants ∪ self keeps chat readable
+    // to exactly the trade parties regardless of seat-hold timing.
+    const recipients = Array.from(
+      new Set(
+        [
+          state.participants[Role.BUYER],
+          state.participants[Role.SELLER],
+          state.participants[Role.ARBITER],
+          pubkey,
+        ].filter((pk): pk is string => typeof pk === "string" && pk.length > 0),
+      ),
+    );
     const bodyEnvelope = await createEnvelope(
       JSON.stringify(chatBody),
       recipients,

@@ -122,6 +122,11 @@ import {
 } from "../escrow-engine/types.js";
 import { recordTradeToIndex, removeTradeFromIndex } from "../escrow-engine/trade-index.js";
 import {
+  canRenewListing,
+  buildRenewCreateParams,
+  isSellerOwnedListing,
+} from "../escrow-engine/listing-renewal.js";
+import {
   FedimintClient,
   EscrowFedimintBridge,
   resolveFederationForCommunity,
@@ -210,7 +215,7 @@ import {
   buildArbiterApplicationEvent,
   collectArbiterApplications,
 } from "../arbiters/applications.js";
-import { maybeNotifyTransition, maybeNotifyChatMessage } from "../notifications/notify-service.js";
+import { maybeNotifyTransition, maybeNotifyChatMessage, maybeNotifyBuyerInterest, maybeNotifyNewListing } from "../notifications/notify-service.js";
 import {
   RATING_KIND,
   buildRatingEvent,
@@ -748,6 +753,15 @@ export interface UseEscrowActions {
    *  units of a multi-unit parent listing and return it (the buyer then locks
    *  the child via the normal flow). */
   purchaseFromListing: (parent: EscrowState, quantity: number) => Promise<{ escrowId: string; state: EscrowState }>;
+  /** Store permanence (#49) Tier 1: re-publish an identical CREATE (fresh 24h
+   *  window) for the caller's OWN listing that lapsed WITHOUT ever being funded.
+   *  Throws if the listing isn't renewable (not owned / ever funded / not yet
+   *  lapsing). Moves no sats — Option B: renewal re-publishes, never transfers. */
+  renewListing: (escrowId: string) => Promise<{ escrowId: string; state: EscrowState }>;
+  /** Monthly CBP recurrence: re-publish an identical CREATE for the caller's own
+   *  bill-pay listing (bill-pay only, no bond, home-community inherited). Unlike
+   *  renewListing it works on funded/settled priors too. Moves no sats. */
+  repostRecurringCbp: (escrowId: string) => Promise<{ escrowId: string; state: EscrowState }>;
   /** Fetch self-published kind:0 profile names for visible participants. */
   fetchNostrProfiles: (pubkeys: string[]) => Promise<NostrProfileNameMap>;
   /** Trigger haptic feedback */
@@ -810,6 +824,8 @@ export interface UseEscrowActions {
     escrowId: string,
     opts: {
       amountMsats: number;
+      /** E1.1: arbiter-insurance msats folded into the invoice only. */
+      premiumMsats?: number;
       description: string;
       fundingMethod?: "lightning" | "onchain" | "nwc";
       nwcConnectionString?: string;
@@ -1050,6 +1066,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // honor it the instant Browse events arrive — before `state.pubkey` has even
   // re-rendered. Kept in sync by forgetEscrow / loadEscrow.
   const forgottenIdsRef = useRef<Set<string>>(new Set());
+  // Liquidity/attention notifications: the second this signed-in session went
+  // live. Buyer-interest + new-listing buzzes use it as their backlog guard (the
+  // analogue of the transition core's prev-must-be-non-null rule) so a cold-boot
+  // replay of old listings/holds never storms. Set at connect; read in
+  // updateEscrow, which is a []-dep callback with no access to the closure.
+  const notifyLiveSinceRef = useRef<number>(Math.floor(Date.now() / 1000));
   // PR 5: federation health cache. Mirrored into React state for the UI;
   // the ref is the source of truth read inside createFundingInvoice so
   // we don't depend on the latest closure of `state`.
@@ -1145,11 +1167,17 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     // — exactly the prev→next we compare. Fire-and-forget: maybeNotifyTransition
     // is deduped, enable-gated, and permission-gated internally, so it never
     // double-fires (even under StrictMode re-invokes) or blocks the update.
-    maybeNotifyTransition(
-      stateRef.current?.escrows.get(escrowId),
-      escrowState,
-      stateRef.current?.pubkey,
-    );
+    const priorEscrow = stateRef.current?.escrows.get(escrowId);
+    const notifyPubkey = stateRef.current?.pubkey;
+    maybeNotifyTransition(priorEscrow, escrowState, notifyPubkey);
+
+    // Liquidity/attention (Part ①.3 + Part ②): pull the seller back the moment a
+    // buyer shows interest (a pre-lock child order / a JOIN hold on their
+    // listing), and buzz opted-in users on a fresh home-chama listing. Both are
+    // enable-gated, opt-in-gated, backlog-guarded (notifyLiveSinceRef), and
+    // deduped internally, so they never block the update or double-fire.
+    maybeNotifyBuyerInterest(priorEscrow, escrowState, notifyPubkey, notifyLiveSinceRef.current);
+    maybeNotifyNewListing(priorEscrow, escrowState, notifyPubkey, notifyLiveSinceRef.current);
 
     setState(prev => {
       const next = new Map(prev.escrows);
@@ -1246,6 +1274,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // arriving live buzz — the analogue of the transition core's prev-must-be-
       // non-null guard, for a stream that has no "prev".
       const chatNotifyLiveSince = Math.floor(Date.now() / 1000);
+      // Same live-since powers the buyer-interest + new-listing backlog guards,
+      // read from updateEscrow (a []-dep callback outside this closure).
+      notifyLiveSinceRef.current = chatNotifyLiveSince;
 
       const callbacks: EscrowClientCallbacks = {
         onStateUpdate: (id, s) => updateEscrow(id, s),
@@ -2208,6 +2239,47 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     return result;
   }, []);
 
+  // ── Store permanence (#49) Tier 1: renew a lapsed-unfunded listing ─────────
+  // Re-publish an IDENTICAL CREATE (fresh 24h window) for a listing that lapsed
+  // WITHOUT ever being funded. Only the seller's own listing, only when it was
+  // never LOCKED (canRenewListing gates all of this). Moves no sats — it's just
+  // re-listing a browse offer (Option B: renewal re-publishes, never transfers).
+  // Reuses `createEscrow` so fed tags, the expiry override, and the saved
+  // pointer all apply exactly as a fresh publish — the renewed store keeps the
+  // same short trade timeout (permanence via renewal, never via longer locks).
+  const renewListing = useCallback(async (escrowId: string) => {
+    const client = requireClient();
+    const state = client.getState(escrowId);
+    if (!state) throw new Error("Listing not found — reload it first.");
+    const userPubkey = stateRef.current?.pubkey ?? null;
+    if (!canRenewListing(state, userPubkey, Math.floor(Date.now() / 1000))) {
+      throw new Error("This listing can't be renewed — only your own lapsed, unfunded stores.");
+    }
+    const params = buildRenewCreateParams(state);
+    return createEscrow(params as Parameters<EscrowClient["createEscrow"]>[0]);
+  }, [createEscrow]);
+
+  // Monthly CBP recurrence: re-publish an identical CREATE for the caller's OWN
+  // bill-pay listing on the ~monthly cadence. Reuses buildRenewCreateParams (so
+  // the re-post inherits the listing's community = the owner's HOME, never fans
+  // out) but — unlike renewListing — does NOT require the prior instance to be
+  // unfunded: a monthly bill that WAS paid last month must still re-post this
+  // month. Bill-pay only; NO bond gate (CBP is self-limiting). Moves no sats.
+  const repostRecurringCbp = useCallback(async (escrowId: string) => {
+    const client = requireClient();
+    const state = client.getState(escrowId);
+    if (!state) throw new Error("Listing not found — reload it first.");
+    if (state.category !== "bill-pay") {
+      throw new Error("Recurrence only applies to Community Bill Pay listings.");
+    }
+    const userPubkey = stateRef.current?.pubkey ?? null;
+    if (!isSellerOwnedListing(state, userPubkey)) {
+      throw new Error("Only your own bill can be re-posted.");
+    }
+    const params = buildRenewCreateParams(state);
+    return createEscrow(params as Parameters<EscrowClient["createEscrow"]>[0]);
+  }, [createEscrow]);
+
   /** Forget a trade locally: drop its saved pointer and hide it from the
    *  in-memory list. For unrecoverable "ghost" trades the user wants out of
    *  their view. Non-custodial-safe — money lives in 2-of-3 escrow regardless,
@@ -3009,6 +3081,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     escrowId: string,
     opts: {
       amountMsats: number;
+      /** E1.1 arbiter insurance: extra msats folded into the funding
+       *  invoice ON TOP of amountMsats so the wallet retains the funder's
+       *  0.25% premium after the lock spend (which independently consumes
+       *  state.amountMsats). Never enters the lock, the #37 intent stash,
+       *  or the direct-lock balance gate. Ignored on the Fedi-internal
+       *  path (exact-amount — a bump there would over-fund the escrow). */
+      premiumMsats?: number;
       description: string;
       fundingMethod?: "lightning" | "onchain" | "nwc";
       nwcConnectionString?: string;
@@ -3221,6 +3300,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         }
       }
 
+      // E1.1: sanitize the insurance bump once. Whole msats, never
+      // negative, zero in sim/testnet (the premium sweep no-ops there).
+      const premiumMsats = (!isSimModeOn() && !isTestnetMode())
+        ? Math.max(0, Math.floor(opts.premiumMsats ?? 0))
+        : 0;
+
       if (opts.fundingMethod === "onchain") {
         const meta = buildChamaOperationMeta({
           flow: "fund_receive",
@@ -3241,7 +3326,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
             `Use Lightning for smaller trades.`
           );
         }
-        const depositAmountSats = amountSats + pegInFeeSats;
+        // E1.1: the deposit ASK includes the insurance premium so the
+        // residue exists after the lock; the shortfall check below stays
+        // against the LOCK amount only — a deposit that covers the trade
+        // but not the premium still proceeds (premium fails soft, the
+        // sweep just finds no residue and retries another day).
+        const depositAmountSats = amountSats + pegInFeeSats + Math.floor(premiumMsats / 1000);
         const baselineMsats = await fedimint.getBalance();
         const deposit = await fedimint.createOnchainDepositAddress(meta);
         if (opts.signal?.aborted) {
@@ -3335,9 +3425,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // intent block — see F9.)
 
       const { runFundAndLock } = await import("../payments/fund-and-lock.js");
+      // E1.1: the invoice (and the ≥90% payment-detection threshold) carry
+      // amount + premium; the lock spend is decoupled (escrow-bridge
+      // recomputes state.amountMsats), so the premium stays behind as the
+      // wallet residue the settle-time sweep spends to the arbiter.
       const result = await runFundAndLock({
         escrowId,
-        amountMsats: opts.amountMsats,
+        amountMsats: opts.amountMsats + premiumMsats,
         description: opts.description,
         savedHandleId: opts.savedHandleId,
         selectedItems: opts.selectedItems,
@@ -3768,6 +3862,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     recoverRelays,
     createEscrow,
     joinEscrow,
+    renewListing,
+    repostRecurringCbp,
     lockAndPublish: lockAndPublishAction,
     vote: voteAction,
     releasePeriod: async (escrowId: string, periodIndex: number) => {

@@ -114,6 +114,8 @@ export const claim: Record<string, string> = {
   "claim.fastestNwcHeading": "⚡ FASTEST · CLAIM STRAIGHT TO SAVED NWC WALLET",
   "claim.feeReserveAfter": "stays available for Lightning fees.",
   "claim.feeReserveBefore": "About",
+  "claim.insuranceBefore": "🛡",
+  "claim.insuranceAfter": "stays behind for your arbiter’s insurance (0.25%).",
   "claim.ifCashReceiveOn": "if Cash receive is on",
   "claim.invoiceOnlyHint": "For invoice-only wallets or NWC make_invoice.",
   "claim.kenyanNumbersHint":

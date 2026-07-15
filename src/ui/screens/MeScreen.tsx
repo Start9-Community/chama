@@ -50,8 +50,10 @@ import { getAllPickerCountries } from "../../communities/countries.js";
 import {
   MAIN_SURFACE_RECOVERY_MIN_SATS,
   formatStepInCountdown,
+  selectNeedsYouTrades,
   type AggregateRatings,
 } from "../decisions.js";
+import { AttentionQueue } from "../components/AttentionQueue.js";
 import { counterpartyToRate, type RatingThumb } from "../../reputation/ratings.js";
 import { RatingTap } from "../components/RatingTap.js";
 import {
@@ -73,6 +75,8 @@ import {
   dmNotifyPref,
   setDmNotifyPref,
   type DmNotifyPref,
+  newListingPref,
+  setNewListingPref,
 } from "../../notifications/notify-service.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
@@ -262,6 +266,12 @@ export function MeScreen({
   const dashboard = buildMeDashboard(myTrades, allTrades ?? myTrades, pubkey, nowSec);
   const tradeCounts = buildMeTradeCounts(myTrades, dashboard.needsYou);
   const visibleTrades = filterMeTrades(myTrades, dashboard.needsYou, tradeFilter);
+  // The attention hero reads from the SAME urgency-ranked source as the Me-tab
+  // badge (selectNeedsYouTrades) — we never reimplement the ranking. Includes
+  // arbiter disputes, so it reads over allTrades (the pool-visible set).
+  const rankedNeedsYou = selectNeedsYouTrades({ escrows: allTrades ?? myTrades, userPubkey: pubkey, nowSec });
+  const latestTrade = myTrades.find(isLiveTrade) ?? myTrades[0] ?? null;
+  const hasSellerDashboard = dashboard.sellerOpen.length > 0 || dashboard.sellerLive.length > 0;
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
@@ -302,15 +312,20 @@ export function MeScreen({
         </div>
       </div>
 
-      {onSelectCommunity && (
-        <YourChamaCard
-          communitySlug={communitySlug ?? null}
-          hasActiveCommitment={hasActiveCommitment}
-          onSelectCommunity={onSelectCommunity}
-          loadLiveness={loadLiveness}
-          livenessBlocksPerDay={livenessBlocksPerDay}
-        />
-      )}
+      {/* ⭐ ATTENTION HERO — the single prioritized "needs your attention" queue.
+          One source of truth with the Me-tab badge (selectNeedsYouTrades),
+          pin/snooze triage on top. Everything else is collapsed below. */}
+      <AttentionQueue
+        ranked={rankedNeedsYou}
+        pubkey={pubkey}
+        onOpenTrade={onOpenTrade}
+        latestTrade={latestTrade}
+      />
+
+      {/* ── MONEY-SAFETY, always visible (never collapsed) ──────────────────
+          Recovery / stranded-claim / lock-recovery / pending-ecash cards are
+          money-critical, so they sit right under the hero — never hidden in a
+          closed accordion. */}
 
       {/* v3.4.0 C13 — stranded claim notes. INVARIANT(stranded-notes-surfaced):
           a bearer note the drain gave up on gets a persistent, actionable
@@ -551,135 +566,237 @@ export function MeScreen({
         </div>
       )}
 
-      <MeDashboard
-        dashboard={dashboard}
-        onOpenTrade={onOpenTrade}
-        onSellerEditListing={onSellerEditListing}
-        onSellerDeleteListing={onSellerDeleteListing}
-        pubkey={pubkey}
-      />
-
-      {/* Ratings — minimal v0.2.0 surface. Per Pillar 2.6 reputation
-          is the backbone primitive; the surface ships even before
-          rating events do, so users learn the model through
-          encountering it. */}
-      <div style={{
-        background: T.card, border: `1px solid ${T.border}`,
-        borderRadius: T.r, padding: 20, marginBottom: 16,
-      }}>
-        <div style={{
-          fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
-          letterSpacing: 1, marginBottom: 12,
-        }}>
-          {t("me.ratingsTitle")}
+      {/* ── MY TRADES (collapsed by default) — seller queue + full history ─── */}
+      <Accordion
+        title={t("me.accMyTrades")}
+        count={myTrades.length || undefined}
+      >
+        {hasSellerDashboard && (
+          <SellerDashboardPanel
+            dashboard={dashboard}
+            onOpenTrade={onOpenTrade}
+            onSellerEditListing={onSellerEditListing}
+            onSellerDeleteListing={onSellerDeleteListing}
+          />
+        )}
+        <div style={{ marginTop: hasSellerDashboard ? 16 : 0 }}>
+          <MeTradeHistory
+            trades={visibleTrades}
+            totalCount={myTrades.length}
+            counts={tradeCounts}
+            activeFilter={tradeFilter}
+            onFilter={setTradeFilter}
+            pubkey={pubkey}
+            onOpenTrade={onOpenTrade}
+            onRefreshTrades={onRefreshTrades}
+            onRateCounterparty={onRateCounterparty}
+            myGivenRatings={myGivenRatings}
+            archivedTrades={archivedTrades}
+            onOpenArchivedTrade={onOpenArchivedTrade}
+          />
         </div>
-        {ratings && ratings.count > 0 ? (
-          <div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-              <span style={{ fontSize: 28, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
-                {ratings.count}
-              </span>
-              <span style={{ fontSize: 12, color: T.muted, fontFamily: T.mono }}>
-                {ratings.count !== 1 ? t("me.ratingMany") : t("me.ratingOne")}
-              </span>
-              <span style={{ flex: 1 }} />
-              <span style={{
-                fontSize: 16, fontWeight: 700,
-                color: ratings.positive >= ratings.count - ratings.negative ? T.green : T.amber,
-                fontFamily: T.mono,
-              }}>
-                {Math.round((ratings.positive / Math.max(ratings.count, 1)) * 100)}%
-              </span>
-              <span style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
-                {t("me.positive")}
-              </span>
-            </div>
-            {/* v3.1.1 (#2): 👍/👎 breakdown, consistent with the tap-a-
-                counterparty reputation readout. This aggregate includes arbiter
-                ratings (any verified rating where you are the ratee). */}
-            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 10, fontFamily: T.mono, fontSize: 13 }}>
-              <span style={{ color: T.green, fontWeight: 700 }}>👍 {ratings.positive}</span>
-              <span style={{ color: T.amber, fontWeight: 700 }}>👎 {ratings.negative}</span>
-              <span style={{ color: T.muted, fontSize: 11 }}>{ratings.count !== 1 ? t("me.ratingsFromTradesMany", { count: ratings.count }) : t("me.ratingsFromTradesOne", { count: ratings.count })}</span>
-            </div>
-          </div>
-        ) : (
-          <div style={{ fontSize: 12, color: T.muted, fontFamily: T.sans, lineHeight: 1.55 }}>
-            {t("me.noRatingsYet")}
-          </div>
-        )}
-      </div>
+      </Accordion>
 
-      {/* Settings sub-page entries */}
-      <div style={{
-        background: T.card, border: `1px solid ${T.border}`,
-        borderRadius: T.r, padding: 0, marginBottom: 16, overflow: "hidden",
-      }}>
-        {themeMode && onThemeModeChange && (
+      {/* ── ARBITER (collapsed) — rendered only for an arbiter / pool member ── */}
+      {dashboard.arbiterVisible && (
+        <Accordion
+          title={t("me.accArbiter")}
+          count={dashboard.arbiterDisputes.length || undefined}
+        >
+          <ArbiterDashboardPanel
+            dashboard={dashboard}
+            onOpenTrade={onOpenTrade}
+            viewerPubkey={pubkey}
+          />
+        </Accordion>
+      )}
+
+      {/* ── SETTINGS (collapsed) ────────────────────────────────────────────── */}
+      <Accordion title={t("me.accSettings")}>
+        <div style={{
+          background: T.card, border: `1px solid ${T.border}`,
+          borderRadius: T.r, padding: 0, overflow: "hidden",
+        }}>
+          {themeMode && onThemeModeChange && (
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              gap: 10, padding: "14px 16px", borderBottom: `1px solid ${T.border}`,
+            }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+                  {t("me.appearance")}
+                </div>
+                <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+                  {t("me.appearanceHint")}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 4 }}>
+                {(["dark", "light", "system"] as ThemeMode[]).map(mode => {
+                  const active = themeMode === mode;
+                  const label = mode === "system" ? t("me.auto") : mode === "dark" ? t("me.dark") : t("me.light");
+                  return (
+                    <button
+                      key={mode}
+                      onClick={() => onThemeModeChange(mode)}
+                      style={{
+                        padding: "6px 10px", borderRadius: 999,
+                        border: `1px solid ${active ? T.accent + "66" : T.border}`,
+                        background: active ? T.accentDim : T.surface,
+                        color: active ? T.accent : T.muted,
+                        fontFamily: T.mono, fontSize: 10, fontWeight: 800,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <LanguageRow />
+          <NotificationsRow />
+          <DmNotificationsRow />
+          <NewListingNotificationsRow />
+          <NostrNamesRow on={kind0On} onToggle={() => setKind0On(!kind0On)} />
+          {SHOW_BOND_CEREMONY && onOpenBondCeremony && (
+            <SettingsRow label={t("me.postYourBond")} hint={t("me.postYourBondHint")} onClick={onOpenBondCeremony} />
+          )}
+          <SettingsRow label={t("me.paymentMethods")} hint={t("me.paymentMethodsHint")} onClick={onOpenSavedHandles} />
+          <SettingsRow label={t("me.lightningAddresses")} hint={t("me.lightningAddressesHint")} onClick={onOpenPayoutDestinations} />
+          <SettingsRow label={t("me.advanced")} hint={t("me.advancedHint")} onClick={onOpenAdvanced} />
+          <SettingsRow label={t("me.helpFaq")} hint={t("me.helpFaqHint")} onClick={onOpenHelp} />
+        </div>
+      </Accordion>
+
+      {/* ── PROFILE & CHAMA (collapsed) — your chama, reputation, sign out ──── */}
+      <Accordion title={t("me.accProfileChama")}>
+        {onSelectCommunity && (
+          <YourChamaCard
+            communitySlug={communitySlug ?? null}
+            hasActiveCommitment={hasActiveCommitment}
+            onSelectCommunity={onSelectCommunity}
+            loadLiveness={loadLiveness}
+            livenessBlocksPerDay={livenessBlocksPerDay}
+          />
+        )}
+
+        {/* Ratings — reputation is the backbone primitive; the surface ships
+            even before rating events do, so users learn the model. */}
+        <div style={{
+          background: T.card, border: `1px solid ${T.border}`,
+          borderRadius: T.r, padding: 20, marginBottom: 16,
+        }}>
           <div style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            gap: 10, padding: "14px 16px", borderBottom: `1px solid ${T.border}`,
+            fontSize: 11, fontWeight: 600, color: T.muted, fontFamily: T.mono,
+            letterSpacing: 1, marginBottom: 12,
           }}>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
-                {t("me.appearance")}
-              </div>
-              <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
-                {t("me.appearanceHint")}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 4 }}>
-              {(["dark", "light", "system"] as ThemeMode[]).map(mode => {
-                const active = themeMode === mode;
-                const label = mode === "system" ? t("me.auto") : mode === "dark" ? t("me.dark") : t("me.light");
-                return (
-                  <button
-                    key={mode}
-                    onClick={() => onThemeModeChange(mode)}
-                    style={{
-                      padding: "6px 10px", borderRadius: 999,
-                      border: `1px solid ${active ? T.accent + "66" : T.border}`,
-                      background: active ? T.accentDim : T.surface,
-                      color: active ? T.accent : T.muted,
-                      fontFamily: T.mono, fontSize: 10, fontWeight: 800,
-                      cursor: "pointer",
-                    }}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
+            {t("me.ratingsTitle")}
           </div>
-        )}
-        <LanguageRow />
-        <NotificationsRow />
-        <DmNotificationsRow />
-        <NostrNamesRow on={kind0On} onToggle={() => setKind0On(!kind0On)} />
-        {SHOW_BOND_CEREMONY && onOpenBondCeremony && (
-          <SettingsRow label={t("me.postYourBond")} hint={t("me.postYourBondHint")} onClick={onOpenBondCeremony} />
-        )}
-        <SettingsRow label={t("me.paymentMethods")} hint={t("me.paymentMethodsHint")} onClick={onOpenSavedHandles} />
-        <SettingsRow label={t("me.lightningAddresses")} hint={t("me.lightningAddressesHint")} onClick={onOpenPayoutDestinations} />
-        <SettingsRow label={t("me.advanced")} hint={t("me.advancedHint")} onClick={onOpenAdvanced} />
-        <SettingsRow label={t("me.helpFaq")} hint={t("me.helpFaqHint")} onClick={onOpenHelp} />
-        <SettingsRow label={t("me.signOut")} hint={null} onClick={onSignOut} danger />
-      </div>
+          {ratings && ratings.count > 0 ? (
+            <div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+                <span style={{ fontSize: 28, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
+                  {ratings.count}
+                </span>
+                <span style={{ fontSize: 12, color: T.muted, fontFamily: T.mono }}>
+                  {ratings.count !== 1 ? t("me.ratingMany") : t("me.ratingOne")}
+                </span>
+                <span style={{ flex: 1 }} />
+                <span style={{
+                  fontSize: 16, fontWeight: 700,
+                  color: ratings.positive >= ratings.count - ratings.negative ? T.green : T.amber,
+                  fontFamily: T.mono,
+                }}>
+                  {Math.round((ratings.positive / Math.max(ratings.count, 1)) * 100)}%
+                </span>
+                <span style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>
+                  {t("me.positive")}
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 10, fontFamily: T.mono, fontSize: 13 }}>
+                <span style={{ color: T.green, fontWeight: 700 }}>👍 {ratings.positive}</span>
+                <span style={{ color: T.amber, fontWeight: 700 }}>👎 {ratings.negative}</span>
+                <span style={{ color: T.muted, fontSize: 11 }}>{ratings.count !== 1 ? t("me.ratingsFromTradesMany", { count: ratings.count }) : t("me.ratingsFromTradesOne", { count: ratings.count })}</span>
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: T.muted, fontFamily: T.sans, lineHeight: 1.55 }}>
+              {t("me.noRatingsYet")}
+            </div>
+          )}
+        </div>
 
-      <MeTradeHistory
-        trades={visibleTrades}
-        totalCount={myTrades.length}
-        counts={tradeCounts}
-        activeFilter={tradeFilter}
-        onFilter={setTradeFilter}
-        pubkey={pubkey}
-        onOpenTrade={onOpenTrade}
-        onRefreshTrades={onRefreshTrades}
-        onRateCounterparty={onRateCounterparty}
-        myGivenRatings={myGivenRatings}
-        archivedTrades={archivedTrades}
-        onOpenArchivedTrade={onOpenArchivedTrade}
-      />
+        <div style={{
+          background: T.card, border: `1px solid ${T.border}`,
+          borderRadius: T.r, padding: 0, overflow: "hidden",
+        }}>
+          <SettingsRow label={t("me.signOut")} hint={null} onClick={onSignOut} danger />
+        </div>
+      </Accordion>
+    </div>
+  );
+}
+
+// Simple collapsible section. Closed by default — the Me screen keeps only the
+// attention hero + money-safety cards open; everything else lives behind these.
+function Accordion({
+  title,
+  count,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  count?: number;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+          gap: 12, padding: "14px 16px",
+          background: T.card, border: `1px solid ${T.border}`,
+          borderRadius: open ? `${T.r}px ${T.r}px 0 0` : T.r,
+          cursor: "pointer", textAlign: "left" as const,
+        }}
+      >
+        <span style={{
+          display: "inline-flex", alignItems: "center", gap: 8,
+          fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: T.muted,
+          letterSpacing: 1, textTransform: "uppercase",
+        }}>
+          {title}
+          {count !== undefined && (
+            <span style={{
+              fontFamily: T.mono, color: T.text, fontSize: 10, fontWeight: 900,
+              padding: "2px 7px", borderRadius: 999,
+              background: T.surface, border: `1px solid ${T.border}`,
+            }}>
+              {count}
+            </span>
+          )}
+        </span>
+        <span aria-hidden="true" style={{
+          color: T.muted, fontSize: 13, fontFamily: T.mono,
+          transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s",
+        }}>
+          ›
+        </span>
+      </button>
+      {open && (
+        <div style={{
+          border: `1px solid ${T.border}`, borderTop: "none",
+          borderRadius: `0 0 ${T.r}px ${T.r}px`,
+          padding: 12, background: T.bg,
+        }}>
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -970,98 +1087,6 @@ type MeDashboardModel = {
   arbiterWatching: EscrowState[];
   arbiterSettled: EscrowState[];
 };
-
-function MeDashboard({
-  dashboard,
-  onOpenTrade,
-  onSellerEditListing,
-  onSellerDeleteListing,
-  pubkey,
-}: {
-  dashboard: MeDashboardModel;
-  onOpenTrade: (id: string) => void;
-  onSellerEditListing?: (id: string) => void;
-  onSellerDeleteListing?: (id: string) => void | Promise<void>;
-  pubkey: string;
-}) {
-  const { t } = useT();
-  const hasSellerDashboard = dashboard.sellerOpen.length > 0 || dashboard.sellerLive.length > 0;
-  const hasNeedsYou = dashboard.needsYou.length > 0;
-  const showDashboard = hasNeedsYou || hasSellerDashboard || dashboard.arbiterVisible;
-  if (!showDashboard) return null;
-
-  const firstNeedsYou = dashboard.needsYou[0];
-  const firstSeller = dashboard.sellerLive[0] ?? dashboard.sellerOpen[0];
-
-  return (
-    <div style={{
-      background: T.card, border: `1px solid ${T.border}`,
-      borderRadius: T.r, padding: 16, marginBottom: 16,
-    }}>
-      <div style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        gap: 12, marginBottom: 12,
-      }}>
-        <div style={{
-          fontSize: 11, fontWeight: 700, color: T.muted, fontFamily: T.mono,
-          letterSpacing: 1, textTransform: "uppercase",
-        }}>
-          {t("me.tradeDashboard")}
-        </div>
-        {hasNeedsYou && (
-          <span style={{
-            fontFamily: T.mono, color: T.accent, fontSize: 10, fontWeight: 900,
-            padding: "4px 8px", borderRadius: 999,
-            background: T.accentDim, border: `1px solid ${T.accent}44`,
-          }}>
-            {t("me.needsYouCount", { count: dashboard.needsYou.length })}
-          </span>
-        )}
-      </div>
-
-      {hasNeedsYou && (
-        <DashboardRow
-          label={t("me.needsYou")}
-          value={dashboard.needsYou.length === 1
-            ? t("me.tradeCountOne", { count: dashboard.needsYou.length })
-            : t("me.tradeCountMany", { count: dashboard.needsYou.length })}
-          hint={t("me.needsYouHint")}
-          tone={T.accent}
-          onClick={firstNeedsYou ? () => onOpenTrade(firstNeedsYou.id) : undefined}
-          last={!hasSellerDashboard && !dashboard.arbiterVisible}
-        />
-      )}
-
-      {hasSellerDashboard && (
-        <DashboardRow
-          label={t("me.sellerQueue")}
-          value={t("me.openLiveCounts", { open: dashboard.sellerOpen.length, live: dashboard.sellerLive.length })}
-          hint={t("me.sellerQueueHint")}
-          tone={T.green}
-          onClick={firstSeller ? () => onOpenTrade(firstSeller.id) : undefined}
-          last={!dashboard.arbiterVisible}
-        />
-      )}
-
-      {hasSellerDashboard && (
-        <SellerDashboardPanel
-          dashboard={dashboard}
-          onOpenTrade={onOpenTrade}
-          onSellerEditListing={onSellerEditListing}
-          onSellerDeleteListing={onSellerDeleteListing}
-        />
-      )}
-
-      {dashboard.arbiterVisible && (
-        <ArbiterDashboardPanel
-          dashboard={dashboard}
-          onOpenTrade={onOpenTrade}
-          viewerPubkey={pubkey}
-        />
-      )}
-    </div>
-  );
-}
 
 type SellerQueueKey = "ready" | "holds" | "live" | "stock";
 
@@ -2511,6 +2536,56 @@ function DmNotificationsRow() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// Part ②: opt-in "buzz me when a fresh listing appears in my home chama."
+// Default OFF (explicit opt-in, non-spammy). Whole-community for now; the pref
+// is stored as a structure so a later per-vertical version is a value change.
+// Self-contained — reads/writes the pref directly. Turning it on asks OS
+// permission (the real gate).
+function NewListingNotificationsRow() {
+  const { t } = useT();
+  const [on, setOn] = useState<boolean>(() => newListingPref().enabled);
+  const toggle = () => {
+    const next = !on;
+    setOn(next);
+    // Preserve any (future) per-vertical selection; today verticals stays "all".
+    setNewListingPref({ ...newListingPref(), enabled: next });
+    if (next) void ensureNotificationPermission();
+  };
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      gap: 10, padding: "14px 16px", borderBottom: `1px solid ${T.border}`,
+    }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+          {t("me.newListingNotifications")}
+        </div>
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+          {t("me.newListingNotificationsHint")}
+        </div>
+      </div>
+      <button
+        onClick={toggle}
+        role="switch"
+        aria-checked={on}
+        style={{
+          width: 46, height: 26, borderRadius: 999, position: "relative",
+          border: `1px solid ${on ? T.green + "66" : T.border}`,
+          background: on ? T.green + "33" : T.surface,
+          cursor: "pointer", transition: "background 0.15s, border-color 0.15s",
+          flexShrink: 0,
+        }}
+      >
+        <span style={{
+          position: "absolute", top: 2, left: on ? 22 : 2,
+          width: 20, height: 20, borderRadius: "50%",
+          background: on ? T.green : T.muted, transition: "left 0.15s",
+        }} />
+      </button>
     </div>
   );
 }

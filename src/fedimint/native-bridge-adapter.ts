@@ -25,6 +25,10 @@ import {
 
 export const NATIVE_BRIDGE_MODE_KEY = "chama_native_fedimint";
 export const NATIVE_BRIDGE_URL_KEY = "chama_native_fedimint_url";
+// Remote-bridge "friend wallet" auth: sent as `Authorization: Bearer <token>`
+// on every bridge request when set. Lives ONLY in localStorage / env — never
+// read from URL query params (they land in history and server logs).
+export const NATIVE_BRIDGE_TOKEN_KEY = "chama_native_fedimint_token";
 export const NATIVE_BRIDGE_INVITE_KEY = "chama_native_fedimint_invite";
 export const NATIVE_BRIDGE_COMMUNITY_KEY = "chama_native_fedimint_community";
 export const DEFAULT_NATIVE_BRIDGE_URL = "http://127.0.0.1:8787";
@@ -448,6 +452,12 @@ export function isNativeBridgeModeOn(): boolean {
   const storedFlag = getLocalStorageValue(NATIVE_BRIDGE_MODE_KEY);
   if (storedFlag !== null) return isEnabledSetting(storedFlag);
 
+  // Remote-bridge "friend wallet": a bridge URL configured in localStorage
+  // opts this browser into native mode by itself — configure once (via the
+  // invite link or Settings), forget. Clearing the URL restores the browser
+  // SDK; an explicit stored mode flag above still wins either way.
+  if (getLocalStorageValue(NATIVE_BRIDGE_URL_KEY) !== null) return true;
+
   const envFlag = getImportEnv("VITE_CHAMA_NATIVE_FEDIMINT");
   if (envFlag !== null) return isEnabledSetting(envFlag);
 
@@ -464,6 +474,74 @@ export function getNativeBridgeUrl(): string {
     getImportEnv("VITE_CHAMA_NATIVE_BRIDGE_URL") ??
     DEFAULT_NATIVE_BRIDGE_URL;
   return normalizeBaseUrl(url);
+}
+
+export function getNativeBridgeToken(): string | null {
+  return (
+    getLocalStorageValue(NATIVE_BRIDGE_TOKEN_KEY) ??
+    getImportEnv("VITE_CHAMA_NATIVE_BRIDGE_TOKEN")
+  );
+}
+
+export function setNativeBridgeConfig(url: string, token: string | null): void {
+  const normalized = normalizeBaseUrl(url);
+  if (!normalized) return;
+  setLocalStorageValue(NATIVE_BRIDGE_URL_KEY, normalized);
+  try {
+    if (typeof localStorage !== "undefined") {
+      if (token && token.trim()) {
+        localStorage.setItem(NATIVE_BRIDGE_TOKEN_KEY, token.trim());
+      } else {
+        localStorage.removeItem(NATIVE_BRIDGE_TOKEN_KEY);
+      }
+    }
+  } catch {
+    // Best-effort; the URL write above is the load-bearing one.
+  }
+}
+
+export function clearNativeBridgeConfig(): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.removeItem(NATIVE_BRIDGE_URL_KEY);
+    localStorage.removeItem(NATIVE_BRIDGE_TOKEN_KEY);
+  } catch {
+    // Ignore; worst case the browser stays in remote-bridge mode.
+  }
+}
+
+/**
+ * Remote-bridge invite link: `https://app/#bridge=<url>&token=<t>`.
+ * The config rides the URL FRAGMENT (never sent to any server, never in
+ * query logs); this claims it into localStorage and strips the fragment so
+ * the token doesn't linger in the address bar or get re-shared by accident.
+ * Call once at boot, BEFORE anything reads the bridge config.
+ * Returns true when an invite was claimed.
+ */
+export function claimRemoteBridgeInviteFromFragment(): boolean {
+  try {
+    if (typeof window === "undefined") return false;
+    const rawHash = window.location.hash.replace(/^#/, "");
+    if (!rawHash || !rawHash.includes("bridge=")) return false;
+    const fragmentParams = new URLSearchParams(rawHash);
+    const bridgeUrl = fragmentParams.get("bridge")?.trim() ?? "";
+    if (!/^https?:\/\//i.test(bridgeUrl)) return false;
+    const token = fragmentParams.get("token");
+    setNativeBridgeConfig(bridgeUrl, token);
+    try {
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + window.location.search,
+      );
+    } catch {
+      // If the strip fails the config is still claimed; the fragment is
+      // client-side only, so nothing was transmitted.
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function getNativeBridgeCommunitySlug(): string {
@@ -530,6 +608,13 @@ async function nativeBridgeFetch<T>(
     ...rest
   } = init;
   const headers = new Headers(rawHeaders);
+  // Remote-bridge auth: every bridge request funnels through here, so this
+  // one line covers the whole wallet surface. Token-less local bridges
+  // (Tauri/Android sidecars) send no header — unchanged.
+  const token = getNativeBridgeToken();
+  if (token && !headers.has("authorization")) {
+    headers.set("authorization", `Bearer ${token}`);
+  }
   const requestInit: RequestInit = { ...rest, headers };
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let controller: AbortController | null = null;

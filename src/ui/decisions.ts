@@ -550,6 +550,119 @@ export function sumActiveBuyerSellerTradeMsats(inputs: {
   return sum;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Part ① — "needs you" attention set (Me-tab badge + the loud attention pill)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// A de-duplicated, urgency-ordered list of the trades/listings that need the
+// user to ACT right now. Pure so both the bottom-nav badge count and the pill's
+// "N waiting · tap to act" (routing to the most urgent) read from one source of
+// truth. Mirrors MeScreen's tradeNeedsUser (vote/claim owed) and adds the two
+// liquidity signals a seller must not miss: a live child ORDER to deliver
+// (covered by the LOCKED-no-vote branch) and a buyer WAITING on a pre-lock
+// listing (a live JOIN hold). Each trade counts at most once.
+
+/** Higher = more urgent; drives both the ordering and the pill's tap target. */
+const NEEDS_YOU_RANK = {
+  claim: 4,   // APPROVED and I'm the winner — sats ready to claim
+  dispute: 3, // I'm the arbiter and a dispute is open, my ruling owed
+  vote: 2,    // LOCKED and I'm buyer/seller without my vote (incl. an order to deliver)
+  waiting: 1, // my CREATED listing has a live buyer hold — respond / lock it
+} as const;
+
+function samePk(a: string | null | undefined, b: string | null | undefined): boolean {
+  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
+}
+
+/** The attention reason (if any) this trade needs the user to act on, or null. */
+function needsYouReason(
+  e: EscrowState,
+  userPubkey: string,
+  nowSec: number,
+): keyof typeof NEEDS_YOU_RANK | null {
+  const p = getEffectiveParticipantsAt(e, nowSec);
+  const isBuyer = samePk(p.buyer, userPubkey);
+  const isSeller = samePk(p.seller, userPubkey);
+  const isAssignedArbiter = samePk(p.arbiter, userPubkey);
+  const isPoolArbiter = e.communityArbiters?.some((a) => samePk(a, userPubkey)) ?? false;
+
+  // Claim owed — resolved in my favor, the payout is mine to take.
+  if (e.status === EscrowStatus.APPROVED) {
+    const winner = payoutRecipientFor(e, e.resolvedOutcome ?? Outcome.RELEASE);
+    return winner && samePk(winner.pubkey, userPubkey) ? "claim" : null;
+  }
+
+  if (e.status === EscrowStatus.LOCKED) {
+    // Vote / deliver owed — my turn on a live trade (a live child order to
+    // deliver lands here for the seller until they vote release).
+    if ((isBuyer || isSeller) && e.votes[getRoleKey(isBuyer)] === undefined) return "vote";
+    // Arbiter ruling owed — a buyer↔seller dispute is open and my vote isn't in.
+    const bV = e.votes[Role.BUYER];
+    const sV = e.votes[Role.SELLER];
+    const dispute = bV !== undefined && sV !== undefined && bV !== sV;
+    if ((isAssignedArbiter || isPoolArbiter) && dispute && e.votes[Role.ARBITER] === undefined) {
+      return "dispute";
+    }
+    return null;
+  }
+
+  // Buyer waiting on my open listing — a live JOIN hold I should respond to.
+  if (e.status === EscrowStatus.CREATED && isSeller) {
+    const hold = e.joinHolds?.[Role.BUYER];
+    if (hold && hold.expiresAt > nowSec) return "waiting";
+  }
+  return null;
+}
+
+function getRoleKey(isBuyer: boolean): Role {
+  return isBuyer ? Role.BUYER : Role.SELLER;
+}
+
+/**
+ * The trades needing the user's action, most-urgent first (claim → dispute →
+ * vote → waiting), de-duplicated by id. Pure. Drives the Me-tab badge count and
+ * the attention pill's headline + tap target.
+ */
+export function selectNeedsYouTrades(inputs: {
+  escrows: Iterable<EscrowState>;
+  userPubkey: string;
+  nowSec?: number;
+}): EscrowState[] {
+  const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
+  const ranked: { trade: EscrowState; rank: number }[] = [];
+  const seen = new Set<string>();
+  for (const e of inputs.escrows) {
+    if (seen.has(e.id)) continue;
+    const reason = needsYouReason(e, inputs.userPubkey, nowSec);
+    if (!reason) continue;
+    seen.add(e.id);
+    ranked.push({ trade: e, rank: NEEDS_YOU_RANK[reason] });
+  }
+  ranked.sort((a, b) => b.rank - a.rank);
+  return ranked.map((r) => r.trade);
+}
+
+/** The urgency reason (if any) a trade needs the user to act on — the public
+ *  accessor over the private needsYouReason so the attention hero can render a
+ *  one-line "what's owed" WITHOUT reimplementing the urgency logic. Returns
+ *  one of "claim" | "dispute" | "vote" | "waiting", or null. */
+export function needsYouReasonFor(
+  e: EscrowState,
+  userPubkey: string,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): "claim" | "dispute" | "vote" | "waiting" | null {
+  return needsYouReason(e, userPubkey, nowSec);
+}
+
+/** Count of trades needing the user's action — the Me-tab red badge. */
+export function countNeedsYou(inputs: {
+  escrows: Iterable<EscrowState>;
+  userPubkey: string;
+  nowSec?: number;
+}): number {
+  return selectNeedsYouTrades(inputs).length;
+}
+
 /**
  * Browse is the public market surface, not only "things I am not in".
  * A listing remains browsable while it is CREATED, including:

@@ -108,6 +108,8 @@ export const claim: Record<string, string> = {
   "claim.fastestNwcHeading": "⚡ MÁS RÁPIDO · RECLAMAR DIRECTO A BILLETERA NWC GUARDADA",
   "claim.feeReserveAfter": "queda disponible para comisiones de Lightning.",
   "claim.feeReserveBefore": "Alrededor de",
+  "claim.insuranceBefore": "🛡",
+  "claim.insuranceAfter": "queda apartado para el seguro de tu árbitro (0,25 %).",
   "claim.ifCashReceiveOn": "si la recepción como Efectivo está activada",
   "claim.invoiceOnlyHint": "Para billeteras solo de factura o make_invoice de NWC.",
   "claim.kenyanNumbersHint":

@@ -48,6 +48,8 @@ export const browse: Record<string, string> = {
   "browse.realMoneyTrades": "INTERCAMBIOS CON DINERO REAL",
   "browse.reconnectTo": "Reconéctate a {community} para ver qué se intercambia.",
   "browse.searchPlaceholder": "Buscar anuncios...",
+  "browse.showMyListings": "Mostrar mis anuncios",
+  "browse.showMyListingsHidden": "· {count} tuyos ocultos",
   "browse.sectionOpenCount": "{count} abiertos",
   "browse.sourceWithFx": "{source} · FX {fx}",
   "browse.submit": "Enviar",

@@ -785,6 +785,24 @@ export function formatPhoneNumberForDisplay(value: string): string {
   return getPhoneNumberDisplayParts(value).display;
 }
 
+const ISO_TO_PHONE_CC: Record<string, string> = (() => {
+  const m: Record<string, string> = {};
+  for (const [cc, iso] of Object.entries(PHONE_CC_TO_ISO)) {
+    if (!(iso in m)) m[iso] = cc; // first dial code wins per ISO (e.g. "1" → US)
+  }
+  return m;
+})();
+
+/** A national-format phone placeholder for a community's country (ISO alpha-2),
+ *  e.g. "KE" → "+254 712 345 678", "CM" → "+237 6 71 23 45 67". Null when we
+ *  have no dial-code rule for that country, so callers can fall back. */
+export function phonePlaceholderForCountryIso(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const cc = ISO_TO_PHONE_CC[iso.toUpperCase()];
+  if (!cc) return null;
+  return PHONE_LENGTH_RULES[cc]?.example ?? null;
+}
+
 /** Fully revealed phone number — for the settings reveal toggle and the
  *  active-trade reveal shown to the three participants. Unlike
  *  formatPhoneNumberForDisplay (flag-led, which drops the explicit +CC

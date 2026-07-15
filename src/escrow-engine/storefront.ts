@@ -55,6 +55,40 @@ export function childCommitsStock(child: EscrowState, now: number): boolean {
   return childIsLocked(child) || childIsHeld(child, now);
 }
 
+/** #63 storefront-vs-order clarity. A PARENT storefront is a multi-unit listing
+ *  (`stock` set) that is not itself a child — the persistent shopfront that
+ *  spawns child order escrows on each purchase. Pure display predicate. */
+export function isParentStorefront(s: EscrowState): boolean {
+  return s.stock !== undefined && s.parent === undefined;
+}
+
+/** #63 A CHILD order is one purchase spawned from a parent storefront — it
+ *  carries `parent` = the storefront's id. Pure display predicate. */
+export function isChildOrder(s: EscrowState): boolean {
+  return s.parent !== undefined;
+}
+
+/** #63 A child order that is LIVE for the seller to act on: funded (LOCKED)
+ *  but not yet settled. Drives the "orders in progress" list on the storefront
+ *  and the new-order notification. */
+export function isLiveChildOrder(s: EscrowState): boolean {
+  return isChildOrder(s) && s.status === EscrowStatus.LOCKED;
+}
+
+/** #70 A CHILD order that is still LIVE for the seller — any non-terminal child
+ *  (joined/CREATED, LOCKED, or mid-settlement APPROVED/CLAIMED). Broader than
+ *  isLiveChildOrder (LOCKED-only) on purpose: every open order can carry unread
+ *  chat + attention the seller must see, so the parent storefront can aggregate
+ *  ALL of them, not just the one funded order. Pure display predicate. */
+export function isActiveChildOrder(s: EscrowState): boolean {
+  return (
+    isChildOrder(s) &&
+    s.status !== EscrowStatus.COMPLETED &&
+    s.status !== EscrowStatus.CANCELLED &&
+    s.status !== EscrowStatus.EXPIRED
+  );
+}
+
 /** Units a child claims (defaults to 1 for legacy / malformed values, so a
  *  child can never silently free or over-consume stock). */
 function childClaim(child: EscrowState): number {

@@ -8,9 +8,12 @@ export const BOTTOM_NAV_HEIGHT = 64;
 
 // Bottom navigation — fixed at the viewport bottom. v0.2.0 will add
 // active-trade interception on tab tap; v0.1.85 is visual only.
-export function BottomNav({ active, onSelect }: {
+export function BottomNav({ active, onSelect, badges }: {
   active: Tab;
   onSelect: (t: Tab) => void;
+  /** Small red count badges per tab (e.g. Me = "needs you" items). Zero/absent
+   *  ⇒ no badge. */
+  badges?: Partial<Record<Tab, number>>;
 }) {
   const { t } = useT();
   const useSafeAreaInsets = shouldApplyCssSafeAreaInsets(getSignInEnvironment());
@@ -35,6 +38,7 @@ export function BottomNav({ active, onSelect }: {
       }}>
         {items.map(item => {
           const isActive = active === item.id;
+          const badge = badges?.[item.id] ?? 0;
           return (
             <button
               key={item.id}
@@ -51,9 +55,27 @@ export function BottomNav({ active, onSelect }: {
                 height: BOTTOM_NAV_HEIGHT,
                 borderTop: `2px solid ${isActive ? T.accent : "transparent"}`,
                 transition: "all 0.15s",
+                position: "relative",
               }}
             >
-              <span style={{ fontSize: 18, lineHeight: 1 }}>{item.icon}</span>
+              <span style={{ fontSize: 18, lineHeight: 1, position: "relative" }}>
+                {item.icon}
+                {badge > 0 && (
+                  <span
+                    aria-label={`${badge}`}
+                    style={{
+                      position: "absolute", top: -6, left: "calc(50% + 6px)",
+                      minWidth: 16, height: 16, padding: "0 4px",
+                      borderRadius: 8, background: T.red, color: "#fff",
+                      fontFamily: T.mono, fontSize: 10, fontWeight: 700,
+                      lineHeight: "16px", textAlign: "center",
+                      boxShadow: `0 0 0 2px ${T.surface}`,
+                    }}
+                  >
+                    {badge > 99 ? "99+" : badge}
+                  </span>
+                )}
+              </span>
               {item.label}
             </button>
           );

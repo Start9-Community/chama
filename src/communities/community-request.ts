@@ -73,7 +73,12 @@ export async function sendCommunityRequestToGlobalArbiters(
 
     for (const recipient of recipients) {
       try {
-        const encrypted = await signer.nip44Encrypt(message, recipient);
+        // kind:4 content must be NIP-04 ciphertext or external clients
+        // (where the arbiters read these) render a blank DM (bug #64).
+        if (!signer.nip04Encrypt) {
+          throw new Error("Your Nostr signer does not support NIP-04 encryption");
+        }
+        const encrypted = await signer.nip04Encrypt(message, recipient);
         const signed = await signer.signEvent({
           kind: COMMUNITY_REQUEST_KIND,
           created_at: createdAt,

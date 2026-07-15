@@ -50,6 +50,8 @@ export const browse: Record<string, string> = {
   "browse.realMoneyTrades": "REAL MONEY TRADES",
   "browse.reconnectTo": "Reconnect to {community} to see what's trading.",
   "browse.searchPlaceholder": "Search listings...",
+  "browse.showMyListings": "Show my listings",
+  "browse.showMyListingsHidden": "· {count} of yours hidden",
   "browse.sectionOpenCount": "{count} open",
   "browse.sourceWithFx": "{source} · FX {fx}",
   "browse.submit": "Submit",

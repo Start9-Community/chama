@@ -27,6 +27,8 @@ export function ActiveTradePill({
   trade,
   activeTradeCount = 1,
   activeTradeMsats,
+  actionMode = false,
+  actionCount = 0,
   onTap,
 }: {
   trade: EscrowState;
@@ -36,6 +38,13 @@ export function ActiveTradePill({
   /** Aggregate msats across money-moving buyer/seller trades. Open
    *  listings stay in Browse/Me and do not light this attention banner. */
   activeTradeMsats?: number;
+  /** Part ①: when the user has an item that NEEDS them to act (a buyer waiting,
+   *  an order to deliver, a vote/claim owed), the pill goes loud + actionable —
+   *  "N waiting · tap to act" in the accent colour — and taps route to the most
+   *  urgent item. Idle (no action) keeps the calm purple active-trade reading. */
+  actionMode?: boolean;
+  /** How many items need the user right now (drives the loud headline count). */
+  actionCount?: number;
   onTap: () => void;
 }) {
   const { t } = useT();
@@ -43,6 +52,9 @@ export function ActiveTradePill({
   const statusLabel = statusLabelKey ? t(statusLabelKey) : trade.status.toLowerCase();
   const count = Math.max(1, activeTradeCount);
   const amountMsats = activeTradeMsats ?? trade.amountMsats;
+  const nWaiting = Math.max(1, actionCount);
+  const tone = actionMode ? T.accent : T.purple;
+  const toneDim = actionMode ? T.accentDim : T.purpleDim;
   return (
     <button
       onClick={onTap}
@@ -51,7 +63,7 @@ export function ActiveTradePill({
         width: "calc(100% - 32px)",
         margin: "12px 16px 0",
         padding: "10px 14px",
-        background: T.purpleDim, border: `1px solid ${T.purple}66`,
+        background: toneDim, border: `1px solid ${tone}${actionMode ? "aa" : "66"}`,
         borderRadius: T.r,
         color: T.text, fontFamily: T.sans,
         cursor: "pointer", textAlign: "left" as const,
@@ -60,17 +72,19 @@ export function ActiveTradePill({
     >
       <span style={{
         width: 10, height: 10, borderRadius: "50%",
-        background: T.purple,
-        boxShadow: `0 0 8px ${T.purple}88`,
+        background: tone,
+        boxShadow: `0 0 8px ${tone}88`,
         animation: "pulse 2s ease-in-out infinite",
         flexShrink: 0,
       }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
-          fontSize: 11, color: T.purple, fontFamily: T.mono,
+          fontSize: 11, color: tone, fontFamily: T.mono,
           letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700,
         }}>
-          {count === 1 ? t("card.activeTradeOne") : t("card.activeTradeMany", { count })} · <BitcoinAmount msats={amountMsats} size={11} gap={3} glyphScale={1.18} /> {t("card.totalSuffix")}
+          {actionMode
+            ? t("card.needsYouPill", { count: nWaiting })
+            : <>{count === 1 ? t("card.activeTradeOne") : t("card.activeTradeMany", { count })} · <BitcoinAmount msats={amountMsats} size={11} gap={3} glyphScale={1.18} /> {t("card.totalSuffix")}</>}
         </div>
         <div style={{
           fontSize: 13, color: T.text, fontFamily: T.sans,

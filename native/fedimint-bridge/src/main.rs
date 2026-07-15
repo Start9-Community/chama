@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::extract::{Query, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{header::AUTHORIZATION, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -239,6 +239,20 @@ enum Command {
 
         #[arg(long)]
         invite_code: Option<String>,
+
+        /// Require `Authorization: Bearer <token>` on EVERY route, /health
+        /// included (it leaks federation/gateway info). Unset keeps the
+        /// current open localhost behavior (Tauri/Android shells unchanged).
+        /// Mandatory when binding beyond loopback — serve refuses to start
+        /// on a non-loopback address without it.
+        #[arg(long, env = "CHAMA_BRIDGE_AUTH_TOKEN")]
+        auth_token: Option<String>,
+
+        /// Exact origin allowed by CORS (repeatable, or comma-separated via
+        /// the env var). When set, replaces the permissive `Any` origin —
+        /// must include the app origin(s) that will call this bridge.
+        #[arg(long = "allowed-origin", env = "CHAMA_BRIDGE_ALLOWED_ORIGINS", value_delimiter = ',')]
+        allowed_origins: Vec<String>,
     },
 
     /// Join/open, print info, probe gateways, and create a tiny invoice.
@@ -712,8 +726,13 @@ async fn main() -> Result<()> {
                     .await?,
             )?;
         }
-        Command::Serve { bind, invite_code } => {
-            serve_bridge(bridge, bind, invite_code).await?;
+        Command::Serve {
+            bind,
+            invite_code,
+            auth_token,
+            allowed_origins,
+        } => {
+            serve_bridge(bridge, bind, invite_code, auth_token, allowed_origins).await?;
         }
         Command::Smoke {
             invite_code,
@@ -1754,6 +1773,50 @@ struct AppState {
     bridge: Bridge,
     client: Arc<Mutex<Option<ClientHandleArc>>>,
     discovery: Arc<Mutex<DiscoveryProbe>>,
+    /// When set, every route requires `Authorization: Bearer <token>`.
+    /// None keeps the historical open-localhost behavior.
+    auth_token: Option<Arc<str>>,
+}
+
+/// Byte-wise constant-time equality: examines every byte regardless of where
+/// the first mismatch sits, so response timing can't binary-search the token.
+/// The length check short-circuits, which leaks only the token's length —
+/// harmless for the high-entropy random tokens this protects.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Bearer-token gate for remote-bridge deployments. With no token configured
+/// this is a pass-through (Tauri/Android localhost sidecars, unchanged).
+async fn require_bearer_auth(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(expected) = state.auth_token.as_deref() else {
+        return next.run(request).await;
+    };
+
+    let presented = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim);
+
+    match presented {
+        Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => {
+            next.run(request).await
+        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "missing or invalid bridge auth token" })),
+        )
+            .into_response(),
+    }
 }
 
 fn amount_to_floor_sats(amount: Amount) -> u64 {
@@ -1888,16 +1951,40 @@ struct OnchainWithdrawRequest {
     no_wait: Option<bool>,
 }
 
-async fn serve_bridge(bridge: Bridge, bind: SocketAddr, invite_code: Option<String>) -> Result<()> {
+async fn serve_bridge(
+    bridge: Bridge,
+    bind: SocketAddr,
+    invite_code: Option<String>,
+    auth_token: Option<String>,
+    allowed_origins: Vec<String>,
+) -> Result<()> {
+    let auth_token: Option<Arc<str>> = auth_token
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+        .map(Arc::from);
+
+    // A token-less bridge is a drainable wallet to anyone who can reach the
+    // port. Loopback binds stay open (Tauri/Android sidecar behavior,
+    // unchanged); anything wider refuses to start without a token so a
+    // misconfigured remote deployment fails loud instead of exposing funds.
+    if auth_token.is_none() && !bind.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing to serve on non-loopback {bind} without --auth-token \
+             (CHAMA_BRIDGE_AUTH_TOKEN): an unauthenticated bridge is a drainable wallet"
+        );
+    }
+
     let probe_target = bridge.discovery_probe_target();
     let initial_probe = match &probe_target {
         Some(addr) => DiscoveryProbe::probing(addr),
         None => DiscoveryProbe::skipped("no PKARR resolver configured"),
     };
+    let auth_enabled = auth_token.is_some();
     let state = AppState {
         bridge,
         client: Arc::new(Mutex::new(None)),
         discovery: Arc::new(Mutex::new(initial_probe)),
+        auth_token,
     };
 
     // Boot-time readiness probe: confirm the device can actually reach the
@@ -1918,10 +2005,31 @@ async fn serve_bridge(bridge: Bridge, bind: SocketAddr, invite_code: Option<Stri
         *state.client.lock().await = Some(client);
     }
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(Any);
+    // CORS: exact-origin allowlist when configured (the remote "friend
+    // wallet" shape — must name the app origin), else the historical
+    // permissive localhost behavior. `allow_headers(Any)` covers the
+    // Authorization header the auth layer requires.
+    let cors = if allowed_origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers(Any)
+    } else {
+        let origins = allowed_origins
+            .iter()
+            .map(|origin| {
+                origin
+                    .trim()
+                    .trim_end_matches('/')
+                    .parse::<HeaderValue>()
+                    .with_context(|| format!("invalid --allowed-origin {origin:?}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers(Any)
+    };
     let app = Router::new()
         .route("/health", get(api_health))
         .route("/join", post(api_join))
@@ -1945,13 +2053,24 @@ async fn serve_bridge(bridge: Bridge, bind: SocketAddr, invite_code: Option<Stri
         .route("/onchain/await-deposit", post(api_await_onchain_deposit))
         .route("/onchain/withdraw-fees", post(api_onchain_withdraw_fees))
         .route("/onchain/withdraw", post(api_onchain_withdraw))
+        // Auth wraps every route (including /health — it leaks federation
+        // and gateway info). CORS is layered LAST so it sits OUTSIDE auth:
+        // browser preflight OPTIONS requests carry no Authorization header
+        // and must be answered by the CORS layer, never 401'd.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer_auth,
+        ))
         .layer(cors)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind {bind}"))?;
-    eprintln!("chama-fedimint-bridge listening on http://{bind}");
+    eprintln!(
+        "chama-fedimint-bridge listening on http://{bind} (auth: {})",
+        if auth_enabled { "bearer token required" } else { "none — localhost only" },
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -2048,6 +2167,7 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "effective_iroh_config",
             "discovery_probe",
             "pay_outcome_by_escrow",
+            "auth_token",
         ],
     }))
 }

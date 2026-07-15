@@ -14,8 +14,10 @@ import {
   getPhoneNumberSaveError,
   getPhoneNumberDisplayParts,
   getPhoneCountryHint,
+  phonePlaceholderForCountryIso,
   sanitizePhoneNumberForSave,
 } from "../../payments/saved-handles.js";
+import { getCommunityBySlug } from "../../communities/registry.js";
 import {
   type Rail,
   getRailByKey,
@@ -199,9 +201,15 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
   const phoneNetworkResults = filterRails(phoneNetworkOptions, phoneNetworkQuery)
     .slice(0, MAX_NETWORK_RESULTS);
   const phoneRail = getRailByKey(PHONE_NUMBER_RAIL);
-  const phonePlaceholder = localPhoneNetworkOptions.find(r =>
-    r.region?.includes(communitySlug) && r.placeholder?.startsWith("+")
-  )?.placeholder
+  // Prefer the user's OWN country dial code + national format (Kenya → +254 …,
+  // Cameroon → +237 …) so the placeholder always matches where they live — a
+  // region-matched or first-"+" rail could otherwise leak a foreign example
+  // (e.g. Brazil's +55) when no local phone rail is tagged for the community.
+  const communityCountryIso = getCommunityBySlug(communitySlug)?.countries?.[0] ?? null;
+  const phonePlaceholder = phonePlaceholderForCountryIso(communityCountryIso)
+    || localPhoneNetworkOptions.find(r =>
+      r.region?.includes(communitySlug) && r.placeholder?.startsWith("+")
+    )?.placeholder
     || localPhoneNetworkOptions.find(r => r.placeholder?.startsWith("+"))?.placeholder
     || phoneRail?.placeholder
     || "+254 712-345-678";

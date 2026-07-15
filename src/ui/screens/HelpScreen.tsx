@@ -11,7 +11,7 @@
 
 import { useState, type CSSProperties, type ReactNode, type MouseEvent } from "react";
 import { T } from "../theme.js";
-import { FAQ_INTRO, FAQ_SECTIONS, FAQ_GLOSSARY, FAQ_HELP, type FaqItem } from "../content/faq.js";
+import { getFaqIntro, getFaqSections, getFaqGlossary, FAQ_HELP, type FaqItem } from "../content/faq.js";
 import { isTauriRuntime } from "../sign-in-environment.js";
 import { openExternalUrl } from "../open-url.js";
 import { useT } from "../../i18n/index.js";
@@ -31,6 +31,10 @@ export function HelpScreen({ onBack }: { onBack: () => void }) {
   const { t } = useT();
   const [open, setOpen] = useState<string | null>(null);
   const toggle = (key: string) => setOpen(cur => (cur === key ? null : key));
+  // Resolved per render → follows the live language (useT re-renders on switch).
+  const faqIntro = getFaqIntro();
+  const faqSections = getFaqSections();
+  const faqGlossary = getFaqGlossary();
 
   // Focus-on-expand: when one answer is open, everything else recedes so the open
   // answer is the hero. Receded rows stay tappable — a tap collapses the current
@@ -111,11 +115,11 @@ export function HelpScreen({ onBack }: { onBack: () => void }) {
         fontFamily: T.sans, fontSize: 13, lineHeight: 1.6, color: T.muted,
         ...recede(focusMode),
       }}>
-        {FAQ_INTRO}
+        {faqIntro}
       </div>
 
       {/* Sections — accordion */}
-      {FAQ_SECTIONS.map(section => (
+      {faqSections.map(section => (
         <div key={section.id} style={{ marginBottom: 18 }}>
           <div style={{ ...sectionLabel, ...recede(focusMode) }}>{section.title}</div>
           <div style={cardWrap}>
@@ -164,8 +168,8 @@ export function HelpScreen({ onBack }: { onBack: () => void }) {
       <div style={{ marginBottom: 18, ...recede(focusMode) }}>
         <div style={sectionLabel}>{t("help.miniGlossary")}</div>
         <div style={{ ...cardWrap, padding: "6px 14px" }}>
-          {FAQ_GLOSSARY.map((g, i) => (
-            <div key={g.term} style={{ padding: "9px 0", borderBottom: i < FAQ_GLOSSARY.length - 1 ? `1px solid ${T.border}` : "none" }}>
+          {faqGlossary.map((g, i) => (
+            <div key={g.term} style={{ padding: "9px 0", borderBottom: i < faqGlossary.length - 1 ? `1px solid ${T.border}` : "none" }}>
               <span style={{ fontFamily: T.sans, fontSize: 13, fontWeight: 800, color: T.text }}>{g.term}</span>
               <span style={{ fontFamily: T.sans, fontSize: 12.5, lineHeight: 1.55, color: T.muted }}> — {g.def}</span>
             </div>

@@ -14,6 +14,7 @@ import {
   selectedMenuItemsTotalMsats,
 } from "../../escrow-engine/types.js";
 import { getWinner } from "../../escrow-engine/state-machine.js";
+import { isParentStorefront, isChildOrder } from "../../escrow-engine/storefront.js";
 import { payoutRecipientFor } from "../../escrow-engine/recipients.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
 import { getVoteLabel } from "../../labels/vote-labels.js";
@@ -51,7 +52,8 @@ import { bondedArbitersForCommunity } from "../../arbiters/live-chama.js";
 import type { VerifiedBond } from "../../bond-multisig/bond-announcement.js";
 import { counterpartyToRate, type RatingThumb, type AggregateRatings } from "../../reputation/ratings.js";
 import { RatingTap } from "../components/RatingTap.js";
-import { markChatRead, getLastReadChatAt, countUnreadChat } from "../../chat/unread.js";
+import { markChatRead, getLastReadChatAt, countUnreadChat, unreadChatForTrade } from "../../chat/unread.js";
+import { pickDefaultPane } from "./trade-pane.js";
 import { billTypeDisplay } from "../../communities/bill-types.js";
 import {
   hasStateBExplained,
@@ -102,6 +104,7 @@ export function TradeDetail({
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
   onPrewarmFunding, onRebroadcast, onForget, onPurchase, stockLeft, isOversoldOrder = false,
   onRateCounterparty, myGivenRatings, fetchRatingSummary, fetchCommunityBonds,
+  liveChildOrders, onOpenChild,
 }: {
   state: EscrowState; pubkey: string;
   /** User's home community slug — drives State A vs State B subtitle
@@ -220,6 +223,14 @@ export function TradeDetail({
    *  the parent's stock by lock order). Reliable only for the seller. Shows a
    *  refund banner. */
   isOversoldOrder?: boolean;
+  /** #63 storefront routing: live (LOCKED, unsettled) child orders spawned from
+   *  THIS parent storefront. Only meaningful when `state` is a parent storefront;
+   *  drives the "N orders in progress" section. Derived in App from
+   *  childrenByParent — undefined for non-storefront trades. */
+  liveChildOrders?: EscrowState[];
+  /** #63 open a child order's detail (deep-link from the storefront's live-orders
+   *  list). Wired to openEscrow in App. */
+  onOpenChild?: (childId: string) => void;
 }) {
   const { t } = useT();
   const btcPrice = useBitcoinPrice();
@@ -901,10 +912,20 @@ export function TradeDetail({
   // the terms (Details). Once LOCKED, the party who owes fiat lands on Details (who
   // to pay + the "You owe" headline); the receiver waits in Chat for the "sent" ping.
   // From the vote/claim/settle phase on, it's all coordination → Chat.
-  const defaultPane =
-    state.status === EscrowStatus.CREATED ? 1
-    : state.status === EscrowStatus.LOCKED && !titleDisputed && myRole != null && myRole === fiatPayerRole ? 1
-    : 0;
+  // #68 action-aware landing: land on the pane where the viewer's next action
+  // lives (Details for pre-lock config + fund/claim money actions; Chat for
+  // unread coordination) so nobody opens to a view with nothing to do. Pure
+  // helper (trade-pane.ts) so the rules are testable. The unread signal is read
+  // from device-local storage so it's stable at mount without depending on the
+  // chatReadAt state defined below.
+  const defaultPane = pickDefaultPane({
+    status: state.status,
+    myRole,
+    fiatPayerRole,
+    iAmWinner,
+    titleDisputed,
+    hasUnreadChat: unreadChatForTrade(state, myRole) > 0,
+  });
   const [activePane, setActivePane] = useState(defaultPane);
   // Snap to the leading pane on trade change only (not every status tick), so a
   // manual swipe within a trade isn't yanked back.
@@ -914,8 +935,28 @@ export function TradeDetail({
     // so onPagerScroll doesn't mistake it for a user swipe.
     userMovedPaneRef.current = false;
     programmaticTargetRef.current = defaultPane;
-    const el = pagerRef.current;
-    if (el) el.scrollLeft = defaultPane * el.clientWidth;
+    // #68 landing-race fix: on first mount the pager's clientWidth is frequently 0
+    // (not laid out yet), so `scrollLeft = pane * 0` silently no-ops and the view
+    // stays stuck on Chat — the exact "buyer joins a store/CBP and lands in an empty
+    // chat instead of the cart" bug. Apply the snap AFTER layout via rAF, retrying
+    // until the pager has a real width, so pre-lock config reliably lands on Details.
+    let raf = 0;
+    let tries = 0;
+    const snap = () => {
+      const el = pagerRef.current;
+      if (!el) return;
+      const w = el.clientWidth;
+      // Bounded retry: if the pager is still zero-width (hidden / not laid out),
+      // retry for at most ~30 frames (~0.5s) then give up — NEVER an unbounded
+      // per-frame loop (that would peg a CPU core on any mounted-but-hidden pager).
+      if (w === 0) {
+        if (tries++ < 30) raf = requestAnimationFrame(snap);
+        return;
+      }
+      if (Math.round(el.scrollLeft / w) !== defaultPane) el.scrollLeft = defaultPane * w;
+    };
+    raf = requestAnimationFrame(snap);
+    return () => { if (raf) cancelAnimationFrame(raf); };
   }, [state.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const goPane = (i: number) => {
     const clamped = Math.max(0, Math.min(PAGER_TABS.length - 1, i));
@@ -935,14 +976,19 @@ export function TradeDetail({
     const el = pagerRef.current;
     if (!el) return;
     const i = Math.round(el.scrollLeft / Math.max(1, el.clientWidth));
-    setActivePane(prev => (prev === i ? prev : i));
     // Tell our own smooth-scroll apart from a finger swipe: while a programmatic
-    // target is pending, ignore; the moment it settles, clear it. A horizontal
-    // scroll with NO pending target is the user swiping → they've taken control.
+    // target is pending, IGNORE transient positions (a layout-settle scroll to 0
+    // must not clobber activePane back to Chat — the #68 landing-race). Only clear
+    // the target once we've actually arrived. A horizontal scroll with NO pending
+    // target is the user swiping → they've taken control.
     if (programmaticTargetRef.current !== null) {
-      if (i === programmaticTargetRef.current) programmaticTargetRef.current = null;
+      if (i === programmaticTargetRef.current) {
+        programmaticTargetRef.current = null;
+        setActivePane(prev => (prev === i ? prev : i));
+      }
       return;
     }
+    setActivePane(prev => (prev === i ? prev : i));
     userMovedPaneRef.current = true;
   };
   // v4.1 lifecycle landing: when a trade goes LIVE (LOCKED), send the fiat payer to
@@ -996,7 +1042,17 @@ export function TradeDetail({
 
   // Vertical kicker over the nav title + on the Details pane header, so the
   // trade's vertical is obvious without inferring it from vote labels.
-  const verticalKicker = state.category === "marketplace"
+  // #63 storefront-vs-order clarity: a multi-unit PARENT reads as a storefront,
+  // a CHILD order reads as an order (with the buyer short-id) — so a seller can
+  // tell the persistent shopfront apart from a live sale at a glance. These win
+  // over the generic vertical kicker; everything else keeps its vertical.
+  const verticalKicker = isParentStorefront(state)
+    ? t("trade.kickerStorefront")
+    : isChildOrder(state)
+    ? (state.participants[Role.BUYER]
+        ? t("trade.kickerOrder", { buyer: shortParticipantPubkey(state.participants[Role.BUYER]!) })
+        : t("trade.kickerOrderNoBuyer"))
+    : state.category === "marketplace"
     ? t("trade.kickerMarketplace", { kind: state.fulfillment === "service" ? t("trade.kickerService") : state.fulfillment === "digital" ? t("trade.kickerDigital") : t("trade.kickerGoods") })
     : state.category === "p2p-trade" ? t("trade.kickerP2p")
     : state.category === "bill-pay" ? t("trade.kickerBillPay")
@@ -1127,6 +1183,68 @@ export function TradeDetail({
           <Badge status={statusKey} />
         </div>
       </div>
+
+      {/* #63 storefront routing: on a PARENT storefront, surface the live child
+          orders (funded, unsettled) so the seller can jump straight to the sale
+          they need to fulfill — instead of hunting for a second same-titled
+          trade. Only renders when we're on a storefront AND there are live
+          orders. Reuses App-derived liveChildOrders (childrenByParent). */}
+      {isParentStorefront(state) && (liveChildOrders?.length ?? 0) > 0 && (
+        <div style={{
+          border: `1px solid ${T.accent}33`,
+          background: T.accentDim,
+          borderRadius: 12,
+          padding: "10px 12px",
+          margin: "0 4px 16px",
+        }}>
+          <div style={{
+            color: T.accent, fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+            letterSpacing: 0.5, marginBottom: 8,
+          }}>
+            {t("trade.storefrontOrdersTitle", { count: liveChildOrders!.length })}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {liveChildOrders!.map((child) => {
+              const buyer = child.participants[Role.BUYER];
+              // #70 each order carries its OWN unread badge so the seller sees
+              // which of several concurrent orders has a new message.
+              const childUnread = unreadChatForTrade(child, Role.SELLER);
+              return (
+                <button
+                  key={child.id}
+                  onClick={() => onOpenChild?.(child.id)}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    gap: 8, width: "100%", textAlign: "left",
+                    background: T.surface, border: `1px solid ${T.border}`,
+                    borderRadius: 9, padding: "8px 10px", cursor: "pointer",
+                    color: T.text, fontFamily: T.sans, fontSize: 13, fontWeight: 600,
+                  }}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {t("trade.storefrontOrderRow", {
+                      buyer: buyer ? shortParticipantPubkey(buyer) : t("trade.buyer"),
+                    })}
+                  </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flex: "0 0 auto" }}>
+                    {childUnread > 0 && (
+                      <span aria-label={childUnread === 1 ? t("card.unreadMessageOne") : t("card.unreadMessageMany", { count: childUnread })} style={{
+                        display: "inline-flex", alignItems: "center",
+                        minWidth: 18, height: 18, padding: "0 5px", boxSizing: "border-box",
+                        borderRadius: 999, background: T.accent, color: "#fff",
+                        fontFamily: T.mono, fontSize: 9.5, fontWeight: 800, lineHeight: "18px",
+                      }}>
+                        💬 {childUnread > 9 ? "9+" : childUnread}
+                      </span>
+                    )}
+                    <span aria-hidden="true" style={{ color: T.accent }}>→</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Zone 1 — progress spine: Reserved → Locked → Settled. Stable stations so
           it's learnable; the middle node carries the deal's health (amber when

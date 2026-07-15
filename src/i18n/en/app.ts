@@ -35,7 +35,7 @@ export const app: Record<string, string> = {
     "Every trade your community has posted lives here. Tap a listing to see the deal and chat with the other side.",
   "app.coachBrowseTitle": "Browse the stores",
   "app.coachCreateBody":
-    "This ✎ button is always one tap away — swap cash for sats, pay a bill, sell something, or lend.",
+    "This ✎ button is always one tap away — swap cash for sats, pay a bill, or sell something.",
   "app.coachCreateTitle": "Start your own trade",
   "app.coachDashboardBody":
     "Your standing, stats, earnings, and ratings are coming here — the place that tracks how you're doing as you trade.",

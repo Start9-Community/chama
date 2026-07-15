@@ -340,9 +340,16 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
 
   const closeable = view.kind !== "working";
 
+  // Only treat a backdrop click as "dismiss" when the press STARTED on the
+  // backdrop. Otherwise a drag-select inside an input that happens to end on
+  // the backdrop (mousedown in field → mouseup outside) fires a click on the
+  // backdrop and wrongly closes the modal (the sneaky amount-select glitch).
+  const backdropPressRef = useRef(false);
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "#000c", zIndex: 9998, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
-      onClick={(e) => { if (e.target === e.currentTarget && closeable) onClose(); }}>
+      onMouseDown={(e) => { backdropPressRef.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (backdropPressRef.current && e.target === e.currentTarget && closeable) onClose(); backdropPressRef.current = false; }}>
       <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, borderRadius: T.r, width: "100%", maxWidth: 380, maxHeight: "90vh", overflow: "auto", padding: 20 }}>
         <Header onClose={onClose} closeable={closeable} />
 

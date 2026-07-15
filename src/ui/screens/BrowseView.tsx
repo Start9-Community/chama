@@ -8,6 +8,7 @@ import { ArbiterApplyForm } from "../components/ArbiterApplyForm.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
 import { type NostrProfileNameMap } from "../nostr-profiles.js";
 import { type AmountDisplayMode } from "../amount-display.js";
+import { getBrowseShowOwn, setBrowseShowOwn, filterOwnListings, countOwnListings } from "../browse-own-filter.js";
 import { useT } from "../../i18n/index.js";
 
 // v4.2.1: the arbiter / recruitment on-ramp is hidden for now — it pushes a
@@ -34,6 +35,7 @@ export function BrowseView({
   amountDisplayMode,
   matchingListings, nonMatchingListings,
   stockByListing,
+  orderIndicatorByListing,
   categoryCounts,
   fedimintJoined, pubkey,
   kind0Enabled = false, profileNames,
@@ -49,6 +51,9 @@ export function BrowseView({
   nonMatchingListings: EscrowState[];
   /** #7 Stage 3: derived "N left" per multi-unit parent listing id. */
   stockByListing?: Map<string, number>;
+  /** #70 per-parent live child-order count + aggregated unread chat, so a
+   *  seller's storefront card surfaces ALL its orders, not just its own chat. */
+  orderIndicatorByListing?: Map<string, { orders: number; unread: number }>;
   categoryCounts?: Record<string, number>;
   fedimintJoined: boolean;
   pubkey: string;
@@ -68,6 +73,12 @@ export function BrowseView({
   const [searchQuery, setSearchQuery] = useState("");
   const [showRecruit, setShowRecruit] = useState(false);
   const [customInviteInput, setCustomInviteInput] = useState("");
+  // Hide the viewer's OWN authored listings from Browse by default (they always
+  // live in Me). A toggle reveals them so they're visible in both places — the
+  // seller's choice. Persisted device-local. Buyers never author what they see,
+  // so this never affects a buyer's feed (filterOwnListings fails open).
+  const [showOwn, setShowOwnState] = useState<boolean>(() => getBrowseShowOwn());
+  const toggleShowOwn = () => setShowOwnState((v) => { const next = !v; setBrowseShowOwn(next); return next; });
 
   // v3.1.1: fade the floating action menu down while the list is scrolling so it
   // never sits opaque over a card the user is reading; back to full ~300ms after
@@ -86,16 +97,30 @@ export function BrowseView({
     return () => { window.removeEventListener("scroll", onScroll, true); if (t) clearTimeout(t); };
   }, []);
 
-  const totalListings = matchingListings.length + nonMatchingListings.length;
+  // Own-listing hide (default) happens BEFORE search/section grouping so counts
+  // and empty-states reflect what the viewer actually sees.
+  const ownHiddenCount = useMemo(
+    () => (showOwn ? 0 : countOwnListings(matchingListings, pubkey) + countOwnListings(nonMatchingListings, pubkey)),
+    [showOwn, matchingListings, nonMatchingListings, pubkey],
+  );
+  const ownFilteredMatching = useMemo(
+    () => filterOwnListings(matchingListings, pubkey, showOwn),
+    [matchingListings, pubkey, showOwn],
+  );
+  const ownFilteredNonMatching = useMemo(
+    () => filterOwnListings(nonMatchingListings, pubkey, showOwn),
+    [nonMatchingListings, pubkey, showOwn],
+  );
+  const totalListings = ownFilteredMatching.length + ownFilteredNonMatching.length;
   const homeCommunity = getCommunityBySlug(browseCommunity);
   const search = searchQuery.trim().toLowerCase();
   const filteredMatchingListings = useMemo(
-    () => matchingListings.filter((listing) => listingMatchesSearch(listing, search)),
-    [matchingListings, search],
+    () => ownFilteredMatching.filter((listing) => listingMatchesSearch(listing, search)),
+    [ownFilteredMatching, search],
   );
   const filteredNonMatchingListings = useMemo(
-    () => nonMatchingListings.filter((listing) => listingMatchesSearch(listing, search)),
-    [nonMatchingListings, search],
+    () => ownFilteredNonMatching.filter((listing) => listingMatchesSearch(listing, search)),
+    [ownFilteredNonMatching, search],
   );
   const matchingSections = useMemo(
     () => groupListingsByVertical(filteredMatchingListings),
@@ -331,6 +356,37 @@ export function BrowseView({
         })}
       </div>
 
+      {/* "Show my listings" toggle — own authored listings are hidden from
+          Browse by default (they always live in Me). Only shown when the viewer
+          actually has own listings to reveal, so a buyer's UI stays clean. */}
+      {(showOwn || ownHiddenCount > 0) && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <button
+            type="button"
+            onClick={toggleShowOwn}
+            aria-pressed={showOwn}
+            style={{
+              padding: "7px 11px", borderRadius: 18,
+              background: showOwn ? T.accentDim : T.surface,
+              border: `1px solid ${showOwn ? T.accent + "66" : T.border}`,
+              color: showOwn ? T.accent : T.muted,
+              fontFamily: T.mono, fontSize: 11, fontWeight: 700,
+              cursor: "pointer", transition: "all 0.15s",
+              whiteSpace: "nowrap" as const, letterSpacing: 0,
+              display: "inline-flex", alignItems: "center", gap: 6,
+            }}
+          >
+            <span>{showOwn ? "✓" : "＋"}</span>
+            <span>{t("browse.showMyListings")}</span>
+            {!showOwn && ownHiddenCount > 0 && (
+              <span style={{ color: T.muted }}>
+                {t("browse.showMyListingsHidden", { count: ownHiddenCount })}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
+
       {search && totalListings > 0 && filteredTotal === 0 && (
         <div style={{
           textAlign: "center", padding: "24px 16px",
@@ -383,6 +439,7 @@ export function BrowseView({
                     amountDisplayMode={amountDisplayMode}
                     quoteCurrency={quoteCurrency}
                     stockByListing={stockByListing}
+                    orderIndicatorByListing={orderIndicatorByListing}
                   />
                 ))
               ) : (
@@ -398,6 +455,7 @@ export function BrowseView({
                         amountDisplayMode={amountDisplayMode}
                         quoteCurrency={quoteCurrency}
                         stockLeft={stockByListing?.get(s.id)}
+                        orderIndicator={orderIndicatorByListing?.get(s.id)}
                       />
                     </div>
                   ))}
@@ -438,6 +496,7 @@ export function BrowseView({
                     amountDisplayMode={amountDisplayMode}
                     quoteCurrency={quoteCurrency}
                     stockByListing={stockByListing}
+                    orderIndicatorByListing={orderIndicatorByListing}
                   />
                 ))
               ) : (
@@ -454,6 +513,7 @@ export function BrowseView({
                         amountDisplayMode={amountDisplayMode}
                         quoteCurrency={quoteCurrency}
                         stockLeft={stockByListing?.get(s.id)}
+                        orderIndicator={orderIndicatorByListing?.get(s.id)}
                       />
                     </div>
                   ))}
@@ -603,6 +663,7 @@ function BrowseSection({
   amountDisplayMode,
   quoteCurrency,
   stockByListing,
+  orderIndicatorByListing,
 }: {
   section: BrowseListingSection;
   pubkey: string;
@@ -613,6 +674,7 @@ function BrowseSection({
   amountDisplayMode: AmountDisplayMode;
   quoteCurrency?: string | null;
   stockByListing?: Map<string, number>;
+  orderIndicatorByListing?: Map<string, { orders: number; unread: number }>;
 }) {
   const { t } = useT();
   return (
@@ -659,6 +721,7 @@ function BrowseSection({
               amountDisplayMode={amountDisplayMode}
               quoteCurrency={quoteCurrency}
               stockLeft={stockByListing?.get(s.id)}
+              orderIndicator={orderIndicatorByListing?.get(s.id)}
             />
           </div>
         ))}

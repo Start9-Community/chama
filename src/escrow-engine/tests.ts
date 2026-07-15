@@ -93,7 +93,28 @@ import {
   childCommitsStock,
   buildChildCreateParams,
   overcommittedChildren,
+  isParentStorefront,
+  isChildOrder,
+  isLiveChildOrder,
 } from "./storefront.js";
+import {
+  canRenewListing,
+  listingNeverFunded,
+  buildRenewCreateParams,
+  sellerIsBonded,
+  resolveListingTenure,
+  isSellerOwnedListing,
+  lapsedRenewableListings,
+  BONDED_TENURE_SECONDS,
+  UNBONDED_TENURE_SECONDS,
+} from "./listing-renewal.js";
+import {
+  isDueForRepost,
+  priorInstanceBlocks,
+  nextRepostAt,
+  RECURRENCE_PERIOD_SECONDS,
+  type CbpRecurrenceConfig,
+} from "./cbp-recurrence.js";
 import {
   arbiterPriorityOrder,
   arbiterPriorityOrderFor,
@@ -481,6 +502,8 @@ import {
 import {
   decideChamaBarLabel,
   decideVotePrompt,
+  selectNeedsYouTrades,
+  countNeedsYou,
 } from "../ui/decisions.js";
 import {
   estimateFiatForMsats,
@@ -578,7 +601,7 @@ import {
   assignablePool,
   assignableBondedArbiters,
 } from "../arbiters/exposure.js";
-import { notificationForTransition, chatNotificationFor } from "../notifications/trade-notifications.js";
+import { notificationForTransition, chatNotificationFor, buyerInterestNotificationFor, newListingNotificationFor } from "../notifications/trade-notifications.js";
 import { catchUpPrev, readSeenStatus, recordSeenStatus } from "../notifications/notify-service.js";
 import {
   RATING_KIND,
@@ -1643,6 +1666,121 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
     "spawn→count: every spawned child references the parent listing");
 }
 
+// 3k.3b. Store permanence (#49) — renewable listings (Tier 1) + bond-gated
+// tenure (Tier 3). Pure predicates: who may renew, what a re-publish carries,
+// and how the bond resolves tenure WITHOUT ever extending the trade timeout.
+{
+  const NOW_S = Math.floor(NOW / 1000);
+  const listingRes = applyEvent(null, makeParsedEvent(EscrowEventKind.CREATE, SELLER_PK, {
+    type: "escrow:create", description: "Fresh mangoes — 1kg", amountMsats: 20_000_000,
+    fiatAmount: 3, fiatCurrency: "USD", category: "marketplace", mintUrl: "fed11qstore",
+    platformFeeBps: 50, platformFeePubkey: PLATFORM_PK, arbiterFeeMsats: 1_000_000,
+    paymentMethods: ["Cash"], expirySeconds: 86400, communityArbiters: [ARBITER_PK],
+    fulfillment: "physical", stock: 4, country: "KE", createdAt: NOW,
+  }));
+  assertOk(listingRes, "store: seller's marketplace listing applies");
+  if (listingRes.ok) {
+    const listing = listingRes.state;
+    const lapsedAt = listing.expiresAt + 10;
+    // Ownership gate.
+    assert(isSellerOwnedListing(listing, SELLER_PK), "store: the seller owns their own listing");
+    assert(!isSellerOwnedListing(listing, BUYER_PK), "store: a non-seller can't renew it");
+    assert(!isSellerOwnedListing({ ...listing, parent: "parent_A" } as EscrowState, SELLER_PK),
+      "store: a CHILD order is never a renewable storefront");
+    // Unfunded gate.
+    assert(listingNeverFunded(listing), "store: a CREATED, never-locked listing is unfunded");
+    assert(!listingNeverFunded({ ...listing, lock: { ...listing.lock, lockedAt: NOW_S } } as EscrowState),
+      "store: an ever-LOCKED listing is funded — never renewable");
+    assert(!listingNeverFunded({ ...listing, status: EscrowStatus.CANCELLED } as EscrowState),
+      "store: a CANCELLED (seller-deleted) listing is not renewable");
+    // Renew eligibility keys off lapse (or lead window), owner, unfunded.
+    assert(!canRenewListing(listing, SELLER_PK, NOW_S),
+      "store: a fresh listing far from lapse is not yet renewable");
+    assert(canRenewListing(listing, SELLER_PK, lapsedAt),
+      "store: the seller's own lapsed unfunded listing is renewable");
+    assert(!canRenewListing(listing, BUYER_PK, lapsedAt),
+      "store: only the seller may renew, even once lapsed");
+    // Manual-card feed: only truly-lapsed listings.
+    const lapsedList = lapsedRenewableListings([listing], SELLER_PK, lapsedAt);
+    assert(lapsedList.length === 1 && lapsedList[0].id === listing.id,
+      "store: lapsedRenewableListings surfaces the seller's lapsed store");
+    assert(lapsedRenewableListings([listing], SELLER_PK, NOW_S).length === 0,
+      "store: a not-yet-lapsed listing isn't on the manual-renew card");
+    // Re-publish params: identical terms, NO longer expiry (trade timeout stays).
+    const rp = buildRenewCreateParams(listing);
+    assert(rp.description === listing.description && rp.amountMsats === 20_000_000,
+      "store: renew params carry the same description + amount");
+    assert(rp.category === "marketplace" && rp.mintUrl === "fed11qstore" && rp.country === "KE",
+      "store: renew params carry the same fed + self-describing country");
+    assert(rp.stock === 4, "store: renew params preserve the storefront stock");
+    assert(!("expirySeconds" in rp),
+      "store: renew NEVER stamps a longer expiry — the trade timeout stays ~24h (Tier 2 deferred)");
+    assert(JSON.stringify(rp.communityArbiters) === JSON.stringify([ARBITER_PK]),
+      "store: renew params carry the arbiter pool");
+  }
+  // Tier 3 bond gate: funded+active 38135 ≥ floor ⇒ bonded ⇒ auto-renew + 7d.
+  const bonds = [
+    { npub: SELLER_PK, community: "ke-kes", address: "a", lockUntil: 999, actualSats: 50_000n, claimedSats: 50_000n, funded: true, active: true },
+  ];
+  assert(sellerIsBonded(bonds, SELLER_PK), "store: a funded+active bond ≥ floor makes the seller bonded");
+  assert(!sellerIsBonded(bonds, BUYER_PK), "store: another npub isn't bonded off the seller's bond");
+  assert(!sellerIsBonded([{ ...bonds[0], funded: false }], SELLER_PK),
+    "store: an unfunded bond announcement doesn't grant tenure");
+  assert(!sellerIsBonded([{ ...bonds[0], actualSats: 1_000n }], SELLER_PK),
+    "store: a sub-floor bond doesn't grant tenure");
+  const bondedT = resolveListingTenure({ bonded: true });
+  const unbondedT = resolveListingTenure({ bonded: false });
+  assert(bondedT.autoRenew && bondedT.maxTenureSeconds === BONDED_TENURE_SECONDS,
+    "store: bonded ⇒ auto-renew + 7-day store horizon");
+  assert(!unbondedT.autoRenew && unbondedT.maxTenureSeconds === UNBONDED_TENURE_SECONDS,
+    "store: unbonded ⇒ manual renew only + 24h horizon");
+}
+
+// 3k.5. MONTHLY CBP RECURRENCE — the pure cadence + anti-stacking gates. A
+// recurring bill re-posts ~monthly (RE-PUBLISH, no sats), online-gated, no bond.
+// These gates decide WHEN a re-post fires and WHEN it must NOT (never pile up
+// unpaid rent bills). Storage round-trips aren't tested here (localStorage
+// bookkeeping mirrors trade-index) — the decisions are the load-bearing part.
+{
+  const T0 = 1_700_000_000; // fixed epoch-seconds anchor for this block
+  const cfg: CbpRecurrenceConfig = {
+    seriesId: "series_A", community: "ke-kes",
+    lastPostId: "post_1", lastPostAt: T0, createdAt: T0, active: true,
+  };
+  // Cadence: not due before 30 days, due at/after.
+  assert(!isDueForRepost(cfg, T0 + RECURRENCE_PERIOD_SECONDS - 10),
+    "cbp: a series isn't due before the ~30-day cadence elapses");
+  assert(isDueForRepost(cfg, T0 + RECURRENCE_PERIOD_SECONDS),
+    "cbp: a series is due once the 30-day cadence elapses");
+  assert(!isDueForRepost({ ...cfg, active: false }, T0 + RECURRENCE_PERIOD_SECONDS * 2),
+    "cbp: a cancelled (inactive) series never re-posts, however overdue");
+  assert(nextRepostAt(cfg) === T0 + RECURRENCE_PERIOD_SECONDS,
+    "cbp: nextRepostAt = lastPostAt + 30 days");
+  // Anti-stacking: block while the prior instance is still LIVE (non-terminal).
+  const live = new Map<string, EscrowState>([
+    ["post_1", { status: EscrowStatus.CREATED } as EscrowState],
+  ]);
+  const funded = new Map<string, EscrowState>([
+    ["post_1", { status: EscrowStatus.LOCKED } as EscrowState],
+  ]);
+  const done = new Map<string, EscrowState>([
+    ["post_1", { status: EscrowStatus.COMPLETED } as EscrowState],
+  ]);
+  const lapsed = new Map<string, EscrowState>([
+    ["post_1", { status: EscrowStatus.EXPIRED } as EscrowState],
+  ]);
+  assert(priorInstanceBlocks(cfg, live),
+    "cbp: a still-open (CREATED) prior instance blocks a re-post — no stacking");
+  assert(priorInstanceBlocks(cfg, funded),
+    "cbp: an in-flight (LOCKED) prior instance blocks a re-post — no stacking");
+  assert(!priorInstanceBlocks(cfg, done),
+    "cbp: a paid (COMPLETED) prior instance no longer blocks — this month can post");
+  assert(!priorInstanceBlocks(cfg, lapsed),
+    "cbp: a lapsed (EXPIRED) prior instance no longer blocks");
+  assert(!priorInstanceBlocks(cfg, new Map()),
+    "cbp: an unloaded prior instance (aged off) doesn't block — cadence ≫ 24h expiry");
+}
+
 // 3k.4. #7 Stage 6 — concurrency + replay sweep. The races the design flagged
 // as highest-risk: two buyers on the last unit, a refund freeing stock back, an
 // expired hold freeing a reservation, partial sell-through, sold-out, and
@@ -1707,6 +1845,14 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
   // A multi-quantity child commits all its claimed units at once.
   assert(remainingStock(parent, [child(EscrowStatus.LOCKED, 2)], t) === 1, "Stage 6: a child claiming 2 units decrements by 2");
   assert(remainingStock(parent, [child(EscrowStatus.LOCKED, 5)], t) === 0, "Stage 6: an over-claiming child still floors at 0");
+
+  // #63 storefront-vs-order display predicates: the parent (stock, no parent)
+  // reads as a storefront; a spawned child (parent set) reads as an order; a
+  // LOCKED child is the live order the seller routes to.
+  assert(isParentStorefront(parent) && !isChildOrder(parent), "#63: a multi-unit parent is a storefront, not an order");
+  assert(isChildOrder(child(EscrowStatus.LOCKED, 1)) && !isParentStorefront(child(EscrowStatus.LOCKED, 1)), "#63: a spawned child is an order, not a storefront");
+  assert(isLiveChildOrder(child(EscrowStatus.LOCKED, 1)), "#63: a LOCKED child is a live order");
+  assert(!isLiveChildOrder(child(EscrowStatus.CREATED, 1)), "#63: an unfunded (CREATED) child is not yet a live order");
 }
 
 // 3k.5. #7 seller overcommit refund — which LOCKED children are oversold,
@@ -3605,8 +3751,33 @@ console.log("\n── CHAT ──");
   const expiredSlotPayload = JSON.parse(expiredSlotCaptured.content) as ChatPayload;
   assert(!!expiredSlotPayload.bodyEnvelope?.encryptedFor[SELLER_PK],
     "Seller chat still encrypts to the active seller");
-  assert(!expiredSlotPayload.bodyEnvelope?.encryptedFor[expiredBuyer],
-    "Expired buyer JOIN slot is not included in new chat recipients");
+  // Doctrine change (named-participants ∪ self): the JOIN hold governs who may
+  // LOCK, never who may READ their own conversation. A buyer whose hold lapsed
+  // but who still occupies the named slot stays a chat recipient (excluding
+  // them silently dropped an expired-hold AUTHOR's own messages on reload).
+  // Once a replacement buyer takes the slot, the old one drops out naturally.
+  assert(!!expiredSlotPayload.bodyEnvelope?.encryptedFor[expiredBuyer],
+    "Expired-hold buyer still in the named slot remains a chat recipient (hold gates LOCK, not read)");
+  const replacedBuyer = "44".repeat(32);
+  const replacedBuyerState = {
+    ...expiredBuyerState,
+    id: expiredBuyerState.id + "_replaced",
+    participants: { ...expiredBuyerState.participants, [Role.BUYER]: replacedBuyer },
+  } as EscrowState;
+  let replacedSlotPublishedChat: NostrEvent | null = null;
+  (expiredSlotChatClient as any).states.set(replacedBuyerState.id, replacedBuyerState);
+  (expiredSlotChatClient as any).relayManager.publish = async (event: NostrEvent) => {
+    replacedSlotPublishedChat = event;
+    return { accepted: 1, rejected: 0, errors: [] };
+  };
+  await expiredSlotChatClient.sendChat(replacedBuyerState.id, "only the current parties read this");
+  const replacedSlotPayload = JSON.parse(
+    (replacedSlotPublishedChat as unknown as NostrEvent).content,
+  ) as ChatPayload;
+  assert(!replacedSlotPayload.bodyEnvelope?.encryptedFor[expiredBuyer],
+    "A REPLACED buyer (no longer the named slot) is not a chat recipient");
+  assert(!!replacedSlotPayload.bodyEnvelope?.encryptedFor[replacedBuyer],
+    "The replacement buyer in the named slot is a chat recipient");
 
   // v3.1.1 (chat-safety, FIX 1 regression): the sent chat raw MUST be persisted
   // to the durable rawEvents cache. CHAT is intentionally NOT in eventChain, so
@@ -4800,6 +4971,11 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     async nip44Decrypt(ciphertext: string) {
       return ciphertext;
     },
+    // kind:4 DMs must be NIP-04-encrypted (bug #64) — the request path
+    // uses this, never nip44Encrypt.
+    async nip04Encrypt(plaintext: string, recipientPubkey: string) {
+      return `nip04:${recipientPubkey}:${plaintext}`;
+    },
   };
   const requestResult = await sendCommunityRequestToGlobalArbiters({
     requestedChama: "Cameroon",
@@ -4815,6 +4991,8 @@ console.log("\n── COMMUNITY REGISTRY + STORAGE ──");
     "Country request DMs publish as kind 4 events with deterministic test time");
   assert(publishedRequests.every(e => e.tags.some(t => t[0] === "chama" && t[1] === "community-request")),
     "Country request DMs carry a Chama request tag");
+  assert(publishedRequests.every(e => e.content.startsWith("nip04:")),
+    "Country request kind:4 DMs are NIP-04-encrypted, never NIP-44 (bug #64)");
 }
 
 // ── 14b. PERMISSIONLESS COMMUNITY ADDITION (v0.1.85) ─────────────────────
@@ -15752,6 +15930,11 @@ console.log("\n── SIGN-IN OPTION ENVIRONMENT GATE ──");
   }
   assert(nip04EncryptRefused,
     "NIP-46 adapter refuses to downgrade encryption to NIP-04");
+  // Explicit NIP-04 for kind:4 DMs is NOT the downgrade path — the adapter
+  // exposes it separately, with the same (plaintext, pubkey) → bunker
+  // (pubkey, plaintext) arg flip as nip44 (bug #64).
+  assert(await nip04Only.nip04Encrypt!("dm-text", SELLER_PK) === `nip04:${SELLER_PK}:dm-text`,
+    "NIP-46 adapter nip04Encrypt flips args to bunker (pubkey, plaintext)");
   let nip04DecryptRefused = false;
   try {
     await nip04Only.nip44Decrypt("cipher", SELLER_PK);
@@ -18738,6 +18921,109 @@ console.log("\n── DM / trade-chat notifications (chatNotificationFor) ──
     "sender role comes from participants (pubkey), not the self-declared payload role");
 }
 
+// ── Liquidity & attention: buyer-interest + new-listing notification deciders ──
+console.log("\n── Liquidity & attention (buyerInterest / newListing / needsYou) ──");
+{
+  const BUYER = "11".repeat(32);
+  const BUYER2 = "77".repeat(32);
+  const SELLER = "22".repeat(32);
+  const ARB = "33".repeat(32);
+  const STRANGER = "44".repeat(32);
+  const LIVE = 1_700_000_000;
+  const HOME = "ke-kes";
+
+  const mk = (over: Partial<EscrowState>): EscrowState => ({
+    id: "sm_liq_0001",
+    category: "marketplace",
+    status: EscrowStatus.CREATED,
+    participants: { [Role.BUYER]: null, [Role.SELLER]: SELLER, [Role.ARBITER]: null },
+    votes: {},
+    resolvedOutcome: null,
+    communityArbiters: [ARB],
+    community: HOME,
+    createdAt: LIVE + 5,
+    ...over,
+  }) as EscrowState;
+
+  // ── buyerInterestNotificationFor ──
+  // Case A: a fresh child order on my storefront (prev undefined) → seller buzzes.
+  const child = mk({ id: "sm_child_01", parent: "sm_parent_01" });
+  const iA = buyerInterestNotificationFor(undefined, child, SELLER, LIVE);
+  assert(iA?.tag === "sm_child_01:interest", "buyer-interest: a fresh child order buzzes the seller");
+  // Not the seller → nothing.
+  assert(buyerInterestNotificationFor(undefined, child, STRANGER, LIVE) === null,
+    "buyer-interest: only the seller is buzzed on a child order");
+  // Backlog child (created before live-since) stays silent.
+  const oldChild = mk({ id: "sm_child_02", parent: "sm_parent_01", createdAt: LIVE - 10 });
+  assert(buyerInterestNotificationFor(undefined, oldChild, SELLER, LIVE) === null,
+    "buyer-interest: a child created before live-since is backlog, no buzz");
+  // Already-seen child (prev present) never re-buzzes.
+  assert(buyerInterestNotificationFor(child, child, SELLER, LIVE) === null,
+    "buyer-interest: an already-seen child never re-buzzes");
+
+  // Case B: a JOIN hold lands on my own single listing → seller buzzes (per buyer).
+  const held = mk({ joinHolds: { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER, joinedAt: LIVE + 10, expiresAt: LIVE + 9000, eventId: "j1" } } });
+  const iB = buyerInterestNotificationFor(mk({}), held, SELLER, LIVE);
+  assert(iB?.tag === `sm_liq_0001:interest:${BUYER}`, "buyer-interest: a JOIN hold buzzes the seller, tagged by buyer");
+  // Same buyer already held in prev → no re-buzz.
+  assert(buyerInterestNotificationFor(held, held, SELLER, LIVE) === null,
+    "buyer-interest: the same buyer's hold doesn't re-buzz");
+  // A different buyer re-buzzes (fire-once per buyer).
+  const held2 = mk({ joinHolds: { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER2, joinedAt: LIVE + 20, expiresAt: LIVE + 9000, eventId: "j2" } } });
+  assert(buyerInterestNotificationFor(held, held2, SELLER, LIVE)?.tag === `sm_liq_0001:interest:${BUYER2}`,
+    "buyer-interest: a different buyer's hold re-buzzes");
+  // Backlog hold (joinedAt < live-since) stays silent.
+  const oldHold = mk({ joinHolds: { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER, joinedAt: LIVE - 5, expiresAt: LIVE + 9000, eventId: "j3" } } });
+  assert(buyerInterestNotificationFor(mk({}), oldHold, SELLER, LIVE) === null,
+    "buyer-interest: a hold older than live-since is backlog, no buzz");
+  // A LOCKED order is a funded sale (the transition core owns it) — not interest.
+  assert(buyerInterestNotificationFor(mk({}), mk({ status: EscrowStatus.LOCKED }), SELLER, LIVE) === null,
+    "buyer-interest: a LOCKED trade is a sale, not pre-lock interest");
+
+  // ── newListingNotificationFor ──
+  const listing = mk({ id: "sm_new_01" });
+  const n1 = newListingNotificationFor(undefined, listing, STRANGER, HOME, "Kenya · KES", LIVE);
+  assert(n1?.tag === "sm_new_01:newlisting", "new-listing: a fresh home-chama listing buzzes a non-owner");
+  assert(/Kenya/.test(n1?.body ?? ""), "new-listing: body carries the friendly community name");
+  // My own listing (I'm the seller) → never.
+  assert(newListingNotificationFor(undefined, listing, SELLER, HOME, "Kenya · KES", LIVE) === null,
+    "new-listing: my own listing never buzzes me");
+  // Foreign community → never.
+  assert(newListingNotificationFor(undefined, mk({ id: "sm_new_02", community: "ng-ngn" }), STRANGER, HOME, "Kenya · KES", LIVE) === null,
+    "new-listing: a listing in another chama doesn't ping my home");
+  // No explicit home → never.
+  assert(newListingNotificationFor(undefined, listing, STRANGER, null, "", LIVE) === null,
+    "new-listing: no explicit home ⇒ no ping");
+  // Backlog listing → never.
+  assert(newListingNotificationFor(undefined, mk({ id: "sm_new_03", createdAt: LIVE - 10 }), STRANGER, HOME, "Kenya · KES", LIVE) === null,
+    "new-listing: a listing created before live-since is backlog");
+  // Already seen (prev present) → never (only a brand-new sighting is "new").
+  assert(newListingNotificationFor(listing, listing, STRANGER, HOME, "Kenya · KES", LIVE) === null,
+    "new-listing: an already-seen listing never re-buzzes");
+  // A child order isn't a listing.
+  assert(newListingNotificationFor(undefined, mk({ id: "sm_new_04", parent: "p" }), STRANGER, HOME, "Kenya · KES", LIVE) === null,
+    "new-listing: a child order is not a listing");
+
+  // ── selectNeedsYouTrades / countNeedsYou (Part ① attention set) ──
+  const nowSec = LIVE + 100;
+  const claim = mk({ id: "t_claim", status: EscrowStatus.APPROVED, resolvedOutcome: Outcome.RELEASE,
+    participants: { [Role.BUYER]: BUYER, [Role.SELLER]: SELLER, [Role.ARBITER]: ARB },
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.RELEASE }, expiresAt: nowSec + 9000 });
+  const vote = mk({ id: "t_vote", status: EscrowStatus.LOCKED,
+    participants: { [Role.BUYER]: BUYER, [Role.SELLER]: SELLER, [Role.ARBITER]: ARB },
+    votes: {}, expiresAt: nowSec + 9000 });
+  const waiting = mk({ id: "t_wait", status: EscrowStatus.CREATED,
+    joinHolds: { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER, joinedAt: nowSec - 5, expiresAt: nowSec + 9000, eventId: "jw" } } });
+  const idle = mk({ id: "t_idle", status: EscrowStatus.CREATED }); // no hold, no action
+  const ordered = selectNeedsYouTrades({ escrows: [waiting, claim, vote, idle], userPubkey: SELLER, nowSec });
+  assert(ordered.map((e) => e.id).join(",") === "t_claim,t_vote,t_wait",
+    "needs-you: ordered most-urgent first (claim → vote → waiting), idle listing excluded");
+  assert(countNeedsYou({ escrows: [waiting, claim, vote, idle], userPubkey: SELLER, nowSec }) === 3,
+    "needs-you: count matches the attention set size");
+  assert(countNeedsYou({ escrows: [waiting, claim, vote, idle], userPubkey: STRANGER, nowSec }) === 0,
+    "needs-you: a non-participant has zero attention items");
+}
+
 // ── Ratings primitive (kind:38123) — the reputation keystone ──
 console.log("\n── Ratings primitive (kind:38123) ──");
 {
@@ -20132,6 +20418,28 @@ console.log("\n── ARBITER PREMIUM (compute + kind 38113 + ledger) ──");
   const badAmt = ap.computeArbiterPremium(slice({ amountMsats: 0 }), BUYER_PK);
   assert(!badAmt.payable && badAmt.reason === "bad-amount",
     "premium: zero/invalid amount → bad-amount");
+
+  // ── E1.1 funder-side invoice fold ──
+  // The funding invoice carries lock + funderPremiumMsats so the wallet
+  // retains the premium after the (decoupled) lock spend. Predicted from
+  // the CREATE-stamped bondedArbiters (the seat isn't taken until LOCK).
+  assert(ap.funderPremiumMsats(slice(), 1_000_000_000) === 2_500_000,
+    "premium/E1.1: funder fold on a 1M-sat lock = 2,500 sats (whole-sat msats)");
+  assert(ap.funderPremiumMsats(slice(), 5_500_000) === 13_000,
+    "premium/E1.1: the field-failure trade (5,500 sats) folds a 13-sat premium");
+  assert(ap.funderPremiumMsats(slice({ bondedArbiters: [] }), 1_000_000_000) === 0
+    && ap.funderPremiumMsats(slice({ bondedArbiters: undefined }), 1_000_000_000) === 0,
+    "premium/E1.1: no bonded stamp → no fold (OG/pre-2B trades unchanged)");
+  assert(ap.funderPremiumMsats(slice(), 3_600_000) === 0,
+    "premium/E1.1: below the 10-sat note floor → no fold");
+  assert(ap.funderPremiumMsats(slice(), 0) === 0 && ap.funderPremiumMsats(slice(), NaN) === 0,
+    "premium/E1.1: zero/invalid lock amount → no fold");
+  // Residue-covers-sweep invariant: when the lock amount equals the trade
+  // amount, the folded residue equals EXACTLY what the settle sweep spends.
+  const sweepSide = ap.computeArbiterPremium(slice({ amountMsats: 5_500_000 }), BUYER_PK);
+  assert(sweepSide.payable && sweepSide.payable
+    && ap.funderPremiumMsats(slice(), 5_500_000) === sweepSide.amountMsats,
+    "premium/E1.1: folded residue == the sweep's spend (funder can always pay)");
 
   // ── selection helpers ──
   const mkTrade = (id: string, status: EscrowStatus, over: Record<string, unknown> = {}) =>

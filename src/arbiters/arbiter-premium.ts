@@ -108,6 +108,30 @@ export function computeArbiterPremium(
 }
 
 /**
+ * E1.1 funder side: the premium to FOLD INTO the funding invoice so the
+ * wallet retains a residue after the lock spend (the trade flows
+ * otherwise drain wallets to ~zero — the E1 field failure).
+ *
+ * At funding time the arbiter seat is not yet taken (LOCK seats it), so
+ * this predicts eligibility from the CREATE-stamped bondedArbiters: the
+ * lock builder prefers exactly that subset, so a non-empty stamp means a
+ * bonded seat. A wrong prediction merely leaves the funder a few sats of
+ * dust in their own wallet. Returns whole-sat msats, or 0 when no
+ * premium applies (no stamp / below the note floor / bad amount).
+ */
+export function funderPremiumMsats(
+  state: Pick<EscrowState, "bondedArbiters">,
+  lockAmountMsats: number,
+): number {
+  if ((state.bondedArbiters ?? []).length === 0) return 0;
+  if (!Number.isFinite(lockAmountMsats) || lockAmountMsats <= 0) return 0;
+  const sats = Math.floor(
+    calculateBasisPointFeeMsats(lockAmountMsats, PER_SIDE_PREMIUM_BPS) / 1000,
+  );
+  return sats < PREMIUM_MIN_NOTE_SATS ? 0 : sats * 1000;
+}
+
+/**
  * Pick the COMPLETED trades on which `myPubkey` still owes a premium.
  * `hasOutboxRecord` is the durable idempotence gate (paid / declined /
  * sending records all block a re-pay). Pure — the App sweep feeds it the

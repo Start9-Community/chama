@@ -100,6 +100,18 @@ export function adaptNIP46BunkerSigner(bunkerSigner: BunkerSignerLike): Signer {
       }
       return bunkerSigner.nip44Decrypt(senderPubkey, ciphertext);
     },
+    // kind:4 DMs only — NOT a NIP-44 downgrade path: kind:4 content is
+    // NIP-04 by spec, and escrow payloads never route through this.
+    // Note the arg flip: Chama's Signer is (plaintext, pubkey); the
+    // nostr-tools BunkerSigner is (thirdPartyPubkey, plaintext).
+    nip04Encrypt: async (plaintext: string, recipientPubkey: string) => {
+      if (!bunkerSigner.nip04Encrypt) {
+        throw new Error(
+          "Your remote signer (NIP-46 bunker) does not support NIP-04 encryption.",
+        );
+      }
+      return bunkerSigner.nip04Encrypt(recipientPubkey, plaintext);
+    },
   };
 }
 

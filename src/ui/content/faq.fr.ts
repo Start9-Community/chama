@@ -1,0 +1,96 @@
+// French FAQ content — a full translation of faq.en.ts (same shape: same section
+// ids, same q/step counts). Voice + terminology mirror docs/FAQ.fr.md and the
+// app's locked FR glossary (src/i18n/fr/*).
+import type { FaqContent } from "./faq-types.js";
+
+export const faqFr: FaqContent = {
+  intro:
+    "Chama est une place de marché où vous échangez avec votre communauté grâce au Bitcoin — sans avoir besoin de comprendre le Bitcoin. Un chama est une tontine d'Afrique de l'Est : des voisins qui mettent en commun ce qu'ils ont et se font confiance pour régler les comptes. Ici, la confiance est cryptographique, et il n'y a aucune entreprise au milieu — juste vous, votre interlocuteur, votre communauté et Nostr.",
+  sections: [
+    {
+      id: "basics",
+      title: "L'essentiel",
+      items: [
+        { q: "Qu'est-ce que Chama ?", a: "Une place de marché pair-à-pair. Vous pouvez acheter et vendre des bitcoins, des biens et des services avec les gens de votre communauté. Chaque échange est protégé par un séquestre qu'aucune entreprise ne peut geler, saisir ou bloquer — car il n'y a aucune entreprise au milieu." },
+        { q: "Dois-je connaître le Bitcoin ?", a: "Non. Vous choisissez votre pays et votre monnaie, vous échangez, et (dans les pays pris en charge) votre argent peut arriver directement sur votre compte d'argent mobile comme M-Pesa. Le Bitcoin, c'est la tuyauterie ; vous n'avez pas à y penser." },
+        { q: "Chama est-il gratuit ? Quels sont les frais ?", a: "L'application est gratuite à télécharger, et Chama lui-même ne prend aucune commission — il est non-dépositaire, donc aucune entreprise ne s'interpose entre vous et votre argent. Sur un échange abouti, une petite prime d'assurance de 0,5 % va à l'arbitre communautaire qui garantit votre échange (0,25 % de chaque côté), envoyée en ecash. Elle est incluse par défaut et vous pouvez la désactiver avant de régler. Si un échange est confié à un arbitre pour trancher un litige, de petits frais supplémentaires s'appliquent pour ce travail. Les vendeurs peuvent aussi fixer leur propre prime sur une annonce (p. ex. « +25 % ») — c'est le prix du vendeur, pas un frais Chama — et vous voyez toujours le montant final avant de vous engager." },
+        { q: "Est-ce que Chama détient mon argent ?", a: "Non. Chama ne touche jamais votre argent. Vos fonds restent dans un séquestre partagé uniquement pendant un échange actif, et ils vous reviennent dès que l'échange est réglé. Entre deux échanges, votre solde est à zéro par conception — il n'y a aucun portefeuille à vider." },
+      ],
+    },
+    {
+      id: "start",
+      title: "Pour commencer",
+      items: [
+        { q: "Comment obtenir Chama ?", a: "Android : installez depuis Zapstore (zapstore.dev/apps/app.chama.market). Web & ordinateur : ouvrez getchama.app (aussi sur chama.community)." },
+        { q: "Comment me connecter ?", a: "Chama utilise une clé comme compte (le standard Nostr) — pas d'e-mail/mot de passe et pas de formulaire d'inscription. L'application peut créer une clé pour vous, ou vous pouvez utiliser votre clé Nostr existante. Notez votre clé et gardez-la en lieu sûr — c'est elle, votre compte." },
+        { q: "Qu'est-ce qu'une « communauté » et comment la choisir ?", a: "Une communauté, c'est votre monnaie + pays + drapeau — par exemple Kenya · KES, ou Sénégal · CFA. Vous choisissez la vôtre à la première connexion. Elle détermine la monnaie dans laquelle vos échanges sont libellés et les voisins avec qui vous échangez. Vous pouvez en changer plus tard dans Réglages → Avancé, mais vous restez « chez vous » par défaut. Vous pouvez aussi jeter un œil aux autres communautés en parcourant les annonces." },
+      ],
+    },
+    {
+      id: "trade",
+      title: "Acheter & vendre",
+      items: [
+        { q: "Comment acheter ?", a: { steps: [
+          "Dans Parcourir, touchez une annonce qui vous intéresse.",
+          "Touchez Rejoindre comme acheteur pour réserver votre place (rien ne bouge encore).",
+          "Composez votre commande / confirmez le montant, puis financez — vos sats sont alors verrouillés en toute sécurité sous séquestre.",
+          "Payez le vendeur en monnaie locale (p. ex. M-Pesa, Airtel) comme l'indique l'annonce, ou recevez vos biens.",
+          "Quand vous avez reçu ce que vous avez payé, touchez pour libérer — les sats vont au vendeur. Terminé.",
+        ] } },
+        { q: "Comment vendre ?", a: { steps: [
+          "Touchez Créer et publiez une annonce (Échange / Boutiques / Paiement communautaire de factures), fixez votre prix et les moyens de paiement que vous acceptez.",
+          "Quand un acheteur rejoint et finance, les sats se verrouillent sous séquestre — vous verrez « Sats verrouillés sous séquestre ».",
+          "Livrez le bien / envoyez la monnaie convenue, puis touchez Marquer comme livré (ou « Marquer comme envoyé ») — c'est votre confirmation.",
+          "Une fois libéré, touchez Réclamer pour recevoir vos sats — et encaissez.",
+        ] } },
+        { q: "Quelles sont les étapes d'un échange ?", a: "Réservé (quelqu'un a rejoint) → Verrouillé (sats financés sous séquestre) → l'action se déroule (biens livrés / monnaie envoyée) → Libéré (les deux parties sont d'accord) → Réclamez votre versement → Réglé. Vous suivez tout sur la frise de l'échange, et pouvez discuter avec l'autre partie à tout moment." },
+        { q: "En quoi le séquestre me protège-t-il ?", a: "Quand un échange est financé, l'argent est réparti de sorte que deux des trois personnes de l'échange — vous, votre interlocuteur et un arbitre de la communauté — doivent être d'accord pour qu'il puisse bouger. Personne seul (et aucune entreprise) ne peut partir avec. Normalement, vous et votre interlocuteur êtes simplement d'accord et l'échange se règle ; l'arbitre n'intervient qu'en cas de problème." },
+        { q: "Qu'est-ce qu'un arbitre ?", a: "Un membre de confiance de votre communauté qui peut aider à trancher un échange uniquement en cas de litige. Il ne peut pas prendre votre argent — il ne peut que départager acheteur et vendeur. Les arbitres bâtissent une réputation au fil du temps." },
+        { q: "Et si quelque chose tourne mal / en cas de litige ?", a: "Si vous et votre interlocuteur n'êtes pas d'accord (p. ex. un bien jamais arrivé), chacun exprime son vote — libérer ou rembourser — en expliquant pourquoi. En cas de désaccord, l'arbitre est appelé pour décider équitablement. Vous n'êtes jamais laissé bloqué." },
+        { q: "Comment annuler ou me rétracter ?", a: "Tant que rien n'est financé, vous pouvez simplement partir. Après le financement, se rétracter revient à voter un remboursement, qui renvoie les sats à la bonne personne (l'arbitre est le filet de sécurité). Chama vous montre toujours exactement où va l'argent avant de confirmer." },
+      ],
+    },
+    {
+      id: "money",
+      title: "Récupérer votre argent",
+      items: [
+        { q: "D'où viennent les sats pour financer un échange ?", a: "Vous financez avec des bitcoins (sats) que vous détenez déjà — par exemple depuis un portefeuille Lightning. Chama ne vous vend pas de bitcoins dans l'application. Dans un échange typique, le côté monnaie se passe directement entre vous et votre interlocuteur (vous lui envoyez M-Pesa/Airtel comme l'indique l'annonce) ; Chama met sous séquestre le côté Bitcoin." },
+        { q: "Comment être payé / encaisser ?", a: "Quand un échange est prêt, touchez Réclamer et choisissez où va votre argent. Vos options dépendent de votre pays : 🇰🇪 Kenya — encaissez sur M-Pesa en un geste (les KES arrivent sur votre téléphone en quelques secondes). Autres pays — une page de partenaire local s'ouvre là où il en existe un (p. ex. Banxaas au Sénégal) ; d'autres arrivent. Lightning, partout — envoyez vers n'importe quelle adresse Lightning, facture, ou portefeuille connecté (NWC). Bitcoin on-chain — collez une adresse Bitcoin (plus lent ; frais de réseau)." },
+        { q: "Comment encaisser sur M-Pesa (Kenya) ?", a: { steps: [
+          "Sur un échange abouti, touchez Réclamer.",
+          "Choisissez Encaisser sur M-Pesa.",
+          "Saisissez votre numéro M-Pesa (il est enregistré pour la prochaine fois).",
+          "Confirmez — vous verrez le montant approximatif en KES, et les shillings arrivent en quelques secondes.",
+        ], outro: "Aucune application à installer, aucun compte, aucune connaissance du Bitcoin requise. (Cela utilise Tando, un pont Lightning → M-Pesa basé sur des standards.)" } },
+        { q: "Y a-t-il une limite pour l'encaissement M-Pesa ?", a: "Oui — les encaissements M-Pesa sont plafonnés par transfert. Si votre réclamation dépasse la limite, Chama vous montre le maximum, pour que vous puissiez envoyer un montant plus petit ou encaisser le reste via Lightning." },
+        { q: "Puis-je payer un échange en M-Pesa (en espèces, pas en Bitcoin) ?", a: "Pas dans l'application pour l'instant. Encaisser vers l'argent mobile fonctionne dans les pays pris en charge ; convertir votre argent mobile en Bitcoin est quelque chose que vous faites au préalable avec un service externe, ou directement avec votre partenaire d'échange." },
+      ],
+    },
+    {
+      id: "safety",
+      title: "Votre compte & sécurité",
+      items: [
+        { q: "Mon argent est-il en sécurité ?", a: "Oui — vos fonds sont protégés par le séquestre « deux sur trois » et ne sont jamais engagés que dans un échange précis. Chama, et toute entité « Chama », ne peut pas les saisir, les geler ni les déplacer." },
+        { q: "Sauvegardez votre compte (important !)", a: "Votre clé est votre compte et votre seul moyen de récupération. Si vous perdez votre téléphone sans sauvegarde, vous pourriez perdre l'accès. À la connexion, enregistrez votre clé / phrase de récupération en lieu sûr et privé (notez-la hors ligne ; ne la partagez jamais). Quiconque détient votre clé contrôle votre compte — traitez-la comme de l'argent liquide." },
+        { q: "Chama respecte-t-il ma vie privée ?", a: "Vous ne donnez à Chama ni e-mail, ni numéro de téléphone, ni pièce d'identité pour l'utiliser. Votre identité, c'est juste votre clé. Gardez à l'esprit que ce que vous publiez publiquement (annonces, messages d'un échange) circule sur le réseau Nostr." },
+      ],
+    },
+    {
+      id: "trouble",
+      title: "Dépannage",
+      items: [
+        { q: "Il affiche « Connexion… » ou demande de « Reconnecter ».", a: "Chama communique avec le réseau via des relais. Sur une connexion faible, quelques-uns peuvent tomber — touchez Reconnecter, ou patientez un instant ; il se reconnecte tout seul. Vos échanges et vos fonds ne sont jamais perdus pendant ce temps." },
+        { q: "J'ai terminé un échange mais il dit que ma réclamation « nécessite votre attention ».", a: "En général, votre argent est déjà arrivé et l'application n'a simplement pas pu le confirmer automatiquement — vérifiez votre solde ou votre portefeuille. Chama garde une copie de secours de la note dans tous les cas, donc rien n'est perdu. S'il manque réellement, la note enregistrée est votre voie de récupération." },
+        { q: "Le financement ou la réclamation a échoué.", a: "Rien ne bouge sans réussite complète — une tentative échouée signifie qu'aucun sat n'a été envoyé. Patientez un instant puis réessayez ; si une voie reste lente, touchez d'abord Reconnecter. Si vous êtes sur une toute nouvelle installation et qu'une première connexion bloque, assurez-vous d'avoir une connexion stable et réessayez." },
+      ],
+    },
+  ],
+  glossary: [
+    { term: "Sats", def: "La petite unité du Bitcoin (1 Bitcoin = 100 000 000 sats). Les prix dans Chama s'affichent aussi dans votre monnaie locale." },
+    { term: "Lightning", def: "Le réseau de paiement Bitcoin rapide et bon marché que Chama utilise pour déplacer les sats." },
+    { term: "Séquestre", def: "Une « consignation » sûre des fonds pendant un échange, libérée seulement quand les bonnes personnes sont d'accord." },
+    { term: "Arbitre", def: "Un membre de la communauté qui peut trancher un échange en litige — sans jamais pouvoir prendre votre argent." },
+    { term: "Clé / npub", def: "Votre compte sur Chama (et Nostr). Sauvegardez-la." },
+    { term: "M-Pesa / Tando", def: "L'argent mobile (Kenya) et le pont qui transforme vos sats en espèces M-Pesa." },
+  ],
+};

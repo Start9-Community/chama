@@ -15,6 +15,7 @@ import { listingPremiumLine } from "../listing-metrics.js";
 import { unreadChatForTrade } from "../../chat/unread.js";
 import { billTypeDisplay } from "../../communities/bill-types.js";
 import { payoutRecipientFor } from "../../escrow-engine/recipients.js";
+import { isParentStorefront, isChildOrder } from "../../escrow-engine/storefront.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
 import { BitcoinAmount } from "./BitcoinAmount.js";
@@ -48,6 +49,7 @@ export function TradeCard({
   amountDisplayMode = "sats",
   quoteCurrency,
   stockLeft,
+  orderIndicator,
 }: {
   state: EscrowState;
   pubkey: string;
@@ -60,6 +62,11 @@ export function TradeCard({
   /** #7 Stage 3: derived remaining units for a multi-unit parent listing.
    *  Undefined for single-unit listings (no badge). */
   stockLeft?: number;
+  /** #70 aggregated live child-order signal for a seller's parent storefront:
+   *  the count of open orders + unread chat summed across them. Non-zero only on
+   *  the seller's own listings; drives the "N orders · M unread" indicator so
+   *  EVERY joined order surfaces, not just the parent's own chat. */
+  orderIndicator?: { orders: number; unread: number };
 }) {
   const { t } = useT();
   const btcPrice = useBitcoinPrice();
@@ -110,6 +117,13 @@ export function TradeCard({
     : pubkey === state.participants[Role.ARBITER] ? Role.ARBITER
     : null;
   const chatUnread = unreadChatForTrade(state, myRoleForUnread);
+  // #70 On a seller's PARENT storefront, child orders never render as their own
+  // Browse cards, so fold every live child order's unread chat into this card's
+  // badge (and surface the live-order count) — otherwise the seller sees a
+  // single indicator no matter how many orders are open.
+  const childOrderUnread = orderIndicator?.unread ?? 0;
+  const liveOrderCount = orderIndicator?.orders ?? 0;
+  const combinedUnread = chatUnread + childOrderUnread;
   // v4.1 (#12): CBP bill type, resolved for display (icon + label). Null elsewhere.
   const billTypeChip = state.category === "bill-pay" ? billTypeDisplay(state.billType) : null;
   const timeLine = compactJoinHoldRemaining(state, nowSec, t) ?? compactTimeRemaining(state, nowSec, t);
@@ -188,15 +202,15 @@ export function TradeCard({
       overflow: "hidden",
       position: "relative", isolation: "isolate",
     }}>
-      {chatUnread > 0 && (
-        <span aria-label={chatUnread === 1 ? t("card.unreadMessageOne") : t("card.unreadMessageMany", { count: chatUnread })} style={{
+      {combinedUnread > 0 && (
+        <span aria-label={combinedUnread === 1 ? t("card.unreadMessageOne") : t("card.unreadMessageMany", { count: combinedUnread })} style={{
           position: "absolute", top: 8, right: 8, zIndex: 2,
           display: "inline-flex", alignItems: "center", gap: 3,
           minWidth: 18, height: 18, padding: "0 5px", boxSizing: "border-box",
           borderRadius: 999, background: T.accent, color: "#fff",
           fontFamily: T.mono, fontSize: 9.5, fontWeight: 800, lineHeight: "18px",
         }}>
-          💬 {chatUnread > 9 ? "9+" : chatUnread}
+          💬 {combinedUnread > 9 ? "9+" : combinedUnread}
         </span>
       )}
       {/* Storefront media stays on own-route Store/Exchange-menu tiles. External
@@ -260,8 +274,17 @@ export function TradeCard({
               fontFamily: T.mono, fontWeight: 700,
               lineHeight: 1.2,
             }}>
-              <span style={{ fontSize: 11, lineHeight: 1 }}>{CAT_ICON[state.category] || "📦"}</span>
-              {shortCategoryLabel(state.category, t)}
+              {/* #63 storefront-vs-order clarity: a multi-unit parent reads as a
+                  🏪 Storefront, a spawned child purchase as a 🛒 Order — so a
+                  seller can tell the persistent shopfront apart from a live sale
+                  in the trade list. The emoji rides the label; other verticals
+                  keep the CAT_ICON glyph. */}
+              {isParentStorefront(state) ? t("card.categoryStorefront")
+                : isChildOrder(state) ? t("card.categoryOrder")
+                : <>
+                    <span style={{ fontSize: 11, lineHeight: 1 }}>{CAT_ICON[state.category] || "📦"}</span>
+                    {shortCategoryLabel(state.category, t)}
+                  </>}
             </span>
             {billTypeChip && billTypeChip.label !== state.description && (
               <span style={{
@@ -306,6 +329,21 @@ export function TradeCard({
                 fontFamily: T.mono, fontWeight: 800,
               }}>
                 {stockLeft > 0 ? t("card.stockLeft", { count: stockLeft }) : t("card.reserved")}
+              </span>
+            )}
+            {/* #70 seller's storefront: every live child order aggregated into one
+                honest "N orders · M unread" chip (children never render as their
+                own Browse cards, so this is where the seller sees all of them). */}
+            {liveOrderCount > 0 && (
+              <span style={{
+                fontSize: 10, padding: "3px 8px", borderRadius: 999,
+                background: `${T.accent}1c`, color: T.accent,
+                border: `1px solid ${T.accent}55`,
+                fontFamily: T.mono, fontWeight: 800,
+                display: "inline-flex", alignItems: "center", gap: 4,
+              }}>
+                {t(liveOrderCount === 1 ? "card.liveOrdersOne" : "card.liveOrdersMany", { count: liveOrderCount })}
+                {combinedUnread > 0 && ` · 💬 ${combinedUnread > 9 ? "9+" : combinedUnread}`}
               </span>
             )}
             {state.category === "marketplace" && sellerPubkey && (

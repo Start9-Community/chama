@@ -16,13 +16,27 @@ import {
   type SelectedMenuItem,
   EscrowStatus,
   Outcome,
+  Role,
   TRULY_TERMINAL_STATES,
   getEffectiveParticipantsAt,
 } from "../escrow-engine/types.js";
 import { DEFAULT_RELAYS } from "../escrow-engine/default-relays.js";
 import { getWinner } from "../escrow-engine/state-machine.js";
-import { remainingStock, isSoldOut, overcommittedChildren } from "../escrow-engine/storefront.js";
+import { remainingStock, isSoldOut, overcommittedChildren, isLiveChildOrder, isActiveChildOrder } from "../escrow-engine/storefront.js";
+import { unreadChatForTrade } from "../chat/unread.js";
 import { archivedTradeEntries } from "../escrow-engine/trade-index.js";
+import {
+  lapsedRenewableListings,
+  autoRenewableListings,
+  sellerIsBonded,
+} from "../escrow-engine/listing-renewal.js";
+import {
+  registerCbpRecurrence,
+  recordCbpRepost,
+  cancelCbpRecurrence,
+  activeCbpRecurrence,
+  dueRecurringSeries,
+} from "../escrow-engine/cbp-recurrence.js";
 import {
   CURATED_PRESETS,
   getActiveInvite,
@@ -38,6 +52,8 @@ import {
 } from "../fedimint/index.js";
 import { getPayoutRecord } from "../payments/payout-journal.js";
 import {
+  computeArbiterPremium,
+  funderPremiumMsats,
   selectPremiumPayTargets,
   selectPremiumRedeemTargets,
 } from "../arbiters/arbiter-premium.js";
@@ -77,6 +93,7 @@ import {
   activeCommittedMsats,
   decideChamaBarLabel,
   findActiveTrade,
+  selectNeedsYouTrades,
   identifyStrandedEcashSource,
   isMidFunding,
   shouldShowOnBrowse,
@@ -105,6 +122,8 @@ import { DashboardScreen } from "./screens/DashboardScreen.js";
 import { TradeDetail } from "./screens/TradeDetail.js";
 import { CreateForm } from "./screens/CreateForm.js";
 import { MeScreen } from "./screens/MeScreen.js";
+import { LapsedStoreCard } from "./components/LapsedStoreCard.js";
+import { RecurringBillCard } from "./components/RecurringBillCard.js";
 import { SettingsAdvanced } from "./screens/SettingsAdvanced.js";
 import { HelpScreen } from "./screens/HelpScreen.js";
 
@@ -595,6 +614,8 @@ export default function App() {
   const [pendingFundAndLock, setPendingFundAndLock] = useState<{
     escrowId: string;
     amountMsats: number;
+    /** E1.1: funder's 0.25% arbiter insurance, folded into the invoice. */
+    premiumMsats?: number;
     ctaLabel: string;
     savedHandleId?: string;
     selectedItems?: SelectedMenuItem[];
@@ -613,6 +634,9 @@ export default function App() {
   const [pendingClaim, setPendingClaim] = useState<{
     escrowId: string;
     payoutMsats: number;
+    /** E1.1: winner's 0.25% arbiter insurance, held back from the payout
+     *  quote so the settle-time sweep finds it in the wallet. */
+    premiumMsats?: number;
     tradeCommunity?: string | null;
     fiatCurrency?: string | null;
     resolve: () => void;
@@ -1024,6 +1048,120 @@ export default function App() {
     ? archivedTradeEntries(escrows.keys())
     : [];
 
+  // ── Store permanence (#49) ─────────────────────────────────────────────
+  // Tier 1: the seller's own listings that lapsed UNFUNDED — feed the manual
+  // "your store lapsed — renew?" card. Cheap pure filter over loaded escrows.
+  const lapsedListings = pubkey
+    ? lapsedRenewableListings(escrows.values(), pubkey, now)
+    : [];
+  const [renewingId, setRenewingId] = useState<string | null>(null);
+  // Tier 3: is the signed-in seller chain-verified bonded (funded+active 38135
+  // ≥ floor) in their home community? Gates auto-renew (bonded ⇒ store persists
+  // while online; unbonded ⇒ manual renew only) and the card's copy. Resolved
+  // once per connect via the existing fetchCommunityBonds/esplora path.
+  const [sellerBonded, setSellerBonded] = useState(false);
+  // Auto-renew dedupe: an id we've already re-published this session so the
+  // online effect can't re-fire on the same lapsed listing every tick.
+  const autoRenewedRef = useRef<Set<string>>(new Set());
+
+  const renewListing = async (id: string) => {
+    setRenewingId(id);
+    try {
+      const { escrowId } = await actions.renewListing(id);
+      setToast({ message: t("me.storeRenewed"), type: "success" });
+      openEscrow(escrowId, "me");
+    } catch (e: any) {
+      setToast({ message: e?.message || t("me.storeRenewFailed"), type: "error" });
+    } finally {
+      setRenewingId(null);
+    }
+  };
+
+  // Tier 3 bond resolution: chain-verify the seller's own bond once per connect
+  // (fail-soft — any hiccup leaves them unbonded ⇒ manual renew only).
+  useEffect(() => {
+    if (!connected || !pubkey || !browseCommunity) { setSellerBonded(false); return; }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const bonds = await actions.fetchCommunityBonds(browseCommunity);
+        if (!cancelled) setSellerBonded(sellerIsBonded(bonds, pubkey));
+      } catch { if (!cancelled) setSellerBonded(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [connected, pubkey, browseCommunity]);
+
+  // Tier 1 auto-renew (online-gated, bonded-only): while the seller's client is
+  // connected, re-publish their about-to-lapse / just-lapsed UNFUNDED stores so
+  // the shopfront never disappears between buyers. DECIDED: requires the seller
+  // online (a vanished owner's store SHOULD lapse — auto-renew is a liveness
+  // signal). Unbonded sellers get manual renew only, so this no-ops for them.
+  useEffect(() => {
+    if (!connected || !pubkey || !sellerBonded) return;
+    const renewables = autoRenewableListings(escrows.values(), pubkey, now)
+      .filter((l) => !autoRenewedRef.current.has(l.id));
+    if (renewables.length === 0) return;
+    for (const l of renewables) {
+      autoRenewedRef.current.add(l.id); // mark first so a throw can't hot-loop
+      void actions.renewListing(l.id).catch((e: any) => {
+        console.warn("[chama] auto-renew failed:", l.id, e?.message || e);
+      });
+    }
+  }, [connected, pubkey, sellerBonded, escrows, now]);
+
+  // ── Monthly CBP recurrence ─────────────────────────────────────────────
+  // The owner's active recurring bill series (from local storage), resolved to
+  // the currently-loaded instance state for display. Drives the "🔁 Monthly
+  // bill" card (indicator + Stop). Recomputed cheaply as escrows/now change.
+  const [, setRecurringTick] = useState(0);
+  const recurringSeries = pubkey
+    ? activeCbpRecurrence()
+        .map((cfg) => ({ cfg, state: escrows.get(cfg.lastPostId) ?? escrows.get(cfg.seriesId) ?? null }))
+    : [];
+  // Per-cycle dedupe so the effect can't re-fire a repost on the same 30-day
+  // cycle while it's in flight or before the loaded state updates. Keyed by
+  // (seriesId, lastPostAt) — recordCbpRepost advances lastPostAt so the NEXT
+  // cycle re-arms naturally 30 days later.
+  const cbpRepostedRef = useRef<Set<string>>(new Set());
+
+  const cancelRecurring = (seriesId: string) => {
+    cancelCbpRecurrence(seriesId);
+    setToast({ message: t("me.recurringStopped"), type: "info" });
+    setRecurringTick((n) => n + 1); // re-render so the card drops immediately
+  };
+
+  // Auto-repost effect (online-gated, NO bond gate — CBP is self-limiting).
+  // Home-community-only + zero-sats are inherent: repostRecurringCbp reuses
+  // buildRenewCreateParams, which copies the listing's own community (= home)
+  // and re-publishes a fresh CREATE. Anti-stacking (concurrent-unpaid cap = 1)
+  // lives in dueRecurringSeries via priorInstanceBlocks.
+  useEffect(() => {
+    if (!connected || !pubkey) return;
+    const due = dueRecurringSeries(escrows, now);
+    for (const cfg of due) {
+      const cycleKey = `${cfg.seriesId}:${cfg.lastPostAt}`;
+      if (cbpRepostedRef.current.has(cycleKey)) continue;
+      // Need a loaded source instance to rebuild the CREATE from. If neither the
+      // latest instance nor the original series listing is loaded this session,
+      // skip WITHOUT marking done so it retries once the chain rehydrates.
+      const sourceId = escrows.has(cfg.lastPostId)
+        ? cfg.lastPostId
+        : escrows.has(cfg.seriesId)
+          ? cfg.seriesId
+          : null;
+      if (!sourceId) continue;
+      cbpRepostedRef.current.add(cycleKey); // mark first so a throw can't hot-loop
+      void actions
+        .repostRecurringCbp(sourceId)
+        .then(({ escrowId }) => {
+          recordCbpRepost(cfg.seriesId, escrowId, Math.floor(Date.now() / 1000));
+        })
+        .catch((e: any) => {
+          console.warn("[chama] cbp-recurrence repost failed:", cfg.seriesId, e?.message || e);
+        });
+    }
+  }, [connected, pubkey, escrows, now]);
+
   // v0.6.5: hasActiveBuyerSellerCommitment + findActiveTrade are now
   // informational only — they still drive the ChamaBar "in escrow"
   // pill and the ActiveTradePill, but no longer gate Create or Fund.
@@ -1053,6 +1191,18 @@ export default function App() {
   const committedMsats = pubkey
     ? activeCommittedMsats({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : 0;
+
+  // Part ① — liquidity/attention: the trades needing the user to act right now,
+  // most-urgent first (claim → dispute → vote/deliver → buyer-waiting). Drives
+  // the Me-tab red badge and promotes the attention pill to its loud, actionable
+  // "N waiting · tap to act" reading (routing to the most urgent item). Falls
+  // back to the calm active-trade pill when nothing needs the user.
+  const needsYouTrades = pubkey
+    ? selectNeedsYouTrades({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
+    : [];
+  const needsYouCount = needsYouTrades.length;
+  const attentionTrade = needsYouTrades[0] ?? activeTrade;
+  const attentionActionMode = needsYouCount > 0;
 
   // v0.6.5 funding-operation gate. The single backstop against two
   // concurrent runFundAndLock calls racing on the shared OPFS wallet.
@@ -1389,6 +1539,28 @@ export default function App() {
     }
   }
   const listingChildren = (s: EscrowState) => childrenByParent.get(s.id) ?? [];
+  // #70 seller-side order indicators: a parent storefront card must surface
+  // EVERY live child order's attention, not just its own chat. Child orders
+  // never appear as their own Browse cards (shouldShowOnBrowse filters
+  // parent !== undefined), so without this the seller sees a single indicator
+  // however many orders are open. Aggregate, per parent, the count of active
+  // child orders + the unread chat across them (unreadChatForTrade returns 0 for
+  // a non-participant, so this is non-zero only on the viewer's OWN listings).
+  const listingOrderIndicator = new Map<string, { orders: number; unread: number }>();
+  for (const [parentId, kids] of childrenByParent) {
+    let orders = 0;
+    let unread = 0;
+    for (const c of kids) {
+      if (!isActiveChildOrder(c)) continue;
+      orders++;
+      const myRole = c.participants[Role.SELLER] === pubkey ? Role.SELLER
+        : c.participants[Role.BUYER] === pubkey ? Role.BUYER
+        : c.participants[Role.ARBITER] === pubkey ? Role.ARBITER
+        : null;
+      unread += unreadChatForTrade(c, myRole);
+    }
+    if (orders > 0) listingOrderIndicator.set(parentId, { orders, unread });
+  }
   const listingSoldOut = (s: EscrowState) =>
     s.stock !== undefined && isSoldOut(s, listingChildren(s), now);
   const allVisibleListings = visibleTrades.filter(s =>
@@ -1779,11 +1951,29 @@ export default function App() {
   const handleCreate = async (params: any) => {
     try {
       setToast({ message: t("app.signingNip07"), type: "info" });
+      // Monthly CBP: pull off the client-only recurrence intent BEFORE publish so
+      // it never leaks into the CREATE event (it's not a consensus field).
+      const recurringCbp = params?.recurringCbp === true;
+      const recurringCommunity = params?.community ?? null;
+      if ("recurringCbp" in (params ?? {})) delete params.recurringCbp;
       const { escrowId } = await actions.createEscrow(params);
+      // Register the recurring series locally (bill-pay only, home-community
+      // inherited, no bond). Best-effort — a bookkeeping failure never breaks
+      // the publish.
+      if (recurringCbp && params?.category === "bill-pay") {
+        try {
+          registerCbpRecurrence({ escrowId, community: recurringCommunity });
+        } catch (e) {
+          console.warn("[chama] cbp-recurrence register failed:", e);
+        }
+      }
       setToast({ message: t("app.tradePublished", { escrowId }), type: "success" });
-      setDetailBackView("create");
-      setView("detail");
-      setSelectedId(escrowId);
+      // Post-publish: land on Browse (the listing is now live among the
+      // community's) instead of dumping the seller inside an empty trade to
+      // stare at "waiting for a buyer" — dead air. They'll be pulled BACK to the
+      // trade by a notification + the attention signal the moment a buyer acts.
+      setSelectedId(null);
+      setView("browse");
     } catch (e: any) {
       console.error("[chama] Create failed:", e);
       setToast({ message: e.message || t("app.createFailed"), type: "error" });
@@ -2184,6 +2374,7 @@ export default function App() {
         <AtomicFundingModal
           escrowId={pendingFundAndLock.escrowId}
           amountMsats={pendingFundAndLock.amountMsats}
+          premiumMsats={pendingFundAndLock.premiumMsats ?? 0}
           ctaLabel={pendingFundAndLock.ctaLabel}
           savedHandleId={pendingFundAndLock.savedHandleId}
           selectedItems={pendingFundAndLock.selectedItems}
@@ -2290,6 +2481,7 @@ export default function App() {
         <ClaimPayoutModal
           escrowId={pendingClaim.escrowId}
           payoutMsats={pendingClaim.payoutMsats}
+          premiumMsats={pendingClaim.premiumMsats ?? 0}
           savedDestinations={listPayoutDestinations()}
           savedNwcConnections={fediWebView ? [] : listSavedNwcConnections()}
           homeCommunity={getUserCommunitySlugRaw()}
@@ -2600,10 +2792,16 @@ export default function App() {
               // token. Fee fields stay in the protocol record, but should
               // only affect this amount once real payout fan-out exists.
               const payoutMsats = selected.amountMsats;
+              // E1.1: hold back the winner's 0.25% arbiter insurance from
+              // the payout quote so the settle sweep finds it in the wallet.
+              const claimDecision = (!isSimModeOn() && !isTestnetMode() && pubkey)
+                ? computeArbiterPremium(selected, pubkey)
+                : null;
               return new Promise<void>((resolve) => {
                 setPendingClaim({
                   escrowId: selectedId!,
                   payoutMsats,
+                  premiumMsats: claimDecision?.payable ? claimDecision.amountMsats : 0,
                   tradeCommunity: selected.community,
                   fiatCurrency: selected.fiatCurrency,
                   resolve,
@@ -2686,6 +2884,12 @@ export default function App() {
             }}
             stockLeft={selected ? stockByListing.get(selected.id) : undefined}
             isOversoldOrder={selected ? oversoldChildIds.has(selected.id) : false}
+            // #63 storefront routing: the live (LOCKED, unsettled) child orders
+            // spawned from THIS parent storefront, so the seller can see and
+            // tap through to each order to fulfill it. Reuses the App-derived
+            // childrenByParent grouping (via listingChildren) — no re-query.
+            liveChildOrders={selected ? listingChildren(selected).filter(isLiveChildOrder) : undefined}
+            onOpenChild={(id) => openEscrow(id)}
             // v1.2.4: direct-NWC Fund. Saved-NWC users skip the
             // AtomicFundingModal chooser entirely; the button on
             // TradeDetail dispatches fundAndLock with NWC params and
@@ -2739,6 +2943,8 @@ export default function App() {
               try {
                 const terminal = await actions.fundAndLock(selectedId!, {
                   amountMsats: opts.amountMsats,
+                  // E1.1: same insurance fold as the modal path.
+                  premiumMsats: funderPremiumMsats(selected, opts.amountMsats),
                   description,
                   fundingMethod: "nwc",
                   nwcConnectionString: opts.nwcConnectionString,
@@ -2804,9 +3010,15 @@ export default function App() {
               const winner = getWinner(selected);
               if (!winner) return { ok: false, error: "No winner yet" };
               const payoutMsats = selected.amountMsats;
+              // E1.1: same insurance holdback as the ClaimPayoutModal path.
+              const nwcClaimDecision = (!isSimModeOn() && !isTestnetMode() && pubkey)
+                ? computeArbiterPremium(selected, pubkey)
+                : null;
+              const nwcPremiumMsats = nwcClaimDecision?.payable ? nwcClaimDecision.amountMsats : 0;
+              const effectivePayoutMsats = Math.max(0, payoutMsats - nwcPremiumMsats);
               const { resolveNwcConnectionToInvoice } = await import("../payments/nwc.js");
               const { claimPayoutSats } = await import("../payments/lightning-fees.js");
-              const payoutSats = claimPayoutSats(payoutMsats, "lightning");
+              const payoutSats = claimPayoutSats(effectivePayoutMsats, "lightning");
               opts.onPhase?.(t("app.askingNwcInvoice"));
               let invoice: string;
               try {
@@ -2824,7 +3036,7 @@ export default function App() {
               try {
                 const terminal = await actions.claimAndPayout(selectedId!, {
                   bolt11: invoice,
-                  expectedDeltaMsats: payoutMsats,
+                  expectedDeltaMsats: effectivePayoutMsats,
                   saveAfter: false,
                   onPhase: (phase) => {
                     const label =
@@ -2906,10 +3118,16 @@ export default function App() {
                 : selected.category === "bill-pay" ? "Lock Sats"
                 : selected.category === "p2p-trade" ? "Fund Escrow"
                 : "Lock Sats";
+              // E1.1: fold the funder's 0.25% arbiter insurance into the
+              // invoice (bonded-stamp trades only; zero in sim/testnet).
+              const fundPremiumMsats = (!simOn && !isTestnetMode())
+                ? funderPremiumMsats(selected, lockAmountMsats)
+                : 0;
               return new Promise<void>((resolve) => {
                 setPendingFundAndLock({
                   escrowId: selectedId!,
                   amountMsats: lockAmountMsats,
+                  premiumMsats: fundPremiumMsats,
                   ctaLabel: lockLabel,
                   savedHandleId,
                   selectedItems,
@@ -2932,12 +3150,14 @@ export default function App() {
           {/* v0.6.5: Create no longer hard-blocks on active trades.
               The pill stays as the informational "you have N active
               trades" reminder; the form is always available below. */}
-          {activeTrade && (
+          {attentionTrade && (
             <ActiveTradePill
-              trade={activeTrade}
+              trade={attentionTrade}
               activeTradeCount={activeCommitmentCount}
               activeTradeMsats={activeTradeMsats}
-              onTap={() => openEscrow(activeTrade.id)}
+              actionMode={attentionActionMode}
+              actionCount={needsYouCount}
+              onTap={() => openEscrow(attentionTrade.id)}
             />
           )}
           {nativeLockResume && (
@@ -3004,14 +3224,23 @@ export default function App() {
         />
       ) : view === "me" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          {activeTrade && (
+          {attentionTrade && (
             <ActiveTradePill
-              trade={activeTrade}
+              trade={attentionTrade}
               activeTradeCount={activeCommitmentCount}
               activeTradeMsats={activeTradeMsats}
-              onTap={() => openEscrow(activeTrade.id)}
+              actionMode={attentionActionMode}
+              actionCount={needsYouCount}
+              onTap={() => openEscrow(attentionTrade.id)}
             />
           )}
+          <LapsedStoreCard
+            listings={lapsedListings}
+            bonded={sellerBonded}
+            renewingId={renewingId}
+            onRenew={renewListing}
+          />
+          <RecurringBillCard series={recurringSeries} onStop={cancelRecurring} />
           <MeScreen
             pubkey={pubkey!}
             kind0Enabled={kind0Enabled}
@@ -3089,12 +3318,14 @@ export default function App() {
         </div>
       ) : view === "saved-handles" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          {activeTrade && (
+          {attentionTrade && (
             <ActiveTradePill
-              trade={activeTrade}
+              trade={attentionTrade}
               activeTradeCount={activeCommitmentCount}
               activeTradeMsats={activeTradeMsats}
-              onTap={() => openEscrow(activeTrade.id)}
+              actionMode={attentionActionMode}
+              actionCount={needsYouCount}
+              onTap={() => openEscrow(attentionTrade.id)}
             />
           )}
           <SavedHandlesPanel
@@ -3104,12 +3335,14 @@ export default function App() {
         </div>
       ) : view === "payout-destinations" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          {activeTrade && (
+          {attentionTrade && (
             <ActiveTradePill
-              trade={activeTrade}
+              trade={attentionTrade}
               activeTradeCount={activeCommitmentCount}
               activeTradeMsats={activeTradeMsats}
-              onTap={() => openEscrow(activeTrade.id)}
+              actionMode={attentionActionMode}
+              actionCount={needsYouCount}
+              onTap={() => openEscrow(attentionTrade.id)}
             />
           )}
           <PayoutDestinationsPanel
@@ -3122,12 +3355,14 @@ export default function App() {
         </div>
       ) : view === "advanced" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          {activeTrade && (
+          {attentionTrade && (
             <ActiveTradePill
-              trade={activeTrade}
+              trade={attentionTrade}
               activeTradeCount={activeCommitmentCount}
               activeTradeMsats={activeTradeMsats}
-              onTap={() => openEscrow(activeTrade.id)}
+              actionMode={attentionActionMode}
+              actionCount={needsYouCount}
+              onTap={() => openEscrow(attentionTrade.id)}
             />
           )}
           <SettingsAdvanced
@@ -3217,6 +3452,7 @@ export default function App() {
               matchingListings={matchingListings}
               nonMatchingListings={nonMatchingListings}
               stockByListing={stockByListing}
+              orderIndicatorByListing={listingOrderIndicator}
               categoryCounts={browseCategoryCounts}
               fedimintJoined={fedimint.joined}
               isFirstTime={getUserCommunitySlugRaw() === null}
@@ -3250,7 +3486,7 @@ export default function App() {
         </>
       )}
 
-      {!detailMode && <BottomNav active={activeTab} onSelect={switchTab} />}
+      {!detailMode && <BottomNav active={activeTab} onSelect={switchTab} badges={{ me: needsYouCount }} />}
 
       {/* v4.1 C1: one-time post-sign-in tour. Only on the Browse home screen
           (FABs mounted), never over the create sheet or a detail view. */}

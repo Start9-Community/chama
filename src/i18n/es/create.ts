@@ -1,5 +1,13 @@
 // es/create — Session C fills this from src/i18n/en/create.ts (key set must match EXACTLY).
 export const create: Record<string, string> = {
+  // CBP mensual — interruptor de factura recurrente (solo pago de facturas).
+  "create.recurringToggleLabel": "Mensual recurrente",
+  "create.recurringToggleHint": "Vuelve a publicar esta factura en tu comunidad cada mes mientras estás en línea. Sin fianza — detenlo cuando quieras desde Yo.",
+  // Permanencia de la tienda (#49) Nivel 3 — nota de tenencia según la fianza.
+  "create.tenureBondedTitle": "Escaparate con fianza",
+  "create.tenureBondedBody": "tu fianza mantiene abierta esta tienda — se renueva automáticamente mientras estás en línea (tenencia de 7 días). Cada trato sigue venciendo en 24 h.",
+  "create.tenureUnbondedTitle": "Tienda de 24 horas",
+  "create.tenureUnbondedBody": "este anuncio vence tras 24 h; renuévalo cuando quieras desde Yo. Deposita una fianza para un escaparate de renovación automática.",
   "create.aboveLendingCapAfter": ".",
   "create.aboveLendingCapBefore": "Por encima del límite de préstamos de Fedimint de",
   "create.acceptedPayment": "PAGO ACEPTADO",

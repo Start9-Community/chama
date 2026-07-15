@@ -134,6 +134,16 @@ export class NIP07Signer implements Signer {
       },
     );
   }
+
+  // kind:4 DMs only — the NIP-44-only rule above is for escrow payloads;
+  // a kind:4 MUST carry NIP-04 ciphertext or external clients render blank.
+  async nip04Encrypt(plaintext: string, recipientPubkey: string): Promise<string> {
+    const nostr = this.getNostr();
+    if (!nostr.nip04?.encrypt) {
+      throw new Error("Your Nostr signer does not support NIP-04 encryption");
+    }
+    return nostr.nip04.encrypt(recipientPubkey, plaintext);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -207,6 +217,15 @@ export class FediSigner implements Signer {
       },
     );
   }
+
+  // kind:4 DMs only — see NIP07Signer.nip04Encrypt.
+  async nip04Encrypt(plaintext: string, recipientPubkey: string): Promise<string> {
+    const nostr = this.getNostr();
+    if (nostr.nip04?.encrypt) {
+      return nostr.nip04.encrypt(recipientPubkey, plaintext);
+    }
+    throw new Error("Fedi NIP-04 encryption not available");
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -279,6 +298,11 @@ export class LocalSigner implements Signer {
     }
     // Stub: base64 decode
     return atob(ciphertext);
+  }
+
+  async nip04Encrypt(plaintext: string, _recipientPubkey: string): Promise<string> {
+    // Stub: base64 encode (NOT SECURE — testing only)
+    return btoa(plaintext);
   }
 }
 
@@ -434,6 +458,16 @@ export class AmberSigner implements Signer {
       type: "nip44_decrypt",
       content: ciphertext,
       pubkey: senderPubkey,
+      current_user: this.pubkey || "",
+    });
+  }
+
+  // kind:4 DMs only — see NIP07Signer.nip04Encrypt.
+  async nip04Encrypt(plaintext: string, recipientPubkey: string): Promise<string> {
+    return this.redirectToAmber({
+      type: "nip04_encrypt",
+      content: plaintext,
+      pubkey: recipientPubkey,
       current_user: this.pubkey || "",
     });
   }

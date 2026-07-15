@@ -75,6 +75,12 @@ export const fund: Record<string, string> = {
   "fund.invoiceExpiresIn": "invoice expires {time}",
   "fund.lightningQrAlt": "Lightning invoice QR code",
   "fund.lnFast": "LN · FAST",
+  "fund.largeAmountTitle": "Large amount",
+  "fund.largeAmountBody":
+    "This is a big payment — Lightning may not route it reliably. Fund on-chain instead (recommended below).",
+  "fund.largeAmountBodyNoOnchain":
+    "This is a big payment — Lightning may not route it reliably. Use on-chain funding instead.",
+  "fund.recommended": "RECOMMENDED",
   "fund.lockFailedFallback": "LOCK failed",
   "fund.lockFailedTitle": "Couldn't lock the trade",
   "fund.lockedInEscrow": "Locked in escrow",
@@ -177,6 +183,8 @@ export const fund: Record<string, string> = {
   "fund.splittingShares": "SPLITTING SHARES · PUBLISHING LOCK",
   "fund.stillWaitingPayment": "Waiting for the payment…",
   "fund.tradeAmountBefore": "Trade amount:",
+  "fund.insuranceBefore": "includes 🛡",
+  "fund.insuranceAfter": "arbiter insurance (0.25%)",
   "fund.tradeLiveClosing": "Trade is live · closing…",
   "fund.tryAgain": "Try again",
   "fund.tryLockNow": "Try LOCK now",

@@ -6,7 +6,12 @@
 // when key events happen in a trade. Uses the user's NIP-07 signer
 // (nos2x / Alby) to encrypt and sign the DM events.
 //
-// DM events are kind:4 (NIP-04 encrypted direct messages).
+// DM events are kind:4 → content MUST be NIP-04 ciphertext. External
+// clients (Damus, Amethyst, ChapSmart) NIP-04-decrypt kind:4; NIP-44
+// ciphertext there renders as a BLANK message (bug #64). Chama has no
+// inbound kind:4 inbox, so these DMs exist ONLY for external clients —
+// NIP-04 is the interoperable format, not a security downgrade of any
+// escrow payload (those stay NIP-44 on their own kinds).
 // Future: upgrade to NIP-17 (kind:14 sealed sender) for better privacy.
 
 import type { EscrowState, Role } from "./types.js";
@@ -46,8 +51,14 @@ export class EscrowNotifier {
     try {
       const now = Math.floor(Date.now() / 1000);
 
-      // NIP-04: kind:4, content is encrypted to the recipient
-      const encrypted = await this.signer.nip44Encrypt(message, recipientPubkey);
+      // NIP-04: kind:4, content is encrypted to the recipient. A signer
+      // without NIP-04 support skips the DM (throw → caught below) rather
+      // than publish NIP-44 ciphertext no client can read.
+      if (!this.signer.nip04Encrypt) {
+        console.warn("[chama] DM skipped — signer has no NIP-04 support");
+        return;
+      }
+      const encrypted = await this.signer.nip04Encrypt(message, recipientPubkey);
 
       const unsigned = {
         kind: 4,

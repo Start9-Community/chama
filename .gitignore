@@ -52,3 +52,9 @@ scripts/.mutinynet-verify-keys.json
 
 # brand-asset drafts — never deploy/bundle (the v5.0.0 APK-bloat lesson)
 design/brand-assets/icons-archive/
+
+# Local agent memory + internal design briefs — NEVER pushed to the public repo
+# (restored 2026-07-13 after the "clean public repository" cleanup removed them).
+# Keep on disk for Claude/CC continuity; push only if explicitly needed.
+CLAUDE.md
+design/mockups/

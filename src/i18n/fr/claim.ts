@@ -117,6 +117,8 @@ export const claim: Record<string, string> = {
     "⚡ LE PLUS RAPIDE · RÉCLAMER DIRECT VERS LE PORTEFEUILLE NWC ENREGISTRÉ",
   "claim.feeReserveAfter": "reste disponible pour les frais Lightning.",
   "claim.feeReserveBefore": "Environ",
+  "claim.insuranceBefore": "🛡",
+  "claim.insuranceAfter": "reste de côté pour l’assurance de votre arbitre (0,25 %).",
   "claim.ifCashReceiveOn": "si la réception en Cash est activée",
   "claim.invoiceOnlyHint":
     "Pour les portefeuilles à facture seule ou le make_invoice NWC.",

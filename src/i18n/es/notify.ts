@@ -3,6 +3,8 @@ export const notify: Record<string, string> = {
   "notify.approvedBody":
     "El intercambio {label} se resolvió a tu favor — abre Chama para reclamar tus sats.",
   "notify.approvedTitle": "✅ Tu reclamo está listo",
+  "notify.buyerInterestBody": "Un comprador está mirando tu anuncio {label}. Abre Chama para responder.",
+  "notify.buyerInterestTitle": "👀 Un comprador está mirando tu anuncio",
   "notify.chatBody": "{who} te escribió en el intercambio {label}.",
   "notify.chatSenderRole": "Tu {role}",
   "notify.chatSomeone": "Alguien",
@@ -17,6 +19,10 @@ export const notify: Record<string, string> = {
   "notify.expiredTitle": "⏰ El intercambio expiró",
   "notify.lockedBody": "El intercambio {label} está activo — el otro lado lo financió. Te toca.",
   "notify.lockedTitle": "⚡ Sats bloqueados en custodia",
+  "notify.newListingBody": "Nuevo anuncio en {community}: {title}",
+  "notify.newListingTitle": "🆕 Nuevo anuncio en tu chama",
+  "notify.newOrderBody": "Un comprador financió el pedido {label} en tu tienda. Abre Chama para completarlo.",
+  "notify.newOrderTitle": "🛒 Nuevo pedido en tu tienda",
   "notify.selfTestBody":
     "Si ves esto, la entrega de notificaciones del sistema funciona en esta versión.",
   "notify.selfTestTitle": "Notificaciones de Chama OK",

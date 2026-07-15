@@ -36,6 +36,12 @@ import { getPinnedIdentity } from "../../storage/identity-pin.js";
 import { QRCode } from "../QRCode.js";
 import { Preferences } from "@capacitor/preferences";
 import { isTauriRuntime } from "../sign-in-environment.js";
+import {
+  NATIVE_BRIDGE_TOKEN_KEY,
+  NATIVE_BRIDGE_URL_KEY,
+  clearNativeBridgeConfig,
+  setNativeBridgeConfig,
+} from "../../fedimint/native-bridge-adapter.js";
 
 // Settings → Advanced — the home of Power-user mode (formerly
 // "Sandbox mode" through v0.4.1) and the federation-switching tools
@@ -250,6 +256,11 @@ export function SettingsAdvanced({
           />
         )}
       </div>
+
+      {/* Remote-bridge "friend wallet": point this browser at a Rust bridge
+          running on a trusted person's server. Every money leg then runs in
+          the Rust lane (identical to Tauri) — the browser is pure UI. */}
+      <RemoteBridgeCard />
 
       {/* v2.4 — Recovery phrase. Visible to ALL users (not power-user gated):
           backing up your own funds is a right, not an advanced toggle. Chama
@@ -769,6 +780,138 @@ function NwcPermissionCard({
 // wallet even if they lose this device or their Nostr account. Hidden by
 // default behind a deliberate reveal; the words never leave the device unless
 // the user copies/QRs them on purpose.
+// Remote-bridge "friend wallet" config (2026-07-14 brief): URL + bearer token
+// for a Rust bridge hosted by someone the user personally trusts. Deliberate
+// choices: the token is paste-only (never a URL query param — those land in
+// history/server logs; invite links use the self-stripping #fragment instead),
+// and Save/Disconnect reload the app because the wallet adapter binds its
+// bridge URL at init. Plain-English like the rest of this screen (i18n for
+// SettingsAdvanced is a tracked deferral).
+function RemoteBridgeCard() {
+  const [open, setOpen] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
+  const [tokenInput, setTokenInput] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const configuredUrl = (() => {
+    try { return localStorage.getItem(NATIVE_BRIDGE_URL_KEY)?.trim() || null; } catch { return null; }
+  })();
+  const hasToken = (() => {
+    try { return !!localStorage.getItem(NATIVE_BRIDGE_TOKEN_KEY)?.trim(); } catch { return false; }
+  })();
+
+  const handleConnect = () => {
+    setError(null);
+    const url = urlInput.trim();
+    if (!/^https?:\/\//i.test(url)) {
+      setError("The node address must start with https:// (or http:// for localhost testing).");
+      return;
+    }
+    setNativeBridgeConfig(url, tokenInput.trim() || null);
+    window.location.reload();
+  };
+  const handleDisconnect = () => {
+    clearNativeBridgeConfig();
+    window.location.reload();
+  };
+
+  return (
+    <div style={{
+      background: T.card, border: `1px solid ${T.border}`,
+      borderRadius: T.r, padding: 16, marginBottom: 16,
+    }}>
+      <div
+        onClick={() => setOpen(!open)}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          cursor: "pointer", gap: 12,
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.sans }}>
+            Chama node
+          </div>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 4, lineHeight: 1.5 }}>
+            {configuredUrl
+              ? <>Connected to <span style={{ color: T.green }}>{configuredUrl}</span>{hasToken ? " · token set" : ""}</>
+              : "Run your wallet on a node hosted by someone you trust."}
+          </div>
+        </div>
+        <div style={{
+          color: T.muted, fontFamily: T.mono, fontSize: 12,
+          transform: open ? "rotate(90deg)" : "rotate(0)",
+          transition: "transform 0.16s ease",
+        }}>
+          ▸
+        </div>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 10 }}>
+            Your wallet keys live on that node — connect only to a node run by a
+            person you personally trust, and use it from ONE browser only.
+            Sats pass through during trades and settle out; Chama holds nothing
+            between trades.
+          </div>
+          <input
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+            placeholder={configuredUrl ?? "https://node.example.com/w/yourname"}
+            style={{ ...inputStyle, marginBottom: 8 }}
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+          <input
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            placeholder="Access token (from your invite)"
+            type="password"
+            style={{ ...inputStyle, marginBottom: 8 }}
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+          {error && (
+            <div style={{ fontSize: 11, color: T.red, fontFamily: T.mono, marginBottom: 8 }}>
+              {error}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={handleConnect}
+              disabled={!urlInput.trim()}
+              style={{
+                flex: 1, padding: "10px 12px", borderRadius: 8,
+                border: `1px solid ${T.border}`,
+                background: urlInput.trim() ? T.accent : T.card,
+                color: urlInput.trim() ? "#fff" : T.muted,
+                fontFamily: T.sans, fontSize: 13, fontWeight: 700,
+                cursor: urlInput.trim() ? "pointer" : "default",
+              }}
+            >
+              Connect (reloads app)
+            </button>
+            {configuredUrl && (
+              <button
+                onClick={handleDisconnect}
+                style={{
+                  padding: "10px 12px", borderRadius: 8,
+                  border: `1px solid ${T.border}`, background: "none",
+                  color: T.red, fontFamily: T.sans, fontSize: 13,
+                  fontWeight: 600, cursor: "pointer",
+                }}
+              >
+                Disconnect
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RecoveryPhraseCard() {
   const [revealed, setRevealed] = useState(false);
   const [showQr, setShowQr] = useState(false);

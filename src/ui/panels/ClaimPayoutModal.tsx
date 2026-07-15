@@ -94,6 +94,11 @@ export interface ClaimPayoutModalProps {
    *  reduced slightly in the modal so the wallet can pay outbound LN
    *  fees from the same balance. */
   payoutMsats: number;
+  /** E1.1 arbiter insurance: msats held back from the payout quote (the
+   *  winner's 0.25% premium). The invoice/quote is sized from
+   *  payoutMsats − premiumMsats so the residue stays in the wallet for
+   *  the settle-time premium sweep. 0 = no insurance on this trade. */
+  premiumMsats?: number;
   /** Saved Lightning Address payout destinations for the picker's Tier 1
    *  list. Caller fetches via listPayoutDestinations(); the modal does
    *  not re-fetch. */
@@ -169,6 +174,7 @@ interface DispatchArgs {
 export function ClaimPayoutModal({
   escrowId,
   payoutMsats,
+  premiumMsats = 0,
   savedDestinations,
   savedNwcConnections = [],
   homeCommunity,
@@ -180,8 +186,13 @@ export function ClaimPayoutModal({
   onClose,
 }: ClaimPayoutModalProps) {
   const { t } = useT();
-  const payoutSats = claimPayoutSats(payoutMsats, claimTarget);
-  const reserveSats = claimPayoutReserveSats(payoutMsats, claimTarget);
+  // E1.1: quote from the premium-reduced amount. The full claim still
+  // lands in the wallet; the gap (insurance + unspent fee reserve) stays
+  // behind for the settle-time premium sweep.
+  const effectiveMsats = Math.max(0, payoutMsats - Math.max(0, Math.floor(premiumMsats)));
+  const insuranceSats = Math.floor(Math.max(0, Math.floor(premiumMsats)) / 1000);
+  const payoutSats = claimPayoutSats(effectiveMsats, claimTarget);
+  const reserveSats = claimPayoutReserveSats(effectiveMsats, claimTarget);
   const [stage, setStage] = useState<Stage>({ kind: "picking" });
   const [payoutMethod, setPayoutMethod] = useState<PayoutMethod | null>(null);
   // Retry state: when a retryable terminal is up, the "Try again"
@@ -239,7 +250,10 @@ export function ClaimPayoutModal({
       terminal = await claimAndPayout(escrowId, {
         bolt11: args.bolt11,
         onchainAddress: args.onchainAddress,
-        expectedDeltaMsats: payoutMsats,
+        // E1.1: the onchain path pays exactly this figure, and the LN
+        // growth/cover checks are ≥-thresholds — so the reduced amount is
+        // correct on every target (the fedi-wallet branch ignores it).
+        expectedDeltaMsats: effectiveMsats,
         saveAfter: args.saveAfter,
         addressUsed: args.addressUsed,
         onPhase: (phase) => setStage({ kind: "running", phase }),
@@ -485,6 +499,11 @@ export function ClaimPayoutModal({
             {reserveSats > 0 && (
               <>
                 . {t("claim.feeReserveBefore")} <BitcoinAmount sats={reserveSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.feeReserveAfter")}
+              </>
+            )}
+            {insuranceSats > 0 && (
+              <>
+                {" "}{t("claim.insuranceBefore")} <BitcoinAmount sats={insuranceSats} size={11} gap={4} glyphScale={1.18} color={T.muted} glyphColor={T.muted} /> {t("claim.insuranceAfter")}
               </>
             )}
           </>

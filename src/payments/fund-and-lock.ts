@@ -47,6 +47,17 @@ import { recordSatsTrace } from "./sats-trace.js";
 import { isSimModeOn } from "../sim/simMode.js";
 import type { SelectedMenuItem } from "../escrow-engine/types.js";
 
+// ── Funding-method guidance ────────────────────────────────────────────────
+//
+// #65: a practical ceiling above which a single Lightning payment is unlikely
+// to route reliably through the federation's LN gateway (channel capacity /
+// per-payment limits vary by gateway and there's no reliable way to probe the
+// real cap, so we use a conservative constant). This is a UX STEERING
+// threshold only — NOT a consensus/protocol limit and NOT enforced anywhere in
+// the spend/lock math. Above it, the funding UI warns and steers the user to
+// on-chain (peg-in) funding, but never hard-blocks (the user may proceed).
+export const MAX_LN_FUNDING_SATS = 2_000_000;
+
 // ── Phase types ──────────────────────────────────────────────────────────
 
 /** Phases emitted during the polling loop (a sub-set of the orchestrator's

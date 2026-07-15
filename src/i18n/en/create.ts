@@ -5,6 +5,14 @@
 // key fan-outs (menuTitle*/menuAdd*/… — the module-level helpers resolve them
 // with translate(getCurrentLang()) at render time).
 export const create: Record<string, string> = {
+  // Monthly CBP — recurring bill toggle (bill-pay only, no bond, online-gated).
+  "create.recurringToggleLabel": "Recurring monthly",
+  "create.recurringToggleHint": "Auto-re-post this bill to your community every month while you're online. No bond needed — stop it any time from Me.",
+  // Store permanence (#49) Tier 3 — bond-gated tenure note on the review step.
+  "create.tenureBondedTitle": "Bonded storefront",
+  "create.tenureBondedBody": "your bond keeps this store open — it auto-renews while you're online (7-day tenure). Each trade still times out in 24h.",
+  "create.tenureUnbondedTitle": "24-hour store",
+  "create.tenureUnbondedBody": "this listing lapses after 24h; renew it any time from Me. Post a bond for an auto-renewing storefront.",
   "create.aboveLendingCapAfter": ".",
   "create.aboveLendingCapBefore": "Above current Fedimint lending cap of",
   "create.acceptedPayment": "ACCEPTED PAYMENT",

@@ -119,4 +119,12 @@ export class NsecSigner implements Signer {
     const conversationKey = nip44.v2.utils.getConversationKey(this.secretKey, senderPubkey);
     return nip44.v2.decrypt(ciphertext, conversationKey);
   }
+
+  // kind:4 DMs only — a kind:4 MUST carry NIP-04 ciphertext or external
+  // clients render blank. Escrow payloads stay on nip44Encrypt.
+  async nip04Encrypt(plaintext: string, recipientPubkey: string): Promise<string> {
+    await this.init();
+    const { nip04 } = await import("nostr-tools");
+    return nip04.encrypt(this.secretKey, recipientPubkey, plaintext);
+  }
 }

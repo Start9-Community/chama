@@ -47,6 +47,7 @@ import {
 import { defaultCurrencyForCommunity } from "../../communities/currency.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
 import { assignableBondedArbiters } from "../../arbiters/exposure.js";
+import { sellerIsBonded, resolveListingTenure } from "../../escrow-engine/listing-renewal.js";
 import type { VerifiedBond } from "../../bond-multisig/bond-announcement.js";
 import { type ArbiterWarning, displayCounterpartyName, resolveCreateMintUrl } from "../decisions.js";
 import { T, inputStyle, fmtSats } from "../theme.js";
@@ -109,6 +110,9 @@ interface FormState {
   premium: string;
   /** v4.1 (#12): optional Community-Bill-Pay bill-type id (single listing). */
   billType?: string;
+  /** Monthly CBP: owner marked this bill (bundle) as recurring — the client
+   *  auto-re-posts it ~monthly to their home community. Bill-pay only. */
+  recurringCbp?: boolean;
   fulfillment: Fulfillment;
   isSubscription: boolean;
   periods: string;
@@ -310,6 +314,7 @@ function normalizeFormState(raw: any, currency = "USD"): FormState {
     cur: fallback.cur,
     premium: typeof raw.premium === "string" || typeof raw.premium === "number" ? String(raw.premium) : fallback.premium,
     billType: typeof raw.billType === "string" ? raw.billType : "",
+    recurringCbp: raw.recurringCbp === true,
     paymentMethods: Array.isArray(raw.paymentMethods)
       ? raw.paymentMethods
           .map((method: unknown) => typeof method === "string" ? method.trim() : "")
@@ -665,11 +670,14 @@ function descriptionPlaceholder(vertical: Vertical, usingMenu: boolean): string 
 }
 
 function descriptionRequired(vertical: Vertical, usingMenu: boolean): boolean {
-  // A single (non-menu) CBP listing needs no free-text description: the bill-type
-  // chip + amount already say what it is, and it's a no-KYC private bill pay —
-  // a description just adds friction (and a place to leak private detail). Mirror
-  // Exchange, which already skips it. Menu/bundle listings still take a name.
-  if (vertical === "bill-pay" && !usingMenu) return false;
+  // CBP needs no free-text description in EITHER mode: the bill-type chip + amount
+  // (or, for the monthly bundle, the individual bills) already say what it is, and
+  // it's a no-KYC private bill pay — a name just adds friction (and a place to leak
+  // private detail). A bundle "name" is meaningless here — nobody names their pile
+  // of monthly bills; the bills ARE the listing. The menu auto-titles as an
+  // "N-bill bundle" when the desc is empty (fallbackMenuDescription). Mirrors
+  // Exchange, which already skips it.
+  if (vertical === "bill-pay") return false;
   return usingMenu || vertical !== "p2p-trade";
 }
 
@@ -979,6 +987,7 @@ export function emptyCreateFormState(currency = "USD"): FormState {
     paymentMethods: [],
     menuItems: [],
     billType: "",
+    recurringCbp: false,
   };
 }
 
@@ -1034,7 +1043,18 @@ export function CreateForm({
   const [persistedHome, setPersistedHome] = useState<string | null>(
     () => getUserCommunitySlugRaw(),
   );
-  const isHomeCommunity = persistedHome === community;
+  // Only nag when the persisted home genuinely differs from where you are —
+  // NOT when it's simply unset yet, and NOT for a co-labeled sibling fed of the
+  // same place (e.g. ke-kes "Kenya · KES" vs ke-kes-bitsacco "Kenya · KES").
+  // A raw string compare wrongly flagged those as "not home" even though Me and
+  // the FX pill read identically. The nag stays for a true cross-country /
+  // cross-currency stale home (the tz-tzs repair case it was built for).
+  const persistedHomeCommunity = persistedHome ? getCommunityBySlug(persistedHome) : null;
+  const currentCommunity = getCommunityBySlug(community);
+  const sameCommunityIdentity = !!persistedHomeCommunity && !!currentCommunity
+    && persistedHomeCommunity.displayName === currentCommunity.displayName
+    && persistedHomeCommunity.currency === currentCommunity.currency;
+  const isHomeCommunity = !persistedHome || persistedHome === community || sameCommunityIdentity;
   const setAsHome = () => {
     try { setUserCommunitySlug(community); } catch {}
     setPersistedHome(community);
@@ -1068,6 +1088,27 @@ export function CreateForm({
   useEffect(() => {
     setForm(prev => prev.cur === communityCurrency ? prev : { ...prev, cur: communityCurrency });
   }, [communityCurrency]);
+
+  // Store permanence (#49) Tier 3: gate this listing's TENURE on the seller's
+  // bond — the exact chain-verified check (funded+active 38135 ≥ floor) already
+  // used for arbiter seating. Bonded ⇒ the store AUTO-RENEWS while the seller
+  // is online (a 7-day rolling storefront license); unbonded ⇒ the 24h default
+  // with manual renew only. Pure display gate: it never changes the published
+  // expiry (renewal keeps the short trade timeout — permanence via renewal, not
+  // longer locks). Fail-soft: any fetch hiccup leaves the unbonded posture.
+  const [storeBonded, setStoreBonded] = useState(false);
+  useEffect(() => {
+    if (!fetchCommunityBonds || !userPubkey) { setStoreBonded(false); return; }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const bonds = await fetchCommunityBonds(community);
+        if (!cancelled) setStoreBonded(sellerIsBonded(bonds, userPubkey));
+      } catch { if (!cancelled) setStoreBonded(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [community, userPubkey]);
+  const storeTenure = resolveListingTenure({ bonded: storeBonded });
 
   // Auto-save draft on field change (silent, debounced via the form
   // state's natural batching). Cleared on successful publish.
@@ -1199,6 +1240,12 @@ export function CreateForm({
           periodDurationSeconds: parseWholeSats(form.intervalDays) * 86400,
         };
       }
+      // Monthly CBP: a CLIENT-ONLY recurrence intent (bill-pay only). App strips
+      // it before createEscrow — it's NOT a consensus field — and registers the
+      // recurring series locally on a successful publish.
+      if (vertical === "bill-pay" && form.recurringCbp) {
+        params.recurringCbp = true;
+      }
       await onCreate(params);
       // Successful publish — clear this vertical's draft + mark
       // first-publish so the honesty card never re-shows.
@@ -1269,6 +1316,22 @@ export function CreateForm({
         />
       )}
 
+      {step === 3 && vertical === "marketplace" && (
+        <div style={{
+          margin: "12px 16px 0",
+          padding: "10px 12px",
+          background: T.purpleDim,
+          border: `1px solid ${T.purple}55`,
+          borderRadius: T.r,
+          fontFamily: T.sans, fontSize: 12, color: T.muted,
+        }}>
+          <span style={{ color: T.purple, fontWeight: 700 }}>
+            {storeTenure.bonded ? t("create.tenureBondedTitle") : t("create.tenureUnbondedTitle")}
+          </span>
+          {" — "}
+          {storeTenure.bonded ? t("create.tenureBondedBody") : t("create.tenureUnbondedBody")}
+        </div>
+      )}
       {step === 3 && (
         <Step3
           vertical={vertical}
@@ -1505,11 +1568,6 @@ function Step1({
   const { t } = useT();
   const visibleDrafts = showAllDrafts ? drafts : drafts.slice(0, 3);
   const hiddenDraftCount = Math.max(0, drafts.length - 3);
-  // CBP's "Monthly bills" multi-mode is parked (coming soon) — never leave the
-  // form in menu mode for bill-pay (e.g. after switching verticals from a Store).
-  useEffect(() => {
-    if (vertical === "bill-pay" && listingMode === "menu") setListingMode("single");
-  }, [vertical, listingMode]);
 
   return (
     <>
@@ -1653,11 +1711,11 @@ function Step1({
             position: "absolute", top: 4, bottom: 4, left: 4,
             width: "calc(50% - 4px)", borderRadius: 999,
             background: T.accentDim, border: `1px solid ${T.accent}66`,
-            transform: (listingMode === "menu" && vertical !== "bill-pay") ? "translateX(100%)" : "translateX(0)",
+            transform: listingMode === "menu" ? "translateX(100%)" : "translateX(0)",
             transition: "transform .22s cubic-bezier(.4,0,.2,1)",
           }} />
           {([["single", singleModeLabel(vertical)], ["menu", menuModeLabel(vertical)]] as [ListingMode, string][]).map(([mode, label]) => {
-            const disabled = mode === "menu" && vertical === "bill-pay";
+            const disabled = false;
             const active = listingMode === mode && !disabled;
             return (
               <button
@@ -1689,7 +1747,7 @@ function Step1({
           })}
         </div>
         <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.sans, lineHeight: 1.4, marginTop: 7 }}>
-          {listingMode === "menu" && vertical !== "bill-pay"
+          {listingMode === "menu"
             ? menuModeDescription(vertical)
             : singleModeDescription(vertical)}
         </div>
@@ -2088,6 +2146,46 @@ function Step2({
             {t("create.billTypeHint")}
           </div>
         </div>
+      )}
+
+      {/* Monthly CBP: mark a bill (or a monthly-bills bundle) as recurring so the
+          client auto-re-posts it ~monthly to the owner's home community. No bond,
+          online-gated. Bill-pay only; applies to single AND menu mode. */}
+      {vertical === "bill-pay" && (
+        <button
+          type="button"
+          onClick={() => setForm(f => ({ ...f, recurringCbp: !f.recurringCbp }))}
+          style={{
+            display: "flex", alignItems: "flex-start", gap: 10, width: "100%",
+            marginBottom: 16, padding: "12px 14px", textAlign: "left" as const,
+            background: form.recurringCbp ? `${T.accent}1f` : T.surface,
+            border: `1px solid ${form.recurringCbp ? T.accent : T.border}`,
+            borderRadius: T.r, cursor: "pointer", fontFamily: T.sans,
+          }}
+        >
+          <span aria-hidden="true" style={{ fontSize: 18, lineHeight: 1 }}>🔁</span>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{
+              display: "block", fontSize: 13, fontWeight: 700,
+              color: form.recurringCbp ? T.accent : T.text,
+            }}>
+              {t("create.recurringToggleLabel")}
+            </span>
+            <span style={{ display: "block", fontSize: 10.5, color: T.muted, marginTop: 3, lineHeight: 1.45 }}>
+              {t("create.recurringToggleHint")}
+            </span>
+          </span>
+          <span aria-hidden="true" style={{
+            flexShrink: 0, width: 40, height: 22, borderRadius: 999, position: "relative",
+            background: form.recurringCbp ? T.accent : T.border, transition: "background .2s",
+          }}>
+            <span style={{
+              position: "absolute", top: 2, left: form.recurringCbp ? 20 : 2,
+              width: 18, height: 18, borderRadius: "50%", background: "#fff",
+              transition: "left .2s",
+            }} />
+          </span>
+        </button>
       )}
 
       {!usingMenu ? (

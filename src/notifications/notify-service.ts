@@ -11,10 +11,14 @@
 
 import {
   notificationForTransition, chatNotificationFor,
+  buyerInterestNotificationFor, newListingNotificationFor,
   type TradeNotification, type DmNotifyPref,
 } from "./trade-notifications.js";
 import { setPendingTradeDeepLink } from "./deep-link.js";
 import { translate, getCurrentLang } from "../i18n/index.js";
+import { getScopedStorageItem, setScopedStorageItem } from "../storage/user-scope.js";
+import { getUserCommunitySlugRaw } from "../communities/storage.js";
+import { getCommunityBySlug } from "../communities/registry.js";
 import type { EscrowState, ChatPayload, ParsedEscrowEvent } from "../escrow-engine/types.js";
 
 export type { DmNotifyPref };
@@ -117,6 +121,61 @@ export function setDmNotifyPref(pref: DmNotifyPref): void {
   } catch {
     /* cosmetic preference; ignore storage failure */
   }
+}
+
+// ── New-listing opt-in (user-scoped, default OFF, whole-community for now) ────
+//
+// Part ② of the liquidity pass: opt-in "buzz me when a fresh listing appears in
+// my home chama." DECIDED whole-community (a single switch) for now, but the
+// pref is modeled as a STRUCTURE so a future per-vertical version (CBP / Work /
+// Chip In / Stack toggles) is a clean extension, NOT a schema break:
+//   • `enabled` is the master on/off for this feature.
+//   • `verticals` is "all" today; later it can hold a set of vertical ids and
+//     `newListingEnabledForCategory` narrows to that set. Storing the discriminated
+//     union now means flipping to per-vertical is a value change, not a migration.
+// User-scoped (follows the npub), stored as JSON. Default OFF = explicit opt-in.
+const NEW_LISTING_PREF_KEY = "chama_new_listing_notify";
+
+export interface NewListingPref {
+  enabled: boolean;
+  /** "all" = every vertical (today's whole-community behavior). A string[] is
+   *  the forward-compatible per-vertical selection (category ids). */
+  verticals: "all" | string[];
+}
+
+const DEFAULT_NEW_LISTING_PREF: NewListingPref = { enabled: false, verticals: "all" };
+
+export function newListingPref(): NewListingPref {
+  try {
+    const raw = getScopedStorageItem(NEW_LISTING_PREF_KEY);
+    if (!raw) return DEFAULT_NEW_LISTING_PREF;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return DEFAULT_NEW_LISTING_PREF;
+    const obj = parsed as Partial<NewListingPref>;
+    const verticals = obj.verticals === "all" || Array.isArray(obj.verticals)
+      ? obj.verticals
+      : "all";
+    return { enabled: obj.enabled === true, verticals };
+  } catch {
+    return DEFAULT_NEW_LISTING_PREF;
+  }
+}
+
+export function setNewListingPref(pref: NewListingPref): void {
+  try {
+    setScopedStorageItem(NEW_LISTING_PREF_KEY, JSON.stringify(pref));
+  } catch {
+    /* cosmetic preference; ignore storage failure */
+  }
+}
+
+/** True when new-listing notifications are on AND this listing's category is in
+ *  scope. Today "all" ⇒ always in scope; the per-vertical set narrows later. */
+export function newListingEnabledForCategory(category: string | null | undefined): boolean {
+  const pref = newListingPref();
+  if (!pref.enabled) return false;
+  if (pref.verticals === "all") return true;
+  return typeof category === "string" && pref.verticals.includes(category);
 }
 
 // ── Fire-once dedup (persisted, so a moment never re-buzzes across restarts) ──
@@ -389,6 +448,60 @@ export function maybeNotifyChatMessage(
   void (async () => {
     const allowed = await ensureNotificationPermission();
     notifyDebug(() => `fire chat tag=${n.tag} platform=${platformName()} permission=${allowed}`);
+    if (allowed) await deliver(n);
+  })();
+}
+
+/**
+ * Buzz the SELLER the moment a buyer shows interest in one of their listings
+ * (a fresh child order pre-lock, or a JOIN hold on their own listing) so they're
+ * pulled back before the buyer gives up. Honors the master toggle; deduped
+ * fire-once-per-(listing,buyer) via the shared fired-tag set (mirrors the
+ * transition core). `liveSinceSec` is when this session went live (backlog
+ * guard). Fully fire-and-forget; never throws.
+ */
+export function maybeNotifyBuyerInterest(
+  prev: EscrowState | null | undefined,
+  next: EscrowState,
+  userPubkey: string | null | undefined,
+  liveSinceSec: number,
+): void {
+  if (!notificationsEnabled()) return;
+  const n = buyerInterestNotificationFor(prev, next, userPubkey, liveSinceSec);
+  if (!n) return;
+  if (readFiredTags().has(n.tag)) return;
+  recordFiredTag(n.tag); // reserve synchronously against replay double-fire
+  void (async () => {
+    const allowed = await ensureNotificationPermission();
+    notifyDebug(() => `fire buyer-interest tag=${n.tag} platform=${platformName()} permission=${allowed}`);
+    if (allowed) await deliver(n);
+  })();
+}
+
+/**
+ * Buzz an OPTED-IN user when a fresh listing appears in their HOME chama (that
+ * isn't theirs). Gated by the master toggle + the new-listing opt-in (default
+ * OFF) + the listing's category being in scope. Home community + friendly label
+ * are resolved here so the pure decider stays registry-free. Deduped
+ * fire-once-per-listing. `liveSinceSec` is the backlog guard. Fire-and-forget.
+ */
+export function maybeNotifyNewListing(
+  prev: EscrowState | null | undefined,
+  next: EscrowState,
+  userPubkey: string | null | undefined,
+  liveSinceSec: number,
+): void {
+  if (!notificationsEnabled()) return;
+  if (!newListingEnabledForCategory(next.category)) return;
+  const home = getUserCommunitySlugRaw(); // null ⇒ no explicit home ⇒ decider bails
+  const label = (home && getCommunityBySlug(home)?.displayName) || home || "";
+  const n = newListingNotificationFor(prev, next, userPubkey, home, label, liveSinceSec);
+  if (!n) return;
+  if (readFiredTags().has(n.tag)) return;
+  recordFiredTag(n.tag);
+  void (async () => {
+    const allowed = await ensureNotificationPermission();
+    notifyDebug(() => `fire new-listing tag=${n.tag} platform=${platformName()} permission=${allowed}`);
     if (allowed) await deliver(n);
   })();
 }

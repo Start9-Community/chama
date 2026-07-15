@@ -27,7 +27,7 @@ export const app: Record<string, string> = {
     "Cada intercambio que tu comunidad ha publicado vive aquí. Toca un anuncio para ver el trato y chatear con el otro lado.",
   "app.coachBrowseTitle": "Explora el mercado",
   "app.coachCreateBody":
-    "Este botón ✎ siempre está a un toque — cambia efectivo por sats, paga una factura, vende algo o presta.",
+    "Este botón ✎ siempre está a un toque — cambia efectivo por sats, paga una factura o vende algo.",
   "app.coachCreateTitle": "Inicia tu propio intercambio",
   "app.coachDashboardBody":
     "Tu reputación, estadísticas, ganancias y calificaciones llegarán aquí — el lugar que muestra cómo te va mientras intercambias.",

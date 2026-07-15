@@ -27,9 +27,10 @@ import {
   listSavedNwcConnections,
   type SavedNwcConnection,
 } from "../../payments/nwc-connections.js";
-import type {
-  FundAndLockPhase,
-  FundAndLockTerminal,
+import {
+  MAX_LN_FUNDING_SATS,
+  type FundAndLockPhase,
+  type FundAndLockTerminal,
 } from "../../payments/fund-and-lock.js";
 import {
   isChapsmartOnrampEnabled,
@@ -57,6 +58,11 @@ export interface AtomicFundingModalProps {
   escrowId: string;
   /** Exact trade amount in millisatoshis. */
   amountMsats: number;
+  /** E1.1 arbiter insurance: extra msats folded into the funding invoice
+   *  on top of the trade amount (the funder's 0.25% premium). The lock
+   *  only ever spends the trade amount; this stays behind as the wallet
+   *  residue the settle-time premium sweep pays to the arbiter. */
+  premiumMsats?: number;
   /** Category-aware label ("Fund Escrow", "Pay for Item", etc.). */
   ctaLabel: string;
   /** Optional handle to reveal in the LOCK payload. */
@@ -81,6 +87,7 @@ export interface AtomicFundingModalProps {
     escrowId: string,
     opts: {
       amountMsats: number;
+      premiumMsats?: number;
       description: string;
       fundingMethod?: "lightning" | "onchain" | "nwc";
       nwcConnectionString?: string;
@@ -141,6 +148,7 @@ type ModalPhase =
 export function AtomicFundingModal({
   escrowId,
   amountMsats,
+  premiumMsats = 0,
   ctaLabel,
   savedHandleId,
   selectedItems,
@@ -156,6 +164,10 @@ export function AtomicFundingModal({
 }: AtomicFundingModalProps) {
   const { t } = useT();
   const amountSats = Math.floor(amountMsats / 1000);
+  // E1.1: the invoice/deposit ask = trade + insurance; the header shows
+  // the total the payer will actually see in their wallet.
+  const insuranceSats = Math.floor(Math.max(0, premiumMsats) / 1000);
+  const totalSats = amountSats + insuranceSats;
   const [phase, setPhase] = useState<ModalPhase>({ kind: "choose-method" });
   const [fundingMethod, setFundingMethod] = useState<"lightning" | "onchain" | "nwc" | null>(null);
   const [savedNwcConnections, setSavedNwcConnections] = useState<SavedNwcConnection[]>(
@@ -220,6 +232,7 @@ export function AtomicFundingModal({
     const run = async () => {
       const terminal = await fundAndLock(escrowId, {
         amountMsats,
+        premiumMsats,
         description: `Chama trade · ${ctaLabel}`,
         fundingMethod,
         nwcConnectionString: selectedNwcConnection ?? undefined,
@@ -451,8 +464,13 @@ export function AtomicFundingModal({
               {ctaLabel.toUpperCase()}
             </div>
             <div style={{ fontSize: 22, fontWeight: 800, color: T.text, fontFamily: T.mono, letterSpacing: -0.5 }}>
-              <BitcoinAmount sats={amountSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
+              <BitcoinAmount sats={totalSats} size={22} gap={6} glyphScale={1.2} color={T.text} glyphColor={T.muted} />
             </div>
+            {insuranceSats > 0 && (
+              <div style={{ fontSize: 9.5, color: T.muted, fontFamily: T.mono, marginTop: 4, display: "flex", alignItems: "baseline", gap: 4 }}>
+                {t("fund.insuranceBefore")} <BitcoinAmount sats={insuranceSats} size={9.5} gap={3} glyphScale={1.15} color={T.muted} glyphColor={T.muted} /> {t("fund.insuranceAfter")}
+              </div>
+            )}
           </div>
           <button onClick={handleCancel} style={{
             background: "none", border: "none", color: T.muted,
@@ -665,6 +683,11 @@ function FundingMethodChooser({
     };
   })();
   const nwcReady = isNwcConnectionString(nwcInput);
+  // #65: above the LN routing ceiling, a single Lightning payment likely won't
+  // route through the federation's gateway. Warn + steer to on-chain (which is
+  // available here whenever onchainGate is not disabled). Never hard-blocks.
+  const largeAmount = amountSats > MAX_LN_FUNDING_SATS;
+  const onchainSteerable = largeAmount && !onchainGate.disabled;
 
   if (disableNwc) {
     return (
@@ -714,6 +737,22 @@ function FundingMethodChooser({
 
   return (
     <div>
+      {largeAmount && (
+        <div style={{
+          marginBottom: 12, padding: "10px 12px", borderRadius: T.rs,
+          background: T.amberDim, border: `1px solid ${T.amber}66`,
+          fontFamily: T.mono, fontSize: 10.5, color: T.amber, lineHeight: 1.5,
+        }}>
+          <div style={{ fontWeight: 900, letterSpacing: 0.5, marginBottom: 4 }}>
+            {t("fund.largeAmountTitle")}
+          </div>
+          <div>
+            {onchainGate.disabled
+              ? t("fund.largeAmountBodyNoOnchain")
+              : t("fund.largeAmountBody")}
+          </div>
+        </div>
+      )}
       <div style={{
         fontSize: 11, color: T.muted, fontFamily: T.mono,
         lineHeight: 1.5, marginBottom: 12,
@@ -778,6 +817,9 @@ function FundingMethodChooser({
             minHeight: 118, padding: 12, borderRadius: T.r,
             background: T.accentDim, border: `1px solid ${T.accent}66`,
             color: T.text, cursor: "pointer", textAlign: "left",
+            // #65: de-emphasize LN above the routing ceiling (still tappable —
+            // never hard-blocked; the user may proceed at their own risk).
+            opacity: onchainSteerable ? 0.6 : 1,
           }}
         >
           <div style={{ fontSize: 20, marginBottom: 8 }}>⚡</div>
@@ -793,7 +835,8 @@ function FundingMethodChooser({
           disabled={onchainGate.disabled}
           style={{
             minHeight: 118, padding: 12, borderRadius: T.r,
-            background: T.amberDim, border: `1px solid ${T.amber}66`,
+            background: T.amberDim,
+            border: `${onchainSteerable ? 2 : 1}px solid ${T.amber}${onchainSteerable ? "" : "66"}`,
             color: T.text,
             cursor: onchainGate.disabled ? "not-allowed" : "pointer",
             opacity: onchainGate.disabled ? 0.55 : 1,
@@ -803,6 +846,15 @@ function FundingMethodChooser({
           <div style={{ fontSize: 20, marginBottom: 8 }}>₿</div>
           <div style={{ fontSize: 12, fontWeight: 800, color: T.amber, fontFamily: T.mono, marginBottom: 6 }}>
             {t("fund.onchainSlow")}
+            {onchainSteerable && (
+              <span style={{
+                marginLeft: 6, padding: "1px 5px", borderRadius: T.rs,
+                background: T.amber, color: "#000", fontSize: 8,
+                fontWeight: 900, letterSpacing: 0.5,
+              }}>
+                {t("fund.recommended")}
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, lineHeight: 1.45 }}>
             {onchainGate.detail}

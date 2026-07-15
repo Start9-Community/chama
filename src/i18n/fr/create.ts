@@ -1,5 +1,13 @@
 // fr/create — Session B fills this from src/i18n/en/create.ts (key set must match EXACTLY).
 export const create: Record<string, string> = {
+  // CBP mensuel — bascule facture récurrente (paiement de factures uniquement).
+  "create.recurringToggleLabel": "Mensuel récurrent",
+  "create.recurringToggleHint": "Republie automatiquement cette facture dans votre communauté chaque mois tant que vous êtes en ligne. Aucune caution requise — arrêtez quand vous voulez depuis Moi.",
+  // Permanence de la boutique (#49) Niveau 3 — note de tenure liée à la caution.
+  "create.tenureBondedTitle": "Vitrine avec caution",
+  "create.tenureBondedBody": "votre caution garde cette boutique ouverte — elle se renouvelle automatiquement tant que vous êtes en ligne (tenure de 7 jours). Chaque échange expire toujours en 24 h.",
+  "create.tenureUnbondedTitle": "Boutique de 24 heures",
+  "create.tenureUnbondedBody": "cette annonce expire après 24 h ; renouvelez-la à tout moment depuis Moi. Déposez une caution pour une vitrine à renouvellement automatique.",
   "create.aboveLendingCapAfter": ".",
   "create.aboveLendingCapBefore": "Au-dessus du plafond de prêt Fedimint actuel de",
   "create.acceptedPayment": "PAIEMENT ACCEPTÉ",

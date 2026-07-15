@@ -77,6 +77,12 @@ export const fund: Record<string, string> = {
   "fund.invoiceExpiresIn": "la facture expire {time}",
   "fund.lightningQrAlt": "QR code de la facture Lightning",
   "fund.lnFast": "LN · RAPIDE",
+  "fund.largeAmountTitle": "Montant élevé",
+  "fund.largeAmountBody":
+    "C'est un gros paiement — le Lightning risque de ne pas l'acheminer de façon fiable. Financez plutôt en on-chain (recommandé ci-dessous).",
+  "fund.largeAmountBodyNoOnchain":
+    "C'est un gros paiement — le Lightning risque de ne pas l'acheminer de façon fiable. Utilisez plutôt le financement on-chain.",
+  "fund.recommended": "RECOMMANDÉ",
   "fund.lockFailedFallback": "Échec du LOCK",
   "fund.lockFailedTitle": "Impossible de verrouiller l'échange",
   "fund.lockedInEscrow": "Verrouillé sous séquestre",
@@ -183,6 +189,8 @@ export const fund: Record<string, string> = {
   "fund.splittingShares": "PARTAGE DES PARTS · PUBLICATION DU LOCK",
   "fund.stillWaitingPayment": "En attente du paiement…",
   "fund.tradeAmountBefore": "Montant de l'échange :",
+  "fund.insuranceBefore": "dont 🛡",
+  "fund.insuranceAfter": "d’assurance arbitre (0,25 %)",
   "fund.tradeLiveClosing": "L'échange est en cours · fermeture…",
   "fund.tryAgain": "Réessayer",
   "fund.tryLockNow": "Tenter le LOCK maintenant",
