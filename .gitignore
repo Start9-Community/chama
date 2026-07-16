@@ -4,6 +4,7 @@ dist/
 *.db
 *.db-journal
 .env
+.env.release
 .DS_Store
 .claude/
 
@@ -53,8 +54,16 @@ scripts/.mutinynet-verify-keys.json
 # brand-asset drafts — never deploy/bundle (the v5.0.0 APK-bloat lesson)
 design/brand-assets/icons-archive/
 
+# Internal VPS ops (friend-wallet bridge runbook) — infra detail, not app source.
+# Kept on disk; never in the public tree.
+scripts/remote-bridge/
+
+# Agent-generated adoption log — artifact, not source.
+chama-pulse-log.md
+
 # Local agent memory + internal design briefs — NEVER pushed to the public repo
 # (restored 2026-07-13 after the "clean public repository" cleanup removed them).
 # Keep on disk for Claude/CC continuity; push only if explicitly needed.
 CLAUDE.md
+Codex.md
 design/mockups/
