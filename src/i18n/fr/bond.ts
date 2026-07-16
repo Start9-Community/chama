@@ -71,6 +71,7 @@ export const bond: Record<string, string> = {
   "bond.dashArbitratedAfterOne": " échange.",
   "bond.dashArbitratedBefore": "Vous avez arbitré ",
   "bond.dashHeading": "TABLEAU DE BORD",
+  "bond.dashAnnouncedElsewhere": "Une ou plusieurs cautions ici ont été posées sur un autre appareil. Elles sont actives sur la chaîne, mais vous les récupérez depuis l'appareil qui les a créées.",
   "bond.dashLockedCapital": "Du capital verrouillé, au grand jour — combien × combien de temps vous tenez parole. Ça fait de vous un arbitre cautionné pour votre Chama.",
   "bond.dashManage": "Gérer",
   "bond.dashNewHereBefore": "Nouveau ici. ",

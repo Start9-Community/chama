@@ -13,13 +13,15 @@
 //
 // Read-only + composed from data the app already has; no new money path.
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { T } from "../theme.js";
 import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { LivenessSignal, useLiveness } from "../components/LivenessSignal.js";
 import type { ChamaLiveness } from "../../arbiters/live-chama.js";
 import { listCommitmentBonds } from "../../bond-multisig/commitment-store.js";
+import type { VerifiedBond } from "../../bond-multisig/bond-announcement.js";
+import { mergeDashboardBonds } from "../../bond-multisig/dashboard-bonds.js";
 import { summarizeArbiterEarnings } from "../../arbiters/arbiter-earnings.js";
 import { SHOW_BOND_CEREMONY } from "../panels/BondCeremonyModal.js";
 import { getCommunityBySlug } from "../../communities/registry.js";
@@ -39,6 +41,7 @@ export function DashboardScreen({
   livenessBlocksPerDay = 144,
   onOpenBondCeremony,
   balanceMsats = 0,
+  fetchMyBonds,
 }: {
   pubkey: string;
   /** The user's own trade-verified public rating (null until it can verify any). */
@@ -51,6 +54,9 @@ export function DashboardScreen({
   onOpenBondCeremony?: () => void;
   /** The user's spendable Chama (Fedimint ecash) balance, in msats. */
   balanceMsats?: number;
+  /** #77: fetch the signed-in npub's own chain-verified announced bonds, so a bond
+   *  shows cross-device (a fresh install has no local commitment record). Fail-soft. */
+  fetchMyBonds?: () => Promise<VerifiedBond[]>;
 }) {
   const { t } = useT();
   const lower = pubkey.toLowerCase();
@@ -73,7 +79,26 @@ export function DashboardScreen({
   // trade set changes (a redeem lands via the App sweep → escrows update →
   // myTrades identity changes → fresh summary).
   const earnings = useMemo(() => summarizeArbiterEarnings(), [myTrades]);
-  const activeBonds = bonds.filter((b) => b.phase !== "reclaimed");
+  const localActive = useMemo(() => bonds.filter((b) => b.phase !== "reclaimed"), [bonds]);
+
+  // #77: cross-device bond visibility. Fetch-once-on-mount (keyed on pubkey),
+  // fail-soft — a relay/esplora hiccup leaves the local set unchanged. Merged
+  // below with the local commitment records, deduped by bond address.
+  const [announcedBonds, setAnnouncedBonds] = useState<VerifiedBond[]>([]);
+  useEffect(() => {
+    if (!fetchMyBonds) return;
+    let cancelled = false;
+    void fetchMyBonds()
+      .then((v) => { if (!cancelled) setAnnouncedBonds(v); })
+      .catch(() => { /* fail-soft: keep local bonds only */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lower]);
+
+  const mergedBonds = useMemo(
+    () => mergeDashboardBonds(localActive, announcedBonds, lower),
+    [localActive, announcedBonds, lower],
+  );
 
   const { liveness, loading: livenessLoading } = useLiveness(communitySlug ?? null, loadLiveness, { intervalMs: 90_000 });
 
@@ -163,25 +188,30 @@ export function DashboardScreen({
             {onOpenBondCeremony && (
               <button onClick={onOpenBondCeremony}
                 style={{ background: T.accentDim, border: `1px solid ${T.accent}66`, color: T.accent, fontFamily: T.mono, fontSize: 10, fontWeight: 800, letterSpacing: 0.5, padding: "5px 10px", borderRadius: T.rs, cursor: "pointer" }}>
-                {activeBonds.length > 0 ? t("bond.dashManage") : t("bond.dashPostABond")}
+                {mergedBonds.length > 0 ? t("bond.dashManage") : t("bond.dashPostABond")}
               </button>
             )}
           </div>
-          {activeBonds.length > 0 ? (
+          {mergedBonds.length > 0 ? (
             <div style={{ display: "grid", gap: 8 }}>
-              {activeBonds.map((b) => {
-                const locked = b.phase === "locked";
-                return (
-                  <div key={b.bondId} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs }}>
-                    <span style={{ fontSize: 14, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
-                      <BitcoinAmount sats={Number(b.amountSats)} size={14} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
-                    </span>
-                    <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, fontFamily: T.mono, color: locked ? T.green : T.amber, border: `1px solid ${locked ? T.green : T.amber}`, borderRadius: 99, padding: "2px 8px" }}>
-                      {locked ? t("bond.chipLockedEmoji") : t("bond.chipAwaitingFunding")}
-                    </span>
-                  </div>
-                );
-              })}
+              {mergedBonds.map((b) => (
+                <div key={b.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs }}>
+                  <span style={{ fontSize: 14, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
+                    <BitcoinAmount sats={b.amountSats} size={14} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
+                  </span>
+                  <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, fontFamily: T.mono, color: b.locked ? T.green : T.amber, border: `1px solid ${b.locked ? T.green : T.amber}`, borderRadius: 99, padding: "2px 8px" }}>
+                    {b.locked ? t("bond.chipLockedEmoji") : t("bond.chipAwaitingFunding")}
+                  </span>
+                </div>
+              ))}
+              {/* Announced-only bonds have no local reclaim material (the reclaim
+                  key is device-local) — say so instead of implying a reclaim that
+                  can't run here. */}
+              {mergedBonds.some((b) => !b.local) && (
+                <div style={{ fontSize: 10.5, color: T.amber, fontFamily: T.mono, lineHeight: 1.5, marginTop: 2 }}>
+                  {t("bond.dashAnnouncedElsewhere")}
+                </div>
+              )}
               <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginTop: 2 }}>
                 {t("bond.dashLockedCapital")}
               </div>

@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# Load local, gitignored deploy config (deploy host/key/signing) so a fresh
+# terminal tab always has it — independent of ~/.zshrc / which tab you opened.
+__CHAMA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[ -f "$__CHAMA_ROOT/.env.release" ] && . "$__CHAMA_ROOT/.env.release"
+
 # Usage:
 #   ./scripts/release.sh [--patch|--minor|--major] "subject line"
 #   ./scripts/release.sh [--patch|--minor|--major] -F /tmp/chama-commit.txt
@@ -118,6 +123,22 @@ fi
 #   export CHAMA_DEPLOY_HOST=user@example.org
 CHAMA_DEPLOY_KEY="${CHAMA_DEPLOY_KEY:-}"
 CHAMA_DEPLOY_HOST="${CHAMA_DEPLOY_HOST:-}"
+
+# Push the freshly-built dist/ to the live web root, and — when CHAMA_POC_DIST=1 —
+# ALSO mirror it to the friend/PoC dist (~/chama-poc-dist) so browser/iPhone-PWA
+# friends don't sit on a stale bundle after a release. FRONTEND ONLY: never rebuilds
+# the Rust bridge binary (that stays a manual on-VPS step, needed only when
+# native/fedimint-bridge/** changes). Reuses the same CHAMA_DEPLOY_HOST + _KEY.
+# ⚠ ~/chama-dist (live getchama.app) and ~/chama-poc-dist (poc.getchama.app) are
+# SEPARATE origins — never target both in one command; keep the live dist intact.
+deploy_dist() {
+  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* "$CHAMA_DEPLOY_HOST:~/chama-dist/"
+  if [ "${CHAMA_POC_DIST:-0}" = "1" ]; then
+    echo "↗ Updating friend/PoC dist (~/chama-poc-dist) so friends get v${NEW_VERSION:-current}…"
+    rsync -az -e "ssh -i $CHAMA_DEPLOY_KEY" dist/ "$CHAMA_DEPLOY_HOST:~/chama-poc-dist/"
+    echo "✅ friend/PoC dist updated (bundle only; bridge binary unchanged)"
+  fi
+}
 if [ "${DEPLOY:-1}" = "1" ]; then
   if [ -z "$CHAMA_DEPLOY_HOST" ]; then
     echo "❌ CHAMA_DEPLOY_HOST is required for deployment."
@@ -268,7 +289,7 @@ if [ "$RELEASE_MODE" = "deploy-live" ]; then
 
   echo "🚀 Deploying origin/main@$COMMIT_SHA as v$NEW_VERSION..."
   npx cap sync android
-  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* "$CHAMA_DEPLOY_HOST:~/chama-dist/"
+  deploy_dist
 
   echo "✅ Deployed v$NEW_VERSION from origin/main@$COMMIT_SHA"
   exit 0
@@ -323,7 +344,7 @@ if [ "$RELEASE_MODE" = "current" ]; then
   fi
 
   npx cap sync android
-  scp -r -i "$CHAMA_DEPLOY_KEY" dist/* "$CHAMA_DEPLOY_HOST:~/chama-dist/"
+  deploy_dist
 
   echo "✅ Deployed v$NEW_VERSION"
   exit 0
@@ -431,6 +452,6 @@ if [ "$DEPLOY" = "0" ]; then
 fi
 
 npx cap sync android
-scp -r -i "$CHAMA_DEPLOY_KEY" dist/* "$CHAMA_DEPLOY_HOST:~/chama-dist/"
+deploy_dist
 
 echo "✅ Deployed v$NEW_VERSION"

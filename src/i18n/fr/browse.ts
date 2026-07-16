@@ -34,6 +34,8 @@ export const browse: Record<string, string> = {
   "browse.navMe": "Moi",
   "browse.noListingsMatch": "Aucune annonce ne correspond à « {query} ».",
   "browse.noOpenOffers": "Pas encore d'offres ouvertes",
+  "browse.ownHiddenTitle": "Vos annonces sont masquées",
+  "browse.ownHiddenBody": "Les seules offres ici sont vos {count} annonces — masquées par défaut. Touchez « Afficher mes annonces » pour les révéler.",
   "browse.openOfferSummaryMany": "{filtered} sur {total} offres ouvertes",
   "browse.openOfferSummaryOne": "{filtered} sur {total} offre ouverte",
   "browse.otherCommunitiesMany": "{count} annonces dans d'autres communautés",

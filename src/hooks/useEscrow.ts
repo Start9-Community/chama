@@ -117,6 +117,7 @@ import {
   type ChatImageAttachment,
   type SelectedMenuItem,
   EscrowStatus,
+  EscrowEventKind,
   Role,
   Outcome,
 } from "../escrow-engine/types.js";
@@ -180,6 +181,7 @@ import {
   type ReclaimDestinationChoice,
 } from "../bond-multisig/commitment-bond.js";
 import { buildBondAnnouncementEvent, selectLatestAnnouncements, groupLatestAnnouncementsByCommunity, verifyBondAnnouncement, ARBITER_BOND_ANNOUNCEMENT_KIND, type VerifiedBond } from "../bond-multisig/bond-announcement.js";
+import { readCachedCommunityBonds, writeCachedCommunityBonds } from "../arbiters/bonded-pool-cache.js";
 import { getCommitmentBond, upsertCommitmentBond, listCommitmentBonds, newBondId, reconstructBondRecord } from "../bond-multisig/commitment-store.js";
 import { MAINNET as BOND_NETWORK } from "../bond-multisig/multisig.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
@@ -269,6 +271,7 @@ function readSubstitutionGraceOverride(): number | null {
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
 import {
   computeArbiterPremium,
+  selectPremiumProbeLoads,
   PREMIUM_SPEND_TRY_CANCEL_SECS,
 } from "../arbiters/arbiter-premium.js";
 import {
@@ -720,6 +723,12 @@ export interface UseEscrowActions {
   /** Task #53 E1 arbiter side: decrypt + redeem any premium notes on this
    *  trade addressed to me; records the earnings ledger. Fail-soft. */
   redeemArbiterPremiums: (escrowId: string) => Promise<void>;
+  /** Task #62 arbiter redeem-probe: relay-probe kind-38113 premiums
+   *  #p-tagged to me, loadEscrow the trades whose notes aren't loaded (a
+   *  settled trade is unwatched + discovery-skipped, so a premium
+   *  published after settlement never reaches a passive arbiter's state
+   *  otherwise), then redeem. Fail-soft; sim/testnet no-op. */
+  probeArbiterPremiums: () => Promise<void>;
   /** Release a subscription period */
   releasePeriod: (escrowId: string, periodIndex: number) => Promise<EscrowState>;
   /** Send a chat message */
@@ -917,6 +926,11 @@ export interface UseEscrowActions {
   /** Fetch every arbiter's current bond announcement for a community, chain-verified
    *  (the data source for the live-chama liveness score). */
   fetchCommunityBonds: (community: string) => Promise<VerifiedBond[]>;
+  /** #77: the signed-in npub's OWN chain-verified bond announcements (kind 38135,
+   *  authored by this pubkey, across every community). Lets the Dashboard show a
+   *  bond cross-device (a fresh install has no local commitment record). Fail-soft:
+   *  a relay/esplora hiccup returns [] rather than throwing into render. */
+  fetchMyBonds: () => Promise<VerifiedBond[]>;
   /** Compute a community's live-chama liveness score: chain-verified bonds +
    *  arbiter ratings → coverage/commitment/reputation composite. Pure roll-up over
    *  fetchCommunityBonds; never a hardcoded "Kenya is green". */
@@ -3864,6 +3878,46 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     if (redeemedAny) refreshBalanceRef.current?.().catch(() => {});
   };
 
+  // Task #62 arbiter redeem-probe. The App redeem sweep only walks LOADED
+  // trades; a settled trade is unwatched (its live sub is gone) and
+  // discovery skips it ("settled — nothing to heal"), so a 38113 published
+  // AFTER settlement never reaches a passive arbiter's state. This probes
+  // relays directly for premiums #p-tagged to me, loadEscrow's the trades
+  // whose notes we don't hold (the #d re-fetch merges the 38113 into
+  // premiumNotes), then redeems. Fail-soft everywhere — a probe must never
+  // surface an error.
+  const probeArbiterPremiumsAction = async (): Promise<void> => {
+    if (isSimModeOn() || isTestnetMode()) return;
+    const client = clientRef.current;
+    if (!client) return;
+    let pubkey: string;
+    try { pubkey = await client.getPubkey(); } catch { return; }
+    let events: { id: string; created_at: number; tags: string[][] }[];
+    try {
+      events = await client.queryOnce(
+        { kinds: [EscrowEventKind.PREMIUM], "#p": [pubkey] } as any,
+        8_000,
+      );
+    } catch { return; }
+    if (events.length === 0) return;
+    const targets = selectPremiumProbeLoads(events, {
+      isSettled: isEarningSettled,
+      isNoteLoaded: (escrowId, eventId) =>
+        (client.getState(escrowId)?.premiumNotes ?? []).some((n) => n.raw.id === eventId),
+    });
+    for (const id of targets) {
+      try {
+        // loadEscrow merges + replays the full chain (partial-replay-safe)
+        // and fires onStateUpdate, so the trade also lands in the App map.
+        const loaded = await client.loadEscrow(id);
+        if (!loaded) continue;
+        await redeemArbiterPremiumsAction(id);
+      } catch (e) {
+        console.warn(`[chama] arbiter premium probe: ${id} load/redeem failed:`, e);
+      }
+    }
+  };
+
   // ── Return ──────────────────────────────────────────────────────────────
 
   const actions: UseEscrowActions = {
@@ -3887,6 +3941,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     reattachPayout: reattachPayoutAction,
     payArbiterPremium: payArbiterPremiumAction,
     redeemArbiterPremiums: redeemArbiterPremiumsAction,
+    probeArbiterPremiums: probeArbiterPremiumsAction,
     sendChat,
     cancel: cancelAction,
     loadEscrow,
@@ -4303,23 +4358,84 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       }
       return { recovered };
     },
+    fetchMyBonds: async (): Promise<VerifiedBond[]> => {
+      // #77: the user's OWN announced bonds, chain-verified — so the Dashboard
+      // shows a live bond on a fresh device (no local commitment record yet).
+      // Fail-soft everywhere: any relay/esplora hiccup yields [] (never throws
+      // into render), and each announcement is recompute-don't-trust verified.
+      try {
+        const client = clientRef.current;
+        const signer = signerRef.current;
+        if (!client || !signer) return [];
+        const myPubkey = (await signer.getPublicKey()).trim().toLowerCase();
+        const events = await client.queryOnce(
+          { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], authors: [myPubkey] } as any, 6_000,
+        );
+        const latest = selectLatestAnnouncements(events as any).filter(
+          (a: any) => a.npub.toLowerCase() === myPubkey,
+        );
+        if (latest.length === 0) return [];
+        const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
+        const tip = await esploraTipHeight(fetchJson).catch(() => undefined);
+        const verified: VerifiedBond[] = [];
+        for (const a of latest) {
+          const v = await verifyBondAnnouncement(
+            a, { network: BOND_NETWORK, fetchJson, tipHeight: tip },
+          ).catch(() => null);
+          if (v) verified.push(v);
+        }
+        return verified;
+      } catch (e) {
+        console.warn("[chama] fetchMyBonds failed — showing local bonds only:", e);
+        return [];
+      }
+    },
     fetchCommunityBonds: async (community: string) => {
       const client = clientRef.current;
       if (!client) throw new Error("Not connected");
-      const events = await client.queryOnce(
-        { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], "#d": [community] } as any, 6_000,
-      );
-      const latest = selectLatestAnnouncements(events as any);
-      const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
-      const tip = await esploraTipHeight(fetchJson).catch(() => undefined);
-      // ⭐ Each announcement is chain-verified (recompute address + read on-chain);
-      // an unfunded or unreproducible claim is dropped, never counted.
-      const verified: VerifiedBond[] = [];
-      for (const a of latest) {
-        const v = await verifyBondAnnouncement(a, { network: BOND_NETWORK, fetchJson, tipHeight: tip });
-        if (v) verified.push(v);
+      // Stamp-hardening (the flaky-bondedArbiters fix): this fetch feeds the
+      // CREATE-time bonded stamp, where a silent empty result = silent
+      // arbiter-revenue loss on the whole trade. So: (1) retry an EMPTY relay
+      // read once (empty is ambiguous — no announcements vs a flap), and
+      // (2) on any failure OR an empty verify, fall back to the last
+      // chain-verified cached set (12h TTL) instead of returning nothing.
+      try {
+        let events = await client.queryOnce(
+          { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], "#d": [community] } as any, 6_000,
+        );
+        if (events.length === 0) {
+          await new Promise((r) => setTimeout(r, 800));
+          events = await client.queryOnce(
+            { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], "#d": [community] } as any, 6_000,
+          );
+        }
+        const latest = selectLatestAnnouncements(events as any);
+        const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
+        const tip = await esploraTipHeight(fetchJson).catch(() => undefined);
+        // ⭐ Each announcement is chain-verified (recompute address + read on-chain);
+        // an unfunded or unreproducible claim is dropped, never counted.
+        const verified: VerifiedBond[] = [];
+        for (const a of latest) {
+          const v = await verifyBondAnnouncement(a, { network: BOND_NETWORK, fetchJson, tipHeight: tip });
+          if (v) verified.push(v);
+        }
+        if (verified.length > 0) {
+          writeCachedCommunityBonds(community, verified);
+          return verified;
+        }
+        // Empty after the retry: either genuinely bond-less or a flap that
+        // outlived the retry. Prefer recent verified truth while it's fresh.
+        return readCachedCommunityBonds(community) ?? verified;
+      } catch (e) {
+        const cached = readCachedCommunityBonds(community);
+        if (cached) {
+          console.warn(
+            `[chama] fetchCommunityBonds(${community}): live fetch failed — using cached chain-verified set:`, e,
+          );
+          return cached;
+        }
+        throw e;
       }
-      return verified;
     },
     fetchBondedArbiterCounts: async (): Promise<Record<string, number>> => {
       const client = clientRef.current;

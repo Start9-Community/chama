@@ -116,25 +116,44 @@ export function listingHasLapsed(state: EscrowState, nowSec: number): boolean {
 }
 
 /** Auto-renew eligibility: the seller's own unfunded listing that has lapsed OR
- *  is within the lead window. Never a funded/locked/settled/cancelled trade. */
-export function canRenewListing(state: EscrowState, userPubkey: string | null, nowSec: number): boolean {
+ *  is within the lead window. Never a funded/locked/settled/cancelled trade, and
+ *  never an id already RETIRED (superseded by a prior renewal — the durable
+ *  cross-reload guard that stops the +N-per-open duplication). `retired` defaults
+ *  empty so existing callers are byte-identical. */
+export function canRenewListing(
+  state: EscrowState,
+  userPubkey: string | null,
+  nowSec: number,
+  retired: ReadonlySet<string> = EMPTY_RETIRED,
+): boolean {
   return (
+    !retired.has(state.id) &&
     isSellerOwnedListing(state, userPubkey) &&
     listingNeverFunded(state) &&
     nowSec >= state.expiresAt - RENEW_LEAD_SECONDS
   );
 }
 
+/** Shared empty default so the retired param stays backward-compatible. */
+const EMPTY_RETIRED: ReadonlySet<string> = new Set<string>();
+
 /** Fully-lapsed unfunded listings the seller owns — the manual "your store
- *  lapsed — renew?" card feeds off this (no lead window; only truly-lapsed). */
+ *  lapsed — renew?" card feeds off this (no lead window; only truly-lapsed).
+ *  Retired ids are excluded so a superseded listing never re-offers the card. */
 export function lapsedRenewableListings(
   states: Iterable<EscrowState>,
   userPubkey: string | null,
   nowSec: number,
+  retired: ReadonlySet<string> = EMPTY_RETIRED,
 ): EscrowState[] {
   const out: EscrowState[] = [];
   for (const s of states) {
-    if (isSellerOwnedListing(s, userPubkey) && listingNeverFunded(s) && listingHasLapsed(s, nowSec)) {
+    if (
+      !retired.has(s.id) &&
+      isSellerOwnedListing(s, userPubkey) &&
+      listingNeverFunded(s) &&
+      listingHasLapsed(s, nowSec)
+    ) {
       out.push(s);
     }
   }
@@ -142,15 +161,16 @@ export function lapsedRenewableListings(
 }
 
 /** Listings the online auto-renew effect should re-publish now (lapsed or
- *  about-to-lapse, seller-owned, unfunded). */
+ *  about-to-lapse, seller-owned, unfunded, not already retired). */
 export function autoRenewableListings(
   states: Iterable<EscrowState>,
   userPubkey: string | null,
   nowSec: number,
+  retired: ReadonlySet<string> = EMPTY_RETIRED,
 ): EscrowState[] {
   const out: EscrowState[] = [];
   for (const s of states) {
-    if (canRenewListing(s, userPubkey, nowSec)) out.push(s);
+    if (canRenewListing(s, userPubkey, nowSec, retired)) out.push(s);
   }
   return out;
 }

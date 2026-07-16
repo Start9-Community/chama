@@ -319,8 +319,13 @@ export function BrowseView({
       }}>
         {BROWSE_CATS.map(c => {
           const active = browseCategory === c.id;
-          const count = categoryCounts?.[c.id]
-            ?? (c.id === "all" ? totalListings : countListingsByCategory(matchingListings, nonMatchingListings, c.id));
+          // #75: counts must reflect what the viewer actually SEES — the
+          // own-hidden + retired filtering already applied to ownFiltered* — not
+          // the raw prop (which still counts own/hidden listings). Fall back to
+          // the prop only when no viewer-scoped set is available.
+          const count = c.id === "all"
+            ? totalListings
+            : countListingsByCategory(ownFilteredMatching, ownFilteredNonMatching, c.id);
           return (
             <button
               key={c.id}
@@ -403,17 +408,32 @@ export function BrowseView({
           textAlign: "center", padding: "44px 20px", fontFamily: T.sans,
         }}>
           {fedimintJoined ? (
-            <>
-              <div style={{ fontSize: 40, marginBottom: 14, lineHeight: 1 }}>🤝</div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 8 }}>
-                {t("browse.beFirstTitle")}
-              </div>
-              <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6, maxWidth: 300, margin: "0 auto" }}>
-                {t("browse.beFirstBodyBefore")}{" "}
-                <strong style={{ color: T.accent }}>{t("browse.beFirstCreate")}</strong>{" "}
-                {t("browse.beFirstBodyAfter")}
-              </div>
-            </>
+            !showOwn && ownHiddenCount > 0 ? (
+              // #75: the only offers here are the viewer's OWN, hidden by
+              // default — don't claim the community is empty. Point them at the
+              // reveal toggle instead of "be the first to post".
+              <>
+                <div style={{ fontSize: 40, marginBottom: 14, lineHeight: 1 }}>🙈</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 8 }}>
+                  {t("browse.ownHiddenTitle")}
+                </div>
+                <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6, maxWidth: 300, margin: "0 auto" }}>
+                  {t("browse.ownHiddenBody", { count: ownHiddenCount })}
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 40, marginBottom: 14, lineHeight: 1 }}>🤝</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 8 }}>
+                  {t("browse.beFirstTitle")}
+                </div>
+                <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6, maxWidth: 300, margin: "0 auto" }}>
+                  {t("browse.beFirstBodyBefore")}{" "}
+                  <strong style={{ color: T.accent }}>{t("browse.beFirstCreate")}</strong>{" "}
+                  {t("browse.beFirstBodyAfter")}
+                </div>
+              </>
+            )
           ) : (
             <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6 }}>
               {homeCommunity

@@ -21,7 +21,7 @@
 // ledger) lives in useEscrow; selection helpers here stay testable.
 
 import { AMBIENT_ARBITER_FEE_BPS, calculateBasisPointFeeMsats } from "./fees.js";
-import { EscrowStatus, Role, type EscrowState } from "../escrow-engine/types.js";
+import { EscrowStatus, Role, TAGS, type EscrowState } from "../escrow-engine/types.js";
 
 /** Each side pays half of the 0.5% ambient fee. */
 export const PER_SIDE_PREMIUM_BPS = AMBIENT_ARBITER_FEE_BPS / 2; // 25 bps
@@ -150,6 +150,54 @@ export function selectPremiumPayTargets(opts: {
     out.push(state.id);
   }
   return out;
+}
+
+/** How often the App re-runs the #62 redeem-probe while open. One cheap
+ *  single-filter REQ; only fires loads when an unredeemed note exists. */
+export const PREMIUM_PROBE_INTERVAL_MS = 5 * 60 * 1000;
+
+/** Slack past the note's try_cancel horizon after which a probed premium
+ *  is certainly refunded to its payer — not worth loading the trade for. */
+export const PREMIUM_PROBE_HORIZON_SLACK_SECS = 24 * 60 * 60;
+
+/** The slice of a raw kind-38113 Nostr event the probe selector needs. */
+export interface PremiumProbeEvent {
+  id: string;
+  created_at: number;
+  tags: string[][];
+}
+
+/**
+ * Task #62 arbiter redeem-probe selector. The redeem sweep only walks
+ * LOADED trades — but a settled trade is unwatched (no live sub) and
+ * skipped by discovery's "settled — nothing to heal" gate, so a premium
+ * published AFTER settlement never reaches a passive arbiter's state.
+ * Given the raw events a `{kinds:[38113], "#p":[me]}` relay probe
+ * returned, pick the DISTINCT escrow ids worth a loadEscrow: some note is
+ * neither settled in the earnings ledger, nor already in the loaded
+ * state (the sweep owns those), nor past its refund horizon. Pure.
+ */
+export function selectPremiumProbeLoads(
+  events: Iterable<PremiumProbeEvent>,
+  opts: {
+    isSettled: (eventId: string) => boolean;
+    isNoteLoaded: (escrowId: string, eventId: string) => boolean;
+    nowSecs?: number;
+  },
+): string[] {
+  const now = opts.nowSecs ?? Math.floor(Date.now() / 1000);
+  const horizon = PREMIUM_SPEND_TRY_CANCEL_SECS + PREMIUM_PROBE_HORIZON_SLACK_SECS;
+  const out = new Set<string>();
+  for (const ev of events) {
+    if (!ev || typeof ev.id !== "string" || !Array.isArray(ev.tags)) continue;
+    const escrowId = ev.tags.find((t) => Array.isArray(t) && t[0] === TAGS.ESCROW_ID)?.[1];
+    if (!escrowId) continue;
+    if (Number.isFinite(ev.created_at) && now - ev.created_at > horizon) continue;
+    if (opts.isSettled(ev.id)) continue;
+    if (opts.isNoteLoaded(escrowId, ev.id)) continue;
+    out.add(escrowId);
+  }
+  return [...out];
 }
 
 /**

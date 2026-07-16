@@ -36,6 +36,8 @@ export const browse: Record<string, string> = {
   "browse.navMe": "Me",
   "browse.noListingsMatch": "No listings match \"{query}\".",
   "browse.noOpenOffers": "No open offers yet",
+  "browse.ownHiddenTitle": "Your listings are hidden",
+  "browse.ownHiddenBody": "The only offers here are your {count} own — hidden by default. Tap \"Show my listings\" to reveal them.",
   "browse.openOfferSummaryMany": "{filtered} of {total} open offers",
   "browse.openOfferSummaryOne": "{filtered} of {total} open offer",
   "browse.otherCommunitiesMany": "{count} listings in other communities",

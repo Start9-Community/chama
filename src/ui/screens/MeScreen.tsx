@@ -275,7 +275,12 @@ export function MeScreen({
 
   return (
     <div style={{ padding: 16, maxWidth: 560, margin: "0 auto" }}>
-      {/* Profile header */}
+      {/* Profile header — HIDDEN (Jetty 2026-07-15): Me is "what needs attention
+          + settings" right now, not a profile space, so we reclaim this real
+          estate. The npub still lives in the Profile & Chama accordion below.
+          Flip `false` → true to bring it back when a dedicated Profile surface
+          is designed. */}
+      {false && (
       <div style={{
         background: T.card, border: `1px solid ${T.border}`,
         borderRadius: T.r, padding: 20, marginBottom: 16,
@@ -311,6 +316,7 @@ export function MeScreen({
           </div>
         </div>
       </div>
+      )}
 
       {/* ⭐ ATTENTION HERO — the single prioritized "needs your attention" queue.
           One source of truth with the Me-tab badge (selectNeedsYouTrades),

@@ -20613,6 +20613,96 @@ console.log("\n── ARBITER PREMIUM (compute + kind 38113 + ledger) ──");
   setLocalStorageUserScope(null);
 }
 
+// ── #62 REDEEM-PROBE + BONDED-POOL CACHE (arbiter-premium hardening) ──────
+//
+// Load-bearing invariants: the probe selector only asks for loads that can
+// still pay (unsettled · not already loaded · inside the refund horizon),
+// dedups per trade, and never trips on malformed events. The bonded-pool
+// cache round-trips bigints, refuses empty writes (a flap must never
+// clobber known-good bonds), expires at the TTL, and distrusts a whole
+// entry on one bad record.
+console.log("\n── #62 REDEEM-PROBE + BONDED-POOL CACHE ──");
+{
+  const ap = await import("../arbiters/arbiter-premium.js");
+  const cache = await import("../arbiters/bonded-pool-cache.js");
+
+  // ── probe selector ──
+  const NOW = 1_800_000_000;
+  const ev = (id: string, escrowId: string | null, ageSecs = 60) => ({
+    id,
+    created_at: NOW - ageSecs,
+    tags: escrowId ? [["d", escrowId], ["t", "escrow:premium"], ["p", ARBITER_PK]] : [["p", ARBITER_PK]],
+  });
+  const never = () => false;
+
+  assert(
+    JSON.stringify(ap.selectPremiumProbeLoads([ev("e1", "tr-1")], {
+      isSettled: never, isNoteLoaded: never, nowSecs: NOW,
+    })) === JSON.stringify(["tr-1"]),
+    "probe: a fresh unsettled unloaded 38113 selects its trade for a load");
+  assert(
+    ap.selectPremiumProbeLoads([ev("e1", "tr-1"), ev("e2", "tr-1"), ev("e3", "tr-2")], {
+      isSettled: never, isNoteLoaded: never, nowSecs: NOW,
+    }).length === 2,
+    "probe: two notes on one trade dedup to a single load (2 trades → 2 loads)");
+  assert(
+    ap.selectPremiumProbeLoads([ev("e1", "tr-1")], {
+      isSettled: (id) => id === "e1", isNoteLoaded: never, nowSecs: NOW,
+    }).length === 0,
+    "probe: a ledger-settled note (redeemed or given-up) never triggers a load");
+  assert(
+    ap.selectPremiumProbeLoads([ev("e1", "tr-1")], {
+      isSettled: never,
+      isNoteLoaded: (esc, id) => esc === "tr-1" && id === "e1",
+      nowSecs: NOW,
+    }).length === 0,
+    "probe: a note already in loaded state is the redeem sweep's job — no load");
+  const pastHorizon = ap.PREMIUM_SPEND_TRY_CANCEL_SECS + ap.PREMIUM_PROBE_HORIZON_SLACK_SECS + 60;
+  assert(
+    ap.selectPremiumProbeLoads([ev("e1", "tr-1", pastHorizon)], {
+      isSettled: never, isNoteLoaded: never, nowSecs: NOW,
+    }).length === 0,
+    "probe: a note past its refund horizon (payer reclaimed) is skipped");
+  assert(
+    ap.selectPremiumProbeLoads([ev("e1", null), { id: 5, tags: "x" } as any, null as any], {
+      isSettled: never, isNoteLoaded: never, nowSecs: NOW,
+    }).length === 0,
+    "probe: d-tag-less + malformed events never select (and never throw)");
+
+  // ── bonded-pool cache ──
+  (globalThis as any).localStorage.removeItem(cache.BONDED_POOL_CACHE_KEY);
+  const T0 = 1_000_000_000_000;
+  const bond = {
+    npub: "npub1cachetest", community: "tz-tzs", address: "bc1ptest",
+    lockUntil: 900_000, actualSats: 30_000n, claimedSats: 30_000n,
+    funded: true, active: true,
+  };
+  cache.writeCachedCommunityBonds("tz-tzs", [bond], T0);
+  const back = cache.readCachedCommunityBonds("tz-tzs", T0 + 60_000);
+  assert(
+    back !== null && back.length === 1 && back[0].actualSats === 30_000n
+      && back[0].npub === bond.npub && back[0].funded && back[0].active,
+    "cache: write→read round-trips a verified bond, bigint sats intact");
+  cache.writeCachedCommunityBonds("tz-tzs", [], T0 + 120_000);
+  assert(
+    cache.readCachedCommunityBonds("tz-tzs", T0 + 180_000)?.length === 1,
+    "cache: an EMPTY result is never written — a flap can't clobber known-good bonds");
+  assert(
+    cache.readCachedCommunityBonds("tz-tzs", T0 + cache.BONDED_POOL_CACHE_TTL_MS + 1) === null,
+    "cache: past the TTL the entry is stale → null (caller goes live-or-nothing)");
+  assert(cache.readCachedCommunityBonds("ke-kes", T0) === null,
+    "cache: unknown community → null");
+  // One bad record poisons the whole entry (never a partial trust).
+  (globalThis as any).localStorage.setItem(cache.BONDED_POOL_CACHE_KEY, JSON.stringify({
+    "tz-tzs": { verifiedAt: T0, bonds: [{ npub: "n", community: "tz-tzs", address: "a", lockUntil: 1, actualSats: "not-a-bigint", claimedSats: "0", funded: true, active: true }] },
+  }));
+  assert(cache.readCachedCommunityBonds("tz-tzs", T0 + 1) === null,
+    "cache: one unreadable record ⇒ the whole entry is distrusted");
+  cache.clearBondedPoolCache();
+  assert(cache.readCachedCommunityBonds("tz-tzs", T0 + 1) === null,
+    "cache: clear wipes the store");
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // RESULTS
 // ══════════════════════════════════════════════════════════════════════════

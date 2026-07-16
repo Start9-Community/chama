@@ -51,6 +51,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Load local, gitignored deploy config (deploy host/key/signing/poc-dist) so a fresh
+# terminal tab always has it — independent of ~/.zshrc / which tab you opened. This is
+# the durable fix for the recurring "CHAMA_DEPLOY_HOST is required" snag.
+[ -f "$ROOT_DIR/.env.release" ] && . "$ROOT_DIR/.env.release"
+
 BUMP="patch"
 SET_VERSION=""
 DRY=0

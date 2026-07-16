@@ -71,6 +71,7 @@ export const bond: Record<string, string> = {
   "bond.dashArbitratedAfterOne": " intercambio.",
   "bond.dashArbitratedBefore": "Arbitraste ",
   "bond.dashHeading": "PANEL",
+  "bond.dashAnnouncedElsewhere": "Una o más fianzas aquí se publicaron en otro dispositivo. Están activas en la cadena, pero las reclamas desde el dispositivo que las creó.",
   "bond.dashLockedCapital": "Capital bloqueado, a la vista — cuánto × por cuánto tiempo respaldarás tu palabra. Te convierte en árbitro con fianza para tu Chama.",
   "bond.dashManage": "Gestionar",
   "bond.dashNewHereBefore": "Nuevo por aquí. ",

@@ -29,7 +29,14 @@ import {
   lapsedRenewableListings,
   autoRenewableListings,
   sellerIsBonded,
+  isSellerOwnedListing,
+  listingNeverFunded,
 } from "../escrow-engine/listing-renewal.js";
+import {
+  retireListing,
+  getRetiredIds,
+  supersededListingIds,
+} from "../escrow-engine/listing-renewal-ledger.js";
 import {
   registerCbpRecurrence,
   recordCbpRepost,
@@ -56,6 +63,7 @@ import {
   funderPremiumMsats,
   selectPremiumPayTargets,
   selectPremiumRedeemTargets,
+  PREMIUM_PROBE_INTERVAL_MS,
 } from "../arbiters/arbiter-premium.js";
 import {
   hasPremiumOutboxRecord,
@@ -1024,8 +1032,24 @@ export default function App() {
 
   const now = Math.floor(Date.now() / 1000);
   const HIDE_AFTER = 7 * 86400;
+
+  // Durable retired-listing ledger (#74/#75): ids superseded by a renewal /
+  // repost / one-time dedupe. Cheap synchronous scoped-localStorage read per
+  // render (same precedent as isSimModeOn below); a tick forces a re-read after
+  // any markRetired. Only the OWNER ever has entries (their own listings), so
+  // filtering these out never changes what other users see.
+  const [, setRetiredTick] = useState(0);
+  const retiredIds = getRetiredIds();
+  const markRetired = (id: string) => {
+    retireListing(id);
+    setRetiredTick((n) => n + 1);
+  };
+
   const visibleTrades = [...escrows.values()]
     .filter(s => {
+      // Superseded (retired) own listings must not surface as live trades in
+      // Browse, Me, or the attention queue — they were replaced by a renewal.
+      if (retiredIds.has(s.id)) return false;
       if (["CREATED", "LOCKED", "APPROVED"].includes(s.status)) return true;
       if (s.createdAt && (now - s.createdAt) > HIDE_AFTER) return false;
       return true;
@@ -1052,7 +1076,7 @@ export default function App() {
   // Tier 1: the seller's own listings that lapsed UNFUNDED — feed the manual
   // "your store lapsed — renew?" card. Cheap pure filter over loaded escrows.
   const lapsedListings = pubkey
-    ? lapsedRenewableListings(escrows.values(), pubkey, now)
+    ? lapsedRenewableListings(escrows.values(), pubkey, now, retiredIds)
     : [];
   const [renewingId, setRenewingId] = useState<string | null>(null);
   // Tier 3: is the signed-in seller chain-verified bonded (funded+active 38135
@@ -1068,6 +1092,7 @@ export default function App() {
     setRenewingId(id);
     try {
       const { escrowId } = await actions.renewListing(id);
+      markRetired(id); // durably supersede the old lapsed source
       setToast({ message: t("me.storeRenewed"), type: "success" });
       openEscrow(escrowId, "me");
     } catch (e: any) {
@@ -1098,16 +1123,48 @@ export default function App() {
   // signal). Unbonded sellers get manual renew only, so this no-ops for them.
   useEffect(() => {
     if (!connected || !pubkey || !sellerBonded) return;
-    const renewables = autoRenewableListings(escrows.values(), pubkey, now)
-      .filter((l) => !autoRenewedRef.current.has(l.id));
+    // Persistent retired ledger is the cross-reload guard; autoRenewedRef stays
+    // the in-session guard on top. Cap per pass so a pathological state can't
+    // burst dozens of relay publishes on one load — the rest resolve next pass.
+    const renewables = autoRenewableListings(escrows.values(), pubkey, now, getRetiredIds())
+      .filter((l) => !autoRenewedRef.current.has(l.id))
+      .slice(0, 5);
     if (renewables.length === 0) return;
     for (const l of renewables) {
       autoRenewedRef.current.add(l.id); // mark first so a throw can't hot-loop
-      void actions.renewListing(l.id).catch((e: any) => {
-        console.warn("[chama] auto-renew failed:", l.id, e?.message || e);
-      });
+      void actions
+        .renewListing(l.id)
+        .then(() => markRetired(l.id)) // durably supersede the old source
+        .catch((e: any) => {
+          console.warn("[chama] auto-renew failed:", l.id, e?.message || e);
+        });
     }
   }, [connected, pubkey, sellerBonded, escrows, now]);
+
+  // One-time dedupe (#74/#75): collapse an existing pile of accidental renewals
+  // (the pre-fix +N-per-open duplication) down to one live listing per unique
+  // offer. Retire ALL-BUT-THE-NEWEST of each identity group among the seller's
+  // own unfunded listings. ⚠ Scoped to NEVER-FUNDED but NOT gated on lapsed: the
+  // accumulated duplicates are freshly-renewed copies with a 24h window still
+  // OPEN (not lapsed yet), so a lapsed-only scope missed them and the clone-war
+  // pile survived. Any never-locked owned listing is a candidate; the identity
+  // grouping keeps distinct offers intact (only byte-identical copies collapse).
+  // NOT latched: re-runs whenever the loaded escrow set changes so duplicates
+  // that STREAM in later (loadEscrow rehydrates listings over time) also get
+  // collapsed. Idempotent — once a group is down to its single newest listing,
+  // `superseded` is empty and it early-returns without touching state, so it
+  // can't loop (setRetiredTick isn't in the deps).
+  useEffect(() => {
+    if (!connected || !pubkey) return;
+    const retired = getRetiredIds();
+    const ownUnfunded = [...escrows.values()].filter(
+      (s) => isSellerOwnedListing(s, pubkey) && listingNeverFunded(s) && !retired.has(s.id),
+    );
+    const superseded = supersededListingIds(ownUnfunded);
+    if (superseded.length === 0) return;
+    for (const id of superseded) retireListing(id);
+    setRetiredTick((n) => n + 1);
+  }, [connected, pubkey, escrows]);
 
   // ── Monthly CBP recurrence ─────────────────────────────────────────────
   // The owner's active recurring bill series (from local storage), resolved to
@@ -1155,6 +1212,7 @@ export default function App() {
         .repostRecurringCbp(sourceId)
         .then(({ escrowId }) => {
           recordCbpRepost(cfg.seriesId, escrowId, Math.floor(Date.now() / 1000));
+          markRetired(sourceId); // durably supersede the reposted source instance
         })
         .catch((e: any) => {
           console.warn("[chama] cbp-recurrence repost failed:", cfg.seriesId, e?.message || e);
@@ -1373,6 +1431,25 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pubkey, fedimint.initialized, escrows]);
 
+  // Task #62 arbiter redeem-probe: the sweep above only walks LOADED
+  // trades — a settled trade is unwatched and discovery-skipped, so a
+  // premium published AFTER settlement never reaches a passive arbiter's
+  // state through it. Probe relays for 38113s #p-tagged to me at boot plus
+  // a gentle re-probe (one cheap single-filter REQ) and loadEscrow+redeem
+  // whatever's missing. The action is fail-soft and self-idempotent (the
+  // earnings ledger settles each note once).
+  useEffect(() => {
+    if (!pubkey || !fedimint.initialized) return;
+    if (isSimModeOn() || isTestnetMode()) return;
+    void actions.probeArbiterPremiums();
+    const timer = setInterval(
+      () => void actions.probeArbiterPremiums(),
+      PREMIUM_PROBE_INTERVAL_MS,
+    );
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pubkey, fedimint.initialized]);
+
   // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND nothing
   // else explains the balance — no locked/approved commitment, no
   // mid-funding flow, no mid-claim sweep. CREATED listings do not explain
@@ -1564,6 +1641,10 @@ export default function App() {
   const listingSoldOut = (s: EscrowState) =>
     s.stock !== undefined && isSoldOut(s, listingChildren(s), now);
   const allVisibleListings = visibleTrades.filter(s =>
+    // #74/#75: a listing superseded by a renewal/repost/dedupe must not render
+    // as a live offer OR be counted. Retired is device-local (owner-only), so
+    // this only ever hides the owner's own superseded duplicates.
+    !retiredIds.has(s.id) &&
     shouldShowOnBrowse({ escrow: s, browseCategory: "all", nowSec: now, isSoldOut: listingSoldOut(s) })
   );
   const visibleListings = allVisibleListings.filter(s =>
@@ -3221,6 +3302,7 @@ export default function App() {
           livenessBlocksPerDay={BOND_LIVENESS_BLOCKS_PER_DAY}
           onOpenBondCeremony={() => setShowBondCeremony(true)}
           balanceMsats={fedimint.balanceMsats ?? 0}
+          fetchMyBonds={actions.fetchMyBonds}
         />
       ) : view === "me" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>

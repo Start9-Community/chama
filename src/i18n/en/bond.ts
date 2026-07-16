@@ -73,6 +73,7 @@ export const bond: Record<string, string> = {
   "bond.dashArbitratedAfterOne": " trade.",
   "bond.dashArbitratedBefore": "Arbitrated ",
   "bond.dashHeading": "DASHBOARD",
+  "bond.dashAnnouncedElsewhere": "One or more bonds here were posted on another device. They're live on-chain, but you reclaim them from the device that created them.",
   "bond.dashLockedCapital": "Locked capital, in the open — how much × how long you'll stand behind your word. It makes you a bonded arbiter for your chama.",
   "bond.dashManage": "Manage",
   "bond.dashNewHereBefore": "New here. ",
