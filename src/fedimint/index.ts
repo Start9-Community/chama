@@ -5,10 +5,12 @@
 export * from "./fedimint-client.js";
 export * from "./escrow-bridge.js";
 export * from "./federation-config.js";
+export * from "./arbiter-federation-store.js";
 export * from "./seed-manager.js";
 export {
   adaptRealWallet,
   createRealWallet,
+  preloadRealWalletRuntime,
   resetLocalFedimintWallet,
 } from "./sdk-adapter.js";
 export {

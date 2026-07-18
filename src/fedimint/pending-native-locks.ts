@@ -73,6 +73,7 @@ import {
 } from "../storage/user-scope.js";
 import type { SelectedMenuItem } from "../escrow-engine/types.js";
 import { EscrowStatus, type EscrowState } from "../escrow-engine/types.js";
+import { compactSelectedMenuItems } from "../escrow-engine/selected-menu-items.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -122,6 +123,9 @@ export type PendingNativeLockStage = "intent" | "spent" | "publish-attempted";
 export interface PendingNativeLockOpts {
   savedHandleId?: string;
   selectedItems?: SelectedMenuItem[];
+  /** Buyer seated when funding began. Preserved across a slow Lightning
+   *  payment so expiry cannot erase the intended counterparty mid-lock. */
+  buyerPubkey?: string;
 }
 
 export interface PendingNativeLock {
@@ -156,13 +160,39 @@ export interface PendingNativeLock {
 
 type Stash = Record<string, PendingNativeLock>;
 
+function compactLockOpts(opts: PendingNativeLockOpts | undefined): PendingNativeLockOpts | undefined {
+  if (!opts) return undefined;
+  return {
+    ...opts,
+    selectedItems: compactSelectedMenuItems(opts.selectedItems),
+  };
+}
+
 function loadStash(): Stash {
   try {
     const raw = getScopedStorageItem(PENDING_NATIVE_LOCKS_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return {};
-    return parsed as Stash;
+    const stash = parsed as Stash;
+    let migrated = false;
+    for (const entry of Object.values(stash)) {
+      const before = entry.lockOpts?.selectedItems;
+      if (!before) continue;
+      const hadLegacyMedia = before.some(item =>
+        Object.prototype.hasOwnProperty.call(item as object, "imageDataUrl")
+      );
+      if (hadLegacyMedia) {
+        entry.lockOpts = compactLockOpts(entry.lockOpts);
+        migrated = true;
+      }
+    }
+    // Repair older pending retries immediately so a reload cannot restore
+    // the oversized selection snapshot again.
+    if (migrated) {
+      setScopedStorageItem(PENDING_NATIVE_LOCKS_KEY, JSON.stringify(stash));
+    }
+    return stash;
   } catch (e) {
     console.warn("[chama] pending-native-locks: loadStash failed:", e);
     return {};
@@ -229,7 +259,7 @@ export function stashNativeLockIntent(input: {
     amountMsats: input.amountMsats,
     federationId: input.federationId,
     spendTimeoutSecs: input.spendTimeoutSecs,
-    lockOpts: input.lockOpts,
+    lockOpts: compactLockOpts(input.lockOpts),
     createdAt: Date.now(),
     attempts: 0,
   };
@@ -272,7 +302,7 @@ export function upgradeNativeLockToSpent(input: {
     federationId: input.federationId ?? existing?.federationId ?? null,
     operationId: input.operationId,
     spendTimeoutSecs: input.spendTimeoutSecs ?? existing?.spendTimeoutSecs,
-    lockOpts: input.lockOpts ?? existing?.lockOpts,
+    lockOpts: compactLockOpts(input.lockOpts ?? existing?.lockOpts),
     createdAt: existing?.createdAt ?? Date.now(),
     attempts: 0,
   };

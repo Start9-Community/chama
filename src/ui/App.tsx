@@ -3,6 +3,7 @@ import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 
 import { useEscrow } from "../hooks/useEscrow.js";
+import { listCommitmentBonds } from "../bond-multisig/commitment-store.js";
 import {
   registerNotificationTapHandlers,
   consumePendingTradeDeepLink,
@@ -28,6 +29,7 @@ import { archivedTradeEntries } from "../escrow-engine/trade-index.js";
 import {
   lapsedRenewableListings,
   autoRenewableListings,
+  ownUnfundedListings,
   sellerIsBonded,
   isSellerOwnedListing,
   listingNeverFunded,
@@ -36,7 +38,16 @@ import {
   retireListing,
   getRetiredIds,
   supersededListingIds,
+  listingIdentityKey,
 } from "../escrow-engine/listing-renewal-ledger.js";
+import {
+  bumpAutoRenewCount,
+  getAutoRenewCount,
+  isManuallyKept,
+  markManuallyKept,
+  shouldAgeOutListing,
+  listingHasBuyerInterest,
+} from "../escrow-engine/listing-renewal-age.js";
 import {
   registerCbpRecurrence,
   recordCbpRepost,
@@ -445,6 +456,7 @@ export default function App() {
     connectedRelays,
     error,
     loading,
+    publicListingsLoading,
     fedimint,
     fundingInProgress,
     claimPayoutInProgress,
@@ -530,6 +542,11 @@ export default function App() {
   // pending-redemptions stash that automatic retry gave up on).
   const [strandedClaimExport, setStrandedClaimExport] = useState<StrandedRedemption | null>(null);
   const [autoLoginChecked, setAutoLoginChecked] = useState(false);
+  // `actions` is rebuilt as hook state changes, so this effect can re-run while
+  // secure-storage I/O is still pending. Latch synchronously before the first
+  // await; React's loading state alone cannot prevent already-started reads
+  // from dispatching several connect() calls together.
+  const autoLoginStartedRef = useRef(false);
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [pendingDestroyConfirm, setPendingDestroyConfirm] = useState<PendingDestroyConfirm | null>(null);
   // #25 foreign-chama guidance: a trade whose fed ≠ the wallet's fed (FED_MISMATCH)
@@ -844,8 +861,9 @@ export default function App() {
 
   // Auto-login: in app shells, check for a saved nsec before showing login.
   useEffect(() => {
-    if (autoLoginChecked || connected || loading) return;
+    if (autoLoginChecked || connected || loading || autoLoginStartedRef.current) return;
     if (!shouldPersistNsecInShell()) { setAutoLoginChecked(true); return; }
+    autoLoginStartedRef.current = true;
     (async () => {
       try {
         const value = await readSavedNsec();
@@ -1091,6 +1109,10 @@ export default function App() {
   const renewListing = async (id: string) => {
     setRenewingId(id);
     try {
+      // A MANUAL renew is a deliberate "keep this store alive" — mark the
+      // offer's lineage kept so the auto-renew age-out cap never lapses it.
+      const src = escrows.get(id);
+      if (src) markManuallyKept(listingIdentityKey(src));
       const { escrowId } = await actions.renewListing(id);
       markRetired(id); // durably supersede the old lapsed source
       setToast({ message: t("me.storeRenewed"), type: "success" });
@@ -1100,6 +1122,21 @@ export default function App() {
     } finally {
       setRenewingId(null);
     }
+  };
+
+  // "Clear my unfunded listings" (#82): the seller's own never-funded offers —
+  // the wall of stale/abandoned/test listings. Retiring them drops them from
+  // Browse/Me immediately and they lapse for everyone within ~24h (no CANCEL
+  // write-burst). Only touches the user's OWN unfunded listings.
+  const clearableListings = pubkey
+    ? ownUnfundedListings(escrows.values(), pubkey, retiredIds)
+    : [];
+  const [showClearListings, setShowClearListings] = useState(false);
+  const clearUnfundedListings = () => {
+    for (const s of clearableListings) retireListing(s.id);
+    setRetiredTick((n) => n + 1);
+    setShowClearListings(false);
+    setToast({ message: t("me.listingsCleared", { count: clearableListings.length }), type: "success" });
   };
 
   // Tier 3 bond resolution: chain-verify the seller's own bond once per connect
@@ -1128,10 +1165,22 @@ export default function App() {
     // burst dozens of relay publishes on one load — the rest resolve next pass.
     const renewables = autoRenewableListings(escrows.values(), pubkey, now, getRetiredIds())
       .filter((l) => !autoRenewedRef.current.has(l.id))
+      // Age-out (#82): stop auto-renewing an abandoned/test offer once its
+      // lineage has hit the cap with no buyer interest. A listing that ever had
+      // a JOIN/hold, or that the seller manually renewed, is exempt and stays.
+      .filter((l) => {
+        const key = listingIdentityKey(l);
+        return !shouldAgeOutListing({
+          autoRenewCount: getAutoRenewCount(key),
+          manuallyKept: isManuallyKept(key),
+          hasBuyerInterest: listingHasBuyerInterest(l),
+        });
+      })
       .slice(0, 5);
     if (renewables.length === 0) return;
     for (const l of renewables) {
       autoRenewedRef.current.add(l.id); // mark first so a throw can't hot-loop
+      bumpAutoRenewCount(listingIdentityKey(l)); // count this lineage's auto-renew
       void actions
         .renewListing(l.id)
         .then(() => markRetired(l.id)) // durably supersede the old source
@@ -1234,6 +1283,11 @@ export default function App() {
   const activeCommitmentCount = pubkey
     ? countActiveBuyerSellerCommitments({ escrows: escrows.values(), userPubkey: pubkey, nowSec: now })
     : 0;
+  // Arbiter earnings are intentionally federation-bound and preserved in
+  // separate stores. This flag only comes from a real locked bond; buyers,
+  // sellers, and future Stack users retain the single-federation balance gate.
+  const preservesArbiterFederationBalances = listCommitmentBonds()
+    .some((bond) => bond.phase === "locked");
   // v0.6.5: total amountMsats across every live buyer/seller trade.
   // Drives the ActiveTradePill headline "N active trades · X sats"
   // honestly — the implied total reading. Distinct from
@@ -1423,13 +1477,17 @@ export default function App() {
       isSettled: isEarningSettled,
     });
     for (const id of targets) {
-      const latch = `${id}:${escrows.get(id)?.premiumNotes?.length ?? 0}`;
+      // A premium note is federation-bound ecash. Switching from the wrong
+      // federation to the note's federation must license a fresh redeem
+      // attempt; the old latch keyed only by trade + note count permanently
+      // suppressed that retry for the rest of the session.
+      const latch = `v2:${fedimint.federationId ?? "no-fed"}:${id}:${escrows.get(id)?.premiumNotes?.length ?? 0}`;
       if (premiumRedeemSweptRef.current.has(latch)) continue;
       premiumRedeemSweptRef.current.add(latch);
       void actions.redeemArbiterPremiums(id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pubkey, fedimint.initialized, escrows]);
+  }, [pubkey, fedimint.initialized, fedimint.federationId, escrows]);
 
   // Task #62 arbiter redeem-probe: the sweep above only walks LOADED
   // trades — a settled trade is unwatched and discovery-skipped, so a
@@ -1448,7 +1506,7 @@ export default function App() {
     );
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pubkey, fedimint.initialized]);
+  }, [pubkey, fedimint.initialized, fedimint.federationId]);
 
   // v0.2.0 item 2: recovery banner. Fires when balance > 0 AND nothing
   // else explains the balance — no locked/approved commitment, no
@@ -1763,7 +1821,8 @@ export default function App() {
       return;
     }
 
-    if (balanceBlocksFederationSwitch(request.balanceMsats)) {
+    if (!preservesArbiterFederationBalances
+      && balanceBlocksFederationSwitch(request.balanceMsats)) {
       setPendingDestroyConfirm(request);
       return;
     }
@@ -1855,7 +1914,9 @@ export default function App() {
         fedId: (local.eventChain[0]?.payload as { fed?: string } | undefined)?.fed ?? null,
       },
       currentInvite: liveActiveInvite,
-      balanceMsats: fedimint.balanceMsats ?? 0,
+      balanceMsats: preservesArbiterFederationBalances
+        ? 0
+        : (fedimint.balanceMsats ?? 0),
       activeCommitmentCount,
     });
 
@@ -2112,6 +2173,7 @@ export default function App() {
     fedimint,
     actions,
     activeCommitmentCount,
+    preservesFederationBalances: preservesArbiterFederationBalances,
     setToast,
     setBrowseCommunity,
     setPendingDestroyConfirm: queueDestroyConfirm,
@@ -2556,6 +2618,49 @@ export default function App() {
           publishBondAnnouncement={actions.publishBondAnnouncement}
           onClose={() => setShowBondCeremony(false)}
         />
+      )}
+
+      {showClearListings && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: 20, zIndex: 1100,
+        }}>
+          <div style={{
+            maxWidth: 420, width: "100%", padding: 20, borderRadius: T.r,
+            background: T.card, border: `1px solid ${T.border}`,
+          }}>
+            <div style={{
+              fontSize: 13, color: T.text, fontFamily: T.sans, lineHeight: 1.55,
+              marginBottom: 18,
+            }}>
+              {t("me.clearListingsConfirm", { count: clearableListings.length })}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <button
+                onClick={clearUnfundedListings}
+                style={{
+                  width: "100%", padding: "12px 14px", borderRadius: T.rs,
+                  background: T.accent, border: "none", color: T.bg,
+                  fontFamily: T.mono, fontSize: 13, fontWeight: 800, cursor: "pointer",
+                }}
+              >
+                {t("me.clearListingsConfirmBtn", { count: clearableListings.length })}
+              </button>
+              <button
+                onClick={() => setShowClearListings(false)}
+                style={{
+                  width: "100%", padding: "10px 14px", borderRadius: T.rs,
+                  background: T.surface, border: `1px solid ${T.border}`,
+                  color: T.text, fontFamily: T.mono, fontSize: 12, fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                {t("me.clearListingsCancel")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {pendingClaim && (
@@ -3386,6 +3491,8 @@ export default function App() {
             }}
             onOpenSavedHandles={() => setView("saved-handles")}
             onOpenPayoutDestinations={() => setView("payout-destinations")}
+            unfundedListingCount={clearableListings.length}
+            onClearUnfundedListings={() => setShowClearListings(true)}
             onOpenAdvanced={() => { setAdvancedFocusNwc(false); setView("advanced"); }}
             onOpenHelp={() => setView("help")}
             onSignOut={handleSignOut}
@@ -3537,6 +3644,7 @@ export default function App() {
               orderIndicatorByListing={listingOrderIndicator}
               categoryCounts={browseCategoryCounts}
               fedimintJoined={fedimint.joined}
+              listingsLoading={publicListingsLoading}
               isFirstTime={getUserCommunitySlugRaw() === null}
               onPasteCustomInvite={handlePasteCustomInvite}
               pubkey={pubkey!}

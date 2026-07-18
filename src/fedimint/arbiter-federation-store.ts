@@ -1,0 +1,101 @@
+// Arbiter-only federation storage routing.
+//
+// A bonded arbiter may cover communities backed by different Fedimint
+// federations. Ecash cannot cross federation boundaries, so every federation
+// must keep its own client database. This registry only remembers which
+// browser OPFS scope belongs to each federation; it never stores ecash, keys,
+// or a seed. Buyer/seller and future Stack flows do not call this module.
+
+const STORE_PREFIX = "chama_arbiter_federations_v1";
+
+export interface ArbiterFederationRoute {
+  federationId: string;
+  inviteCode: string;
+  storageScope: string;
+  updatedAt: number;
+}
+
+interface StoredRoutes {
+  version: 1;
+  routes: Record<string, ArbiterFederationRoute>;
+}
+
+function storeKey(pubkey: string): string {
+  return `${STORE_PREFIX}:${pubkey.trim().toLowerCase()}`;
+}
+
+function cleanFederationId(federationId: string): string {
+  return federationId.trim().toLowerCase();
+}
+
+function read(pubkey: string): StoredRoutes {
+  try {
+    if (typeof localStorage === "undefined") return { version: 1, routes: {} };
+    const raw = localStorage.getItem(storeKey(pubkey));
+    if (!raw) return { version: 1, routes: {} };
+    const parsed = JSON.parse(raw) as Partial<StoredRoutes>;
+    if (parsed.version !== 1 || !parsed.routes || typeof parsed.routes !== "object") {
+      return { version: 1, routes: {} };
+    }
+    const routes: Record<string, ArbiterFederationRoute> = {};
+    for (const [key, value] of Object.entries(parsed.routes)) {
+      if (!value || typeof value !== "object") continue;
+      const route = value as Partial<ArbiterFederationRoute>;
+      if (
+        typeof route.federationId !== "string"
+        || typeof route.inviteCode !== "string"
+        || typeof route.storageScope !== "string"
+        || typeof route.updatedAt !== "number"
+      ) continue;
+      const id = cleanFederationId(route.federationId || key);
+      if (!id || !route.inviteCode.startsWith("fed1") || !route.storageScope) continue;
+      routes[id] = { ...route, federationId: id } as ArbiterFederationRoute;
+    }
+    return { version: 1, routes };
+  } catch {
+    return { version: 1, routes: {} };
+  }
+}
+
+function write(pubkey: string, value: StoredRoutes): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(storeKey(pubkey), JSON.stringify(value));
+  } catch {
+    // A missing registry must fail closed into the existing balance guard; it
+    // must never make a destructive switch appear safe.
+  }
+}
+
+/** Stable scope for a newly joined arbiter federation. */
+export function arbiterFederationStorageScope(pubkey: string, federationId: string): string {
+  return `${pubkey.trim().toLowerCase()}:arbiter-fed:${cleanFederationId(federationId)}`;
+}
+
+export function getArbiterFederationRoute(
+  pubkey: string,
+  federationId: string,
+): ArbiterFederationRoute | null {
+  return read(pubkey).routes[cleanFederationId(federationId)] ?? null;
+}
+
+export function listArbiterFederationRoutes(pubkey: string): ArbiterFederationRoute[] {
+  return Object.values(read(pubkey).routes).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export function rememberArbiterFederationRoute(
+  pubkey: string,
+  route: Omit<ArbiterFederationRoute, "updatedAt"> & { updatedAt?: number },
+): ArbiterFederationRoute {
+  const state = read(pubkey);
+  const federationId = cleanFederationId(route.federationId);
+  const saved: ArbiterFederationRoute = {
+    federationId,
+    inviteCode: route.inviteCode.trim(),
+    storageScope: route.storageScope,
+    updatedAt: route.updatedAt ?? Date.now(),
+  };
+  state.routes[federationId] = saved;
+  write(pubkey, state);
+  return saved;
+}

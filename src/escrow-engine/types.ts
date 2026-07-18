@@ -220,6 +220,8 @@ export const TAGS = {
 export interface CreatePayload {
   type: "escrow:create";
   description: string;
+  /** Product photo for a single marketplace listing. */
+  imageDataUrl?: string;
   amountMsats: number;
   /** Fiat amount if applicable */
   fiatAmount?: number;
@@ -380,7 +382,6 @@ export interface SelectedMenuItem {
   fiatAmount?: number;
   fiatCurrency?: string;
   fulfillment?: "physical" | "service" | "digital";
-  imageDataUrl?: string;
   dueAt?: number;
   termDays?: number;
   aprBps?: number;
@@ -605,6 +606,10 @@ export interface PremiumBody {
   escrowId: string;
   payerRole: Role;
   amountSats: number;
+  /** Federation that minted the bearer note. Arbiters must redeem with a
+   *  wallet joined to this federation; a mismatch is deferred, not counted
+   *  as a dead-note failure. Optional for pre-v5.2.3 notes. */
+  federationId?: string;
   /** OOB ecash note string, spendable by whoever redeems it first.
    *  Spent with a long try_cancel horizon so an absent arbiter's note
    *  auto-refunds to the payer. */
@@ -736,6 +741,8 @@ export interface EscrowState {
   status: EscrowStatus;
   /** Trade description */
   description: string;
+  /** Product photo for a single marketplace listing. */
+  imageDataUrl?: string;
   /** Amount in msats */
   amountMsats: number;
   /** Fiat amount and currency (if applicable) */

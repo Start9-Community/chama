@@ -36,6 +36,9 @@ export interface FederationCommandsDeps {
   /** V3 #72: live buyer/seller commitments — a manual switch is blocked
    *  while any are open (balance alone is blind during LOCKED). */
   activeCommitmentCount: number;
+  /** A locked arbiter bond enables per-federation preserved storage, so an
+   *  earnings balance is not a reason to force a Lightning withdrawal. */
+  preservesFederationBalances?: boolean;
   setToast: (t: { message: ReactNode; type: "success" | "error" | "info" }) => void;
   setBrowseCommunity: (slug: string) => void;
   setPendingDestroyConfirm: (
@@ -56,7 +59,7 @@ export interface FederationCommands {
 
 export function useFederationCommands(deps: FederationCommandsDeps): FederationCommands {
   const {
-    fedimint, actions, activeCommitmentCount,
+    fedimint, actions, activeCommitmentCount, preservesFederationBalances = false,
     setToast, setBrowseCommunity, setPendingDestroyConfirm,
   } = deps;
 
@@ -77,7 +80,7 @@ export function useFederationCommands(deps: FederationCommandsDeps): FederationC
     const effect = decideCommunityTapEffect({
       slug,
       currentInvite: previousInvite,
-      balanceMsats: fedimint.balanceMsats ?? 0,
+      balanceMsats: preservesFederationBalances ? 0 : (fedimint.balanceMsats ?? 0),
       activeCommitmentCount,
     });
 

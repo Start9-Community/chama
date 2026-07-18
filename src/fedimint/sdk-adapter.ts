@@ -2399,11 +2399,29 @@ function isOpfsLockError(e: unknown): boolean {
   return /no modification allowed|invalidstate/i.test(msg);
 }
 
+/**
+ * Start loading the heavy browser Fedimint runtime without creating a wallet.
+ * initFedimint uses this while the Nostr seed recovery is in flight, so the
+ * WASM/transport chunks do not sit serially in front of the federation join.
+ */
+export async function preloadRealWalletRuntime(): Promise<{
+  WalletDirector: typeof import("@fedimint/core")["WalletDirector"];
+  WasmWorkerTransport: typeof import("@fedimint/transport-web")["WasmWorkerTransport"];
+}> {
+  const [core, transport] = await Promise.all([
+    import("@fedimint/core"),
+    import("@fedimint/transport-web"),
+  ]);
+  return {
+    WalletDirector: core.WalletDirector,
+    WasmWorkerTransport: transport.WasmWorkerTransport,
+  };
+}
+
 export async function createRealWallet(
   opts: CreateRealWalletOptions = {}
 ): Promise<IFedimintWallet> {
-  const { WalletDirector } = await import("@fedimint/core");
-  const { WasmWorkerTransport } = await import("@fedimint/transport-web");
+  const { WalletDirector, WasmWorkerTransport } = await preloadRealWalletRuntime();
 
   // Terminate any worker left over from a previous init in this session.
   // Handles HMR, double-init, and retry-after-failed-join. (This does NOT

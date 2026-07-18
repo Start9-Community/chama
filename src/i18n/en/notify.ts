@@ -23,6 +23,12 @@ export const notify: Record<string, string> = {
   "notify.disputeBody":
     "Buyer and seller disagree on trade {label}. They're waiting on you — review and vote.",
   "notify.disputeTitle": "⚖️ A trade needs your ruling",
+  // #79 — trade-critical DMs sent to a counterparty's Nostr client (external,
+  // plaintext; trade id + link only, no amounts/keys).
+  "notify.dmLockedMsg": "🔒 Your Chama trade {label} is locked — open the app to pay/act. {link}",
+  "notify.dmVoteMsg": "🗳️ Your Chama trade {label} needs your vote. {link}",
+  "notify.dmDisputeMsg": "⚖️ A Chama trade {label} you arbitrate needs your ruling. {link}",
+  "notify.dmSettledMsg": "✅ Your Chama trade {label} settled — claim your payout. {link}",
   "notify.expiredBody":
     "Trade {label} reached its deadline. Open Chama to see where it landed.",
   "notify.expiredTitle": "⏰ Trade timed out",

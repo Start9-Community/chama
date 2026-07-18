@@ -99,7 +99,7 @@ export const trade: Record<string, string> = {
   "trade.inStock": "{count} in stock",
   "trade.insuranceLabel": "INSURANCE",
   "trade.insuranceSuffix": "to your arbiter at settlement (0.25%)",
-  "trade.insuranceSent": "Insurance sent to your arbiter",
+  "trade.insuranceSent": "Insurance note published for your arbiter",
   "trade.joinAsArbiter": "Join as Arbiter",
   "trade.joinAsBuyer": "Join as Buyer",
   "trade.joinAsSeller": "Join as Seller",

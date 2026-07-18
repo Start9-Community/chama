@@ -9,6 +9,11 @@ const MAX_SAVED_ESCROW_IDS = 50;
 // A slow webview brings relays up staggered; the timer resets on each new
 // connection, so a burst coalesces into ONE re-discovery once things settle.
 const RELAY_GROWTH_DEBOUNCE_MS = 1_500;
+// The first connected relay is the signal to START discovery, not a reason to
+// wait. RelayManager's fetchOnce still quorum-gates the actual REQ, so an
+// immediate first run cannot resolve from a partial single-relay history.
+// Later relay arrivals retain the debounce above to coalesce staggered growth.
+const INITIAL_DISCOVERY_DELAY_MS = 0;
 // Soft-gate readiness wait (relay-connect resilience). A user action that lands
 // during the connect→init handshake window waits this long for ≥1 relay (and a
 // signer) instead of hard-failing with "Not connected"; if it never goes ready
@@ -137,6 +142,7 @@ import {
   getOrCreateSeed,
   clearSeedCache,
   isTestnetMode,
+  preloadRealWalletRuntime,
   resetLocalFedimintWallet,
   drainPendingRedemptions,
   stashPendingFunding,
@@ -155,6 +161,11 @@ import {
   federationNameForInvite,
   deriveCreateFedTags,
   effectiveCreateFederationId,
+  expectedFederationIdForInvite,
+  arbiterFederationStorageScope,
+  getArbiterFederationRoute,
+  listArbiterFederationRoutes,
+  rememberArbiterFederationRoute,
   generateFediEcash,
   receiveFediEcash,
   hasFediInternalEcash,
@@ -218,7 +229,7 @@ import {
   buildArbiterApplicationEvent,
   collectArbiterApplications,
 } from "../arbiters/applications.js";
-import { maybeNotifyTransition, maybeNotifyChatMessage, maybeNotifyBuyerInterest, maybeNotifyNewListing } from "../notifications/notify-service.js";
+import { maybeNotifyTransition, maybeNotifyChatMessage, maybeNotifyBuyerInterest, maybeNotifyNewListing, maybeSendTradeDms } from "../notifications/notify-service.js";
 import {
   RATING_KIND,
   buildRatingEvent,
@@ -563,8 +574,8 @@ export interface FedimintState {
   /**
    * v0.3.1 Phase 3: cold-boot federation probe state.
    *
-   * Sequential to initFedimint: runs once after a successful init/switch,
-   * before the user can compose a trade. Eliminates the
+   * Starts after a successful init/switch without delaying navigation.
+   * Runs once per init and eliminates the
    * "compose-then-fail-at-lock" UX where the user only discovers fed
    * unreachability after 90 seconds of trade composition.
    *
@@ -607,6 +618,8 @@ export interface UseEscrowState {
   error: string | null;
   /** Loading state */
   loading: boolean;
+  /** Browse has connected but is still verifying public listing chains. */
+  publicListingsLoading: boolean;
   /** Fedimint wallet state */
   fedimint: FedimintState;
   /**
@@ -1073,6 +1086,19 @@ export interface UseEscrowConfig extends Partial<EscrowClientConfig> {
 
 export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowActions] {
   const clientRef = useRef<EscrowClient | null>(null);
+  // Synchronous connection gate. React state (`loading`) does not update until
+  // the next render, so concurrent auto-login/tap callers could previously all
+  // pass the UI guard, create independent EscrowClients, and leak every client
+  // except the last one assigned to clientRef. Each leak kept six relay sockets
+  // and a public-listings subscription alive. This ref closes that race for
+  // every caller, including callers outside App's auto-login effect.
+  const connectInFlightRef = useRef(false);
+  // Coalesce boot discovery triggers. Relay growth and connect's post-saved-ID
+  // heal can overlap; sharing one in-flight run avoids duplicate REQs and
+  // loadEscrow work while still allowing a later settled-relay re-heal.
+  const discoveryInFlightRef = useRef<Promise<number> | null>(null);
+  const publicListingsSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const publicListingHydrationsPendingRef = useRef(0);
   const fedimintRef = useRef<FedimintClient | null>(null);
   const bridgeRef = useRef<EscrowFedimintBridge | null>(null);
   const signerRef = useRef<Signer | null>(null);
@@ -1125,6 +1151,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     connectedRelays: 0,
     error: null,
     loading: false,
+    publicListingsLoading: false,
     fundingInProgress: false,
     claimPayoutInProgress: false,
     fedimint: {
@@ -1194,6 +1221,23 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     maybeNotifyBuyerInterest(priorEscrow, escrowState, notifyPubkey, notifyLiveSinceRef.current);
     maybeNotifyNewListing(priorEscrow, escrowState, notifyPubkey, notifyLiveSinceRef.current);
 
+    // #79: Nostr-native "email alert" — when THIS client caused a trade-critical
+    // transition, DM the counterparty so their external Nostr client (Damus/
+    // Amethyst) surfaces it. The decider's single-sender rule + the persisted
+    // per-(trade,transition) dedup keep it to exactly one send network-wide.
+    // Sim/testnet no-op (no real relays/counterparties to alert). Fire-and-forget.
+    if (!isSimModeOn() && !isTestnetMode()) {
+      const dmClient = clientRef.current;
+      if (dmClient) {
+        void maybeSendTradeDms(
+          priorEscrow,
+          escrowState,
+          notifyPubkey,
+          (pk, msg) => dmClient.sendTradeAlertDM(pk, msg),
+        );
+      }
+    }
+
     setState(prev => {
       const next = new Map(prev.escrows);
       next.set(escrowId, escrowState);
@@ -1210,9 +1254,22 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     });
   }, []);
 
+  const runDiscovery = useCallback((client: EscrowClient, pubkey: string): Promise<number> => {
+    const existing = discoveryInFlightRef.current;
+    if (existing) return existing;
+    const run = discoverAndLoadMyTrades(client, pubkey, forgottenIdsRef.current);
+    discoveryInFlightRef.current = run;
+    void run.finally(() => {
+      if (discoveryInFlightRef.current === run) discoveryInFlightRef.current = null;
+    });
+    return run;
+  }, []);
+
   // ── Connect ─────────────────────────────────────────────────────────────
 
   const connect = useCallback(async () => {
+    if (connectInFlightRef.current || clientRef.current) return;
+    connectInFlightRef.current = true;
     setState(prev => ({ ...prev, loading: true, error: null }));
 
     try {
@@ -1309,6 +1366,18 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           console.debug(`[escrow] Validation error on ${id}: ${error} (event: ${eventId})`);
         },
         onRelayStatus: (url, status) => updateRelayStatus(url, status),
+        onPublicListingHydration: (pending) => {
+          publicListingHydrationsPendingRef.current = pending;
+          if (pending > 0) {
+            setState(prev => ({ ...prev, publicListingsLoading: true }));
+            return;
+          }
+          if (publicListingsSettleTimerRef.current) {
+            clearTimeout(publicListingsSettleTimerRef.current);
+            publicListingsSettleTimerRef.current = null;
+          }
+          setState(prev => ({ ...prev, publicListingsLoading: false }));
+        },
       };
 
       const client = new EscrowClient(signer, {
@@ -1327,11 +1396,27 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // the UI filters by "am I a participant" to split Browse from My trades.
       client.watchPublicListings();
 
+      // A public CREATE is intentionally hidden until its complete chain has
+      // been quorum-verified (otherwise a stale completed offer can flash as
+      // OPEN). During that bounded verification window, tell Browse the truth
+      // instead of briefly claiming there are no offers. An actually-empty
+      // community settles after the same cold-start budget.
+      if (publicListingsSettleTimerRef.current) clearTimeout(publicListingsSettleTimerRef.current);
+      publicListingsSettleTimerRef.current = setTimeout(() => {
+        publicListingsSettleTimerRef.current = null;
+        // No CREATE arrived: the initial public query is genuinely empty. If a
+        // chain is still in flight, its completion callback owns settlement.
+        if (publicListingHydrationsPendingRef.current === 0) {
+          setState(prev => ({ ...prev, publicListingsLoading: false }));
+        }
+      }, 10_000);
+
       setState(prev => ({
         ...prev,
         connected: true,
         pubkey,
         loading: false,
+        publicListingsLoading: true,
         // Clean re-scope on a changed identity: drop the prior npub's escrows
         // so the role/pill can never be computed against the wrong identity.
         // The saved-ID reload + active discovery below repopulate for the new
@@ -1511,19 +1596,25 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // openEscrow's refetch — so it never delays connect. Union-only and
       // denylist-aware (see discoverAndLoadMyTrades). Runs on every client;
       // a fresh APK install or any wiped cache benefits identically.
-      void discoverAndLoadMyTrades(client, pubkey, forgottenIdsRef.current);
+      void runDiscovery(client, pubkey);
     } catch (e) {
       setState(prev => ({
         ...prev,
         loading: false,
         error: e instanceof Error ? e.message : String(e),
       }));
+    } finally {
+      connectInFlightRef.current = false;
     }
-  }, [config, updateEscrow, updateRelayStatus]);
+  }, [config, updateEscrow, updateRelayStatus, runDiscovery]);
 
   // ── Disconnect ──────────────────────────────────────────────────────────
 
   const disconnect = useCallback(() => {
+    if (publicListingsSettleTimerRef.current) {
+      clearTimeout(publicListingsSettleTimerRef.current);
+      publicListingsSettleTimerRef.current = null;
+    }
     clientRef.current?.disconnect();
     clientRef.current = null;
     fedimintRef.current?.cleanup().catch((e) =>
@@ -1535,6 +1626,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     fundingInProgressRef.current = null;
     claimPayoutInProgressRef.current = false;
     lastDiscoveryRelayCountRef.current = 0;
+    discoveryInFlightRef.current = null;
+    publicListingHydrationsPendingRef.current = 0;
     setLocalStorageUserScope(null);
     clearSeedCache();
     setState({
@@ -1545,6 +1638,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       connectedRelays: 0,
       error: null,
       loading: false,
+      publicListingsLoading: false,
       fundingInProgress: false,
       claimPayoutInProgress: false,
       fedimint: {
@@ -1601,9 +1695,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // run before all relays are up. Even with the relay-manager's quorum gate,
   // the connect budget can elapse with a partial set. As more relays come
   // online, re-run active discovery (union-only, denylist-aware) so a list
-  // built off a partial set heals to the full one. The timer resets on each
-  // growth, so staggered connects coalesce into ONE re-fire after the set
-  // settles; only fires when the connected count actually grew.
+  // built off a partial set heals to the full one. The FIRST growth starts
+  // immediately (fetchOnce itself still waits for relay quorum). Later growth
+  // retains the debounce so staggered connects coalesce into one settled pass.
   useEffect(() => {
     if (!state.connected || !state.pubkey) return;
     const client = clientRef.current;
@@ -1611,12 +1705,15 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     if (state.connectedRelays <= lastDiscoveryRelayCountRef.current) return;
     const pk = state.pubkey;
     const grewTo = state.connectedRelays;
+    const delay = lastDiscoveryRelayCountRef.current === 0
+      ? INITIAL_DISCOVERY_DELAY_MS
+      : RELAY_GROWTH_DEBOUNCE_MS;
     const t = setTimeout(() => {
       lastDiscoveryRelayCountRef.current = grewTo;
-      void discoverAndLoadMyTrades(client, pk, forgottenIdsRef.current);
-    }, RELAY_GROWTH_DEBOUNCE_MS);
+      void runDiscovery(client, pk);
+    }, delay);
     return () => clearTimeout(t);
-  }, [state.connected, state.pubkey, state.connectedRelays]);
+  }, [state.connected, state.pubkey, state.connectedRelays, runDiscovery]);
 
   // ── Trade actions ───────────────────────────────────────────────────────
 
@@ -1853,7 +1950,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
   const lockAndPublishAction = useCallback(async (
     escrowId: string,
-    opts: { savedHandleId?: string; selectedItems?: SelectedMenuItem[] } = {},
+    opts: { savedHandleId?: string; selectedItems?: SelectedMenuItem[]; buyerPubkey?: string } = {},
   ) => {
     const client = requireClient();
     const bridge = requireBridge();
@@ -1883,7 +1980,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   const lockAndPublishWithEcashAction = useCallback(async (
     escrowId: string,
     oobNotes: string,
-    opts: { savedHandleId?: string; selectedItems?: SelectedMenuItem[] } = {},
+    opts: { savedHandleId?: string; selectedItems?: SelectedMenuItem[]; buyerPubkey?: string } = {},
   ) => {
     const client = requireClient();
     const bridge = requireBridge();
@@ -2456,17 +2553,33 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // (result unused) — but DO NOT fold this into skipMnemonic, which also drives
       // storageScope below; keep storage scoping exactly as it was.
       const skipSeedFetch = skipMnemonic || isNativeBridgeModeOn();
+      // Browser only: overlap the large Fedimint core/transport imports with
+      // Nostr seed recovery. Both are required before wallet construction,
+      // but neither depends on the other; doing them serially made the first
+      // trip to a federation needlessly longer on cold caches.
+      const runtimeWarmup = !skipMnemonic && !isNativeBridgeModeOn()
+        ? preloadRealWalletRuntime()
+        : Promise.resolve(null);
       const mnemonic = skipSeedFetch
         ? undefined
         : await getOrCreateSeed(clientRef.current!, signerRef.current!);
+      await runtimeWarmup;
       // Sim wallet keys its persisted state by npub so multiple
       // identities in the same browser don't share a sim balance.
       const activePubkey = await signerRef.current!.getPublicKey().catch(() => null);
       const simNpub = isSimModeOn()
         ? activePubkey
         : null;
+      const bondedArbiter = listCommitmentBonds().some((bond) => bond.phase === "locked");
+      const desiredFederationId = expectedFederationIdForInvite(desiredInvite);
+      const rememberedArbiterRoute = bondedArbiter && activePubkey && desiredFederationId
+        ? getArbiterFederationRoute(activePubkey, desiredFederationId)
+        : null;
+      // Browser arbiters reopen the OPFS file assigned to this federation.
+      // Native shells select their isolated database through the bridge, so
+      // storageScope remains informational there.
       const storageScope = !skipMnemonic
-        ? activePubkey
+        ? (rememberedArbiterRoute?.storageScope ?? activePubkey)
         : null;
 
       const buildClient = () => new FedimintClient({
@@ -2529,12 +2642,21 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // Sim has no real bearer ecash to protect, so the reconcile/fund-loss
       // guard is meaningless here; bypass it like probeReachable() and the
       // wallet factory already do. Real mode is unaffected.
-      const driftDetected = !isSimModeOn() && shouldReconcileFederation({
+      let driftDetected = !isSimModeOn() && shouldReconcileFederation({
         previousActiveInvite,
         desiredInvite,
         walletIsJoined,
         walletFederationId,
       });
+
+      // A native bonded arbiter may boot with the legacy (first) database
+      // active even though their selected community belongs to another saved
+      // federation. Select the desired database before the destructive drift
+      // reconciliation path gets a chance to run.
+      if (driftDetected && bondedArbiter && isNativeBridgeModeOn()) {
+        await fedimint.switchFederationPreserving(desiredInvite);
+        driftDetected = false;
+      }
       if ((import.meta as any).env?.DEV) {
         console.info("[chama] initFedimint route", {
           userCommunity,
@@ -2549,6 +2671,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       }
 
       if (driftDetected) {
+        if (bondedArbiter) {
+          const err = new Error(
+            "This arbiter federation has no preserved storage route. Chama refused to reset any arbiter ecash. Re-select the federation to repair the route.",
+          );
+          (err as Error & { code?: string }).code = "ARBITER_FEDERATION_ROUTE_MISSING";
+          throw err;
+        }
         const fundingSignal = fundingInProgressRef.current;
         const fundingInFlight = !!fundingSignal && !fundingSignal.aborted;
         if (fundingInFlight || claimPayoutInProgressRef.current) {
@@ -2660,6 +2789,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // Join federation (idempotent in the SDK when already on the
       // same fed; lands cleanly on the new fed when post-wipe).
       const federationId = await fedimint.joinFederation(effectiveInvite);
+
+      // Adopt the pre-multi-federation database as the arbiter's first route.
+      // This is the migration that preserves already-earned premiums (including
+      // balances minted before this feature existed) in place.
+      if (bondedArbiter && activePubkey && desiredFederationId) {
+        const existingRoutes = listArbiterFederationRoutes(activePubkey);
+        if (rememberedArbiterRoute || existingRoutes.length === 0) {
+          rememberArbiterFederationRoute(activePubkey, {
+            federationId,
+            inviteCode: effectiveInvite,
+            storageScope: rememberedArbiterRoute?.storageScope ?? activePubkey,
+          });
+        }
+      }
 
       // PR 5: record the actually-joined invite so the next cold start
       // can reconcile if the user later switches preference.
@@ -2782,22 +2925,21 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
       vibrate([40, 20, 40, 20, 80]);
 
-      // v0.3.1 Phase 3: cold-boot federation probe. Sequential — runs
-      // AFTER initFedimint has resolved init successfully. If init
-      // throws (preceding catch), this block is skipped and
-      // bootProbeState stays "pending" (but fedimint.joined === false
-      // in that case, so the existing not-joined Reconnect surface in
-      // ChamaBar handles the UX, not the new "unreachable" variant).
+      // v0.3.1 Phase 3: cold-boot federation probe. Start it after a
+      // successful join, but deliberately do NOT await it. The picker can
+      // land on Browse as soon as the wallet is joined; pending is already a
+      // non-gating state and the just-in-time money-operation probes remain
+      // the safety boundary. If a newer init replaces this client before the
+      // probe settles, ignore the stale result.
       //
       // Probe1 vs probe2:
       //   probe1 — this block, fires once per initFedimint
       //   probe2 — the just-in-time check inside createFundingInvoice
       //            (line ~1614) and escrow-bridge probes at lock/claim.
-      //   Probe2 sites are unchanged; the boot gate ensures probe2
-      //   never has to surface the first "federation unreachable"
-      //   error to the user mid-trade-composition.
-      try {
-        await fedimint.probeReachable();
+      //   Probe2 sites are unchanged and remain authoritative before
+      //   money moves; probe1 is the early warning shown from Browse.
+      void fedimint.probeReachable().then(() => {
+        if (fedimintRef.current !== fedimint) return;
         const probeOkAt = Date.now();
         healthRef.current = { ok: true, at: probeOkAt };
         updateFedimint({
@@ -2805,7 +2947,8 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           lastHealthOk: true,
           lastHealthAt: probeOkAt,
         });
-      } catch (probeErr) {
+      }).catch((probeErr) => {
+        if (fedimintRef.current !== fedimint) return;
         // Probe failed — joined the fed but it's structurally broken
         // (e.g., quorum dead). Override the optimistic ok seed above.
         // The ChamaBar "⚠ Chama unreachable · Reconnect →" pill picks
@@ -2820,7 +2963,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           lastHealthOk: false,
           lastHealthAt: probeFailedAt,
         });
-      }
+      });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       updateFedimint({ busy: false, error: message });
@@ -2925,6 +3068,95 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       throw new Error("Invite code must start with 'fed1'");
     }
 
+    const bondedArbiter = listCommitmentBonds().some((bond) => bond.phase === "locked");
+    const activePubkey = await signerRef.current?.getPublicKey().catch(() => null) ?? null;
+    const targetFederationId = expectedFederationIdForInvite(trimmed);
+    const currentFederationId = fedimintRef.current?.getFederationId() ?? null;
+
+    if (bondedArbiter && activePubkey && targetFederationId && currentFederationId) {
+      const currentInvite = getActiveInvite();
+      if (currentInvite) {
+        const currentRoute = getArbiterFederationRoute(activePubkey, currentFederationId);
+        rememberArbiterFederationRoute(activePubkey, {
+          federationId: currentFederationId,
+          inviteCode: currentInvite,
+          storageScope: currentRoute?.storageScope ?? activePubkey,
+        });
+      }
+      const targetRoute = getArbiterFederationRoute(activePubkey, targetFederationId);
+      rememberArbiterFederationRoute(activePubkey, {
+        federationId: targetFederationId,
+        inviteCode: trimmed,
+        storageScope: targetRoute?.storageScope
+          ?? arbiterFederationStorageScope(activePubkey, targetFederationId),
+      });
+
+      console.info("[chama] selecting preserved arbiter federation", targetFederationId);
+      updateFedimint({ busy: true, error: null });
+      try {
+        if (persistCustom) setCustomFederationInvite(trimmed);
+        else setCustomFederationInvite("");
+
+        if (isNativeBridgeModeOn()) {
+          const fedimint = fedimintRef.current!;
+          const federationId = await fedimint.switchFederationPreserving(trimmed);
+          setActiveInvite(trimmed);
+          bridgeRef.current = new EscrowFedimintBridge(
+            clientRef.current!,
+            fedimint,
+            signerRef.current!,
+          );
+          const balanceMsats = await fedimint.getBalance();
+          updateFedimint({
+            initialized: true,
+            joined: true,
+            federationId,
+            balanceMsats,
+            busy: false,
+            error: null,
+            lastHealthOk: true,
+            lastHealthAt: Date.now(),
+          });
+        } else {
+          try { await fedimintRef.current?.cleanup(); } catch {}
+          fedimintRef.current = null;
+          bridgeRef.current = null;
+          healthRef.current = { ok: null, at: null };
+          clearActiveInvite();
+          updateFedimint({
+            initialized: false,
+            joined: false,
+            federationId: null,
+            balanceMsats: 0,
+            busy: true,
+            error: null,
+          });
+          await initFedimint(trimmed, { persistCustom });
+        }
+        return;
+      } catch (e) {
+        // Browser switching releases the old OPFS handle before opening the
+        // target. If the target federation is unreachable, immediately reopen
+        // the preserved prior route so a failed community tap cannot leave the
+        // arbiter disconnected (and can never fall into the destructive
+        // single-wallet revert path).
+        if (!isNativeBridgeModeOn() && currentInvite) {
+          try {
+            try { await fedimintRef.current?.cleanup(); } catch {}
+            fedimintRef.current = null;
+            bridgeRef.current = null;
+            clearActiveInvite();
+            await initFedimint(currentInvite, { persistCustom: false });
+          } catch (restoreError) {
+            console.error("[chama] couldn't reopen preserved arbiter federation", restoreError);
+          }
+        }
+        const message = e instanceof Error ? e.message : String(e);
+        updateFedimint({ busy: false, error: message });
+        throw e;
+      }
+    }
+
     // v0.1.76 fund-loss protection: balance-aware refusal. v0.7.2
     // aligns this with the recovery UI: sub-fee dust cannot be sent out
     // through Lightning, so it should not strand users behind a
@@ -2982,7 +3214,6 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       clearActiveInvite();
 
       // Step 2 — wipe OPFS file + rotate filename so init() opens a fresh DB
-      const activePubkey = await signerRef.current?.getPublicKey().catch(() => null) ?? null;
       await resetLocalFedimintWallet({ storageScope: activePubkey });
 
       // Step 3 — persist only Advanced/Sandbox/custom switches as custom
@@ -3144,6 +3375,19 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       opts.onPhase({ kind: "lock-failed", error: err });
       return { kind: "lock-failed", error: err };
     }
+    // Snapshot the seated buyer BEFORE any external Lightning/on-chain payment
+    // can begin. A slow payment may outlive the JOIN hold + hidden grace; the
+    // bridge carries this identity through LOCK, but refuses if a different
+    // buyer replaced them meanwhile. This is a money-path preflight: no buyer
+    // means no invoice and therefore no sats can leave Alby first.
+    let fundingBuyerPubkey: string;
+    try {
+      ({ buyerPubkey: fundingBuyerPubkey } = await requireBridge().preflightLock(escrowId));
+    } catch (e) {
+      const err = describeError(e, "This trade is not ready to fund");
+      opts.onPhase({ kind: "lock-failed", error: err });
+      return { kind: "lock-failed", error: err };
+    }
     // v0.6.5 funding-operation gate. The shared OPFS wallet's
     // spendNotes call cannot safely overlap with a second runFundAndLock.
     // The ref is the authoritative synchronous read at entry (setState
@@ -3193,7 +3437,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           selectedItems: opts.selectedItems,
           onPhase: opts.onPhase,
           signal: opts.signal,
-          preflight: (id) => requireBridge().preflightLock(id),
+          preflight: async () => {}, // outer preflight pinned the buyer before funding
           generateEcash: (amountMsats, memo) => generateFediEcash(amountMsats, memo),
           // Re-absorb WITHOUT expectedMsats — re-absorbing the exact notes we
           // generated is exact, and passing it risks a receive-then-throw that
@@ -3206,7 +3450,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           // (returns state, no throw, on "Cannot LOCK"/"TERMINAL"); we surface
           // the committed notesHash so the orchestrator confirms OUR lock.
           lockAndPublish: async (id, notes, lockOpts) => {
-            const state = await lockAndPublishWithEcashAction(id, notes, lockOpts);
+            const state = await lockAndPublishWithEcashAction(id, notes, {
+              ...lockOpts,
+              buyerPubkey: fundingBuyerPubkey,
+            });
             return { lockedNotesHash: state?.lock?.notesHash ?? null };
           },
         });
@@ -3281,6 +3528,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
               const locked = await lockAndPublishAction(escrowId, {
                 savedHandleId: opts.savedHandleId,
                 selectedItems: opts.selectedItems,
+                buyerPubkey: fundingBuyerPubkey,
               });
               // Positive confirmation, not the swallow's word (F8).
               if (locked?.lock?.notesHash) {
@@ -3317,6 +3565,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
             lockOpts: {
               savedHandleId: opts.savedHandleId,
               selectedItems: opts.selectedItems,
+              buyerPubkey: fundingBuyerPubkey,
             },
           });
         } catch (e) {
@@ -3440,6 +3689,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         await lockAndPublishAction(escrowId, {
           savedHandleId: opts.savedHandleId,
           selectedItems: opts.selectedItems,
+          buyerPubkey: fundingBuyerPubkey,
         });
         opts.onPhase({ kind: "locked" });
         return { kind: "locked" };
@@ -3478,7 +3728,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
               await payInvoiceWithNwc(connectionString, bolt11);
             }
           : undefined,
-        lockAndPublish: lockAndPublishAction,
+        lockAndPublish: (id, lockOpts) => lockAndPublishAction(id, {
+          ...lockOpts,
+          buyerPubkey: fundingBuyerPubkey,
+        }),
         onPhase: opts.onPhase,
         signal: opts.signal,
       });
@@ -3822,6 +4075,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       await client.sendPremium(escrowId, {
         amountSats: decision.amountSats,
         oobNotes: spent.oobNotes,
+        federationId: fedimint.getFederationId() ?? undefined,
         noteKind: "ambient",
       });
     } catch (e) {
@@ -3862,16 +4116,25 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       };
       if (!body || body.escrowId !== escrowId) {
         // Not for me / malformed — count toward give-up so it stops retrying.
-        recordEarningAttemptFailed({ ...base, amountMsats: 0 });
+        recordEarningAttemptFailed({ ...base, amountMsats: 0, lastError: "Premium envelope could not be decrypted or was malformed" });
         continue;
       }
       const amountMsats = Math.floor(body.amountSats) * 1000;
+      const currentFed = fedimint.getFederationId();
+      if (body.federationId && currentFed && body.federationId !== currentFed) {
+        // Federation-bound bearer ecash cannot redeem in another mint. Do not
+        // burn one of the finite retry attempts: the federation-keyed App
+        // latch retries as soon as the arbiter switches to the right wallet.
+        console.warn(`[chama] arbiter premium: waiting for federation ${body.federationId}; current wallet is ${currentFed}`);
+        continue;
+      }
       try {
         await fedimint.redeemWithRetry(body.oobNotes);
         recordEarningRedeemed({ ...base, amountMsats });
         redeemedAny = true;
       } catch (e) {
-        recordEarningAttemptFailed({ ...base, amountMsats });
+        const lastError = e instanceof Error ? e.message : String(e);
+        recordEarningAttemptFailed({ ...base, amountMsats, lastError: lastError.slice(0, 500) });
         console.warn("[chama] arbiter premium: redeem failed:", e);
       }
     }

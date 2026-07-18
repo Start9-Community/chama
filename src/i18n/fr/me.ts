@@ -9,6 +9,13 @@ export const me: Record<string, string> = {
   "me.storeRenewing": "Renouvellement…",
   "me.storeRenewed": "Boutique renouvelée — de retour sur Parcourir.",
   "me.storeRenewFailed": "Impossible de renouveler la boutique.",
+  // Clear unfunded listings (#82) — Settings row + confirm dialog.
+  "me.clearListings": "Effacer mes annonces non financées",
+  "me.clearListingsHint": "{count} annonces jamais financées — retirez-les de votre vitrine.",
+  "me.clearListingsConfirm": "Effacer {count} annonces non financées ? Elles disparaîtront de votre vitrine et expireront pour tout le monde sous ~24 h. Les échanges financés et verrouillés ne sont pas touchés.",
+  "me.clearListingsConfirmBtn": "Effacer {count} annonces",
+  "me.clearListingsCancel": "Les garder",
+  "me.listingsCleared": "{count} annonces non financées effacées.",
   // CBP mensuel — indicateur de facture récurrente + carte Arrêter.
   "me.recurringTitleOne": "Facture mensuelle",
   "me.recurringTitleMany": "{count} factures mensuelles",
@@ -74,6 +81,8 @@ export const me: Record<string, string> = {
   "me.dmNotifications": "Notifications de chat",
   "me.dmOffHint": "Désactivé — le chat reste silencieux",
   "me.dmOnHint": "Activé — vibre à chaque échange",
+  "me.tradeDm": "Alerter mes contreparties",
+  "me.tradeDmHint": "Envoyer un DM Nostr à l'autre partie aux moments clés (verrouillé, vote, réglé) pour que son appli l'alerte",
   "me.earlierTrades": "Échanges antérieurs",
   "me.edit": "Modifier",
   "me.emptyDisputes": "Aucun litige n'attend votre décision pour le moment.",

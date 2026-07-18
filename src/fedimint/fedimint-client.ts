@@ -87,6 +87,11 @@ export interface IFedimintWallet {
   open(): Promise<void>;
   isOpen(): boolean;
   joinFederation(inviteCode: string): Promise<void>;
+  /** Native sidecars can keep several federation databases and atomically
+   *  select one without deleting the previously active database. Browser
+   *  wallets implement the same behavior by reopening a federation-scoped
+   *  OPFS file at the hook layer. */
+  switchFederationPreserving?(inviteCode: string): Promise<void>;
   /** Optional sidecar hook for adapters that cannot recover an invite from
    *  the native client DB after an already-open wallet is re-associated with
    *  Chama's configured invite. */
@@ -654,6 +659,29 @@ export class FedimintClient {
     // moment we've been chasing.
     await this.runRecoveryIfNeeded(wallet, "join");
 
+    this.callbacks.onFederationJoined?.(this._federationId);
+    return this._federationId;
+  }
+
+  /** Select another already-isolated federation database without resetting it.
+   * Only the arbiter flow calls this, and only native adapters expose the hook. */
+  async switchFederationPreserving(inviteCode: string): Promise<string> {
+    const wallet = this.requireWallet();
+    if (!wallet.switchFederationPreserving) {
+      throw new Error("This Fedimint adapter does not support an in-place preserved switch");
+    }
+    if (this.balanceUnsubscribe) {
+      this.balanceUnsubscribe();
+      this.balanceUnsubscribe = null;
+    }
+    await wallet.switchFederationPreserving(inviteCode);
+    this._federationId = await wallet.federation.getFederationId();
+    assertJoinedFederationMatchesInvite(inviteCode, this._federationId);
+    this._joinedInvite = inviteCode.trim();
+    wallet.rememberInviteCode?.(this._joinedInvite);
+    this.balanceUnsubscribe = wallet.balance.subscribeBalance((balance) => {
+      this.callbacks.onBalanceUpdate?.(balance);
+    });
     this.callbacks.onFederationJoined?.(this._federationId);
     return this._federationId;
   }

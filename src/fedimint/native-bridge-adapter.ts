@@ -747,6 +747,19 @@ export class NativeBridgeWallet implements IFedimintWallet {
     await this.refreshBalance();
   }
 
+  async switchFederationPreserving(inviteCode: string): Promise<void> {
+    await assertNativeBridgeCompatible(this.baseUrl);
+    const joined = await this.request<NativeJoinResponse>("/switch", {
+      method: "POST",
+      body: { inviteCode },
+      timeoutMs: NATIVE_BRIDGE_JOIN_TIMEOUT_MS,
+    });
+    this.openState = true;
+    this.federationId = joined.federation_id;
+    this.rememberInviteCode(joined.joined || inviteCode);
+    await this.refreshBalance();
+  }
+
   rememberInviteCode(inviteCode: string): void {
     const trimmed = inviteCode.trim();
     if (!trimmed) return;

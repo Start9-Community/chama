@@ -25,6 +25,12 @@ import {
 import { payoutRecipientFor } from "../escrow-engine/recipients.js";
 import { translate, getCurrentLang } from "../i18n/index.js";
 
+/** getchama.app deep link for a trade, safe to drop into a plaintext external DM.
+ *  Mirrors App's `?trade=<id>` / `?escrowId=<id>` URL open path. */
+function tradeDeepLink(id: string): string {
+  return `https://getchama.app/?trade=${id}`;
+}
+
 export interface TradeNotification {
   escrowId: string;
   title: string;
@@ -328,4 +334,135 @@ export function chatNotificationFor(
     body: translate(lang, "notify.chatBody", { who, label }),
     tag: `${id}:chat:${message.raw.id}`,
   };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Nostr-native "email alert" DMs — the pure "should we DM the counterparty?" core
+// ══════════════════════════════════════════════════════════════════════════
+//
+// #79: Chama is serverless, so PWA background web-push is infeasible (no server
+// to send the push). Instead, when a party takes a TRADE-CRITICAL action, the
+// ACTING client sends the counterparty a NIP-17 gift-wrapped Nostr DM, routed
+// to their advertised inbox relays (legacy kind-4 only when no inbox exists).
+// Their Nostr client surfaces it like an email alert. ALWAYS-ON for
+// trade-critical moments, with a per-user mute
+// (notify-service `tradeDmPref`). No chat / marketing DMs.
+//
+// This module is PURE: given prev + next replayed state and the viewer's role,
+// it returns which participant ROLES to DM, the plaintext message, the dedup
+// `transition` token, and — crucially — the single `sender` role expected to
+// have caused the transition. The side effects (mute gate, per-(trade,transition)
+// dedup, sim/testnet no-op, encrypt+publish) live in notify-service / useEscrow.
+//
+// ⭐ SENDER RULE (documented, deterministic, single-sender). The naive rule
+// "send if I'm a participant not in recipients" would let BOTH the true actor
+// AND the (pool) arbiter DM the recipient — every client dedups LOCALLY, so a
+// cross-client duplicate would slip through. So the decider names ONE `sender`
+// role per transition (always the party that PUBLISHES that transition's event),
+// and the orchestrator sends only when `myRole === sender`. That guarantees
+// exactly one DM per (trade, transition) across the whole network. `sender` is
+// always a buyer/seller (never the arbiter), so a pool arbiter observing a trade
+// never sends. Messages are short, plaintext, non-sensitive (trade id + a
+// getchama.app link; NO amounts/keys) since they're read in EXTERNAL clients.
+
+export interface TradeDmNotification {
+  /** Participant roles to DM (never includes `sender`). */
+  recipients: Role[];
+  /** Plaintext DM body (built in the sender's current language). */
+  message: string;
+  /** The ONE role expected to send this — the party that published the event. */
+  sender: Role;
+  /** Dedup token, one per (trade, transition): `${id}:${transition}`. */
+  transition: string;
+}
+
+/** The viewer's role for DM purposes — the assigned/acting arbiter counts, so a
+ *  seated arbiter is recognized, but a mere pool member is not a sender anyway. */
+export function dmViewerRole(state: EscrowState, pubkey: string): Role | null {
+  return roleOf(state, pubkey);
+}
+
+/** The other trading party (buyer↔seller) — never the arbiter. */
+function counterpartyOf(role: Role): Role | null {
+  if (role === Role.BUYER) return Role.SELLER;
+  if (role === Role.SELLER) return Role.BUYER;
+  return null;
+}
+
+/**
+ * The trade-critical DM (if any) to send for one escrow transitioning prev →
+ * next, from the perspective of `myRole` (the viewer's role on this trade). Pure;
+ * null when nothing warrants a DM. Only a handful of moments where the
+ * counterparty genuinely owes attention fire.
+ */
+export function tradeDmNotificationFor(
+  prev: EscrowState | null | undefined,
+  next: EscrowState,
+  myRole: Role | null,
+): TradeDmNotification | null {
+  if (!prev || !myRole) return null; // only DM on an OBSERVED transition
+  const id = next.id;
+  const label = shortId(id);
+  const link = tradeDeepLink(id);
+  const lang = getCurrentLang();
+
+  const build = (
+    sender: Role, recipients: Role[], key: string, msgKey: string,
+  ): TradeDmNotification | null => {
+    const rcpts = recipients.filter(r => r !== sender);
+    if (rcpts.length === 0) return null;
+    return {
+      recipients: rcpts,
+      sender,
+      transition: `${id}:${key}`,
+      message: translate(lang, msgKey, { label, link }),
+    };
+  };
+
+  // 1) CREATED → LOCKED: the locker funded it; tell the NON-locker (the fiat
+  //    payer / party whose move it is now). Sender = the locker.
+  if (prev.status === EscrowStatus.CREATED && next.status === EscrowStatus.LOCKED) {
+    const release = payoutRecipientFor(next, Outcome.RELEASE); // → non-locker (recipient)
+    const refund = payoutRecipientFor(next, Outcome.REFUND);   // → locker (sender)
+    if (release && refund) {
+      return build(refund.role, [release.role], "locked", "notify.dmLockedMsg");
+    }
+  }
+
+  // 2) A vote just landed while LOCKED. Two sub-cases:
+  //    (a) it produced a DISPUTE (both voted, disagree) → summon the ARBITER.
+  //    (b) only one party has voted → summon the OTHER party's vote.
+  //    Sender = the party who just voted (they published the VOTE).
+  if (next.status === EscrowStatus.LOCKED) {
+    const bPrev = prev.votes[Role.BUYER], sPrev = prev.votes[Role.SELLER];
+    const bNext = next.votes[Role.BUYER], sNext = next.votes[Role.SELLER];
+    const buyerJustVoted = bNext !== undefined && bPrev === undefined;
+    const sellerJustVoted = sNext !== undefined && sPrev === undefined;
+    const justVoter = buyerJustVoted ? Role.BUYER : sellerJustVoted ? Role.SELLER : null;
+    if (justVoter) {
+      if (!inDispute(prev) && inDispute(next)) {
+        // (a) dispute opened — the arbiter is needed.
+        return build(justVoter, [Role.ARBITER], "dispute", "notify.dmDisputeMsg");
+      }
+      const other = counterpartyOf(justVoter);
+      const otherVoted = other === Role.BUYER ? bNext !== undefined : sNext !== undefined;
+      if (other && !otherVoted) {
+        // (b) waiting on the other party's vote.
+        return build(justVoter, [other], "vote", "notify.dmVoteMsg");
+      }
+    }
+  }
+
+  // 3) → APPROVED (settled / claim-ready): tell the WINNER to claim. Sender =
+  //    the non-winner party (the winner is the recipient; the counterparty
+  //    reliably observes the resolution and is a deterministic single sender).
+  if (prev.status !== EscrowStatus.APPROVED && next.status === EscrowStatus.APPROVED) {
+    const winner = payoutRecipientFor(next, next.resolvedOutcome ?? Outcome.RELEASE);
+    const senderRole = winner ? counterpartyOf(winner.role) : null;
+    if (winner && senderRole) {
+      return build(senderRole, [winner.role], "settled", "notify.dmSettledMsg");
+    }
+  }
+
+  return null;
 }

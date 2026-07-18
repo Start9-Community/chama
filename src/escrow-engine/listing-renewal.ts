@@ -160,6 +160,24 @@ export function lapsedRenewableListings(
   return out;
 }
 
+/** Every one of the user's OWN never-funded listings (any status short of a
+ *  funded/locked/settled trade), excluding already-retired ids. Feeds the
+ *  "Clear my unfunded listings" action — a one-tap retire of the seller's whole
+ *  wall of stale/abandoned/test offers. Does NOT touch funded trades. */
+export function ownUnfundedListings(
+  states: Iterable<EscrowState>,
+  userPubkey: string | null,
+  retired: ReadonlySet<string> = EMPTY_RETIRED,
+): EscrowState[] {
+  const out: EscrowState[] = [];
+  for (const s of states) {
+    if (!retired.has(s.id) && isSellerOwnedListing(s, userPubkey) && listingNeverFunded(s)) {
+      out.push(s);
+    }
+  }
+  return out;
+}
+
 /** Listings the online auto-renew effect should re-publish now (lapsed or
  *  about-to-lapse, seller-owned, unfunded, not already retired). */
 export function autoRenewableListings(
@@ -182,6 +200,7 @@ export function autoRenewableListings(
  *  ~24h. No `parent`/`claimedQuantity` (a storefront is never a child). */
 export interface RenewCreateParams {
   description: string;
+  imageDataUrl?: string;
   amountMsats: number;
   fiatAmount?: number;
   fiatCurrency?: string;
@@ -214,6 +233,7 @@ export function buildRenewCreateParams(state: EscrowState): RenewCreateParams {
   }
   return {
     description: state.description,
+    ...(state.imageDataUrl ? { imageDataUrl: state.imageDataUrl } : {}),
     amountMsats: state.amountMsats,
     ...(state.fiatAmount !== undefined ? { fiatAmount: state.fiatAmount } : {}),
     ...(state.fiatCurrency !== undefined ? { fiatCurrency: state.fiatCurrency } : {}),

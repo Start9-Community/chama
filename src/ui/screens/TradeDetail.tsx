@@ -67,6 +67,7 @@ import { CountdownTimer } from "../components/CountdownTimer.js";
 import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { BitcoinPricePill } from "../components/BitcoinPricePill.js";
+import { SwipeImageGallery } from "../components/SwipeImageGallery.js";
 import { NwcStatusBanner } from "../components/NwcStatusBanner.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 import { PagerPills } from "./tradedetail/PagerPills.js";
@@ -334,7 +335,6 @@ export function TradeDetail({
             fiatAmount: item.fiatAmount,
             fiatCurrency: item.fiatCurrency,
             fulfillment: item.fulfillment,
-            imageDataUrl: item.imageDataUrl,
             dueAt: item.dueAt,
             termDays: item.termDays,
             aprBps: item.aprBps,
@@ -356,7 +356,6 @@ export function TradeDetail({
           fiatAmount: item.fiatAmount,
           fiatCurrency: item.fiatCurrency,
           fulfillment: item.fulfillment,
-          imageDataUrl: item.imageDataUrl,
           dueAt: item.dueAt,
           termDays: item.termDays,
           aprBps: item.aprBps,
@@ -549,7 +548,12 @@ export function TradeDetail({
       : [];
   const renderedMenuRows = state.status === EscrowStatus.CREATED
     ? createdMenuRows
-    : state.lock.selectedItems ?? [];
+    : (state.lock.selectedItems ?? []).map(selected => ({
+        ...selected,
+        // Order snapshots intentionally contain no media. Resolve the
+        // thumbnail from the immutable CREATE listing for display only.
+        imageDataUrl: menuItems.find(item => item.id === selected.itemId)?.imageDataUrl,
+      }));
   const menuDisplayAmountMsats = canSelectMenu
     ? selectedMenuAmountMsats || savedOrderAmountMsats
     : lockMenuAmountMsats || savedOrderAmountMsats;
@@ -846,8 +850,9 @@ export function TradeDetail({
     !state.community ||
     state.community === homeCommunity;
   const heroImages = showStorefrontImages ? [
-    ...(renderedMenuRows.length > 0 ? renderedMenuRows : menuItems),
-  ].filter(item => !!item.imageDataUrl).slice(0, 2) : [];
+    ...(state.imageDataUrl ? [{ id: "single-listing", imageDataUrl: state.imageDataUrl }] : []),
+    ...menuItems,
+  ].map(item => item.imageDataUrl).filter((src): src is string => !!src) : [];
   // Trade detail follows the sketch: route education stays as a tiny
   // context note in the hero instead of a full pre-room card.
   const showVerboseRouteEducation = false;
@@ -927,12 +932,15 @@ export function TradeDetail({
     hasUnreadChat: unreadChatForTrade(state, myRole) > 0,
   });
   const [activePane, setActivePane] = useState(defaultPane);
-  // Snap to the leading pane on trade change only (not every status tick), so a
-  // manual swipe within a trade isn't yanked back.
+  // Snap to the leading pane when the viewed trade OR the viewer's seat changes
+  // (not every status tick), so a manual swipe within a stable trade isn't yanked
+  // back. A successful join changes myRole from null to buyer/seller/arbiter while
+  // keeping the same trade id; including myRole here is what makes every vertical
+  // reliably land the new participant on Details for pre-lock configuration.
   useEffect(() => {
     setActivePane(defaultPane);
-    // Fresh trade → re-enable auto-focus, and mark the mount scroll as programmatic
-    // so onPagerScroll doesn't mistake it for a user swipe.
+    // Fresh trade/seat → re-enable auto-focus, and mark the mount scroll as
+    // programmatic so onPagerScroll doesn't mistake it for a user swipe.
     userMovedPaneRef.current = false;
     programmaticTargetRef.current = defaultPane;
     // #68 landing-race fix: on first mount the pager's clientWidth is frequently 0
@@ -957,7 +965,7 @@ export function TradeDetail({
     };
     raf = requestAnimationFrame(snap);
     return () => { if (raf) cancelAnimationFrame(raf); };
-  }, [state.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state.id, myRole]); // eslint-disable-line react-hooks/exhaustive-deps
   const goPane = (i: number) => {
     const clamped = Math.max(0, Math.min(PAGER_TABS.length - 1, i));
     programmaticTargetRef.current = clamped;
@@ -2466,28 +2474,8 @@ export function TradeDetail({
             textAlign: "center" as const,
           }}>
             {heroImages.length > 0 && (
-              <div style={{
-                display: "grid",
-                gridTemplateColumns: heroImages.length > 1 ? "1fr 1fr" : "1fr",
-                gap: 8,
-                marginBottom: 10,
-                borderRadius: T.r,
-                overflow: "hidden",
-                border: `1px solid ${T.border}`,
-              }}>
-                {heroImages.map((item, index) => (
-                  <img
-                    key={`${"itemId" in item ? item.itemId : item.id}-${index}`}
-                    src={item.imageDataUrl ?? ""}
-                    alt=""
-                    style={{
-                      width: "100%",
-                      height: 96,
-                      objectFit: "cover",
-                      display: "block",
-                    }}
-                  />
-                ))}
+              <div style={{ marginBottom: 10, borderRadius: T.r, overflow: "hidden", border: `1px solid ${T.border}` }}>
+                <SwipeImageGallery images={heroImages} height={148} label="Trade photos" />
               </div>
             )}
             {/* v2.7 Stage 2: the decorative 128px woven-mark orb was removed —
@@ -2639,6 +2627,9 @@ export function TradeDetail({
             )}
             {renderedMenuRows.map(item => {
               const itemId = "itemId" in item ? item.itemId : item.id;
+              const itemImage = "imageDataUrl" in item
+                ? item.imageDataUrl
+                : menuItems.find(menuItem => menuItem.id === itemId)?.imageDataUrl;
               const savedOrderItem = savedOrderItems.find(orderItem => orderItem.itemId === itemId);
               const interactive = canSelectMenu;
               const qty = "quantity" in item
@@ -2675,9 +2666,9 @@ export function TradeDetail({
                   border: `1px solid ${T.border}`,
                   borderRadius: T.rs,
                 }}>
-                  {showStorefrontImages && item.imageDataUrl && (
+                  {showStorefrontImages && itemImage && (
                     <img
-                      src={item.imageDataUrl}
+                      src={itemImage}
                       alt=""
                       style={{
                         width: 46,

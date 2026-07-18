@@ -51,6 +51,8 @@ export const browse: Record<string, string> = {
   "browse.reconnectTo": "Reconéctate a {community} para ver qué se intercambia.",
   "browse.searchPlaceholder": "Buscar anuncios...",
   "browse.showMyListings": "Mostrar mis anuncios",
+  "browse.verifyingOffers": "Comprobando ofertas abiertas…",
+  "browse.verifyingOffersBody": "Verificando el estado más reciente de las operaciones entre relés.",
   "browse.showMyListingsHidden": "· {count} tuyos ocultos",
   "browse.sectionOpenCount": "{count} abiertos",
   "browse.sourceWithFx": "{source} · FX {fx}",

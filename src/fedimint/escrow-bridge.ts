@@ -95,6 +95,9 @@ interface LockOptions {
   savedHandleId?: string;
   /** Menu basket snapshot. Required when locking a menu listing. */
   selectedItems?: SelectedMenuItem[];
+  /** Buyer identity snapshotted before an external funding payment begins.
+   *  May outlive that buyer's JOIN grace, but never a replacement buyer. */
+  buyerPubkey?: string;
   /** v2.3: committed substitution grace ceiling (seconds). The hook resolves
    *  this from the consensus-safe power-user override; absent ⇒ the legacy 4h
    *  default. Rides into the signed LOCK so backup eligibility replays
@@ -109,6 +112,28 @@ function amountMsatsForLock(state: EscrowState, selectedItems?: SelectedMenuItem
     throw new Error("Select at least one menu item before locking this trade.");
   }
   return total;
+}
+
+/** Resolve the buyer for LOCK across a slow external payment. Normally the
+ * active hold wins. A buyer pinned before funding may survive hold expiry, but
+ * only while the latest known buyer is still that same key; a replacement is
+ * a hard stop so funds can never lock against an unseen counterparty. */
+export function resolveLockBuyerPubkey(
+  state: EscrowState,
+  nowSec: number,
+  pinnedBuyerPubkey?: string,
+): string | null {
+  const effectiveBuyer = getEffectiveParticipantAt(state, Role.BUYER, nowSec, { includeLockGrace: true });
+  const lastKnownBuyer = state.joinHolds?.[Role.BUYER]?.pubkey ?? state.participants[Role.BUYER] ?? null;
+  if (pinnedBuyerPubkey && lastKnownBuyer && lastKnownBuyer !== pinnedBuyerPubkey) {
+    throw new Error(
+      "Cannot lock — a different buyer replaced the buyer who began this funding attempt. " +
+      "Your sats stay in your Chama balance; review the new buyer before locking."
+    );
+  }
+  return effectiveBuyer ?? (
+    pinnedBuyerPubkey && lastKnownBuyer === pinnedBuyerPubkey ? pinnedBuyerPubkey : null
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -126,7 +151,7 @@ export class EscrowFedimintBridge {
     this.signer = signer;
   }
 
-  private async prepareLockContext(escrowId: string): Promise<{
+  private async prepareLockContext(escrowId: string, pinnedBuyerPubkey?: string): Promise<{
     state: EscrowState;
     buyerPubkey: string;
     sellerPk: string;
@@ -185,7 +210,7 @@ export class EscrowFedimintBridge {
     }
 
     const nowSec = Math.floor(Date.now() / 1000);
-    const buyerPubkey = getEffectiveParticipantAt(state, Role.BUYER, nowSec, { includeLockGrace: true });
+    const buyerPubkey = resolveLockBuyerPubkey(state, nowSec, pinnedBuyerPubkey);
     if (!buyerPubkey) {
       throw new Error(
         "Cannot lock — no buyer pubkey known. The buyer must publish a JOIN " +
@@ -403,7 +428,7 @@ export class EscrowFedimintBridge {
   }
 
   private async lockAndPublishInner(escrowId: string, opts: LockOptions = {}): Promise<EscrowState> {
-    const context = await this.prepareLockContext(escrowId);
+    const context = await this.prepareLockContext(escrowId, opts.buyerPubkey);
     const amountMsats = amountMsatsForLock(context.state, opts.selectedItems);
     const meta = buildChamaOperationMeta({
       flow: "lock_spend",
@@ -414,6 +439,7 @@ export class EscrowFedimintBridge {
     const lockOpts = {
       savedHandleId: opts.savedHandleId,
       selectedItems: opts.selectedItems,
+      buyerPubkey: opts.buyerPubkey,
     };
 
     if (guardOn) {
@@ -509,12 +535,13 @@ export class EscrowFedimintBridge {
     return resultState;
   }
 
-  async preflightLock(escrowId: string): Promise<void> {
-    await this.prepareLockContext(escrowId);
+  async preflightLock(escrowId: string): Promise<{ buyerPubkey: string }> {
+    const { buyerPubkey } = await this.prepareLockContext(escrowId);
+    return { buyerPubkey };
   }
 
   async lockAndPublishWithEcash(escrowId: string, oobNotes: string, opts: LockOptions = {}): Promise<EscrowState> {
-    const context = await this.prepareLockContext(escrowId);
+    const context = await this.prepareLockContext(escrowId, opts.buyerPubkey);
     const amountMsats = amountMsatsForLock(context.state, opts.selectedItems);
     const lockBundle = await this.fedimint.createEscrowLockFromNotes(
       oobNotes,
@@ -552,8 +579,35 @@ export class EscrowFedimintBridge {
       redeemWith?: "browser-sdk" | "fedi-internal";
     } = {},
   ): Promise<EscrowState> {
-    const state = this.escrow.getState(escrowId);
+    let state = this.escrow.getState(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
+
+    // Details opens immediately and refreshes the relay chain in the
+    // background. On a cold/legacy trade the APPROVED/CLAIMED tail can already
+    // be present in memory while the earlier LOCK body (hash + encrypted
+    // shares) is still missing. A fast Claim tap used to race that refresh and
+    // fail permanently with "No lock data" even though a full relay replay a
+    // moment later could recover it. Make the money path self-sufficient: when
+    // either required LOCK component is absent, synchronously fetch + replay
+    // the authoritative union once before deciding the trade is incomplete.
+    // loadEscrow has its own bounded completeness retries and partial-downgrade
+    // guard, so this cannot replace a newer state with a shorter relay view.
+    if (!state.lock.notesHash || !state.lock.shares || state.lock.shares.size < 1) {
+      try {
+        const rehydrated = await this.escrow.loadEscrow(escrowId);
+        state = rehydrated ?? this.escrow.getState(escrowId) ?? state;
+      } catch (error) {
+        // Preserve the deterministic hard-failure below. Letting a relay-fetch
+        // exception escape would make the claim coordinator misclassify this
+        // as an in-flight redeem and start a pointless balance watchdog even
+        // though reconstruction never began.
+        console.debug(
+          `[chama] claim rehydrate failed for ${escrowId}:`,
+          error instanceof Error ? error.message : error,
+        );
+        state = this.escrow.getState(escrowId) ?? state;
+      }
+    }
 
     const myPubkey = await this.signer.getPublicKey();
     const winner = getWinner(state);

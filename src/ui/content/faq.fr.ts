@@ -51,6 +51,23 @@ export const faqFr: FaqContent = {
       ],
     },
     {
+      id: "features",
+      title: "Tout ce que vous pouvez faire",
+      items: [
+        { q: "Quelles sont les fonctionnalités de Chama ?", a: { intro: "Voici toute l'application en un tour rapide :", steps: [
+          "Parcourez les offres de votre communauté ou jetez un œil à un autre pays et une autre monnaie.",
+          "Créez une annonce Échange, Boutique, Travail, Cagnotte, Épargne ou Paiement communautaire de factures, avec prix, moyens de paiement, menus et quantités selon le cas.",
+          "Rejoignez une annonce, discutez en privé avec les autres participants, financez le séquestre Bitcoin, suivez chaque étape et votez pour libérer ou rembourser.",
+          "Réclamez un versement vers M-Pesa là où il est pris en charge, toute adresse ou facture Lightning, un portefeuille NWC connecté, ou une adresse Bitcoin on-chain.",
+          "Utilisez le Tableau de bord pour voir votre Chama, vos annonces actives, votre activité d'arbitre, vos cautions, vos gains et les sats qui vous attendent.",
+          "Utilisez Moi pour voir ce qui requiert votre attention, épingler ou reporter une tâche, consulter l'historique et les évaluations, gérer votre profil et modifier les réglages.",
+          "Recevez des rappels pour les arrivées, verrouillages, messages, échéances, réclamations et litiges ; touchez-en un pour ouvrir l'échange concerné.",
+          "Devenez arbitre communautaire, déposez une caution Bitcoin remboursable, signalez votre disponibilité, tranchez les litiges, bâtissez votre réputation et gagnez la prime d'assurance facultative.",
+          "Utilisez Chama en anglais, français ou espagnol sur le web, Android, macOS, Windows ou Linux. Votre clé Nostr conserve la même identité sur tous vos appareils.",
+        ], outro: "Pour une aide pas à pas, ouvrez la question correspondante ci-dessous. Les réglages avancés permettent aussi de changer de communauté, de fédération, de signataire et de nœud Chama." } },
+      ],
+    },
+    {
       id: "money",
       title: "Récupérer votre argent",
       items: [

@@ -12,8 +12,10 @@
 import {
   notificationForTransition, chatNotificationFor,
   buyerInterestNotificationFor, newListingNotificationFor,
+  tradeDmNotificationFor, dmViewerRole,
   type TradeNotification, type DmNotifyPref,
 } from "./trade-notifications.js";
+import { Role } from "../escrow-engine/types.js";
 import { setPendingTradeDeepLink } from "./deep-link.js";
 import { translate, getCurrentLang } from "../i18n/index.js";
 import { getScopedStorageItem, setScopedStorageItem } from "../storage/user-scope.js";
@@ -120,6 +122,61 @@ export function setDmNotifyPref(pref: DmNotifyPref): void {
     globalThis.localStorage?.setItem(DM_PREF_KEY, pref);
   } catch {
     /* cosmetic preference; ignore storage failure */
+  }
+}
+
+// ── Counterparty DM alerts (#79, always-on by default; per-user mute) ────────
+//
+// When a party takes a trade-critical action, the acting client DMs the
+// counterparty over Nostr so their external client (Damus/Amethyst — which have
+// push) surfaces it, standing in for the web-push Chama can't do serverlessly.
+// Default ENABLED; this is the mute switch. Plain boolean localStorage key.
+const TRADE_DM_PREF_KEY = "chama_trade_dm_pref_v1";
+
+/** True when counterparty trade DMs are enabled (default on). */
+export function tradeDmPref(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(TRADE_DM_PREF_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function setTradeDmPref(on: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(TRADE_DM_PREF_KEY, on ? "1" : "0");
+  } catch {
+    /* cosmetic preference; ignore storage failure */
+  }
+}
+
+// Persisted fire-once-per-(trade, transition) dedup so a reload / re-observe of
+// the same transition never re-sends a DM. Separate from the OS-notification
+// FIRED set — these are outbound network sends, not local buzzes.
+const TRADE_DM_SENT_KEY = "chama_trade_dm_sent_v1";
+const MAX_TRADE_DM_SENT = 500;
+/** Session-only reservation. Persist only after relay publish succeeds, while
+ * preventing rapid duplicate observations from publishing in parallel. */
+const tradeDmInFlight = new Set<string>();
+
+function readTradeDmSent(): Set<string> {
+  try {
+    const raw = globalThis.localStorage?.getItem(TRADE_DM_SENT_KEY);
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    return new Set(Array.isArray(arr) ? arr.filter((t): t is string => typeof t === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function recordTradeDmSent(token: string): void {
+  try {
+    const tokens = readTradeDmSent();
+    tokens.add(token);
+    const trimmed = [...tokens].slice(-MAX_TRADE_DM_SENT);
+    globalThis.localStorage?.setItem(TRADE_DM_SENT_KEY, JSON.stringify(trimmed));
+  } catch {
+    /* ignore */
   }
 }
 
@@ -504,6 +561,59 @@ export function maybeNotifyNewListing(
     notifyDebug(() => `fire new-listing tag=${n.tag} platform=${platformName()} permission=${allowed}`);
     if (allowed) await deliver(n);
   })();
+}
+
+/**
+ * #79 — send trade-critical DMs to the counterparty over Nostr, so their
+ * external client alerts them like an email. Called from updateEscrow on every
+ * observed transition. Gated by the `tradeDmPref` mute, deduped per
+ * (trade, transition), and — per the decider's single-`sender` rule — sent ONLY
+ * by the party that caused the transition, so exactly one DM goes out network-
+ * wide. The caller supplies `send` (bound to the escrow client's DM path) and is
+ * responsible for the sim/testnet no-op gate. Fully fire-and-forget; never throws.
+ */
+export async function maybeSendTradeDms(
+  prev: EscrowState | null | undefined,
+  next: EscrowState,
+  userPubkey: string | null | undefined,
+  send: (recipientPubkey: string, message: string) => Promise<boolean>,
+): Promise<void> {
+  if (!tradeDmPref()) return;
+  if (!userPubkey) return;
+  try {
+    const myRole = dmViewerRole(next, userPubkey);
+    if (!myRole) return; // not a party to this trade
+    const dm = tradeDmNotificationFor(prev, next, myRole);
+    if (!dm) return;
+    if (myRole !== dm.sender) return; // only the acting party sends (single-sender rule)
+    if (readTradeDmSent().has(dm.transition)) return;
+    if (tradeDmInFlight.has(dm.transition)) return;
+    tradeDmInFlight.add(dm.transition);
+
+    const pubkeyForRole = (role: Role): string | null => {
+      if (role === Role.ARBITER) {
+        return next.participants[Role.ARBITER] ?? next.actingArbiter ?? null;
+      }
+      return next.participants[role] ?? null;
+    };
+    let attempted = 0;
+    let allSent = true;
+    try {
+      for (const role of dm.recipients) {
+        const pk = pubkeyForRole(role);
+        // Never DM yourself; skip unresolved roles.
+        if (!pk || pk.toLowerCase() === userPubkey.toLowerCase()) continue;
+        attempted += 1;
+        if (!(await send(pk, dm.message))) allSent = false;
+      }
+      // A failed/unsupported publish stays retryable on the next observation.
+      if (attempted > 0 && allSent) recordTradeDmSent(dm.transition);
+    } finally {
+      tradeDmInFlight.delete(dm.transition);
+    }
+  } catch {
+    /* a DM must never break the trade flow */
+  }
 }
 
 // ── Delivery self-test (opt-in; the on-device "is the OS layer alive?" probe) ─

@@ -37,7 +37,7 @@ export function BrowseView({
   stockByListing,
   orderIndicatorByListing,
   categoryCounts,
-  fedimintJoined, pubkey,
+  fedimintJoined, listingsLoading, pubkey,
   kind0Enabled = false, profileNames,
   isFirstTime, onPasteCustomInvite,
   onOpenEscrow, onLoadById,
@@ -56,6 +56,7 @@ export function BrowseView({
   orderIndicatorByListing?: Map<string, { orders: number; unread: number }>;
   categoryCounts?: Record<string, number>;
   fedimintJoined: boolean;
+  listingsLoading: boolean;
   pubkey: string;
   kind0Enabled?: boolean;
   profileNames?: NostrProfileNameMap;
@@ -132,7 +133,7 @@ export function BrowseView({
   );
   const filteredTotal = filteredMatchingListings.length + filteredNonMatchingListings.length;
   const browseSummary = totalListings === 0
-    ? t("browse.noOpenOffers")
+    ? (listingsLoading ? t("browse.verifyingOffers") : t("browse.noOpenOffers"))
     : t(totalListings === 1 ? "browse.openOfferSummaryOne" : "browse.openOfferSummaryMany", {
         filtered: filteredTotal.toLocaleString(),
         total: totalListings.toLocaleString(),
@@ -407,7 +408,21 @@ export function BrowseView({
         <div style={{
           textAlign: "center", padding: "44px 20px", fontFamily: T.sans,
         }}>
-          {fedimintJoined ? (
+          {listingsLoading ? (
+            <>
+              <div style={{
+                width: 30, height: 30, margin: "0 auto 16px", borderRadius: "50%",
+                border: `3px solid ${T.border}`, borderTopColor: T.accent,
+                animation: "spin 0.8s linear infinite",
+              }} />
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 8 }}>
+                {t("browse.verifyingOffers")}
+              </div>
+              <div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6, maxWidth: 300, margin: "0 auto" }}>
+                {t("browse.verifyingOffersBody")}
+              </div>
+            </>
+          ) : fedimintJoined ? (
             !showOwn && ownHiddenCount > 0 ? (
               // #75: the only offers here are the viewer's OWN, hidden by
               // default — don't claim the community is empty. Point them at the

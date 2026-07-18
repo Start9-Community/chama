@@ -70,6 +70,7 @@ import {
 import { simTagOrNull, shouldDropForSimPolicy } from "../sim/simMode.js";
 import { verifyEvent as verifyNostrEventSignature } from "nostr-tools/pure";
 import { randomId } from "../storage/random-id.js";
+import { compactSelectedMenuItems } from "./selected-menu-items.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // SIGNER INTERFACE — Injected dependency for key operations
@@ -138,6 +139,9 @@ export interface EscrowClientCallbacks {
   onValidationError?: (escrowId: string, error: string, eventId?: string) => void;
   /** Called when relay connectivity changes */
   onRelayStatus?: (relayUrl: string, status: string) => void;
+  /** Number of public CREATE chains currently being verified before they are
+   *  safe to surface in Browse. */
+  onPublicListingHydration?: (pending: number) => void;
 }
 
 function statusProgressRank(status: EscrowStatus): number {
@@ -331,6 +335,17 @@ export class EscrowClient {
     this.relayManager.connect();
 
     this.notifier = new EscrowNotifier(this.signer, this.relayManager);
+  }
+
+  /** #79 — send one trade-critical alert DM over NIP-17 (kind-4 fallback for
+   *  legacy recipients). Fail-soft: a DM must never break the trade flow. */
+  async sendTradeAlertDM(recipientPubkey: string, message: string): Promise<boolean> {
+    try {
+      if (!this.notifier) return false;
+      return await this.notifier.sendTradeAlertDM(recipientPubkey, message);
+    } catch {
+      return false;
+    }
   }
 
   disconnect(): void {
@@ -562,6 +577,7 @@ export class EscrowClient {
 
   async createEscrow(params: {
     description: string;
+    imageDataUrl?: string;
     amountMsats: number;
     fiatAmount?: number;
     fiatCurrency?: string;
@@ -627,6 +643,7 @@ export class EscrowClient {
     const payload: CreatePayload = {
       type: "escrow:create",
       description: params.description,
+      imageDataUrl: params.imageDataUrl,
       amountMsats: params.amountMsats,
       fiatAmount: params.fiatAmount,
       fiatCurrency: params.fiatCurrency,
@@ -933,7 +950,10 @@ export class EscrowClient {
         : {}),
       sellerReceivesMsats: params.sellerReceivesMsats,
       arbiterFeeMsats: params.arbiterFeeMsats,
-      selectedItems: params.selectedItems,
+      // Images live on CREATE. Strip legacy inline media defensively here,
+      // at the final wire boundary, so no caller can create an oversized
+      // LOCK event (including an old pending-lock retry).
+      selectedItems: compactSelectedMenuItems(params.selectedItems),
       buyerPubkey: params.buyerPubkey,
       arbiterPubkey: params.arbiterPubkey,
       handleEnvelope,
@@ -992,9 +1012,6 @@ export class EscrowClient {
         : {}),
     };
     const lockResult = this.applyLocally(escrowId, signed, localPayload);
-
-    // Notify all participants that ecash is locked
-    this.notifier?.onEscrowLocked(lockResult).catch(() => {});
 
     return lockResult;
   }
@@ -1358,7 +1375,7 @@ export class EscrowClient {
    */
   async sendPremium(
     escrowId: string,
-    input: { amountSats: number; oobNotes: string; noteKind?: "ambient" | "dispute" },
+    input: { amountSats: number; oobNotes: string; federationId?: string; noteKind?: "ambient" | "dispute" },
   ): Promise<void> {
     const state = this.states.get(escrowId);
     if (!state) throw new Error(`Escrow ${escrowId} not loaded`);
@@ -1379,6 +1396,7 @@ export class EscrowClient {
       escrowId,
       payerRole,
       amountSats: input.amountSats,
+      federationId: input.federationId,
       oobNotes: input.oobNotes,
       kind: noteKind,
       createdAt: now,
@@ -1939,12 +1957,16 @@ export class EscrowClient {
     if (parsed.kind === EscrowEventKind.CREATE && !currentState) {
       if (!this._listingHydration.has(escrowId)) {
         this._listingHydration.add(escrowId);
+        this.callbacks.onPublicListingHydration?.(this._listingHydration.size);
         this.loadEscrow(escrowId)
           .catch(e => console.debug(
             `[escrow] Listing hydration failed for ${escrowId}:`,
             (e as Error)?.message || e,
           ))
-          .finally(() => this._listingHydration.delete(escrowId));
+          .finally(() => {
+            this._listingHydration.delete(escrowId);
+            this.callbacks.onPublicListingHydration?.(this._listingHydration.size);
+          });
       }
       return;
     }

@@ -14,6 +14,10 @@ export const notify: Record<string, string> = {
   "notify.disputeBody":
     "L'acheteur et le vendeur sont en désaccord sur l'échange {label}. Ils vous attendent — examinez et votez.",
   "notify.disputeTitle": "⚖️ Un échange attend votre décision",
+  "notify.dmLockedMsg": "🔒 Votre échange Chama {label} est verrouillé — ouvrez l'appli pour payer/agir. {link}",
+  "notify.dmVoteMsg": "🗳️ Votre échange Chama {label} attend votre vote. {link}",
+  "notify.dmDisputeMsg": "⚖️ Un échange Chama {label} que vous arbitrez attend votre décision. {link}",
+  "notify.dmSettledMsg": "✅ Votre échange Chama {label} est réglé — réclamez votre versement. {link}",
   "notify.expiredBody":
     "L'échange {label} a atteint son échéance. Ouvrez Chama pour voir où il en est.",
   "notify.expiredTitle": "⏰ Échange : délai écoulé",

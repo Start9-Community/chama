@@ -31,6 +31,7 @@ import {
   type AmountDisplayMode,
 } from "../amount-display.js";
 import { useT, type TFunc } from "../../i18n/index.js";
+import { SwipeImageGallery } from "./SwipeImageGallery.js";
 
 // v0.2.0 item 4: variant="non-matching" applies an amber tint per
 // chama_browse_amber_tint_sorted. Quiet, not alarmist — it's a
@@ -141,7 +142,7 @@ export function TradeCard({
     : null;
   const satsLabel = exchangeRange ? satsRangeLabel(exchangeRange) : fmtSats(state.amountMsats);
   const storefrontImages = isStorefrontTile
-    ? menuItems.map(item => item.imageDataUrl).filter((src): src is string => !!src)
+    ? [state.imageDataUrl, ...menuItems.map(item => item.imageDataUrl)].filter((src): src is string => !!src)
     : [];
   const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null, t) : null;
   const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, fiatFloor, t) : null;
@@ -234,28 +235,7 @@ export function TradeCard({
         }} />
       )}
       {storefrontImages.length > 0 && (
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: storefrontImages.length > 1 ? "1fr 1fr" : "1fr",
-          gap: 2,
-          margin: "-14px -14px 12px",
-          height: 156,
-          background: T.surface,
-        }}>
-          {storefrontImages.slice(0, 2).map((src, index) => (
-            <img
-              key={`${src.slice(0, 32)}_${index}`}
-              src={src}
-              alt=""
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                display: "block",
-              }}
-            />
-          ))}
-        </div>
+        <SwipeImageGallery images={storefrontImages} height={156} edgeToEdge />
       )}
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "stretch",

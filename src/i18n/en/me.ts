@@ -12,6 +12,13 @@ export const me: Record<string, string> = {
   "me.storeRenewing": "Renewing…",
   "me.storeRenewed": "Store renewed — back on Browse.",
   "me.storeRenewFailed": "Couldn't renew the store.",
+  // Clear unfunded listings (#82) — Settings row + confirm dialog.
+  "me.clearListings": "Clear my unfunded listings",
+  "me.clearListingsHint": "{count} never-funded listings — remove them from your storefront.",
+  "me.clearListingsConfirm": "Clear {count} unfunded listings? They'll disappear from your storefront and lapse for everyone within ~24h. Funded and locked trades are untouched.",
+  "me.clearListingsConfirmBtn": "Clear {count} listings",
+  "me.clearListingsCancel": "Keep them",
+  "me.listingsCleared": "Cleared {count} unfunded listings.",
   // Monthly CBP — recurring bill indicator + Stop card.
   "me.recurringTitleOne": "Monthly bill",
   "me.recurringTitleMany": "{count} monthly bills",
@@ -76,6 +83,8 @@ export const me: Record<string, string> = {
   "me.dmNotifications": "DM notifications",
   "me.dmOffHint": "Off — chat stays silent",
   "me.dmOnHint": "On — buzzes on every trade",
+  "me.tradeDm": "Alert my counterparties",
+  "me.tradeDmHint": "DM the other party on Nostr at key trade moments (locked, vote, settled) so their app alerts them",
   "me.earlierTrades": "Earlier trades",
   "me.edit": "Edit",
   "me.emptyDisputes": "No disputes need your decision right now.",

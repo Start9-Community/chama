@@ -23,6 +23,14 @@ import { type FetchProbe } from "./discovery-diagnostics.js";
 // elsewhere).
 const MAX_EVENT_CONTENT_BYTES = 128 * 1024;
 
+// SECURITY / AVAILABILITY: cap the raw WebSocket frame BEFORE JSON.parse.
+// The event-content check below is intentionally retained as a second layer,
+// but it cannot protect the parser itself: a hostile or broken relay can send
+// one enormous JSON frame and pin WebKit's main thread in JSON.parse while the
+// compositor keeps scrolling. 256 KiB leaves generous envelope/tag overhead
+// above MAX_EVENT_CONTENT_BYTES without permitting multi-megabyte frames.
+const MAX_RELAY_FRAME_UNITS = 256 * 1024;
+
 // ── Relay connection states ───────────────────────────────────────────────
 
 export enum RelayStatus {
@@ -91,6 +99,9 @@ interface RelayConnection {
   retryCount: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
   subscriptions: Map<string, NostrFilter>;
+  /** Session-local circuit breaker for a relay that violates the raw-frame
+   *  limit. Reconnect explicitly clears it; automatic backoff does not. */
+  quarantined: boolean;
 }
 
 interface PendingOnceFetch {
@@ -175,6 +186,7 @@ export class RelayManager {
         retryCount: 0,
         retryTimer: null,
         subscriptions: new Map(),
+        quarantined: false,
       });
     }
   }
@@ -192,6 +204,7 @@ export class RelayManager {
     if (this.stopped) return;
     const relay = this.relays.get(url);
     if (!relay) return;
+    if (relay.quarantined) return;
     if (relay.status === RelayStatus.CONNECTING || relay.status === RelayStatus.CONNECTED) return;
 
     relay.status = RelayStatus.CONNECTING;
@@ -214,7 +227,12 @@ export class RelayManager {
 
       ws.onmessage = (msg: MessageEvent) => {
         try {
-          const data = JSON.parse(typeof msg.data === "string" ? msg.data : new TextDecoder().decode(msg.data as ArrayBuffer));
+          const raw = this.readBoundedRelayFrame(msg.data);
+          if (raw === null) {
+            this.quarantineRelay(relay);
+            return;
+          }
+          const data = JSON.parse(raw);
           this.handleRelayMessage(url, data);
         } catch (e) {
           // Ignore unparseable messages
@@ -234,8 +252,12 @@ export class RelayManager {
       };
 
       ws.onclose = () => {
-        relay.status = RelayStatus.DISCONNECTED;
         relay.ws = null;
+        // quarantineRelay already published the ERROR state and intentionally
+        // suppresses automatic backoff. Do not immediately overwrite that
+        // useful diagnosis with DISCONNECTED when close(1009) completes.
+        if (relay.quarantined) return;
+        relay.status = RelayStatus.DISCONNECTED;
         this.callbacks.onStatusChange?.(url, RelayStatus.DISCONNECTED);
         if (this.stopped) return;
         this.scheduleReconnect(url);
@@ -247,12 +269,54 @@ export class RelayManager {
     }
   }
 
+  /** Decode a relay frame only when its cheap, allocation-free size check is
+   *  inside the parser budget. Nostr relays send text frames in browsers;
+   *  ArrayBuffer support keeps injected/test WebSockets compatible. Unknown
+   *  binary containers are rejected rather than copied speculatively. */
+  private readBoundedRelayFrame(frame: unknown): string | null {
+    if (typeof frame === "string") {
+      return frame.length <= MAX_RELAY_FRAME_UNITS ? frame : null;
+    }
+    if (frame instanceof ArrayBuffer) {
+      if (frame.byteLength > MAX_RELAY_FRAME_UNITS) return null;
+      return new TextDecoder().decode(frame);
+    }
+    if (ArrayBuffer.isView(frame)) {
+      if (frame.byteLength > MAX_RELAY_FRAME_UNITS) return null;
+      return new TextDecoder().decode(
+        new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength),
+      );
+    }
+    return null;
+  }
+
+  /** Stop an oversized-frame source for the rest of the session. Merely
+   *  dropping one frame is insufficient: a flooding relay would continue to
+   *  starve the UI, and normal onclose backoff would reconnect into the same
+   *  loop. The user's explicit Reconnect action gets one clean retry. */
+  private quarantineRelay(relay: RelayConnection): void {
+    if (relay.quarantined) return;
+    relay.quarantined = true;
+    relay.status = RelayStatus.ERROR;
+    this.callbacks.onError?.(
+      new Error(`Relay ${relay.url} sent an oversized or unsupported frame and was disconnected`),
+      relay.url,
+    );
+    this.callbacks.onStatusChange?.(relay.url, RelayStatus.ERROR);
+    console.warn(
+      `[relay] ${relay.url} exceeded the ${MAX_RELAY_FRAME_UNITS}-unit raw frame limit; quarantining for this session`,
+    );
+    const ws = relay.ws;
+    relay.ws = null;
+    try { ws?.close(1009, "Relay frame too large"); } catch {}
+  }
+
   // ── Reconnection with exponential backoff ───────────────────────────────
 
   private scheduleReconnect(url: string): void {
     if (this.stopped) return;
     const relay = this.relays.get(url);
-    if (!relay || relay.retryCount >= MAX_RETRY_COUNT) return;
+    if (!relay || relay.quarantined || relay.retryCount >= MAX_RETRY_COUNT) return;
     // Idempotent: a single failure can fire both onerror and onclose, and both
     // call here. With a retry already pending, a second call would double-
     // increment retryCount (skewing the backoff) and leak a timer. At most one
@@ -288,6 +352,7 @@ export class RelayManager {
         relay.retryTimer = null;
       }
       relay.retryCount = 0;
+      relay.quarantined = false;
       this.connectRelay(url);
     }
   }
@@ -945,6 +1010,7 @@ export class RelayManager {
         relay.ws = null;
       }
       relay.status = RelayStatus.DISCONNECTED;
+      relay.quarantined = false;
       relay.subscriptions.clear();
     }
     this.seenEventIds.clear();
@@ -961,6 +1027,7 @@ export class RelayManager {
       retryCount: 0,
       retryTimer: null,
       subscriptions: new Map(),
+      quarantined: false,
     });
     this.connectRelay(url);
   }

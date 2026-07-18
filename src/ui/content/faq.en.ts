@@ -50,6 +50,23 @@ export const faqEn: FaqContent = {
       ],
     },
     {
+      id: "features",
+      title: "Everything you can do",
+      items: [
+        { q: "What features does Chama have?", a: { intro: "Here is the whole app in one quick tour:", steps: [
+          "Browse offers from your community or peek into another country and currency.",
+          "Create an Exchange, Store, Work, Chip In, Stack, or Community Bill Pay listing, with prices, payment methods, menus, and quantities where they apply.",
+          "Join a listing, chat privately with the other people in the trade, fund the Bitcoin escrow, track each step, and vote to release or refund.",
+          "Claim a payout to M-Pesa where supported, any Lightning address or invoice, a connected NWC wallet, or an on-chain Bitcoin address.",
+          "Use Dashboard to see your Chama, active listings, arbiter activity, bonds, earnings, and any sats waiting for you.",
+          "Use Me to see what needs your attention, pin or snooze work, review trade history and ratings, manage your profile, and change app settings.",
+          "Receive reminders for joins, locks, messages, deadlines, claims, and disputes; tapping one takes you to the trade that needs you.",
+          "Become a community arbiter, post a refundable Bitcoin bond, signal that you are available, settle disputes, build reputation, and earn the optional insurance premium.",
+          "Run Chama in English, French, or Spanish on the web, Android, macOS, Windows, or Linux. Your Nostr key keeps the same identity across devices.",
+        ], outro: "For step-by-step help, open the matching question below. Advanced settings also let you switch communities, federations, signers, and Chama nodes." } },
+      ],
+    },
+    {
       id: "money",
       title: "Getting your money",
       items: [

@@ -77,6 +77,8 @@ const GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 /// federation switching stays intact. Override via --iroh-dns /
 /// CHAMA_FEDIMINT_IROH_DNS to point at Chama-owned discovery infra later.
 const DEFAULT_IROH_PKARR_RELAY: &str = "https://dns.iroh.link/pkarr";
+const ARBITER_FEDERATION_ROUTES_FILE: &str = "arbiter-federations-v1.json";
+const ARBITER_FEDERATION_DIR: &str = "arbiter-federations";
 
 /// How long the boot-time discovery readiness probe waits for a TCP connection
 /// to the configured PKARR resolver. Short on purpose: it only sanity-checks
@@ -765,6 +767,17 @@ async fn main() -> Result<()> {
 }
 
 impl Bridge {
+    fn with_data_dir(&self, data_dir: PathBuf) -> Self {
+        Self {
+            data_dir,
+            iroh_enable_dht: self.iroh_enable_dht,
+            iroh_enable_next: self.iroh_enable_next,
+            iroh_dns: self.iroh_dns.clone(),
+            iroh_dns_is_default: self.iroh_dns_is_default,
+            last_good_gateway: self.last_good_gateway.clone(),
+        }
+    }
+
     fn iroh_config_diagnostics(&self) -> IrohConfigDiagnostics {
         IrohConfigDiagnostics {
             dht: self.iroh_enable_dht,
@@ -1772,6 +1785,10 @@ impl Bridge {
 struct AppState {
     bridge: Bridge,
     client: Arc<Mutex<Option<ClientHandleArc>>>,
+    /// Database directory selected by the active client. The base directory is
+    /// retained as the legacy/first federation; bonded arbiters get one sibling
+    /// directory per additional federation.
+    active_data_dir: Arc<Mutex<PathBuf>>,
     discovery: Arc<Mutex<DiscoveryProbe>>,
     /// When set, every route requires `Authorization: Bearer <token>`.
     /// None keeps the historical open-localhost behavior.
@@ -1981,6 +1998,7 @@ async fn serve_bridge(
     };
     let auth_enabled = auth_token.is_some();
     let state = AppState {
+        active_data_dir: Arc::new(Mutex::new(bridge.data_dir.clone())),
         bridge,
         client: Arc::new(Mutex::new(None)),
         discovery: Arc::new(Mutex::new(initial_probe)),
@@ -2033,6 +2051,7 @@ async fn serve_bridge(
     let app = Router::new()
         .route("/health", get(api_health))
         .route("/join", post(api_join))
+        .route("/switch", post(api_switch))
         .route("/reset", post(api_reset))
         .route("/info", get(api_info))
         .route("/gateways", get(api_gateways))
@@ -2090,13 +2109,85 @@ impl AppState {
     async fn join(&self, invite_code: &str) -> Result<ClientHandleArc> {
         let client = self.bridge.open_or_join(invite_code).await?;
         *self.client.lock().await = Some(client.clone());
+        *self.active_data_dir.lock().await = self.bridge.data_dir.clone();
         Ok(client)
+    }
+
+    async fn switch_preserving(&self, invite_code: &str) -> Result<ClientHandleArc> {
+        let invite = InviteCode::from_str(invite_code)
+            .context("invalid federation invite code")?;
+        let target_id = invite.federation_id().to_string();
+        if !target_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            bail!("federation id contains characters unsafe for a local storage path");
+        }
+
+        let current = self.client().await?;
+        let current_id = current.federation_id().to_string();
+        if current_id == target_id {
+            return Ok(current);
+        }
+
+        let mut routes = self.load_arbiter_routes().await;
+        let active_dir = self.active_data_dir.lock().await.clone();
+        routes.insert(current_id, self.route_for_path(&active_dir));
+        let target_route = routes
+            .get(&target_id)
+            .cloned()
+            .unwrap_or_else(|| format!("{ARBITER_FEDERATION_DIR}/{target_id}"));
+        let target_dir = self.path_for_route(&target_route)?;
+        let target_bridge = self.bridge.with_data_dir(target_dir.clone());
+        let client = target_bridge.open_or_join(invite_code).await?;
+
+        routes.insert(target_id, target_route);
+        self.save_arbiter_routes(&routes).await?;
+        *self.client.lock().await = Some(client.clone());
+        *self.active_data_dir.lock().await = target_dir;
+        Ok(client)
+    }
+
+    fn route_for_path(&self, path: &Path) -> String {
+        match path.strip_prefix(&self.bridge.data_dir) {
+            Ok(relative) if relative.as_os_str().is_empty() => ".".to_owned(),
+            Ok(relative) => relative.to_string_lossy().to_string(),
+            Err(_) => ".".to_owned(),
+        }
+    }
+
+    fn path_for_route(&self, route: &str) -> Result<PathBuf> {
+        if route == "." {
+            return Ok(self.bridge.data_dir.clone());
+        }
+        let relative = Path::new(route);
+        if relative.is_absolute()
+            || relative.components().any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            bail!("invalid arbiter federation storage route");
+        }
+        Ok(self.bridge.data_dir.join(relative))
+    }
+
+    async fn load_arbiter_routes(&self) -> BTreeMap<String, String> {
+        let path = self.bridge.data_dir.join(ARBITER_FEDERATION_ROUTES_FILE);
+        let Ok(raw) = tokio::fs::read_to_string(path).await else {
+            return BTreeMap::new();
+        };
+        serde_json::from_str(&raw).unwrap_or_default()
+    }
+
+    async fn save_arbiter_routes(&self, routes: &BTreeMap<String, String>) -> Result<()> {
+        tokio::fs::create_dir_all(&self.bridge.data_dir).await?;
+        let path = self.bridge.data_dir.join(ARBITER_FEDERATION_ROUTES_FILE);
+        let temp = self.bridge.data_dir.join(format!("{ARBITER_FEDERATION_ROUTES_FILE}.tmp"));
+        tokio::fs::write(&temp, serde_json::to_vec(routes)?).await?;
+        tokio::fs::rename(&temp, &path).await?;
+        Ok(())
     }
 
     async fn reset(&self) -> Result<()> {
         let stale_client = self.client.lock().await.take();
         drop(stale_client);
-        self.bridge.reset_local_state().await
+        let active_dir = self.active_data_dir.lock().await.clone();
+        self.bridge.with_data_dir(active_dir).reset_local_state().await
     }
 }
 
@@ -2168,6 +2259,7 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "discovery_probe",
             "pay_outcome_by_escrow",
             "auth_token",
+            "multi_federation_switch",
         ],
     }))
 }
@@ -2177,6 +2269,17 @@ async fn api_join(
     Json(req): Json<JoinRequest>,
 ) -> Result<Json<JoinOutput>, ApiError> {
     let client = state.join(&req.invite_code).await?;
+    Ok(Json(JoinOutput {
+        joined: req.invite_code,
+        federation_id: client.federation_id().to_string(),
+    }))
+}
+
+async fn api_switch(
+    State(state): State<AppState>,
+    Json(req): Json<JoinRequest>,
+) -> Result<Json<JoinOutput>, ApiError> {
+    let client = state.switch_preserving(&req.invite_code).await?;
     Ok(Json(JoinOutput {
         joined: req.invite_code,
         federation_id: client.federation_id().to_string(),

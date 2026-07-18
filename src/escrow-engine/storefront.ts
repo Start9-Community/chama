@@ -194,6 +194,7 @@ export function overcommittedChildren(
  *  EscrowClient.createEscrow's params, carrying the storefront link. */
 export interface ChildCreateParams {
   description: string;
+  imageDataUrl?: string;
   amountMsats: number;
   fiatAmount?: number;
   fiatCurrency?: string;
@@ -240,6 +241,7 @@ export function buildChildCreateParams(
   }
   return {
     description: parent.description,
+    ...(parent.imageDataUrl ? { imageDataUrl: parent.imageDataUrl } : {}),
     amountMsats: parent.amountMsats * claimedQuantity,
     ...(parent.fiatAmount !== undefined ? { fiatAmount: parent.fiatAmount * claimedQuantity } : {}),
     ...(parent.fiatCurrency !== undefined ? { fiatCurrency: parent.fiatCurrency } : {}),

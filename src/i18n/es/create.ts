@@ -12,6 +12,7 @@ export const create: Record<string, string> = {
   "create.aboveLendingCapBefore": "Por encima del límite de préstamos de Fedimint de",
   "create.acceptedPayment": "PAGO ACEPTADO",
   "create.addPhoto": "+ Foto",
+  "create.uploadingPhoto": "Subiendo…",
   "create.addRail": "Agregar",
   "create.addedRail": "Agregado",
   "create.ageDays": "hace {count}d",
@@ -69,6 +70,7 @@ export const create: Record<string, string> = {
     "Tu hogar decide dónde Chama te conecta. Un toque hace de {name} tu hogar.",
   "create.imageFallbackError":
     "Ese archivo no parece una foto compatible, o es demasiado grande para esta versión. Prueba con JPG, PNG o WebP.",
+  "create.photoUploadFailed": "La foto no se pudo subir. Revisa tu conexión e inténtalo de nuevo.",
   "create.intervalBiweekly": "Quincenal",
   "create.intervalLabel": "INTERVALO",
   "create.intervalMonthly": "Mensual",

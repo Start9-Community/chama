@@ -85,6 +85,8 @@ import {
   sortEventChain,
   buildEscrowFilter,
 } from "./event-parser.js";
+import { extractUploadedImageUrl, isSupportedListingImageRef } from "../media/listing-image-upload.js";
+import { compactSelectedMenuItems } from "./selected-menu-items.js";
 import {
   remainingStock,
   unsoldStock,
@@ -185,6 +187,12 @@ import {
   BLF_FEDERATION_INVITE,
 } from "../fedimint/federation-config.js";
 import { OCA_FEDERATION_INVITE } from "../fedimint/federation-invites.js";
+import {
+  arbiterFederationStorageScope,
+  getArbiterFederationRoute,
+  listArbiterFederationRoutes,
+  rememberArbiterFederationRoute,
+} from "../fedimint/arbiter-federation-store.js";
 import { adaptRealWallet, resetLocalFedimintWallet, classifyPayOutcome } from "../fedimint/sdk-adapter.js";
 import {
   clearAllPendingRedemptions,
@@ -485,7 +493,7 @@ import {
   SATS_TRACE_STORAGE_KEY,
 } from "../payments/sats-trace.js";
 import { makeLightningInvoiceQrPayload } from "../payments/lightning-qr.js";
-import { EscrowFedimintBridge } from "../fedimint/escrow-bridge.js";
+import { EscrowFedimintBridge, resolveLockBuyerPubkey } from "../fedimint/escrow-bridge.js";
 import {
   DEFAULT_NATIVE_BRIDGE_COMMUNITY,
   NATIVE_BRIDGE_COMMUNITY_KEY,
@@ -601,7 +609,7 @@ import {
   assignablePool,
   assignableBondedArbiters,
 } from "../arbiters/exposure.js";
-import { notificationForTransition, chatNotificationFor, buyerInterestNotificationFor, newListingNotificationFor } from "../notifications/trade-notifications.js";
+import { notificationForTransition, chatNotificationFor, buyerInterestNotificationFor, newListingNotificationFor, tradeDmNotificationFor } from "../notifications/trade-notifications.js";
 import { catchUpPrev, readSeenStatus, recordSeenStatus } from "../notifications/notify-service.js";
 import {
   RATING_KIND,
@@ -1409,6 +1417,23 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
   }
 }
 
+// 3k.0.1. Listing media never rides in LOCK selected-item snapshots. This
+// also sanitizes runtime objects restored from builds that used the old type.
+{
+  const legacy = [{
+    itemId: "photo-item",
+    label: "Photo item",
+    amountMsats: 25_000,
+    quantity: 1,
+    imageDataUrl: `data:image/jpeg;base64,${"A".repeat(90_000)}`,
+  }] as any;
+  const compact = compactSelectedMenuItems(legacy)!;
+  assert(!("imageDataUrl" in compact[0]),
+    "LOCK selected-item compaction strips legacy listing media");
+  assert(JSON.stringify(compact).length < 1_000,
+    "LOCK selected-item snapshot stays compact when legacy media was inline");
+}
+
 // 3k.1. Quantity cap (#6): a selected quantity may not exceed the menu item's
 // maxQuantity. Anti-drain money-gate enforced at LOCK; uncapped items unbounded.
 {
@@ -1491,7 +1516,7 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
     joinHolds: holdExpiresAt !== undefined
       ? { [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER_PK, joinedAt: NOW, expiresAt: holdExpiresAt, eventId: "h" } }
       : {},
-  }) as EscrowState;
+  }) as unknown as EscrowState;
   const t = NOW;
 
   assert(remainingStock(parent, [], t) === 5, "Storefront: empty → full stock (5)");
@@ -4215,6 +4240,19 @@ console.log("\n── EVENT PARSER ──");
     assert((result.event.payload as CreatePayload).description === "Test listing", "Payload parsed");
     assert((result.event.payload as CreatePayload).premiumBps === 350, "Premium BPS parsed");
   }
+
+  assert(isSupportedListingImageRef("https://image.nostr.build/example.jpg"),
+    "Listing images accept compact HTTPS media links");
+  assert(!isSupportedListingImageRef("http://image.nostr.build/example.jpg"),
+    "Listing images reject insecure HTTP media links");
+  assert(isSupportedListingImageRef("data:image/jpeg;base64,AA=="),
+    "Listing images keep legacy inline draft compatibility");
+  assert(extractUploadedImageUrl({ data: [{ url: "https://image.nostr.build/example.jpg" }] })
+    === "https://image.nostr.build/example.jpg",
+  "nostr.build upload responses yield their HTTPS media URL");
+  assert(extractUploadedImageUrl({ tags: [["url", "https://cdn.example.test/image.webp"]] })
+    === "https://cdn.example.test/image.webp",
+  "NIP-94 upload tags yield their HTTPS media URL");
 
   // #7 Stage 1 — multi-unit storefront schema (additive): stock on a parent
   // listing, parent + claimedQuantity on a child purchase escrow.
@@ -7966,6 +8004,35 @@ console.log("\n── PROBE REACHABILITY ──");
   // Force sim OFF for the real-wallet path.
   (globalThis as any).localStorage?.removeItem?.("chama_sim_mode");
 
+  // Bonded-arbiter federation routing keeps the legacy balance in place and
+  // assigns every additional federation a distinct, stable OPFS scope.
+  {
+    const pubkey = "a".repeat(64);
+    const legacyScope = pubkey;
+    const kenyaScope = arbiterFederationStorageScope(pubkey, AFRIBIT_KIBERA_FEDERATION_ID);
+    rememberArbiterFederationRoute(pubkey, {
+      federationId: BLF_FEDERATION_ID,
+      inviteCode: BLF_FEDERATION_INVITE,
+      storageScope: legacyScope,
+      updatedAt: 1,
+    });
+    rememberArbiterFederationRoute(pubkey, {
+      federationId: AFRIBIT_KIBERA_FEDERATION_ID,
+      inviteCode: AFRIBIT_KIBERA_FEDERATION_INVITE,
+      storageScope: kenyaScope,
+      updatedAt: 2,
+    });
+    assert(getArbiterFederationRoute(pubkey, BLF_FEDERATION_ID)?.storageScope === legacyScope,
+      "arbiter federation store adopts the pre-existing client scope without moving its ecash");
+    assert(getArbiterFederationRoute(pubkey, AFRIBIT_KIBERA_FEDERATION_ID)?.storageScope === kenyaScope,
+      "arbiter federation store assigns an isolated scope to a second federation");
+    assert(listArbiterFederationRoutes(pubkey).map((route) => route.federationId).join(",")
+      === `${AFRIBIT_KIBERA_FEDERATION_ID},${BLF_FEDERATION_ID}`,
+    "arbiter federation routes are stable and newest-first");
+    assert(listArbiterFederationRoutes("b".repeat(64)).length === 0,
+      "arbiter federation routes are isolated per signer (not available to another user/Stack)");
+  }
+
   // (1a) probeReachable returns { fed } at 0 balance — the boot-probe
   //      failure case for the old probeFederation.
   {
@@ -8034,6 +8101,29 @@ console.log("\n── PROBE REACHABILITY ──");
     }
     assert(threw,
       "Already-open BLF wallet cannot be recorded as Afribit");
+    await client.cleanup();
+  }
+
+  // (1a.3) Native arbiter switch selects a preserved database through the
+  // adapter hook and rewires the balance subscription without cleanup/reset.
+  {
+    let federationId = BLF_FEDERATION_ID;
+    let switchedTo = "";
+    let cleanupCount = 0;
+    const wallet: any = makeZeroBalanceWallet({ federationId });
+    wallet.federation.getFederationId = async () => federationId;
+    wallet.switchFederationPreserving = async (invite: string) => {
+      switchedTo = invite;
+      federationId = AFRIBIT_KIBERA_FEDERATION_ID;
+    };
+    wallet.cleanup = async () => { cleanupCount += 1; };
+    const client = new FedimintClient({}, async () => wallet);
+    await client.init();
+    const selected = await client.switchFederationPreserving(AFRIBIT_KIBERA_FEDERATION_INVITE);
+    assert(selected === AFRIBIT_KIBERA_FEDERATION_ID && switchedTo === AFRIBIT_KIBERA_FEDERATION_INVITE,
+      "FedimintClient selects the preserved native federation database");
+    assert(cleanupCount === 0,
+      "preserved arbiter switching never cleans up or resets the prior database");
     await client.cleanup();
   }
 
@@ -8285,6 +8375,40 @@ console.log("\n── Fedi Mini-App ecash funding path ──");
 // re-absorbed back into Fedi on every other exit: abort, amount mismatch,
 // publish failure, a racing tab's foreign LOCK, and a reload/crash (boot
 // drain). This is the launch-blocker fund-loss Jetty hit on a 105-sat trade.
+console.log("\n── Funding-window buyer pin (JOIN expiry race) ──");
+{
+  const BUYER_A = "a1".repeat(32);
+  const BUYER_B = "b2".repeat(32);
+  const NOW = 1_800_000_000;
+  const mk = (buyer: string, expiresAt: number): EscrowState => ({
+    id: "sm_buyer_pin_01",
+    status: EscrowStatus.CREATED,
+    category: "p2p-trade",
+    participants: { [Role.SELLER]: "c3".repeat(32), [Role.BUYER]: buyer },
+    joinHolds: {
+      [Role.BUYER]: { role: Role.BUYER, pubkey: buyer, joinedAt: NOW - 600, expiresAt, eventId: "join" },
+    },
+    votes: {},
+    communityArbiters: [],
+  }) as unknown as EscrowState;
+
+  const active = mk(BUYER_A, NOW + 60);
+  assert(resolveLockBuyerPubkey(active, NOW) === BUYER_A,
+    "funding preflight snapshots the currently active buyer");
+
+  const expired = mk(BUYER_A, NOW - 10_000); // beyond visible hold + hidden grace
+  assert(resolveLockBuyerPubkey(expired, NOW, BUYER_A) === BUYER_A,
+    "the snapshotted buyer survives JOIN expiry while Lightning funding settles");
+  assert(resolveLockBuyerPubkey(expired, NOW) === null,
+    "without a pre-funding snapshot an expired buyer cannot be guessed");
+
+  const replaced = mk(BUYER_B, NOW + 60);
+  let replacementBlocked = false;
+  try { resolveLockBuyerPubkey(replaced, NOW, BUYER_A); } catch { replacementBlocked = true; }
+  assert(replacementBlocked,
+    "a replacement buyer can never inherit another buyer's in-flight funding");
+}
+
 console.log("\n── Fedi fund-and-lock recovery (fund-loss guard) ──");
 {
   const { runFediFundAndLock } = await import("../payments/fedi-fund-and-lock.js");
@@ -9883,6 +10007,66 @@ console.log("\n── pickArbiterFromPool ──");
       assert(!createEscrowLockCalled,
         "Bridge refuses duplicate-arbiter LOCK before spending Fedimint ecash");
     }
+  }
+}
+
+// ── 31d-3a. Claim rehydrates incomplete LOCK data ───────────────────────
+//
+// Trade Details refreshes in the background, so a fast Claim tap can observe
+// an otherwise usable state before the LOCK body has arrived. The bridge must
+// synchronously replay the relay chain before treating missing hash/shares as
+// a permanent hard failure. This belongs in the bridge so modal, direct-NWC,
+// and host-wallet claim paths all get the same protection.
+console.log("\n── claim incomplete-LOCK rehydrate ──");
+{
+  const created = applyEvent(null, createEvent());
+  if (created.ok) {
+    const incompleteApproved = {
+      ...created.state,
+      status: EscrowStatus.APPROVED,
+      resolvedOutcome: Outcome.REFUND,
+    } as EscrowState;
+    let loadCalls = 0;
+    const bridge = new EscrowFedimintBridge(
+      {
+        getState: () => incompleteApproved,
+        loadEscrow: async () => {
+          loadCalls++;
+          return incompleteApproved;
+        },
+      } as any,
+      {} as any,
+      { getPublicKey: async () => SELLER_PK } as any,
+    );
+    try {
+      await bridge.claimAndRedeem(ESCROW_ID);
+    } catch {
+      // Expected: the synthetic approved state remains incomplete after the
+      // mock reload. The invariant under test is that rehydration ran first.
+    }
+    assert(loadCalls === 1,
+      "Claim synchronously rehydrates once when LOCK hash/shares are missing");
+
+    let failedLoadCalls = 0;
+    const fetchFailureBridge = new EscrowFedimintBridge(
+      {
+        getState: () => incompleteApproved,
+        loadEscrow: async () => {
+          failedLoadCalls++;
+          throw new Error("relay temporarily unavailable");
+        },
+      } as any,
+      {} as any,
+      { getPublicKey: async () => SELLER_PK } as any,
+    );
+    let deterministicMissingLock = false;
+    try {
+      await fetchFailureBridge.claimAndRedeem(ESCROW_ID);
+    } catch (error: any) {
+      deterministicMissingLock = /No lock data/.test(error?.message || "");
+    }
+    assert(failedLoadCalls === 1 && deterministicMissingLock,
+      "Claim fetch failure stays a missing-LOCK hard failure (never a false in-flight redeem)");
   }
 }
 
@@ -18332,6 +18516,59 @@ console.log("\n── RELAY MANAGER — one-shot fetch isolation ──");
   assert(!retryTimer, "Disconnect suppresses the socket-close reconnect timer");
 }
 
+// ── RELAY MANAGER — raw-frame availability boundary ──────────────────────
+//
+// The per-event content cap used to run only AFTER JSON.parse. A relay could
+// therefore pin WebKit's main thread and consume gigabytes by sending one huge
+// frame; composited scrolling kept working while every click appeared frozen.
+// Pin the pre-parse rejection and the session-local reconnect circuit breaker.
+console.log("\n── RELAY MANAGER — oversized raw frame quarantine ──");
+{
+  class FrameWS {
+    static instances: FrameWS[] = [];
+    onopen: ((e: Event) => void) | null = null;
+    onmessage: ((e: MessageEvent) => void) | null = null;
+    onerror: ((e: Event) => void) | null = null;
+    onclose: ((e: CloseEvent) => void) | null = null;
+    closed = false;
+    constructor(public url: string) { FrameWS.instances.push(this); }
+    send() {}
+    close() { this.closed = true; }
+    emitRaw(data: unknown) { this.onmessage?.({ data } as MessageEvent); }
+  }
+
+  const errors: string[] = [];
+  const rm = new RelayManager(
+    ["wss://oversized.test"],
+    { onError: (error) => errors.push(error.message) },
+    FrameWS as unknown as typeof WebSocket,
+  );
+  rm.connect();
+  const socket = FrameWS.instances[0]!;
+  socket.onopen?.({} as Event);
+
+  // Larger than the 256 KiB raw budget. Crucially this is not valid JSON: if
+  // the handler tried to parse it first, the quarantine assertions would not
+  // distinguish the old parse-before-check implementation from the fix.
+  socket.emitRaw("x".repeat(256 * 1024 + 1));
+  const relay = (rm as any).relays.get("wss://oversized.test");
+  assert(socket.closed && relay.quarantined,
+    "Oversized raw frame closes and quarantines its relay before dispatch");
+  assert(errors.some((message) => message.includes("oversized")),
+    "Oversized raw frame reports a bounded relay error");
+
+  // The close callback must not arm automatic reconnect into the same flood.
+  socket.onclose?.({} as CloseEvent);
+  assert(!relay.retryTimer && FrameWS.instances.length === 1,
+    "Quarantined relay does not automatically reconnect after close");
+
+  // An explicit user reconnect is allowed one clean retry.
+  rm.forceReconnectAll();
+  assert(!relay.quarantined && FrameWS.instances.length === 2,
+    "Explicit reconnect clears quarantine and creates one fresh socket");
+  rm.disconnect();
+}
+
 // ── RELAY MANAGER — reconnect resilience ───────────────────────────────────
 //
 // The pool degraded in the field because: a WebSocket `error` doesn't always
@@ -18785,6 +19022,51 @@ console.log("\n── Trade notifications (notificationForTransition) ──");
     "A backup pool arbiter is summoned to a dispute too");
 }
 
+// ── #79 External trade-alert DMs — critical moments only ──
+console.log("\n── External trade-alert DMs (tradeDmNotificationFor) ──");
+{
+  const BUYER = "11".repeat(32);
+  const SELLER = "22".repeat(32);
+  const ARB = "33".repeat(32);
+  const mk = (over: Partial<EscrowState>): EscrowState => ({
+    id: "sm_trade_dm_0001",
+    category: "p2p-trade",
+    status: EscrowStatus.CREATED,
+    participants: { [Role.BUYER]: BUYER, [Role.SELLER]: SELLER, [Role.ARBITER]: ARB },
+    votes: {},
+    resolvedOutcome: null,
+    communityArbiters: [ARB],
+    ...over,
+  }) as EscrowState;
+
+  const created = mk({ status: EscrowStatus.CREATED });
+  const locked = mk({ status: EscrowStatus.LOCKED });
+  const lockDm = tradeDmNotificationFor(created, locked, Role.SELLER);
+  assert(lockDm?.transition === "sm_trade_dm_0001:locked" && lockDm.recipients[0] === Role.BUYER,
+    "LOCK publishes one external alert to the party whose action is needed");
+
+  const buyerVoted = mk({ status: EscrowStatus.LOCKED, votes: { [Role.BUYER]: Outcome.RELEASE } });
+  const voteDm = tradeDmNotificationFor(locked, buyerVoted, Role.BUYER);
+  assert(voteDm?.transition === "sm_trade_dm_0001:vote" && voteDm.recipients[0] === Role.SELLER,
+    "A first vote alerts only the other voter");
+
+  const disputed = mk({ status: EscrowStatus.LOCKED,
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND } });
+  const disputeDm = tradeDmNotificationFor(buyerVoted, disputed, Role.SELLER);
+  assert(disputeDm?.transition === "sm_trade_dm_0001:dispute" && disputeDm.recipients[0] === Role.ARBITER,
+    "A disagreement alerts the assigned arbiter");
+
+  const approved = mk({ status: EscrowStatus.APPROVED, resolvedOutcome: Outcome.RELEASE,
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.RELEASE } });
+  assert(tradeDmNotificationFor(locked, approved, Role.SELLER)?.transition === "sm_trade_dm_0001:settled",
+    "Settlement alerts the payout winner to claim");
+
+  const completed = mk({ status: EscrowStatus.COMPLETED, resolvedOutcome: Outcome.RELEASE,
+    votes: approved.votes });
+  assert(tradeDmNotificationFor(approved, completed, Role.BUYER) === null,
+    "COMPLETED sends no external DM — payout-ready was the final useful alert");
+}
+
 // ── Cold-start catch-up (catchUpPrev + persisted last-seen status) ──
 // Bug 2: a KILLED app re-observes trades with prev=undefined. catchUpPrev feeds
 // the persisted last-seen status back as a synthesized prev so a transition that
@@ -19205,6 +19487,7 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
   };
 
   const updates: EscrowState[] = [];
+  const listingHydrationCounts: number[] = [];
   const client = new EscrowClient(
     fakeSigner,
     {
@@ -19215,7 +19498,10 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
       // nostr-tools verifier by default.
       verifyEvent: () => true,
     },
-    { onStateUpdate: (_id, state) => updates.push(state) },
+    {
+      onStateUpdate: (_id, state) => updates.push(state),
+      onPublicListingHydration: (pending) => listingHydrationCounts.push(pending),
+    },
   );
 
   client.connect();
@@ -19246,6 +19532,10 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
     updates.length === 0,
     "Public CREATE does not surface a CREATE-only Browse card before full-chain hydration"
   );
+  assert(
+    listingHydrationCounts[0] === 1,
+    "Browse reports verification in progress while a public listing chain hydrates"
+  );
 
   const fetchReq = socket.sent
     .map(raw => JSON.parse(raw))
@@ -19259,9 +19549,14 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
   socket.emit(["EOSE", fetchSubId]);
 
   await waitUntil(() => updates.some(s => s.status === EscrowStatus.COMPLETED));
+  await waitUntil(() => listingHydrationCounts.at(-1) === 0);
   assert(
     updates.length === 1 && updates[0].status === EscrowStatus.COMPLETED,
     "Hydrated completed trade reaches UI only as COMPLETED, never stale OPEN"
+  );
+  assert(
+    listingHydrationCounts.at(-1) === 0,
+    "Browse reports verification settled after the public listing chain hydrates"
   );
 
   client.disconnect();

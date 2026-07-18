@@ -77,6 +77,8 @@ import {
   type DmNotifyPref,
   newListingPref,
   setNewListingPref,
+  tradeDmPref,
+  setTradeDmPref,
 } from "../../notifications/notify-service.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
@@ -112,6 +114,8 @@ export function MeScreen({
   onSellerDeleteListing,
   onOpenSavedHandles,
   onOpenPayoutDestinations,
+  unfundedListingCount,
+  onClearUnfundedListings,
   onOpenAdvanced,
   onOpenHelp,
   balanceMsats,
@@ -163,6 +167,11 @@ export function MeScreen({
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
   onOpenSavedHandles: () => void;
   onOpenPayoutDestinations: () => void;
+  /** #82: count of the user's own never-funded listings — drives the "Clear my
+   *  unfunded listings" Settings row (hidden when 0). */
+  unfundedListingCount?: number;
+  /** #82: open the confirm dialog to retire ALL own unfunded listings. */
+  onClearUnfundedListings?: () => void;
   onOpenAdvanced: () => void;
   onOpenHelp: () => void;
   balanceMsats: number;
@@ -663,6 +672,7 @@ export function MeScreen({
           <LanguageRow />
           <NotificationsRow />
           <DmNotificationsRow />
+          <CounterpartyDmRow />
           <NewListingNotificationsRow />
           <NostrNamesRow on={kind0On} onToggle={() => setKind0On(!kind0On)} />
           {SHOW_BOND_CEREMONY && onOpenBondCeremony && (
@@ -670,6 +680,13 @@ export function MeScreen({
           )}
           <SettingsRow label={t("me.paymentMethods")} hint={t("me.paymentMethodsHint")} onClick={onOpenSavedHandles} />
           <SettingsRow label={t("me.lightningAddresses")} hint={t("me.lightningAddressesHint")} onClick={onOpenPayoutDestinations} />
+          {onClearUnfundedListings && (unfundedListingCount ?? 0) > 0 && (
+            <SettingsRow
+              label={t("me.clearListings")}
+              hint={t("me.clearListingsHint", { count: unfundedListingCount ?? 0 })}
+              onClick={onClearUnfundedListings}
+            />
+          )}
           <SettingsRow label={t("me.advanced")} hint={t("me.advancedHint")} onClick={onOpenAdvanced} />
           <SettingsRow label={t("me.helpFaq")} hint={t("me.helpFaqHint")} onClick={onOpenHelp} />
         </div>
@@ -2542,6 +2559,54 @@ function DmNotificationsRow() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// #79: always-on "DM my counterparty on Nostr when I take a trade-critical
+// action" — so their external client (Damus/Amethyst) alerts them like an email,
+// standing in for the web-push Chama can't do serverlessly. Default ON; this is
+// the mute. Self-contained. No OS permission involved (it's an outbound Nostr DM,
+// not a local OS notification).
+function CounterpartyDmRow() {
+  const { t } = useT();
+  const [on, setOn] = useState<boolean>(() => tradeDmPref());
+  const toggle = () => {
+    const next = !on;
+    setOn(next);
+    setTradeDmPref(next);
+  };
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      gap: 10, padding: "14px 16px", borderBottom: `1px solid ${T.border}`,
+    }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T.text, fontFamily: T.sans }}>
+          {t("me.tradeDm")}
+        </div>
+        <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginTop: 2 }}>
+          {t("me.tradeDmHint")}
+        </div>
+      </div>
+      <button
+        onClick={toggle}
+        role="switch"
+        aria-checked={on}
+        style={{
+          width: 46, height: 26, borderRadius: 999, position: "relative",
+          border: `1px solid ${on ? T.green + "66" : T.border}`,
+          background: on ? T.green + "33" : T.surface,
+          cursor: "pointer", transition: "background 0.15s, border-color 0.15s",
+          flexShrink: 0,
+        }}
+      >
+        <span style={{
+          position: "absolute", top: 2, left: on ? 22 : 2,
+          width: 20, height: 20, borderRadius: "50%",
+          background: on ? T.green : T.muted, transition: "left 0.15s",
+        }} />
+      </button>
     </div>
   );
 }

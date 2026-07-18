@@ -51,6 +51,23 @@ export const faqEs: FaqContent = {
       ],
     },
     {
+      id: "features",
+      title: "Todo lo que puedes hacer",
+      items: [
+        { q: "¿Qué funciones tiene Chama?", a: { intro: "Aquí tienes toda la app en un recorrido rápido:", steps: [
+          "Explora ofertas de tu comunidad o echa un vistazo a otro país y moneda.",
+          "Crea una publicación de Intercambio, Tienda, Trabajo, Colecta, Ahorro o Pago comunitario de facturas, con precios, métodos de pago, menús y cantidades cuando correspondan.",
+          "Únete a una publicación, chatea en privado con las demás personas del intercambio, financia la custodia de Bitcoin, sigue cada paso y vota para liberar o reembolsar.",
+          "Reclama un cobro a M-Pesa donde esté disponible, cualquier dirección o factura Lightning, una billetera NWC conectada o una dirección Bitcoin on-chain.",
+          "Usa el Panel para ver tu Chama, publicaciones activas, actividad como árbitro, bonos, ganancias y cualquier sat que te esté esperando.",
+          "Usa Yo para ver qué necesita tu atención, fijar o posponer tareas, revisar el historial y las valoraciones, administrar tu perfil y cambiar los ajustes.",
+          "Recibe recordatorios de uniones, bloqueos, mensajes, plazos, cobros y disputas; al tocar uno irás al intercambio que te necesita.",
+          "Conviértete en árbitro de la comunidad, publica un bono reembolsable en Bitcoin, indica que estás disponible, resuelve disputas, construye reputación y gana la prima de seguro opcional.",
+          "Usa Chama en inglés, francés o español en web, Android, macOS, Windows o Linux. Tu llave Nostr mantiene la misma identidad entre dispositivos.",
+        ], outro: "Para ayuda paso a paso, abre la pregunta correspondiente más abajo. Los ajustes avanzados también permiten cambiar de comunidad, federación, firmante y nodo de Chama." } },
+      ],
+    },
+    {
       id: "money",
       title: "Recibir tu dinero",
       items: [

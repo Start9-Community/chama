@@ -17,6 +17,7 @@ export const create: Record<string, string> = {
   "create.aboveLendingCapBefore": "Above current Fedimint lending cap of",
   "create.acceptedPayment": "ACCEPTED PAYMENT",
   "create.addPhoto": "+ Photo",
+  "create.uploadingPhoto": "Uploading…",
   "create.addRail": "Add",
   "create.addedRail": "Added",
   "create.ageDays": "{count}d ago",
@@ -74,6 +75,7 @@ export const create: Record<string, string> = {
     "Home decides where Chama signs you in. One tap makes {name} your home.",
   "create.imageFallbackError":
     "That file doesn't look like a supported photo, or it's too large for this release. Try JPG, PNG, or WebP.",
+  "create.photoUploadFailed": "Photo upload failed. Check your connection and try again.",
   "create.intervalBiweekly": "Bi-weekly",
   "create.intervalLabel": "INTERVAL",
   "create.intervalMonthly": "Monthly",

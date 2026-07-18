@@ -12,6 +12,7 @@ export const create: Record<string, string> = {
   "create.aboveLendingCapBefore": "Au-dessus du plafond de prêt Fedimint actuel de",
   "create.acceptedPayment": "PAIEMENT ACCEPTÉ",
   "create.addPhoto": "+ Photo",
+  "create.uploadingPhoto": "Envoi…",
   "create.addRail": "Ajouter",
   "create.addedRail": "Ajouté",
   "create.ageDays": "il y a {count} j",
@@ -69,6 +70,7 @@ export const create: Record<string, string> = {
     "Votre chez-vous décide où Chama vous connecte. Un seul geste fait de {name} votre chez-vous.",
   "create.imageFallbackError":
     "Ce fichier ne ressemble pas à une photo prise en charge, ou il est trop lourd pour cette version. Essayez JPG, PNG ou WebP.",
+  "create.photoUploadFailed": "L’envoi de la photo a échoué. Vérifiez votre connexion et réessayez.",
   "create.intervalBiweekly": "Toutes les 2 semaines",
   "create.intervalLabel": "INTERVALLE",
   "create.intervalMonthly": "Mensuel",

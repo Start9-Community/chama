@@ -146,6 +146,9 @@ export interface ArbiterEarningRecord {
   noteKind: "ambient" | "dispute";
   status: "redeemed" | "failed";
   attempts: number;
+  /** Last redeem error, retained for diagnosis instead of collapsing every
+   *  failure into a silent zero-balance dashboard. */
+  lastError?: string;
   updatedAt: number; // ms
 }
 
@@ -186,6 +189,7 @@ export function recordEarningAttemptFailed(entry: {
   payer: string;
   amountMsats: number;
   noteKind: "ambient" | "dispute";
+  lastError?: string;
 }): void {
   const store = loadStore<ArbiterEarningRecord>(ARBITER_EARNINGS_KEY);
   const prev = store[entry.eventId];

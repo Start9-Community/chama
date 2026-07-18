@@ -79,6 +79,7 @@ import {
 } from "../amount-display.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
+import { ensureRemoteListingImage } from "../../media/listing-image-upload.js";
 
 type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
@@ -104,6 +105,8 @@ const VERTICALS: { id: string; labelKey: string; icon: string; descriptionKey: s
 interface FormState {
   listingMode: ListingMode;
   desc: string;
+  /** Product photo for a single Store listing. Storefront photos live on items. */
+  imageDataUrl: string;
   sats: string;
   fiat: string;
   cur: string;
@@ -311,6 +314,7 @@ function normalizeFormState(raw: any, currency = "USD"): FormState {
     ...fallback,
     ...raw,
     listingMode,
+    imageDataUrl: typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "",
     cur: fallback.cur,
     premium: typeof raw.premium === "string" || typeof raw.premium === "number" ? String(raw.premium) : fallback.premium,
     billType: typeof raw.billType === "string" ? raw.billType : "",
@@ -404,7 +408,7 @@ function menuKindForVertical(vertical: Vertical): NonNullable<MenuItem["kind"]> 
 }
 
 function menuImagesAllowedForVertical(vertical: Vertical): boolean {
-  return vertical === "marketplace" || vertical === "p2p-trade";
+  return vertical === "marketplace";
 }
 
 function normalizeMenuItems(form: FormState, vertical: Vertical): MenuItem[] {
@@ -502,6 +506,7 @@ function effectiveListingSats(form: FormState, vertical: Vertical): number {
 function hasDraftContent(form: FormState): boolean {
   return !!(
     form.desc.trim()
+    || form.imageDataUrl
     || form.sats.trim()
     || form.fiat.trim()
     || form.premium.trim()
@@ -976,6 +981,7 @@ export function emptyCreateFormState(currency = "USD"): FormState {
   return {
     listingMode: "single",
     desc: "",
+    imageDataUrl: "",
     sats: "",
     fiat: "",
     cur: currency,
@@ -1126,7 +1132,7 @@ export function CreateForm({
   };
 
   const handlePublish = async () => {
-    const menuItems = normalizeMenuItems(form, vertical);
+    let menuItems = normalizeMenuItems(form, vertical);
     const hasMenu = menuItems.length > 0;
     const description = buildListingDescription(form, vertical, menuItems);
     const baseSats = hasMenu ? minimumMenuSats(menuItems) : parseWholeSats(form.sats);
@@ -1144,6 +1150,30 @@ export function CreateForm({
     ) return;
     setSubmitting(true);
     try {
+      // Old drafts may still contain inline data URLs. Upload them before CREATE
+      // so the Nostr event stays small enough for normal relay frame limits.
+      let listingImageRef = form.imageDataUrl;
+      if (vertical === "marketplace" && hasMenu) {
+        for (let index = 0; index < menuItems.length; index += 1) {
+          const item = menuItems[index];
+          if (!item.imageDataUrl?.startsWith("data:image/")) continue;
+          const imageUrl = await ensureRemoteListingImage(item.imageDataUrl, `chama-item-${index + 1}.jpg`);
+          menuItems = menuItems.map(candidate => candidate.id === item.id
+            ? { ...candidate, imageDataUrl: imageUrl }
+            : candidate);
+          setForm(previous => ({
+            ...previous,
+            menuItems: previous.menuItems.map(candidate => candidate.id === item.id
+              ? { ...candidate, imageDataUrl: imageUrl }
+              : candidate),
+          }));
+        }
+      } else if (vertical === "marketplace" && listingImageRef?.startsWith("data:image/")) {
+        listingImageRef = await ensureRemoteListingImage(listingImageRef, "chama-listing.jpg");
+        const uploadedImageRef = listingImageRef;
+        setForm(previous => ({ ...previous, imageDataUrl: uploadedImageRef }));
+      }
+
       const singleLockSats = !hasMenu && vertical === "bill-pay"
         ? satsWithPremium(baseSats, parsePremiumBps(form.premium))
         : baseSats;
@@ -1201,6 +1231,9 @@ export function CreateForm({
           return undefined;
         })(),
         category: vertical,
+        imageDataUrl: vertical === "marketplace" && !hasMenu && listingImageRef
+          ? listingImageRef
+          : undefined,
         community: effectiveCommunity,
         // v3.1 (B3): stamp the community's ISO country so the listing self-describes
         // its flag + currency on devices that don't know this (custom) community.
@@ -1842,6 +1875,7 @@ function Step2({
   // v2.5: inline photo-upload error. window.alert is a silent no-op in the
   // Tauri/Capacitor webview, so a rejected image used to fail invisibly.
   const [imageError, setImageError] = useState<string | null>(null);
+  const [uploadingImageIds, setUploadingImageIds] = useState<Set<string>>(() => new Set());
   const menuItems = normalizeMenuItems(form, vertical);
   const hasMenu = menuItems.length > 0;
   const usingMenu = form.listingMode === "menu";
@@ -1863,6 +1897,7 @@ function Step2({
     billTypeOk &&
     (usingMenu ? hasMenu : form.sats.trim().length > 0) &&
     !partialMenuRows &&
+    uploadingImageIds.size === 0 &&
     !amountTooSmall &&
     !lendingCapExceeded;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
@@ -2032,18 +2067,31 @@ function Step2({
       menuItems: prev.menuItems.filter(item => item.id !== id),
     }));
   };
+  const markImageUploading = (id: string, uploading: boolean) => {
+    setUploadingImageIds(current => {
+      const next = new Set(current);
+      if (uploading) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
   const updateMenuImage = (id: string, file: File | null) => {
     if (!file) {
       updateMenuItem(id, { imageDataUrl: "" });
       return;
     }
     void (async () => {
+      markImageUploading(id, true);
       try {
         const imageDataUrl = await prepareMenuImageDataUrl(file);
-        setImageError(null);
         updateMenuItem(id, { imageDataUrl });
+        const imageUrl = await ensureRemoteListingImage(imageDataUrl, file.name);
+        setImageError(null);
+        updateMenuItem(id, { imageDataUrl: imageUrl });
       } catch (e: any) {
-        setImageError(e?.message || t("create.imageFallbackError"));
+        setImageError(e?.message || t("create.photoUploadFailed"));
+      } finally {
+        markImageUploading(id, false);
       }
     })();
   };
@@ -2051,6 +2099,27 @@ function Step2({
   const clearMenuImage = (id: string) => {
     setImageError(null);
     updateMenuItem(id, { imageDataUrl: "" });
+  };
+
+  const updateSingleImage = (file: File | null) => {
+    if (!file) {
+      set("imageDataUrl", "");
+      return;
+    }
+    void (async () => {
+      markImageUploading("single", true);
+      try {
+        const imageDataUrl = await prepareMenuImageDataUrl(file);
+        set("imageDataUrl", imageDataUrl);
+        const imageUrl = await ensureRemoteListingImage(imageDataUrl, file.name);
+        setImageError(null);
+        set("imageDataUrl", imageUrl);
+      } catch (e: any) {
+        setImageError(e?.message || t("create.photoUploadFailed"));
+      } finally {
+        markImageUploading("single", false);
+      }
+    })();
   };
 
   return (
@@ -2111,6 +2180,50 @@ function Step2({
           placeholder={descriptionPlaceholder(vertical, usingMenu)}
           style={inputStyle} />
       </div>
+      )}
+
+      {vertical === "marketplace" && !usingMenu && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+          <label style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            padding: "9px 10px", borderRadius: T.rs, border: `1px solid ${T.border}`,
+            background: T.card, color: form.imageDataUrl ? T.accent : T.muted,
+            fontFamily: T.mono, fontSize: 10, fontWeight: 800, cursor: "pointer",
+          }}>
+            {uploadingImageIds.has("single")
+              ? t("create.uploadingPhoto")
+              : form.imageDataUrl ? t("create.changePhoto") : t("create.addPhoto")}
+            <input
+              type="file"
+              accept={MENU_IMAGE_ACCEPT}
+              disabled={uploadingImageIds.has("single")}
+              onChange={e => {
+                updateSingleImage(e.target.files?.[0] ?? null);
+                e.currentTarget.value = "";
+              }}
+              style={{ display: "none" }}
+            />
+          </label>
+          {form.imageDataUrl && (
+            <>
+              <img
+                src={form.imageDataUrl}
+                alt=""
+                style={{ width: 54, height: 42, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.border}` }}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  setImageError(null);
+                  set("imageDataUrl", "");
+                }}
+                style={{ border: "none", background: "none", color: T.muted, fontFamily: T.mono, fontSize: 10, fontWeight: 800, cursor: "pointer" }}
+              >
+                {t("create.removePhoto")}
+              </button>
+            </>
+          )}
+        </div>
       )}
 
       {/* v4.1 (#12) CBP bill-type picker — optional, country-driven, informational
@@ -2724,10 +2837,13 @@ function Step2({
                       fontWeight: 800,
                       cursor: "pointer",
                     }}>
-                      {item.imageDataUrl ? t("create.changePhoto") : t("create.addPhoto")}
+                      {uploadingImageIds.has(item.id)
+                        ? t("create.uploadingPhoto")
+                        : item.imageDataUrl ? t("create.changePhoto") : t("create.addPhoto")}
                       <input
                         type="file"
                         accept={MENU_IMAGE_ACCEPT}
+                        disabled={uploadingImageIds.has(item.id)}
                         onChange={e => {
                           updateMenuImage(item.id, e.target.files?.[0] ?? null);
                           e.currentTarget.value = "";
@@ -3182,6 +3298,13 @@ function Step3({
           </>
         ) : (
           <>
+            {form.imageDataUrl && vertical === "marketplace" && (
+              <img
+                src={form.imageDataUrl}
+                alt=""
+                style={{ width: "100%", height: 156, objectFit: "cover", display: "block", borderRadius: T.r, marginBottom: 12 }}
+              />
+            )}
             <div style={{
               fontSize: 14,
               fontWeight: 700,
