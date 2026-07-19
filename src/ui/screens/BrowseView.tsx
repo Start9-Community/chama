@@ -331,6 +331,7 @@ export function BrowseView({
               key={c.id}
               onClick={() => { if (showOwn) toggleShowOwn(); setBrowseCategory(c.id); }}
               style={{
+                order: c.id === "all" ? 0 : 2,
                 flexShrink: 0,
                 padding: "7px 11px", borderRadius: 18,
                 background: active ? T.accentDim : T.surface,
@@ -365,6 +366,7 @@ export function BrowseView({
             onClick={() => { if (!showOwn) toggleShowOwn(); setBrowseCategory("all"); }}
             aria-pressed={showOwn}
             style={{
+              order: 1,
               flexShrink: 0,
               padding: "7px 11px", borderRadius: 18,
               background: showOwn ? T.accentDim : T.surface,
