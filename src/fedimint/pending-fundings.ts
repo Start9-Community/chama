@@ -46,9 +46,9 @@
 // never discard notes the federation will still honor.
 
 import {
-  getScopedStorageItem,
-  removeScopedStorageItem,
-  setScopedStorageItem,
+  getStrictScopedStorageItem,
+  removeStrictScopedStorageItem,
+  setStrictScopedStorageItem,
 } from "../storage/user-scope.js";
 import { hasFediInternalReceiveEcash, receiveFediEcash } from "./fedi-internal.js";
 
@@ -95,7 +95,7 @@ type Stash = Record<string, PendingFunding>;
 
 function loadStash(): Stash {
   try {
-    const raw = getScopedStorageItem(PENDING_FUNDINGS_KEY);
+    const raw = getStrictScopedStorageItem(PENDING_FUNDINGS_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return {};
@@ -108,7 +108,7 @@ function loadStash(): Stash {
 
 function saveStash(stash: Stash): void {
   try {
-    setScopedStorageItem(PENDING_FUNDINGS_KEY, JSON.stringify(stash));
+    setStrictScopedStorageItem(PENDING_FUNDINGS_KEY, JSON.stringify(stash));
   } catch (e) {
     // QuotaExceededError is the main concern. Surface loudly — failing to
     // persist the bearer notes defeats the whole point of this module.
@@ -268,7 +268,7 @@ export async function drainPendingFundings(): Promise<FundingDrainSummary> {
  */
 export function clearAllPendingFundings(): void {
   try {
-    removeScopedStorageItem(PENDING_FUNDINGS_KEY);
+    removeStrictScopedStorageItem(PENDING_FUNDINGS_KEY);
   } catch (e) {
     console.warn("[chama] pending-fundings: clearAll failed:", e);
   }

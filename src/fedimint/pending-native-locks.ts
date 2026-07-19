@@ -67,9 +67,9 @@
 // both money-critical — a bug in one lane must never reach the other.
 
 import {
-  getScopedStorageItem,
-  removeScopedStorageItem,
-  setScopedStorageItem,
+  getStrictScopedStorageItem,
+  removeStrictScopedStorageItem,
+  setStrictScopedStorageItem,
 } from "../storage/user-scope.js";
 import type { SelectedMenuItem } from "../escrow-engine/types.js";
 import { EscrowStatus, type EscrowState } from "../escrow-engine/types.js";
@@ -170,7 +170,7 @@ function compactLockOpts(opts: PendingNativeLockOpts | undefined): PendingNative
 
 function loadStash(): Stash {
   try {
-    const raw = getScopedStorageItem(PENDING_NATIVE_LOCKS_KEY);
+    const raw = getStrictScopedStorageItem(PENDING_NATIVE_LOCKS_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return {};
@@ -190,7 +190,7 @@ function loadStash(): Stash {
     // Repair older pending retries immediately so a reload cannot restore
     // the oversized selection snapshot again.
     if (migrated) {
-      setScopedStorageItem(PENDING_NATIVE_LOCKS_KEY, JSON.stringify(stash));
+      setStrictScopedStorageItem(PENDING_NATIVE_LOCKS_KEY, JSON.stringify(stash));
     }
     return stash;
   } catch (e) {
@@ -204,7 +204,7 @@ function loadStash(): Stash {
  *  pre-spend probe (`assertNativeLockStashWritable`) makes this loud
  *  BEFORE any sats move. */
 function saveStash(stash: Stash): void {
-  setScopedStorageItem(PENDING_NATIVE_LOCKS_KEY, JSON.stringify(stash));
+  setStrictScopedStorageItem(PENDING_NATIVE_LOCKS_KEY, JSON.stringify(stash));
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -220,9 +220,9 @@ function saveStash(stash: Stash): void {
  */
 export function assertNativeLockStashWritable(): void {
   const probeKey = `${PENDING_NATIVE_LOCKS_KEY}_probe`;
-  setScopedStorageItem(probeKey, "1");
+  setStrictScopedStorageItem(probeKey, "1");
   try {
-    removeScopedStorageItem(probeKey);
+    removeStrictScopedStorageItem(probeKey);
   } catch {
     // Cleanup is best-effort; the write above is the load-bearing probe.
   }
@@ -359,7 +359,7 @@ export function listPendingNativeLocks(): PendingNativeLock[] {
 /** Test/advanced-settings helper. NOT called by wallet resets. */
 export function clearAllPendingNativeLocks(): void {
   try {
-    removeScopedStorageItem(PENDING_NATIVE_LOCKS_KEY);
+    removeStrictScopedStorageItem(PENDING_NATIVE_LOCKS_KEY);
   } catch (e) {
     console.warn("[chama] pending-native-locks: clearAll failed:", e);
   }

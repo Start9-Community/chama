@@ -54,6 +54,32 @@ export function getScopedStorageItem(baseKey: string): string | null {
   }
 }
 
+/** Read only the active user's exact key. Unlike getScopedStorageItem this
+ * never claims an old unscoped value. Money/recovery stores must use this:
+ * assigning bearer notes or payout state to whichever identity signs in
+ * next is unsafe. An unscoped legacy value remains quarantined for an
+ * explicit, identity-aware recovery flow. */
+export function getStrictScopedStorageItem(baseKey: string): string | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const scope = getLocalStorageUserScope();
+    return localStorage.getItem(scopedStorageKey(baseKey, scope));
+  } catch {
+    return null;
+  }
+}
+
+/** Strict counterparts preserve any quarantined legacy key. */
+export function setStrictScopedStorageItem(baseKey: string, value: string): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(scopedStorageKey(baseKey), value);
+}
+
+export function removeStrictScopedStorageItem(baseKey: string): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.removeItem(scopedStorageKey(baseKey));
+}
+
 /** Claim a pre-connect legacy value into the active user scope, even if
  *  that scope already had an older value. Use only for settings where
  *  the logged-out UI can visibly stage a new choice before the signer

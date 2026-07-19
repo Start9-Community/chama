@@ -9374,6 +9374,23 @@ console.log("\n── per-npub localStorage scoping ──");
   assert(listPendingRedemptions()[0]?.escrowId === "alice_claim",
     "First npub keeps its pending redemption stash");
 
+  // Money-bearing legacy queues are deliberately NOT auto-claimed by the
+  // next identity. They remain quarantined at the unscoped key until an
+  // identity-aware recovery flow can attribute them safely.
+  setLocalStorageUserScope(null);
+  (globalThis as any).localStorage.setItem(PENDING_REDEMPTIONS_KEY, JSON.stringify({
+    legacy_claim: {
+      escrowId: "legacy_claim", oobNotes: "legacy_bearer_notes",
+      notesHash: "legacy_hash", amountMsats: 99_000,
+      createdAt: Date.now(), attempts: 0,
+    },
+  }));
+  setLocalStorageUserScope("fresh_identity");
+  assert(listPendingRedemptions().length === 0,
+    "Fresh npub never inherits an unscoped bearer-note recovery queue");
+  assert((globalThis as any).localStorage.getItem(PENDING_REDEMPTIONS_KEY) !== null,
+    "Unattributed legacy bearer notes remain quarantined, not deleted");
+
   clearAllPendingRedemptions();
   setLocalStorageUserScope(null);
   (globalThis as any).localStorage.clear();
