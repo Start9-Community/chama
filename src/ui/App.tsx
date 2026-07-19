@@ -3556,6 +3556,7 @@ export default function App() {
           )}
           <SettingsAdvanced
             fedimint={fedimint}
+            loadActiveRecoveryKey={actions.exportActiveRecoveryKey}
             focusNwc={advancedFocusNwc}
             onBack={() => setView("me")}
             onSandboxFund={() => setShowFundModal(true)}

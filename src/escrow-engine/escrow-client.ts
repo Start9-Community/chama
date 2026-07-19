@@ -116,6 +116,10 @@ export interface Signer {
    * NIP-04 support degrades to the nip44 legacy behavior at call sites.
    */
   nip04Encrypt?(plaintext: string, recipientPubkey: string): Promise<string>;
+
+  /** Export a locally-held recovery key on an explicit user request.
+   * Remote/extension signers intentionally omit this capability. */
+  exportRecoveryKey?(): Promise<string>;
 }
 
 /** Unsigned event template — the client builds these, the signer completes them */

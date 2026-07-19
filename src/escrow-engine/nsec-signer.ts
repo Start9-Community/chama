@@ -100,6 +100,13 @@ export class NsecSigner implements Signer {
     return this._pubkey!;
   }
 
+  /** Explicit recovery escape hatch for Me → Advanced. The key remains
+   * memory-only until the user deliberately asks to reveal/copy it. */
+  async exportRecoveryKey(): Promise<string> {
+    await this.init();
+    return this._nsecOrHex.trim();
+  }
+
   async signEvent(event: UnsignedEvent): Promise<NostrEvent> {
     await this.init();
     const { finalizeEvent } = await import("nostr-tools/pure");

@@ -641,6 +641,9 @@ export interface UseEscrowState {
 export interface UseEscrowActions {
   /** Connect to relays and initialize signer */
   connect: () => Promise<void>;
+  /** Return the active local signer's recovery key only when that signer
+   * explicitly supports export. NIP-07/NIP-46/Fedi signers return null. */
+  exportActiveRecoveryKey: () => Promise<string | null>;
   /** Disconnect from relays */
   disconnect: () => void;
   /** Force-reconnect backed-off/abandoned relays and re-arm My-Trades
@@ -4184,6 +4187,11 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // ── Return ──────────────────────────────────────────────────────────────
 
   const actions: UseEscrowActions = {
+    exportActiveRecoveryKey: async () => {
+      const signer = signerRef.current;
+      if (!signer?.exportRecoveryKey) return null;
+      return signer.exportRecoveryKey();
+    },
     connect,
     disconnect,
     recoverRelays,

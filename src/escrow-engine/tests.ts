@@ -532,7 +532,7 @@ import {
   createNip46PairingSecret,
 } from "./nip46-signer.js";
 import { FediSigner, NIP07Signer } from "./signers.js";
-import { validateRecoveryKeyInput } from "./nsec-signer.js";
+import { NsecSigner, validateRecoveryKeyInput } from "./nsec-signer.js";
 import {
   getLocalStorageUserScope,
   scopedStorageKey,
@@ -16056,6 +16056,11 @@ console.log("\n── SIGN-IN OPTION ENVIRONMENT GATE ──");
   const validNsec = await validateRecoveryKeyInput(generatedNsec);
   assert(validNsec.ok && validNsec.kind === "nsec" && validNsec.secretKey.length === 32,
     "Recovery key validation accepts valid nsec1 keys");
+
+  const recoverySigner = new NsecSigner(generatedNsec);
+  await recoverySigner.getPublicKey();
+  assert(await recoverySigner.exportRecoveryKey() === generatedNsec,
+    "Local nsec signer explicitly exports its active recovery key");
 
   const shortHex = await validateRecoveryKeyInput("11".repeat(31));
   assert(!shortHex.ok && /64-character hex/i.test(shortHex.error),

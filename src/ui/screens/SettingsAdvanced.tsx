@@ -56,6 +56,7 @@ import {
 // works for both first-time-join and federation-switch flows.
 export function SettingsAdvanced({
   fedimint,
+  loadActiveRecoveryKey,
   onBack,
   onSwitchFederation,
   onResetLocalWallet,
@@ -69,6 +70,9 @@ export function SettingsAdvanced({
   onProbeFetchById,
 }: {
   fedimint: FedimintState;
+  /** Explicit, user-triggered export for an in-memory local signer. Remote
+   * signers return null and never expose key material to Chama. */
+  loadActiveRecoveryKey?: () => Promise<string | null>;
   onBack: () => void;
   onSwitchFederation: (inviteCode: string, opts?: { force?: boolean }) => Promise<void>;
   onResetLocalWallet: () => Promise<void>;
@@ -274,11 +278,10 @@ export function SettingsAdvanced({
         onFetchApplications={onFetchApplications}
       />
 
-      {/* v2.5 — Account key (nsec). Revealed ONLY when Chama generated the key:
-          an imported key is the user's to back up where they made it; a NIP-46
-          key never touches this device. The nsec is the MASTER key — it owns
-          the Nostr identity AND can recover the wallet seed. */}
-      <NsecRevealCard />
+      {/* v2.5 — Account key (nsec). Explicitly requested from the active local
+          signer, or loaded from secure storage for older generated accounts.
+          Extension and NIP-46 keys never touch Chama and cannot be revealed. */}
+      <NsecRevealCard loadActiveRecoveryKey={loadActiveRecoveryKey} />
 
       {/* Power-user toggle */}
       <div style={{
@@ -1036,16 +1039,20 @@ function RecoveryPhraseCard() {
 // ── Account key reveal (v2.5) ────────────────────────────────────────────
 // The nsec is the MASTER key: it owns the Nostr identity AND decrypts the
 // wallet seed stored on Nostr — so it can recover everything. We reveal it
-// ONLY when Chama generated the key (chama_nsec_origin === "generated"), and
-// only when it's actually stored on this device (chama_saved_nsec).
-// An imported key is the user's to back up where they made it; a NIP-46 key
-// never touches this device. Async-loaded from secure storage on mount.
-function NsecRevealCard() {
+// The reveal is an explicit user action. It asks the active local signer for
+// its in-memory key, with a secure-storage fallback for older generated
+// accounts. Extension and NIP-46 keys never touch Chama and cannot be revealed.
+function NsecRevealCard({
+  loadActiveRecoveryKey,
+}: {
+  loadActiveRecoveryKey?: () => Promise<string | null>;
+}) {
   const [loaded, setLoaded] = useState(false);
   const [origin, setOrigin] = useState<string | null>(null);
   const [nsec, setNsec] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [showQr, setShowQr] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1066,7 +1073,28 @@ function NsecRevealCard() {
     return () => { cancelled = true; };
   }, []);
 
-  const canReveal = origin === "generated" && !!nsec;
+  const canRevealStored = origin === "generated" && !!nsec;
+  const canRequestActive = typeof loadActiveRecoveryKey === "function";
+
+  const revealKey = async () => {
+    setRevealError(null);
+    if (canRevealStored) {
+      setRevealed(true);
+      return;
+    }
+    try {
+      const active = await loadActiveRecoveryKey?.();
+      if (!active) {
+        setRevealError("This account uses an extension or remote signer, so Chama does not hold a recovery key to reveal.");
+        return;
+      }
+      setNsec(active);
+      setOrigin("active");
+      setRevealed(true);
+    } catch {
+      setRevealError("Chama could not read the active local recovery key. Keep this session open and try again.");
+    }
+  };
 
   return (
     <div style={{
@@ -1087,7 +1115,7 @@ function NsecRevealCard() {
 
       {!loaded ? (
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono }}>Checking your device…</div>
-      ) : !canReveal ? (
+      ) : !canRevealStored && !canRequestActive ? (
         <div style={{
           padding: "10px 12px", borderRadius: T.rs,
           background: T.surface, border: `1px solid ${T.border}`,
@@ -1109,7 +1137,7 @@ function NsecRevealCard() {
             Chama will never ask for it.
           </div>
           <button
-            onClick={() => setRevealed(true)}
+            onClick={() => void revealKey()}
             style={{
               width: "100%", padding: "11px 14px", borderRadius: T.rs,
               background: T.accentDim, border: `1px solid ${T.accent}66`,
@@ -1117,8 +1145,13 @@ function NsecRevealCard() {
               cursor: "pointer", letterSpacing: 0.5,
             }}
           >
-            Reveal account key
+            Reveal active recovery key
           </button>
+          {revealError && (
+            <div style={{ marginTop: 10, color: T.red, fontFamily: T.mono, fontSize: 10, lineHeight: 1.5 }}>
+              {revealError}
+            </div>
+          )}
         </>
       ) : (
         <>
