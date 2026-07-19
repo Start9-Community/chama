@@ -53,7 +53,7 @@ export function BrowseView({
   stockByListing?: Map<string, number>;
   /** #70 per-parent live child-order count + aggregated unread chat, so a
    *  seller's storefront card surfaces ALL its orders, not just its own chat. */
-  orderIndicatorByListing?: Map<string, { orders: number; unread: number }>;
+  orderIndicatorByListing?: Map<string, { orders: number; unread: number; viewerOrderId?: string }>;
   categoryCounts?: Record<string, number>;
   fedimintJoined: boolean;
   listingsLoading: boolean;
@@ -491,6 +491,7 @@ export function BrowseView({
                         quoteCurrency={quoteCurrency}
                         stockLeft={stockByListing?.get(s.id)}
                         orderIndicator={orderIndicatorByListing?.get(s.id)}
+                        onResumeOrder={onOpenEscrow}
                       />
                     </div>
                   ))}
@@ -549,6 +550,7 @@ export function BrowseView({
                         quoteCurrency={quoteCurrency}
                         stockLeft={stockByListing?.get(s.id)}
                         orderIndicator={orderIndicatorByListing?.get(s.id)}
+                        onResumeOrder={onOpenEscrow}
                       />
                     </div>
                   ))}
@@ -709,7 +711,7 @@ function BrowseSection({
   amountDisplayMode: AmountDisplayMode;
   quoteCurrency?: string | null;
   stockByListing?: Map<string, number>;
-  orderIndicatorByListing?: Map<string, { orders: number; unread: number }>;
+  orderIndicatorByListing?: Map<string, { orders: number; unread: number; viewerOrderId?: string }>;
 }) {
   const { t } = useT();
   return (
@@ -757,6 +759,7 @@ function BrowseSection({
               quoteCurrency={quoteCurrency}
               stockLeft={stockByListing?.get(s.id)}
               orderIndicator={orderIndicatorByListing?.get(s.id)}
+              onResumeOrder={onOpenEscrow}
             />
           </div>
         ))}

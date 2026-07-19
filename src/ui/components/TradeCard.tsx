@@ -51,6 +51,7 @@ export function TradeCard({
   quoteCurrency,
   stockLeft,
   orderIndicator,
+  onResumeOrder,
 }: {
   state: EscrowState;
   pubkey: string;
@@ -67,7 +68,9 @@ export function TradeCard({
    *  the count of open orders + unread chat summed across them. Non-zero only on
    *  the seller's own listings; drives the "N orders · M unread" indicator so
    *  EVERY joined order surfaces, not just the parent's own chat. */
-  orderIndicator?: { orders: number; unread: number };
+  orderIndicator?: { orders: number; unread: number; viewerOrderId?: string };
+  /** Buyer-only shortcut from the parent listing to their spawned child order. */
+  onResumeOrder?: (id: string) => void;
 }) {
   const { t } = useT();
   const btcPrice = useBitcoinPrice();
@@ -124,6 +127,7 @@ export function TradeCard({
   // single indicator no matter how many orders are open.
   const childOrderUnread = orderIndicator?.unread ?? 0;
   const liveOrderCount = orderIndicator?.orders ?? 0;
+  const viewerOrderId = orderIndicator?.viewerOrderId;
   const combinedUnread = chatUnread + childOrderUnread;
   // v4.1 (#12): CBP bill type, resolved for display (icon + label). Null elsewhere.
   const billTypeChip = state.category === "bill-pay" ? billTypeDisplay(state.billType) : null;
@@ -261,6 +265,7 @@ export function TradeCard({
                   keep the CAT_ICON glyph. */}
               {isParentStorefront(state) ? t("card.categoryStorefront")
                 : isChildOrder(state) ? t("card.categoryOrder")
+                : state.category === "marketplace" ? t("card.categorySingleListing")
                 : <>
                     <span style={{ fontSize: 11, lineHeight: 1 }}>{CAT_ICON[state.category] || "📦"}</span>
                     {shortCategoryLabel(state.category, t)}
@@ -314,7 +319,26 @@ export function TradeCard({
             {/* #70 seller's storefront: every live child order aggregated into one
                 honest "N orders · M unread" chip (children never render as their
                 own Browse cards, so this is where the seller sees all of them). */}
-            {liveOrderCount > 0 && (
+            {viewerOrderId && onResumeOrder ? (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onResumeOrder(viewerOrderId);
+                }}
+                style={{
+                  fontSize: 10, padding: "4px 9px", borderRadius: 999,
+                  background: `${T.accent}26`, color: T.accent,
+                  border: `1px solid ${T.accent}77`,
+                  fontFamily: T.mono, fontWeight: 900,
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  cursor: "pointer",
+                }}
+              >
+                {t("card.yourOrderContinue")}
+                {combinedUnread > 0 && ` · 💬 ${combinedUnread > 9 ? "9+" : combinedUnread}`}
+              </button>
+            ) : liveOrderCount > 0 && (
               <span style={{
                 fontSize: 10, padding: "3px 8px", borderRadius: 999,
                 background: `${T.accent}1c`, color: T.accent,

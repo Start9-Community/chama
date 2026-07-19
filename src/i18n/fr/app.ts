@@ -1,5 +1,7 @@
 // fr/app — Session B fills this from src/i18n/en/app.ts (key set must match EXACTLY).
 export const app: Record<string, string> = {
+  "app.draftOrderCancelled": "Commande provisoire annulée. Aucun sat n’a été déplacé.",
+  "app.couldntCancelDraftOrder": "Impossible d’annuler cette commande provisoire.",
   "app.anotherFundingInProgress":
     "Une autre opération de financement est en cours. Terminez-la d'abord.",
   "app.arbiterNoActionNeeded":

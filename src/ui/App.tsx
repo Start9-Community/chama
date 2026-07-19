@@ -1681,20 +1681,33 @@ export default function App() {
   // however many orders are open. Aggregate, per parent, the count of active
   // child orders + the unread chat across them (unreadChatForTrade returns 0 for
   // a non-participant, so this is non-zero only on the viewer's OWN listings).
-  const listingOrderIndicator = new Map<string, { orders: number; unread: number }>();
+  const listingOrderIndicator = new Map<string, { orders: number; unread: number; viewerOrderId?: string }>();
   for (const [parentId, kids] of childrenByParent) {
+    const parent = escrows.get(parentId);
+    const viewerOwnsParent = parent?.participants[Role.SELLER] === pubkey
+      || (parent?.initiator.role === Role.SELLER && parent.initiator.pubkey === pubkey);
     let orders = 0;
     let unread = 0;
+    let viewerOrder: EscrowState | null = null;
     for (const c of kids) {
       if (!isActiveChildOrder(c)) continue;
-      orders++;
+      if (viewerOwnsParent) orders++;
       const myRole = c.participants[Role.SELLER] === pubkey ? Role.SELLER
         : c.participants[Role.BUYER] === pubkey ? Role.BUYER
         : c.participants[Role.ARBITER] === pubkey ? Role.ARBITER
         : null;
-      unread += unreadChatForTrade(c, myRole);
+      if (myRole) unread += unreadChatForTrade(c, myRole);
+      if (myRole === Role.BUYER && (!viewerOrder || c.createdAt > viewerOrder.createdAt)) {
+        viewerOrder = c;
+      }
     }
-    if (orders > 0) listingOrderIndicator.set(parentId, { orders, unread });
+    if (orders > 0 || viewerOrder) {
+      listingOrderIndicator.set(parentId, {
+        orders,
+        unread,
+        viewerOrderId: viewerOrder?.id,
+      });
+    }
   }
   const listingSoldOut = (s: EscrowState) =>
     s.stock !== undefined && isSoldOut(s, listingChildren(s), now);
@@ -3073,6 +3086,17 @@ export default function App() {
                 openEscrow(escrowId);
               } catch (e: any) {
                 setToast({ message: e?.message || t("app.couldntStartOrder"), type: "error" });
+              }
+            }}
+            onCancelDraftOrder={async (escrowId) => {
+              try {
+                await actions.cancel(escrowId, "buyer_abandoned_draft_order");
+                actions.forgetEscrow(escrowId);
+                setSelectedId(null);
+                setView("browse");
+                setToast({ message: t("app.draftOrderCancelled"), type: "success" });
+              } catch (e: any) {
+                setToast({ message: e?.message || t("app.couldntCancelDraftOrder"), type: "error" });
               }
             }}
             stockLeft={selected ? stockByListing.get(selected.id) : undefined}

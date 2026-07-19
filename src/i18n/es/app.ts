@@ -1,5 +1,7 @@
 // es/app — Session C fills this from src/i18n/en/app.ts (key set must match EXACTLY).
 export const app: Record<string, string> = {
+  "app.draftOrderCancelled": "Pedido borrador cancelado. No se movieron sats.",
+  "app.couldntCancelDraftOrder": "No se pudo cancelar este pedido borrador.",
   "app.anotherFundingInProgress":
     "Hay otra operación de financiamiento en curso. Complétala primero.",
   "app.arbiterNoActionNeeded":

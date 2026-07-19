@@ -103,7 +103,7 @@ export function TradeDetail({
   claimBlockedReason, amountDisplayMode = "sats", onAmountDisplayModeChange, kind0Enabled = false, profileNames,
   disableNwc = false, onBack, onVote, onClaim, onJoin, onLock, onLockDirectNwc, onClaimDirectNwc, onConfirmPayout,
   onSendChat, onReleasePeriod, onOpenSettings, onOpenNwcSettings,
-  onPrewarmFunding, onRebroadcast, onForget, onPurchase, stockLeft, isOversoldOrder = false,
+  onPrewarmFunding, onRebroadcast, onForget, onPurchase, onCancelDraftOrder, stockLeft, isOversoldOrder = false,
   onRateCounterparty, myGivenRatings, fetchRatingSummary, fetchCommunityBonds,
   liveChildOrders, onOpenChild,
 }: {
@@ -217,6 +217,10 @@ export function TradeDetail({
    *  Spawns a child purchase escrow and navigates to it (App handles that), so
    *  the buyer locks the child via the normal flow. */
   onPurchase?: (parentId: string, quantity: number) => void | Promise<void>;
+  /** Buyer-created child orders contain no sats until LOCK. Cancelling one
+   *  publishes CANCEL, releases its visible stock reservation, and removes the
+   *  abandoned draft from this device's Me list. */
+  onCancelDraftOrder?: (escrowId: string) => void | Promise<void>;
   /** #7 multi-unit storefront: derived units left on this parent listing (for
    *  the buy stepper's max + the "N left" line). */
   stockLeft?: number;
@@ -264,6 +268,8 @@ export function TradeDetail({
   // mark-done button — the performer's release vote now carries the verb.
   const chatRowRef = useRef<HTMLDivElement | null>(null);
   const [joining, setJoining] = useState(false);
+  const [draftCancelArmed, setDraftCancelArmed] = useState(false);
+  const [draftCancelling, setDraftCancelling] = useState(false);
   const [locking, setLocking] = useState(false);
   // Advanced "re-broadcast / heal" — idle → broadcasting → a result line.
   const [rebroadcasting, setRebroadcasting] = useState(false);
@@ -2267,6 +2273,46 @@ export function TradeDetail({
             </div>
           )}
           {/* JOIN buttons — show when user is not a participant and slots are open */}
+          {isChildOrder(state)
+            && state.status === EscrowStatus.CREATED
+            && samePubkey(state.initiator.pubkey, pubkey)
+            && onCancelDraftOrder && (
+            <div style={{ margin: "12px 0 16px" }}>
+              <button
+                type="button"
+                disabled={draftCancelling}
+                onClick={async () => {
+                  if (!draftCancelArmed) {
+                    setDraftCancelArmed(true);
+                    return;
+                  }
+                  setDraftCancelling(true);
+                  try {
+                    await onCancelDraftOrder(state.id);
+                  } finally {
+                    setDraftCancelling(false);
+                  }
+                }}
+                style={{
+                  width: "100%", padding: "10px 12px", borderRadius: T.rs,
+                  background: draftCancelArmed ? T.amberDim : "transparent",
+                  border: `1px ${draftCancelArmed ? "solid" : "dashed"} ${draftCancelArmed ? T.amber + "77" : T.border}`,
+                  color: draftCancelArmed ? T.amber : T.muted,
+                  fontFamily: T.mono, fontSize: 11, fontWeight: 800,
+                  cursor: draftCancelling ? "default" : "pointer",
+                }}
+              >
+                {draftCancelling
+                  ? t("trade.cancellingDraftOrder")
+                  : draftCancelArmed
+                    ? t("trade.confirmCancelDraftOrder")
+                    : t("trade.cancelDraftOrder")}
+              </button>
+              <div style={{ marginTop: 6, color: T.muted, fontFamily: T.mono, fontSize: 9.5, lineHeight: 1.45, textAlign: "center" }}>
+                {t("trade.cancelDraftOrderNote")}
+              </div>
+            </div>
+          )}
           {!myRole && !hasDuplicateParticipant && !currentKeyAlreadyPresent && state.status === EscrowStatus.CREATED && canJoinTrade && (
             <div style={{
               paddingTop: 16,

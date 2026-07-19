@@ -9,6 +9,8 @@
 //   • Internal error-return fields ("Aborted", "Mid-funding", …) and
 //     kind/reason codes — compared by consumers, never rendered directly.
 export const app: Record<string, string> = {
+  "app.draftOrderCancelled": "Draft order cancelled. No sats moved.",
+  "app.couldntCancelDraftOrder": "Couldn't cancel this draft order.",
   "app.anotherFundingInProgress":
     "Another funding operation is in progress. Complete it first.",
   "app.arbiterNoActionNeeded": "Buyer and seller agree; no arbiter action needed",
