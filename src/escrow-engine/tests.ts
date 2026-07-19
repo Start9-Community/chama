@@ -11243,6 +11243,23 @@ console.log("\n── LNURL RESOLVER ──");
       "resolveLightningAddressToInvoice chains metadata + callback");
   }
 
+  // Recipient-wallet callback refusal — preserve the server's useful reason.
+  {
+    const mockFetch: typeof fetch = (async () =>
+      jsonResponse({ error: true, message: "Recipient wallet error. Please contact the recipient." }, 400)
+    ) as any;
+    let code = "";
+    let msg = "";
+    try { await requestLnurlInvoice(okMetadata() as any, 15_368, mockFetch); }
+    catch (e) {
+      if (e instanceof LnurlError) { code = e.code; msg = e.message; }
+    }
+    assert(code === "LnurlServerError",
+      "HTTP 400 callback refusal surfaces as LnurlServerError");
+    assert(msg.includes("Recipient wallet error") && msg.includes("HTTP 400"),
+      "HTTP callback refusal preserves the recipient server's reason");
+  }
+
   // Raw bech32 LNURL one-shot — decode metadata URL + callback
   {
     const rawLnurl = "lnurl1dp68gurn8ghj7urgdajku6tc9eshqup0d3h82unvwqhkzmrfvdjsr5eqhc";

@@ -228,6 +228,23 @@ export interface LnurlPayMetadata {
   tag: "payRequest";
 }
 
+/** Non-2xx LNURL responses commonly carry the only useful diagnosis in a
+ * JSON `reason` or `message` field. Preserve it instead of reducing every
+ * recipient-wallet refusal to an opaque HTTP status. */
+async function lnurlHttpErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.clone().json() as Record<string, unknown>;
+    for (const value of [body.reason, body.message, body.error]) {
+      if (typeof value === "string" && value.trim()) {
+        return `${value.trim()} (HTTP ${res.status})`;
+      }
+    }
+  } catch {
+    // A non-JSON error page still gets the status-based fallback.
+  }
+  return fallback;
+}
+
 /** Fetch LNURL-pay metadata for a Lightning Address. Caller passes a
  *  fetch implementation explicitly so tests can mock it without touching
  *  globalThis.fetch. */
@@ -265,7 +282,7 @@ export async function fetchLnurlPayMetadataUrl(
   if (!res.ok) {
     throw new LnurlError(
       "LnurlServerError",
-      `${label} returned HTTP ${res.status}`,
+      await lnurlHttpErrorMessage(res, `${label} returned HTTP ${res.status}`),
     );
   }
   let body: any;
@@ -341,7 +358,7 @@ export async function requestLnurlInvoice(
   if (!res.ok) {
     throw new LnurlError(
       "LnurlServerError",
-      `LNURL callback returned HTTP ${res.status}`,
+      await lnurlHttpErrorMessage(res, `LNURL callback returned HTTP ${res.status}`),
     );
   }
   let body: any;
