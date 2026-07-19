@@ -13,6 +13,7 @@ export function NsecLogin({
   friendlySecondary,
   allowCreate = true,
   minimalPaste = false,
+  autoFocusInput = false,
   choiceFooter,
 }: {
   onSubmit: (nsec: string, remember: boolean, wasGenerated: boolean) => void;
@@ -26,6 +27,8 @@ export function NsecLogin({
   };
   allowCreate?: boolean;
   minimalPaste?: boolean;
+  /** Focus the recovery field when this instance mounts. */
+  autoFocusInput?: boolean;
   // Overrides the choice-mode footer copy. ConnectScreen swaps in
   // recovery-specific guidance once "I'm a returning Chama citizen" reveals
   // the paste box, so the "we'll create a key" line never sits above a box
@@ -241,6 +244,7 @@ export function NsecLogin({
             autoCapitalize="off"
             autoCorrect="off"
             spellCheck={false}
+            autoFocus={autoFocusInput}
             style={{
               width: "100%", padding: "14px 16px", boxSizing: "border-box",
               background: T.surface, border: `1px solid ${inputError ? T.red : T.border}`,

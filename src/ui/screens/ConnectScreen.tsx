@@ -108,40 +108,17 @@ export function ConnectScreen({
   // citizen" on the platforms where pasting is the right path — no hint detour,
   // no intermediate button.
   const [showRecoveryKey, setShowRecoveryKey] = useState(false);
-  const [returningSignInAttempted, setReturningSignInAttempted] = useState(false);
   const homeCommunity = homeSlug ? getCommunityBySlug(homeSlug) : null;
   // NIP-07 browser extension (Alby, nos2x, …). Only meaningful in a desktop
   // browser — native shells and the Fedi WebView don't inject window.nostr.
   const hasNostrExtension = typeof window !== "undefined" && !!(window as any).nostr;
 
-  // v2.5: device-aware "returning" sign-in.
-  //   • Fedi      → the Fedi-provided signer (its own welcome-home button).
-  //   • APK/Tauri → paste the recovery key (no browser extension possible).
-  //   • desktop browser → use the NIP-07 extension; fall back to the clean
-  //     paste box if there's no extension or it fails.
+  // Returning means recovery-key entry on every non-Fedi surface. Browser
+  // extension sign-in remains available under More options, but must not
+  // hijack this plainly-labelled path or force an error before the field shows.
   const handleReturningSignIn = () => {
-    // APK / Tauri: there is no browser extension — the recovery-key paste is the
-    // correct (and only) returning path, so go straight to it.
-    if (isNative) {
-      setShowRecoveryKey(true);
-      return;
-    }
-    // Browser: ALWAYS prefer the NIP-07 extension — pasting an nsec into a web
-    // page is insecure, so the extension is the front door. onConnect() invokes
-    // window.nostr; if it's absent or the user cancels, the error effect below
-    // reveals the paste fallback. We deliberately DON'T gate on hasNostrExtension
-    // any more — that flag races Alby's late injection and was dumping returning
-    // browser users straight onto the paste box.
-    setReturningSignInAttempted(true);
-    onConnect();
-  };
-
-  // Clean fallback: if the extension attempt errors out (no extension, or the
-  // user dismissed its prompt), reveal the attached paste box as the last resort.
-  useEffect(() => {
-    if (!returningSignInAttempted || loading || !error) return;
     setShowRecoveryKey(true);
-  }, [returningSignInAttempted, loading, error]);
+  };
 
   // First-ever launch on this device → orient before asking for anything.
   // Auth-first: after the intro we go STRAIGHT to sign-in (the market picker is
@@ -275,9 +252,7 @@ export function ConnectScreen({
                 : undefined}
               friendlySecondary={{
                 label: loading ? t("common.connecting") : t("connect.returningCitizen"),
-                // v2.5: device-aware — desktop browser kicks the NIP-07
-                // extension; APK/Tauri (and the no-extension / extension-
-                // failure cases) drop the clean paste box in attached below.
+                // Opens and focuses the attached recovery-key field directly.
                 onClick: handleReturningSignIn,
                 disabled: loading,
                 tone: "accent",
@@ -308,6 +283,7 @@ export function ConnectScreen({
                 defaultOpen
                 allowCreate={false}
                 minimalPaste
+                autoFocusInput
               />
             )}
 
