@@ -254,13 +254,14 @@ export function TradeCard({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{
             display: "flex", alignItems: "center", gap: 6,
-            marginBottom: 8, flexWrap: "wrap",
+            marginBottom: 5, flexWrap: "wrap",
           }}>
             <span style={{
               display: "inline-flex", alignItems: "center", gap: 4,
               fontSize: 10, padding: "3px 8px", borderRadius: 999,
-              background: T.surface, color: T.muted,
-              border: `1px solid ${T.border}`,
+              background: isParentStorefront(state) ? `${T.teal}18` : T.surface,
+              color: isParentStorefront(state) ? T.teal : T.muted,
+              border: `1px solid ${isParentStorefront(state) ? `${T.teal}55` : T.border}`,
               fontFamily: T.mono, fontWeight: 700,
               lineHeight: 1.2,
             }}>
@@ -337,19 +338,31 @@ export function TradeCard({
                 {combinedUnread > 0 && ` · 💬 ${combinedUnread > 9 ? "9+" : combinedUnread}`}
               </span>
             )}
+          </div>
+
+          {/* Identity and location are context, not listing type or activity.
+              Keep them on their own predictable row so storefront/single,
+              stock, and live-order state remain instantly scannable above. */}
+          {state.category === "marketplace" && (sellerPubkey || listingCommunity || state.country) && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6,
+            marginBottom: 8, flexWrap: "wrap",
+          }}>
             {state.category === "marketplace" && sellerPubkey && (
               <span style={{
                 fontSize: 10, padding: "3px 9px", borderRadius: 999,
-                background: `linear-gradient(135deg, ${T.amber}2b, ${T.green}18)`,
-                color: T.amber,
-                border: `1px solid ${T.amber}55`,
+                background: isParentStorefront(state) ? `${T.teal}12` : T.surface,
+                color: isParentStorefront(state) ? T.teal : T.muted,
+                border: `1px solid ${isParentStorefront(state) ? `${T.teal}3d` : T.border}`,
                 fontFamily: T.mono, fontWeight: 800,
                 display: "inline-flex", alignItems: "center", gap: 4,
                 maxWidth: "100%",
               }}>
                 <span aria-hidden="true">★</span>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {t("card.storeLine", { name: sellerName ?? shortPubkey(sellerPubkey) })}
+                  {t(isParentStorefront(state) ? "card.storeLine" : "card.sellerLine", {
+                    name: sellerName ?? shortPubkey(sellerPubkey),
+                  })}
                 </span>
               </span>
             )}
@@ -397,6 +410,7 @@ export function TradeCard({
               </span>
             )}
           </div>
+          )}
 
           <div style={{
             fontSize: 17, fontWeight: 800, color: T.text,
