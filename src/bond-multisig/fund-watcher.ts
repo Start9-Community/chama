@@ -52,6 +52,17 @@ export function defaultMinConfs(network: BtcNetwork): number {
 /** Build a `fetch`-backed EsploraFetch for the app (throws on non-2xx). */
 export function esploraFetcher(base: string): EsploraFetch {
   return async (path: string) => {
+    // Never send a stale foreign-network address to an explorer. After the
+    // v5 mainnet flip, old local signet bond records can still contain tb1…;
+    // mempool.space correctly rejects those with HTTP 400. Fail locally so
+    // background bond housekeeping stays quiet and cannot look like a live
+    // mainnet failure in the browser console.
+    const addressMatch = path.match(/^\/address\/([^/]+)(?:\/|$)/);
+    const address = addressMatch?.[1]?.toLowerCase();
+    const mainnetExplorer = /^https:\/\/(?:www\.)?mempool\.space(?:\/|$)/i.test(base);
+    if (address && ((mainnetExplorer && address.startsWith("tb1")) || (!mainnetExplorer && address.startsWith("bc1")))) {
+      throw new Error(`Bitcoin address network does not match explorer: ${address.slice(0, 8)}…`);
+    }
     const res = await fetch(`${base}${path}`);
     if (!res.ok) throw new Error(`Esplora ${res.status} for ${path}`);
     return res.json();

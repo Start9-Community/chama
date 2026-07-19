@@ -413,7 +413,7 @@ import {
   buildBondMultisig, recomputeAddress, buildReturnPsbt, coSignPsbt,
   combineAndFinalize, verifyReturnPsbt, SIGNET as MS_NET, MAINNET as MS_MAINNET, type BondUtxo,
 } from "../bond-multisig/multisig.js";
-import { findBondFundingUtxos, esploraOutspend, esploraRecommendedFeeRate, defaultEsploraBase, defaultMinConfs, type EsploraFetch } from "../bond-multisig/fund-watcher.js";
+import { findBondFundingUtxos, esploraFetcher, esploraOutspend, esploraRecommendedFeeRate, defaultEsploraBase, defaultMinConfs, type EsploraFetch } from "../bond-multisig/fund-watcher.js";
 import {
   buildCommitmentBond, recomputeCommitmentAddress, buildReclaimTx, buildTimelockLeaf,
   buildKeyPathSweepTx, estimateReclaimVsize, estimateReclaimFeeSats,
@@ -3071,6 +3071,14 @@ console.log("\n── MAINNET BOND CONFIG (v5.0 real-money flip guard) ──");
   assert(defaultMinConfs(MS_MAINNET) === 1, `mainnet: bond funding needs 1 conf — Jetty's call (got ${defaultMinConfs(MS_MAINNET)})`);
   assert(defaultEsploraBase(MS_MAINNET).includes("mempool.space"), `mainnet: Esplora base is mempool.space (got ${defaultEsploraBase(MS_MAINNET)})`);
   assert(!defaultEsploraBase(MS_MAINNET).includes("mutinynet"), "mainnet: Esplora base is NOT mutinynet");
+  let staleNetworkError = "";
+  try {
+    await esploraFetcher(defaultEsploraBase(MS_MAINNET))(`/address/tb1p${"q".repeat(58)}/utxo`);
+  } catch (e) {
+    staleNetworkError = e instanceof Error ? e.message : String(e);
+  }
+  assert(staleNetworkError.includes("network does not match explorer"),
+    "mainnet: stale tb1 bond is rejected locally before a mempool.space HTTP 400");
   assert(MIN_COMMITMENT_TERM_BLOCKS === 144, `mainnet: minimum term is 144 blocks (~1 day) (got ${MIN_COMMITMENT_TERM_BLOCKS})`);
 }
 
