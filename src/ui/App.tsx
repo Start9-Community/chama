@@ -2318,9 +2318,16 @@ export default function App() {
         {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
         <GlobeCountryPicker
           onSelect={async (slug) => {
-            await handleSelectCommunity(slug);
-            // Advance only if the pick actually committed (a failed first-time
-            // switch clears it, leaving the picker up to retry).
+            // handleSelectCommunity persists the identity choice synchronously
+            // before its first federation await. Let that committed choice take
+            // the user straight to Browse; wallet join, bond reads, and health
+            // work may finish behind the shell. If the switch later fails, the
+            // handler clears the first-time choice and this gate returns.
+            const selection = handleSelectCommunity(slug);
+            setNeedsHomePick(getUserCommunitySlugRaw() === null);
+            await selection;
+            // Reconcile after success/failure. A failed first-time switch has
+            // cleared the choice, so the picker comes back with its error toast.
             setNeedsHomePick(getUserCommunitySlugRaw() === null);
           }}
           loadLiveness={actions.getChamaLiveness}

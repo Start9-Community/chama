@@ -36,6 +36,9 @@ export function GlobeHero({
         alt=""
         width={size}
         height={size}
+        loading="eager"
+        decoding="async"
+        fetchPriority="high"
         draggable={false}
         style={{
           width: size,
