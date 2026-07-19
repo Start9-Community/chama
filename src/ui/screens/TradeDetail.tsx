@@ -756,13 +756,23 @@ export function TradeDetail({
     claimRetryBlocked,
     canJoinTrade,
   });
-  const heroAmountMsats = nextStep.amountMsats ?? (menuDisplayAmountMsats || state.amountMsats);
-  const exactHeroFiat = detailHeroFiatAmount({
+  // On a parent storefront, quantity is a live checkout selection. Reflect it
+  // in both the top-right next-step amount and the large Details amount before
+  // an order exists, so Buy 2 never leaves stale Buy-1 pricing on screen.
+  const storefrontSelectionAmountMsats = isMultiUnitParent && state.status === EscrowStatus.CREATED
+    ? state.amountMsats * buyQtyClamped
+    : null;
+  const nextStepDisplayAmountMsats = storefrontSelectionAmountMsats ?? nextStep.amountMsats;
+  const heroAmountMsats = nextStepDisplayAmountMsats ?? (menuDisplayAmountMsats || state.amountMsats);
+  const exactHeroFiatBase = detailHeroFiatAmount({
     state,
     selectedMenuItems,
     savedOrderItems,
     menuItems,
   });
+  const exactHeroFiat = exactHeroFiatBase && storefrontSelectionAmountMsats !== null
+    ? { ...exactHeroFiatBase, amount: exactHeroFiatBase.amount * buyQtyClamped }
+    : exactHeroFiatBase;
   const estimatedHeroFiat = detailEstimatedHeroFiatAmount({
     state,
     amountMsats: heroAmountMsats,
@@ -1409,8 +1419,8 @@ export function TradeDetail({
             }}>
               {nextStep.kicker}
             </div>
-            {nextStep.amountMsats !== null && (
-              <BitcoinAmount msats={nextStep.amountMsats} size={12} gap={4} style={{ whiteSpace: "nowrap" }} />
+            {nextStepDisplayAmountMsats !== null && (
+              <BitcoinAmount msats={nextStepDisplayAmountMsats} size={12} gap={4} style={{ whiteSpace: "nowrap" }} />
             )}
           </div>
           <div style={{

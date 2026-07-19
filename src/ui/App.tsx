@@ -3081,6 +3081,18 @@ export default function App() {
             onPurchase={async (_parentId, quantity) => {
               if (!selected) return;
               try {
+                // One active draft per buyer + storefront. Relay delivery can
+                // replay the parent while its child already exists; never mint
+                // another child merely because the buyer tapped Buy again.
+                const existingDraft = listingChildren(selected)
+                  .filter((child) => isActiveChildOrder(child)
+                    && child.participants[Role.BUYER] === pubkey)
+                  .sort((a, b) => b.createdAt - a.createdAt)[0];
+                if (existingDraft) {
+                  setToast({ message: t("app.resumingDraftOrder"), type: "info" });
+                  openEscrow(existingDraft.id);
+                  return;
+                }
                 setToast({ message: t("app.startingOrder"), type: "info" });
                 const { escrowId } = await actions.purchaseFromListing(selected, quantity);
                 openEscrow(escrowId);

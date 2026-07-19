@@ -128,6 +128,12 @@ export function TradeCard({
   const childOrderUnread = orderIndicator?.unread ?? 0;
   const liveOrderCount = orderIndicator?.orders ?? 0;
   const viewerOrderId = orderIndicator?.viewerOrderId;
+  // A buyer with an active child order has one canonical destination from the
+  // parent tile: every tap resumes that order. The small chip is reinforcement,
+  // not the only discoverable hit target.
+  const primarySelect = viewerOrderId && onResumeOrder
+    ? () => onResumeOrder(viewerOrderId)
+    : onSelect;
   const combinedUnread = chatUnread + childOrderUnread;
   // v4.1 (#12): CBP bill type, resolved for display (icon + label). Null elsewhere.
   const billTypeChip = state.category === "bill-pay" ? billTypeDisplay(state.billType) : null;
@@ -200,7 +206,7 @@ export function TradeCard({
     : null;
 
   return (
-    <div onClick={onSelect} style={{
+    <div onClick={primarySelect} style={{
       background: cardBg, border: `1px solid ${cardBorder}`,
       borderRadius: T.r, padding: 14, cursor: "pointer",
       transition: "border-color 0.2s",

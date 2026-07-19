@@ -10,6 +10,7 @@
 //     kind/reason codes — compared by consumers, never rendered directly.
 export const app: Record<string, string> = {
   "app.draftOrderCancelled": "Draft order cancelled. No sats moved.",
+  "app.resumingDraftOrder": "Resuming your existing order…",
   "app.couldntCancelDraftOrder": "Couldn't cancel this draft order.",
   "app.anotherFundingInProgress":
     "Another funding operation is in progress. Complete it first.",
