@@ -3,15 +3,16 @@
 // A seller authors listings (CREATE), so their own listings show up in the
 // public Browse feed — which is confusing (they can't/shouldn't shop their own
 // shop, and it muddles telling a parent storefront from a live child order).
-// By DEFAULT we hide the viewer's own authored listings from Browse; a toggle
-// reveals them. They ALWAYS remain in Me — this only controls the Browse feed.
+// By DEFAULT we hide the viewer's own authored listings from Browse. Turning
+// on "My listings" switches to an owner-only mode (not an additive reveal):
+// public listings disappear until the mode is turned off.
 //
 // Client-only, no reducer/consensus/money-path involvement.
 import { Role, type EscrowState } from "../escrow-engine/types.js";
 
 const SHOW_OWN_KEY = "chama_browse_show_own_v1";
 
-/** True if the toggle is ON (own listings shown in Browse). Default OFF. */
+/** True if owner-only Browse mode is ON. Default OFF. */
 export function getBrowseShowOwn(): boolean {
   try {
     return localStorage.getItem(SHOW_OWN_KEY) === "1";
@@ -47,17 +48,17 @@ export function isOwnListing(listing: EscrowState, viewerPubkey: string | null |
 }
 
 /**
- * Apply the "hide own" preference to a listing set. When `showOwn` is true this
- * is a no-op (current behavior). When false, drops listings the viewer authored
- * — but only if the viewer pubkey is known (fail open otherwise).
+ * Split Browse into mutually-exclusive modes. Owner mode shows ONLY listings
+ * authored by the viewer; public mode shows everything EXCEPT theirs. If the
+ * viewer identity is unavailable, fail open to the public set.
  */
 export function filterOwnListings<T extends EscrowState>(
   listings: readonly T[],
   viewerPubkey: string | null | undefined,
   showOwn: boolean,
 ): T[] {
-  if (showOwn || !viewerPubkey) return [...listings];
-  return listings.filter((l) => !isOwnListing(l, viewerPubkey));
+  if (!viewerPubkey) return [...listings];
+  return listings.filter((l) => isOwnListing(l, viewerPubkey) === showOwn);
 }
 
 /** Count of the viewer's own listings within a set (for the "N of yours hidden" hint). */

@@ -74,10 +74,8 @@ export function BrowseView({
   const [searchQuery, setSearchQuery] = useState("");
   const [showRecruit, setShowRecruit] = useState(false);
   const [customInviteInput, setCustomInviteInput] = useState("");
-  // Hide the viewer's OWN authored listings from Browse by default (they always
-  // live in Me). A toggle reveals them so they're visible in both places — the
-  // seller's choice. Persisted device-local. Buyers never author what they see,
-  // so this never affects a buyer's feed (filterOwnListings fails open).
+  // Mutually-exclusive Browse modes: public listings (default, mine hidden) or
+  // My listings only. Selecting owner mode intentionally hides everything else.
   const [showOwn, setShowOwnState] = useState<boolean>(() => getBrowseShowOwn());
   const toggleShowOwn = () => setShowOwnState((v) => { const next = !v; setBrowseShowOwn(next); return next; });
 
@@ -100,10 +98,11 @@ export function BrowseView({
 
   // Own-listing hide (default) happens BEFORE search/section grouping so counts
   // and empty-states reflect what the viewer actually sees.
-  const ownHiddenCount = useMemo(
-    () => (showOwn ? 0 : countOwnListings(matchingListings, pubkey) + countOwnListings(nonMatchingListings, pubkey)),
-    [showOwn, matchingListings, nonMatchingListings, pubkey],
+  const ownListingCount = useMemo(
+    () => countOwnListings(matchingListings, pubkey) + countOwnListings(nonMatchingListings, pubkey),
+    [matchingListings, nonMatchingListings, pubkey],
   );
+  const ownHiddenCount = showOwn ? 0 : ownListingCount;
   const ownFilteredMatching = useMemo(
     () => filterOwnListings(matchingListings, pubkey, showOwn),
     [matchingListings, pubkey, showOwn],
@@ -319,7 +318,7 @@ export function BrowseView({
         paddingBottom: 2,
       }}>
         {BROWSE_CATS.map(c => {
-          const active = browseCategory === c.id;
+          const active = !showOwn && browseCategory === c.id;
           // #75: counts must reflect what the viewer actually SEES — the
           // own-hidden + retired filtering already applied to ownFiltered* — not
           // the raw prop (which still counts own/hidden listings). Fall back to
@@ -330,7 +329,7 @@ export function BrowseView({
           return (
             <button
               key={c.id}
-              onClick={() => setBrowseCategory(c.id)}
+              onClick={() => { if (showOwn) toggleShowOwn(); setBrowseCategory(c.id); }}
               style={{
                 flexShrink: 0,
                 padding: "7px 11px", borderRadius: 18,
@@ -360,18 +359,13 @@ export function BrowseView({
             </button>
           );
         })}
-      </div>
-
-      {/* "Show my listings" toggle — own authored listings are hidden from
-          Browse by default (they always live in Me). Only shown when the viewer
-          actually has own listings to reveal, so a buyer's UI stays clean. */}
-      {(showOwn || ownHiddenCount > 0) && (
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        {(ownListingCount > 0 || showOwn) && (
           <button
             type="button"
-            onClick={toggleShowOwn}
+            onClick={() => { if (!showOwn) toggleShowOwn(); setBrowseCategory("all"); }}
             aria-pressed={showOwn}
             style={{
+              flexShrink: 0,
               padding: "7px 11px", borderRadius: 18,
               background: showOwn ? T.accentDim : T.surface,
               border: `1px solid ${showOwn ? T.accent + "66" : T.border}`,
@@ -382,16 +376,17 @@ export function BrowseView({
               display: "inline-flex", alignItems: "center", gap: 6,
             }}
           >
-            <span>{showOwn ? "✓" : "＋"}</span>
-            <span>{t("browse.showMyListings")}</span>
-            {!showOwn && ownHiddenCount > 0 && (
-              <span style={{ color: T.muted }}>
-                {t("browse.showMyListingsHidden", { count: ownHiddenCount })}
-              </span>
-            )}
+            <span>★</span>
+            <span>{t("browse.mine")}</span>
+            <span style={{
+              color: showOwn ? T.bg : T.muted,
+              background: showOwn ? T.accent : T.card,
+              border: `1px solid ${showOwn ? T.accent : T.border}`,
+              borderRadius: 999, padding: "1px 5px", fontSize: 9, lineHeight: 1.2,
+            }}>{ownListingCount}</span>
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
       {search && totalListings > 0 && filteredTotal === 0 && (
         <div style={{

@@ -538,6 +538,7 @@ import {
   scopedStorageKey,
   setLocalStorageUserScope,
 } from "../storage/user-scope.js";
+import { filterOwnListings } from "../ui/browse-own-filter.js";
 
 // v0.3.0 Phase 6 — Trinity Ring participant order (theme.ts)
 // v0.3.1 Phase 2 — extends §43 with a grep tripwire over src/ui/
@@ -9289,7 +9290,21 @@ console.log("\n── getUserCommunitySlugRaw ──");
   (globalThis as any).localStorage.clear();
 }
 
-// ── 31a. PER-NPUB LOCALSTORAGE SCOPING ──────────────────────────────────
+// ── 31a. BROWSE OWNER-ONLY MODE ────────────────────────────────────────
+console.log("\n── Browse owner-only mode ──");
+{
+  const mine = { id: "mine", initiator: { pubkey: "alice" }, participants: {} } as any;
+  const theirs = { id: "theirs", initiator: { pubkey: "bob" }, participants: {} } as any;
+  const listings = [mine, theirs];
+  assert(filterOwnListings(listings, "alice", false).map(x => x.id).join(",") === "theirs",
+    "Public Browse mode hides the viewer's own listings");
+  assert(filterOwnListings(listings, "alice", true).map(x => x.id).join(",") === "mine",
+    "My-listings mode hides every listing owned by someone else");
+  assert(filterOwnListings(listings, null, true).length === 2,
+    "Unknown viewer identity fails open without hiding public listings");
+}
+
+// ── 31b. PER-NPUB LOCALSTORAGE SCOPING ──────────────────────────────────
 console.log("\n── per-npub localStorage scoping ──");
 {
   (globalThis as any).localStorage.clear();
