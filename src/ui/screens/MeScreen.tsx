@@ -1401,8 +1401,11 @@ function SellerQueueItem({
   onSellerDeleteListing?: (id: string) => void | Promise<void>;
 }) {
   const { t } = useT();
-  const canDelete = trade.status === EscrowStatus.CREATED && Boolean(onSellerDeleteListing);
-  const canEdit = trade.status === EscrowStatus.CREATED && Boolean(onSellerEditListing);
+  const isSellerListing = trade.status === EscrowStatus.CREATED
+    && trade.initiator.role === Role.SELLER
+    && trade.parent === undefined;
+  const canDelete = isSellerListing && Boolean(onSellerDeleteListing);
+  const canEdit = isSellerListing && Boolean(onSellerEditListing);
 
   return (
     <div style={{
@@ -1453,22 +1456,25 @@ function SellerQueueItem({
       </div>
       <div style={{
         display: "grid",
-        gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+        gridTemplateColumns: isSellerListing ? "repeat(2, minmax(0, 1fr))" : "1fr",
         gap: 6,
       }}>
-        <SellerActionButton label={t("me.view")} tone={T.text} onClick={() => onOpenTrade(trade.id)} />
-        <SellerActionButton
-          label={t("me.edit")}
-          tone={T.amber}
-          disabled={!canEdit}
-          onClick={() => onSellerEditListing?.(trade.id)}
-        />
-        <SellerActionButton
-          label={canDelete ? t("me.delete") : t("me.locked")}
-          tone={canDelete ? T.red : T.muted}
-          disabled={!canDelete}
-          onClick={() => onSellerDeleteListing?.(trade.id)}
-        />
+        {isSellerListing ? <>
+          <SellerActionButton
+            label={t("me.edit")}
+            tone={T.amber}
+            disabled={!canEdit}
+            onClick={() => onSellerEditListing?.(trade.id)}
+          />
+          <SellerActionButton
+            label={t("me.delete")}
+            tone={T.red}
+            disabled={!canDelete}
+            onClick={() => onSellerDeleteListing?.(trade.id)}
+          />
+        </> : (
+          <SellerActionButton label={t("me.view")} tone={T.text} onClick={() => onOpenTrade(trade.id)} />
+        )}
       </div>
     </div>
   );

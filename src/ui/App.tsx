@@ -508,6 +508,7 @@ export default function App() {
   // land focused on the NWC wallets section instead of the top of the page.
   const [advancedFocusNwc, setAdvancedFocusNwc] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [sellerManageId, setSellerManageId] = useState<string | null>(null);
   const urlEscrowOpenAttemptedRef = useRef(false);
   const [detailBackView, setDetailBackView] = useState<View>("browse");
   // V3 #75: set when a listing-tap silently switched the wallet onto the
@@ -774,6 +775,30 @@ export default function App() {
   // old confirm-gated delete never fired). This arms on the first tap and
   // deletes on a second tap of the same listing within 5s — no native dialog.
   const pendingDeleteRef = useRef<{ id: string; at: number } | null>(null);
+
+  const editSellerListing = (_id: string) => {
+    setToast({ message: t("app.editComingSoon"), type: "info" });
+  };
+
+  const deleteSellerListing = async (id: string) => {
+    const armed = pendingDeleteRef.current;
+    if (!armed || armed.id !== id || Date.now() - armed.at > 5000) {
+      pendingDeleteRef.current = { id, at: Date.now() };
+      setToast({ message: t("app.tapDeleteAgain"), type: "info" });
+      return;
+    }
+    pendingDeleteRef.current = null;
+    try {
+      await actions.cancel(id, "seller_deleted_listing");
+      setSellerManageId(null);
+      setToast({ message: t("app.listingDeleted"), type: "success" });
+    } catch (e: any) {
+      setToast({
+        message: e?.message || t("app.couldntDeleteListing"),
+        type: "error",
+      });
+    }
+  };
 
   // v0.2.0 item 8 / v0.3.0 Phase 4 reminder #3: post-recover auto-
   // switch. State machine unchanged; only the trigger surface moves
@@ -1776,6 +1801,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleListings.length, visibleListings.map(l => l.id).join(",")]);
   const selected = selectedId ? escrows.get(selectedId) : null;
+  const sellerManagedListing = sellerManageId ? escrows.get(sellerManageId) ?? null : null;
   const selectedPoisonedClaimReason = selected
     ? listPendingRedemptions().find(entry =>
         entry.escrowId === selected.id &&
@@ -1917,6 +1943,20 @@ export default function App() {
           e?.message || e,
         );
       });
+      return;
+    }
+
+    // A seller-authored, never-funded listing is inventory/configuration,
+    // not an active trade. Its owner gets management actions instead of the
+    // buyer-oriented TradeDetail. Spawned/funded child orders still pass
+    // through normally because those are real trades requiring attention.
+    if (
+      local.status === EscrowStatus.CREATED &&
+      local.initiator.role === Role.SELLER &&
+      local.initiator.pubkey === pubkey &&
+      !local.parent
+    ) {
+      setSellerManageId(id);
       return;
     }
 
@@ -3507,31 +3547,8 @@ export default function App() {
               });
               return added;
             }}
-            onSellerEditListing={(id) => {
-              setToast({
-                message: t("app.editComingSoon"),
-                type: "info",
-              });
-              openEscrow(id, "me");
-            }}
-            onSellerDeleteListing={async (id) => {
-              const armed = pendingDeleteRef.current;
-              if (!armed || armed.id !== id || Date.now() - armed.at > 5000) {
-                pendingDeleteRef.current = { id, at: Date.now() };
-                setToast({ message: t("app.tapDeleteAgain"), type: "info" });
-                return;
-              }
-              pendingDeleteRef.current = null;
-              try {
-                await actions.cancel(id, "seller_deleted_listing");
-                setToast({ message: t("app.listingDeleted"), type: "success" });
-              } catch (e: any) {
-                setToast({
-                  message: e?.message || t("app.couldntDeleteListing"),
-                  type: "error",
-                });
-              }
-            }}
+            onSellerEditListing={editSellerListing}
+            onSellerDeleteListing={deleteSellerListing}
             onOpenSavedHandles={() => setView("saved-handles")}
             onOpenPayoutDestinations={() => setView("payout-destinations")}
             unfundedListingCount={clearableListings.length}
@@ -3729,6 +3746,78 @@ export default function App() {
           steps={COACH_STEPS}
           onDone={() => { setCoachSeen(true); setCoachReady(false); }}
         />
+      )}
+
+      {sellerManagedListing && (
+        <>
+          <div
+            aria-hidden="true"
+            onClick={() => setSellerManageId(null)}
+            style={{
+              position: "fixed", inset: 0, zIndex: 9994,
+              background: "rgba(0,0,0,0.56)",
+              backdropFilter: "blur(7px)", WebkitBackdropFilter: "blur(7px)",
+            }}
+          />
+          <div style={{
+            position: "fixed", zIndex: 9995,
+            left: 16, right: 16, top: "50%", transform: "translateY(-50%)",
+            maxWidth: 460, margin: "0 auto", padding: 18,
+            borderRadius: T.r, background: T.card,
+            border: `1px solid ${T.border}`,
+            boxShadow: "0 18px 54px rgba(0,0,0,0.72)",
+          }}>
+            <button
+              type="button"
+              onClick={() => setSellerManageId(null)}
+              aria-label={t("common.close")}
+              style={{
+                position: "absolute", top: 12, right: 12,
+                width: 32, height: 32, borderRadius: "50%",
+                border: `1px solid ${T.border}`, background: T.surface,
+                color: T.muted, cursor: "pointer", fontSize: 16,
+              }}
+            >×</button>
+            <div style={{
+              color: T.amber, fontFamily: T.mono, fontSize: 10,
+              fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase",
+              marginBottom: 8,
+            }}>🏪 Your listing</div>
+            <div style={{
+              color: T.text, fontFamily: T.sans, fontSize: 21,
+              fontWeight: 850, lineHeight: 1.2, paddingRight: 38,
+              marginBottom: 8,
+            }}>{sellerManagedListing.description}</div>
+            <div style={{
+              color: T.muted, fontFamily: T.sans, fontSize: 13,
+              lineHeight: 1.5, marginBottom: 18,
+            }}>
+              Buyers see the storefront. You manage it here; new orders appear separately in Me.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button
+                type="button"
+                onClick={() => editSellerListing(sellerManagedListing.id)}
+                style={{
+                  padding: "13px 14px", borderRadius: T.rs,
+                  background: T.amberDim, border: `1px solid ${T.amber}66`,
+                  color: T.amber, fontFamily: T.sans, fontSize: 15,
+                  fontWeight: 800, cursor: "pointer",
+                }}
+              >✎ {t("me.edit")}</button>
+              <button
+                type="button"
+                onClick={() => void deleteSellerListing(sellerManagedListing.id)}
+                style={{
+                  padding: "13px 14px", borderRadius: T.rs,
+                  background: T.redDim, border: `1px solid ${T.red}66`,
+                  color: T.red, fontFamily: T.sans, fontSize: 15,
+                  fontWeight: 800, cursor: "pointer",
+                }}
+              >⌫ {t("me.delete")}</button>
+            </div>
+          </div>
+        </>
       )}
 
       {/* v3.2: the create flow opens from either the Browse floating-menu pencil
