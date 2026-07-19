@@ -11,9 +11,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { T } from "../theme.js";
-import { useT } from "../../i18n/index.js";
+import { useT, type TFunc } from "../../i18n/index.js";
 import { HelpTip } from "./HelpTip.js";
-import { formatLivenessReadout, type ChamaLiveness } from "../../arbiters/live-chama.js";
+import { type ChamaLiveness } from "../../arbiters/live-chama.js";
 
 /** Fetch + auto-keep-fresh a community's liveness. Refetches on mount, on window
  *  focus (returning to the app), and — if `intervalMs` > 0 — on a gentle poll.
@@ -60,6 +60,28 @@ const SEGMENTS = 5;
  *  the "become an arbiter" invitation instead of implying the job's taken. */
 const THIN_SCORE = 45;
 
+/** Localized counterpart of the engine's diagnostic formatter. The UI must
+ * never render its intentionally-English test/debug readout directly. */
+export function localizedLivenessReadout(
+  liveness: ChamaLiveness,
+  blocksPerDay: number,
+  t: TFunc,
+): string {
+  if (liveness.arbiterCount === 0) return t("bond.noBondedArbiters");
+  const parts = [t(
+    liveness.arbiterCount === 1 ? "bond.arbiterCountOne" : "bond.arbiterCountMany",
+    { count: liveness.arbiterCount },
+  )];
+  if (liveness.ratings.count > 0) {
+    parts.push(`${Math.round(liveness.ratings.positiveRate * 100)}%`);
+  }
+  if (liveness.avgRemainingBlocks > 0) {
+    const days = Math.max(1, Math.round(liveness.avgRemainingBlocks / blocksPerDay));
+    parts.push(t(days === 1 ? "bond.dayBondOne" : "bond.dayBondMany", { days }));
+  }
+  return parts.join(" · ");
+}
+
 /** The segmented "battery" — fill ∝ score. Thin fills amber (opportunity), a
  *  healthy score fills green; empty is neutral grey. Never red — thin coverage
  *  is an opening, not a failure. */
@@ -98,7 +120,7 @@ export function LivenessSignal({ liveness, loading, blocksPerDay = 144, onBecome
   const readout = loading
     ? t("bond.livenessChecking")
     : liveness
-      ? formatLivenessReadout(liveness, blocksPerDay)
+      ? localizedLivenessReadout(liveness, blocksPerDay, t)
       : t("bond.livenessUnknown");
 
   return (

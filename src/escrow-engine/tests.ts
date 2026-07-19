@@ -539,6 +539,8 @@ import {
   setLocalStorageUserScope,
 } from "../storage/user-scope.js";
 import { filterOwnListings } from "../ui/browse-own-filter.js";
+import { localizedLivenessReadout } from "../ui/components/LivenessSignal.js";
+import { translate } from "../i18n/index.js";
 
 // v0.3.0 Phase 6 — Trinity Ring participant order (theme.ts)
 // v0.3.1 Phase 2 — extends §43 with a grep tripwire over src/ui/
@@ -3338,6 +3340,12 @@ console.log("\n── Live-chama liveness score ──");
   const empty = computeChamaLiveness("tz-tzs", [], noRatings, tip);
   assert(!empty.isLive && empty.arbiterCount === 0 && empty.score === 0, "livechama: no bonds → not live, score 0");
   assert(formatLivenessReadout(empty).includes("No bonded arbiters"), "livechama: empty readout invites the first arbiter");
+  const fr = (key: string, params?: Record<string, string | number>) => translate("fr", key, params);
+  const es = (key: string, params?: Record<string, string | number>) => translate("es", key, params);
+  assert(localizedLivenessReadout(empty, 144, fr).includes("Aucun arbitre cautionné"),
+    "livechama UI: empty French readout is translated");
+  assert(localizedLivenessReadout(empty, 144, es).includes("Aún no hay árbitros"),
+    "livechama UI: empty Spanish readout is translated");
 
   const one = computeChamaLiveness("tz-tzs", [mk(npubA, 50_000, 830_000)], noRatings, tip);
   assert(one.isLive && one.arbiterCount === 1 && one.totalBondSats === 50_000n && one.score > 0, "livechama: one funded active bond → live");
@@ -3360,6 +3368,10 @@ console.log("\n── Live-chama liveness score ──");
 
   const ro = formatLivenessReadout(rated, 2880); // signet ~2880 blocks/day
   assert(/^1 arbiter · 100% · ~\d+-day bond/.test(ro), "livechama: readout formats 'N arbiters · X% · ~D-day bonds'");
+  assert(/^1 arbitre · 100% · caution/.test(localizedLivenessReadout(rated, 2880, fr)),
+    "livechama UI: calculated French arbiter and bond-term readout is translated");
+  assert(/^1 árbitro · 100% · fianza/.test(localizedLivenessReadout(rated, 2880, es)),
+    "livechama UI: calculated Spanish arbiter and bond-term readout is translated");
 
   // ── bonded → arbiter enrollment (S1 primitive) ──────────────────────────────
   const enrolled = bondedArbitersForCommunity([
