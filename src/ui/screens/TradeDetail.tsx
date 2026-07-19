@@ -1850,6 +1850,8 @@ export function TradeDetail({
                     // presuming "Buyer never received" before any dispute exists.
                     ? t("trade.refundNeutral")
                     : voteOutcomeLabel("Refund", getVoteLabel(state.category, state.fulfillment, voteRole, Outcome.REFUND));
+            const releaseCopy = splitVoteActionLabel("Release", releaseLabel);
+            const refundCopy = splitVoteActionLabel("Refund", refundLabel);
 
             const amtLabel = t("trade.amountSats", { amount: fmtSats(state.amountMsats) });
             const releaseRecipientName = (releaseWinner === "seller" ? dealSellerName : dealBuyerName)
@@ -1952,10 +1954,13 @@ export function TradeDetail({
                   </span>
                 ) : (
                   <span style={voteActionLabelStyle()}>
-                    <span aria-hidden="true" style={voteInlineIconStyle}>
-                      {performerVerb ? performerVerb.icon : "✓"}
+                    <span style={voteActionTitleStyle}>
+                      <span aria-hidden="true" style={voteInlineIconStyle}>
+                        {performerVerb ? performerVerb.icon : "✓"}
+                      </span>
+                      {releaseCopy.title}
                     </span>
-                    {releaseLabel}
+                    {releaseCopy.detail && <span style={voteActionDetailStyle}>{releaseCopy.detail}</span>}
                   </span>
                 )}
               </button>
@@ -1984,8 +1989,11 @@ export function TradeDetail({
                   </span>
                 ) : (
                   <span style={voteActionLabelStyle()}>
-                    <span aria-hidden="true" style={voteInlineIconStyle}>↩</span>
-                    {refundLabel}
+                    <span style={voteActionTitleStyle}>
+                      <span aria-hidden="true" style={voteInlineIconStyle}>↩</span>
+                      {refundCopy.title}
+                    </span>
+                    {refundCopy.detail && <span style={voteActionDetailStyle}>{refundCopy.detail}</span>}
                   </span>
                 )}
               </button>
@@ -2112,10 +2120,9 @@ export function TradeDetail({
                 </div>
               );
             }
-            // Buyer-favoring vote on the LEFT (purple), seller-favoring on the RIGHT
-            // (orange), mirroring the B · A · S participant ring + the tally. RELEASE
-            // wins for the buyer in p2p/bill-pay/lending but for the SELLER in
-            // Market — so Market swaps the two so the buyer's outcome stays left.
+            // Protocol order is invariant across every vertical and role:
+            // RELEASE (green) on the left, REFUND (orange) on the right. Do not
+            // reorder by recipient — that made the controls move between trades.
             return (
               <div className="trade-vote-actions" style={{
                 display: "grid",
@@ -2124,7 +2131,8 @@ export function TradeDetail({
                 marginBottom: 16,
               }}>
                 {riskNotice}
-                {isMarketplace ? <>{refundButton}{releaseButton}</> : <>{releaseButton}{refundButton}</>}
+                {releaseButton}
+                {refundButton}
               </div>
             );
           })()}
@@ -4768,6 +4776,11 @@ const voteConfirmActionStyle: React.CSSProperties = {
 
 function voteActionLabelStyle(): React.CSSProperties {
   return {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
     minWidth: 0,
     color: "inherit",
     fontFamily: T.sans,
@@ -4777,6 +4790,41 @@ function voteActionLabelStyle(): React.CSSProperties {
     letterSpacing: 0.2,
     textAlign: "center",
     overflowWrap: "anywhere",
+  };
+}
+
+const voteActionTitleStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+  fontSize: 16.5,
+  fontWeight: 850,
+  lineHeight: 1.15,
+};
+
+const voteActionDetailStyle: React.CSSProperties = {
+  fontSize: 12,
+  fontWeight: 650,
+  lineHeight: 1.25,
+  opacity: 0.86,
+};
+
+function splitVoteActionLabel(
+  outcome: "Release" | "Refund",
+  label: string,
+): { title: string; detail: string | null } {
+  const clean = label.trim();
+  const prefix = clean.slice(0, outcome.length);
+  if (prefix.toLowerCase() !== outcome.toLowerCase()) {
+    return { title: outcome, detail: clean || null };
+  }
+  const rawRest = clean.slice(outcome.length).trim();
+  const pointsToRecipient = rawRest.startsWith("→");
+  const detail = rawRest.replace(/^[·—–:\-→]+\s*/, "").trim();
+  return {
+    title: outcome,
+    detail: detail ? `${pointsToRecipient ? "To " : ""}${detail}` : null,
   };
 }
 
