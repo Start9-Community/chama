@@ -325,26 +325,7 @@ export function TradeCard({
             {/* #70 seller's storefront: every live child order aggregated into one
                 honest "N orders · M unread" chip (children never render as their
                 own Browse cards, so this is where the seller sees all of them). */}
-            {viewerOrderId && onResumeOrder ? (
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onResumeOrder(viewerOrderId);
-                }}
-                style={{
-                  fontSize: 10, padding: "4px 9px", borderRadius: 999,
-                  background: `${T.accent}26`, color: T.accent,
-                  border: `1px solid ${T.accent}77`,
-                  fontFamily: T.mono, fontWeight: 900,
-                  display: "inline-flex", alignItems: "center", gap: 4,
-                  cursor: "pointer",
-                }}
-              >
-                {t("card.yourOrderContinue")}
-                {combinedUnread > 0 && ` · 💬 ${combinedUnread > 9 ? "9+" : combinedUnread}`}
-              </button>
-            ) : liveOrderCount > 0 && (
+            {!viewerOrderId && liveOrderCount > 0 && (
               <span style={{
                 fontSize: 10, padding: "3px 8px", borderRadius: 999,
                 background: `${T.accent}1c`, color: T.accent,

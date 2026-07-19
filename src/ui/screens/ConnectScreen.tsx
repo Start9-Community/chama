@@ -108,17 +108,27 @@ export function ConnectScreen({
   // citizen" on the platforms where pasting is the right path — no hint detour,
   // no intermediate button.
   const [showRecoveryKey, setShowRecoveryKey] = useState(false);
+  const [returningSignInAttempted, setReturningSignInAttempted] = useState(false);
   const homeCommunity = homeSlug ? getCommunityBySlug(homeSlug) : null;
   // NIP-07 browser extension (Alby, nos2x, …). Only meaningful in a desktop
   // browser — native shells and the Fedi WebView don't inject window.nostr.
   const hasNostrExtension = typeof window !== "undefined" && !!(window as any).nostr;
 
-  // Returning means recovery-key entry on every non-Fedi surface. Browser
-  // extension sign-in remains available under More options, but must not
-  // hijack this plainly-labelled path or force an error before the field shows.
+  // Prefer the browser extension when one is present. If there is no extension,
+  // or that attempt fails, reveal the recovery field; NsecLogin autofocuses it.
   const handleReturningSignIn = () => {
-    setShowRecoveryKey(true);
+    if (!hasNostrExtension) {
+      setShowRecoveryKey(true);
+      return;
+    }
+    setReturningSignInAttempted(true);
+    onConnect();
   };
+
+  useEffect(() => {
+    if (!returningSignInAttempted || loading || !error) return;
+    setShowRecoveryKey(true);
+  }, [returningSignInAttempted, loading, error]);
 
   // First-ever launch on this device → orient before asking for anything.
   // Auth-first: after the intro we go STRAIGHT to sign-in (the market picker is
