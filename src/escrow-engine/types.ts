@@ -222,6 +222,8 @@ export interface CreatePayload {
   description: string;
   /** Product photo for a single marketplace listing. */
   imageDataUrl?: string;
+  /** Ordered gallery. imageDataUrl remains the backwards-compatible cover. */
+  imageUrls?: string[];
   amountMsats: number;
   /** Fiat amount if applicable */
   fiatAmount?: number;
@@ -358,6 +360,8 @@ export interface MenuItem {
   fiatCurrency?: string;
   fulfillment?: "physical" | "service" | "digital";
   imageDataUrl?: string;
+  /** Ordered product gallery. imageDataUrl remains the legacy cover. */
+  imageUrls?: string[];
   dueAt?: number;
   termDays?: number;
   aprBps?: number;
@@ -743,6 +747,8 @@ export interface EscrowState {
   description: string;
   /** Product photo for a single marketplace listing. */
   imageDataUrl?: string;
+  /** Ordered listing/store gallery. imageDataUrl remains the legacy cover. */
+  imageUrls?: string[];
   /** Amount in msats */
   amountMsats: number;
   /** Fiat amount and currency (if applicable) */

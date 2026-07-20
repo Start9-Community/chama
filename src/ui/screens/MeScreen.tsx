@@ -72,6 +72,7 @@ import {
   notificationsEnabled,
   setNotificationsEnabled,
   ensureNotificationPermission,
+  sendNotificationSelfTest,
   dmNotifyPref,
   setDmNotifyPref,
   type DmNotifyPref,
@@ -2471,6 +2472,7 @@ function isDoneTrade(trade: EscrowState): boolean {
 function NotificationsRow() {
   const { t } = useT();
   const [on, setOn] = useState<boolean>(() => notificationsEnabled());
+  const [testState, setTestState] = useState<"idle" | "sending" | "sent" | "blocked">("idle");
   const toggle = () => {
     const next = !on;
     setOn(next);
@@ -2490,6 +2492,22 @@ function NotificationsRow() {
           {t("me.notificationsHint")}
         </div>
       </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {on && <button
+        type="button"
+        onClick={() => {
+          setTestState("sending");
+          void sendNotificationSelfTest().then(ok => setTestState(ok ? "sent" : "blocked"));
+        }}
+        style={{
+          border: `1px solid ${testState === "blocked" ? T.red + "66" : T.border}`,
+          background: T.surface, color: testState === "sent" ? T.green : testState === "blocked" ? T.red : T.muted,
+          borderRadius: T.rs, padding: "5px 8px", fontFamily: T.mono, fontSize: 10,
+          fontWeight: 700, cursor: "pointer",
+        }}
+      >
+        {testState === "sending" ? "Sending…" : testState === "sent" ? "Sent ✓" : testState === "blocked" ? "Blocked" : "Test"}
+      </button>}
       <button
         onClick={toggle}
         role="switch"
@@ -2507,6 +2525,7 @@ function NotificationsRow() {
           background: on ? T.green : T.muted, transition: "left 0.15s",
         }} />
       </button>
+      </div>
     </div>
   );
 }

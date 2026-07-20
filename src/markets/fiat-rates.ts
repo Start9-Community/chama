@@ -37,7 +37,7 @@ const RATE_SOURCES: RatesSource[] = [
   },
   {
     id: "fawaz-cdn",
-    url: "https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api@1/latest/currencies/usd.json",
+    url: "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",
     parse: data => parseRatesRecord(valueAt(data, ["usd"])),
   },
 ];

@@ -38,7 +38,7 @@ import {
   Role,
   Outcome,
 } from "./types.js";
-import { isSupportedListingImageRef } from "../media/listing-image-upload.js";
+import { areSupportedListingImageRefs, isSupportedListingImageRef } from "../media/listing-image-upload.js";
 
 // ── Valid event kinds set ─────────────────────────────────────────────────
 
@@ -93,6 +93,7 @@ function validateMenuItem(data: unknown): boolean {
   if (d.kind === "exchange-bracket" && (!isPositiveNumber(minAmount) || !isPositiveNumber(maxAmount))) return false;
   if (hasRange && d.kind !== undefined && d.kind !== "exchange-bracket") return false;
   if (d.imageDataUrl !== undefined && !isSupportedListingImageRef(d.imageDataUrl)) return false;
+  if (d.imageUrls !== undefined && !areSupportedListingImageRefs(d.imageUrls)) return false;
   return (
     typeof d.id === "string" && d.id.length > 0 &&
     typeof d.label === "string" && d.label.trim().length > 0 &&
@@ -189,6 +190,7 @@ function getPrevEventId(tags: string[][]): string | null {
 function validateCreatePayload(data: unknown): data is CreatePayload {
   const d = data as Record<string, unknown>;
   if (d.imageDataUrl !== undefined && !isSupportedListingImageRef(d.imageDataUrl)) return false;
+  if (d.imageUrls !== undefined && !areSupportedListingImageRefs(d.imageUrls)) return false;
   // v0.1.72 federation gates: fedPrefix and fed are optional (backwards
   // compat with pre-.72 trades). When present, they must be the correct
   // shape — fedPrefix is exactly 10 chars, fed is a non-empty hex-ish

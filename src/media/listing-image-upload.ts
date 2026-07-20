@@ -1,6 +1,17 @@
 const NOSTR_BUILD_UPLOAD_ENDPOINT = "https://nostr.build/api/v2/upload/files";
 const IMAGE_UPLOAD_TIMEOUT_MS = 30_000;
 
+export const MAX_LISTING_IMAGE_REFS = 9;
+export type ListingImageUploadAuthorizer = (url: string, method: "POST") => Promise<string>;
+
+class ImageUploadHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`Photo host rejected the upload (${status}).`);
+  }
+}
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 export function extractUploadedImageUrl(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || value === undefined) return null;
 
@@ -56,20 +67,51 @@ function safeUploadFilename(filename: string, type: string): string {
   return `${cleaned || "chama-listing"}.${extension}`;
 }
 
-export async function uploadListingImage(blob: Blob, filename = "chama-listing.jpg"): Promise<string> {
+export async function uploadListingImage(
+  blob: Blob,
+  filename = "chama-listing.jpg",
+  authorize?: ListingImageUploadAuthorizer,
+): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await uploadListingImageOnce(blob, filename, authorize);
+    } catch (error) {
+      lastError = error;
+      const retryable = error instanceof ImageUploadHttpError && (error.status === 429 || error.status >= 500);
+      if (!retryable || attempt === 3) break;
+      await wait(500 * attempt);
+    }
+  }
+  if (lastError instanceof Error) throw lastError;
+  throw new Error("Photo upload failed. Check your connection and try again.");
+}
+
+async function uploadListingImageOnce(
+  blob: Blob,
+  filename: string,
+  authorize?: ListingImageUploadAuthorizer,
+): Promise<string> {
   const formData = new FormData();
   formData.append("file", blob, safeUploadFilename(filename, blob.type));
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), IMAGE_UPLOAD_TIMEOUT_MS);
   try {
+    const authorization = authorize
+      ? await authorize(NOSTR_BUILD_UPLOAD_ENDPOINT, "POST")
+      : undefined;
     const response = await fetch(NOSTR_BUILD_UPLOAD_ENDPOINT, {
       method: "POST",
+      headers: authorization ? { Authorization: authorization } : undefined,
       body: formData,
       signal: controller.signal,
     });
     if (!response.ok) {
-      throw new Error(`Photo host rejected the upload (${response.status}).`);
+      if (response.status === 401) {
+        throw new Error("Photo host needs a signed upload. Reconnect your signer and try again.");
+      }
+      throw new ImageUploadHttpError(response.status);
     }
 
     const payload: unknown = await response.json();
@@ -87,12 +129,20 @@ export async function uploadListingImage(blob: Blob, filename = "chama-listing.j
   }
 }
 
-export async function ensureRemoteListingImage(imageRef: string, filename?: string): Promise<string> {
+export async function ensureRemoteListingImage(
+  imageRef: string,
+  filename?: string,
+  authorize?: ListingImageUploadAuthorizer,
+): Promise<string> {
   if (!imageRef) return "";
   const remote = validateRemoteImageUrl(imageRef);
   if (remote) return remote;
   if (!imageRef.startsWith("data:image/")) throw new Error("This listing contains an invalid photo link.");
-  return uploadListingImage(dataUrlToBlob(imageRef), filename);
+  return uploadListingImage(dataUrlToBlob(imageRef), filename, authorize);
+}
+
+export function areSupportedListingImageRefs(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_LISTING_IMAGE_REFS && value.every(isSupportedListingImageRef);
 }
 
 export function isSupportedListingImageRef(value: unknown): value is string {

@@ -20,6 +20,14 @@ assertProductionEncryption(import.meta.env.PROD);
 // the token never lingers in the address bar.
 claimRemoteBridgeInviteFromFragment();
 
+// Android Chrome/PWA requires web notifications to be shown by a service
+// worker; the page-level Notification constructor may be present yet throw.
+if ("serviceWorker" in navigator) {
+  void navigator.serviceWorker.register("/chama-sw.js").catch((error) => {
+    console.warn("[chama/notify] service worker registration failed", error);
+  });
+}
+
 // Opening another friend-wallet invite in an already-running Chama tab is a
 // same-document hash navigation, so `main.tsx` does not execute again. Claim
 // that new invite as soon as the hash changes, then reload once so every wallet

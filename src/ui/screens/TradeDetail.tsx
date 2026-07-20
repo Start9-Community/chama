@@ -866,9 +866,9 @@ export function TradeDetail({
     !state.community ||
     state.community === homeCommunity;
   const heroImages = showStorefrontImages ? [
-    ...(state.imageDataUrl ? [{ id: "single-listing", imageDataUrl: state.imageDataUrl }] : []),
-    ...menuItems,
-  ].map(item => item.imageDataUrl).filter((src): src is string => !!src) : [];
+    ...(state.imageUrls?.length ? state.imageUrls : state.imageDataUrl ? [state.imageDataUrl] : []),
+    ...menuItems.flatMap(item => item.imageUrls?.length ? item.imageUrls : item.imageDataUrl ? [item.imageDataUrl] : []),
+  ] : [];
   // Trade detail follows the sketch: route education stays as a tiny
   // context note in the hero instead of a full pre-room card.
   const showVerboseRouteEducation = false;

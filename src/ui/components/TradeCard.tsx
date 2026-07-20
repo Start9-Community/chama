@@ -150,9 +150,18 @@ export function TradeCard({
   const exchangeRange = state.category === "p2p-trade"
     ? exchangeBracketRange(menuItems)
     : null;
+  const exchangeBrackets = state.category === "p2p-trade"
+    ? exchangeBracketLabels(menuItems)
+    : [];
   const satsLabel = exchangeRange ? satsRangeLabel(exchangeRange) : fmtSats(state.amountMsats);
   const storefrontImages = isStorefrontTile
-    ? [state.imageDataUrl, ...menuItems.map(item => item.imageDataUrl)].filter((src): src is string => !!src)
+    ? [
+        ...(state.imageUrls?.length ? state.imageUrls : state.imageDataUrl ? [state.imageDataUrl] : []),
+        ...menuItems.flatMap(item => {
+          const leadImage = item.imageUrls?.[0] ?? item.imageDataUrl;
+          return leadImage ? [leadImage] : [];
+        }),
+      ]
     : [];
   const menuCountLine = hasMenu ? menuSummary(state.category, menuItems.length, null, t) : null;
   const menuLine = hasMenu ? menuSummary(state.category, menuItems.length, fiatFloor, t) : null;
@@ -183,7 +192,9 @@ export function TradeCard({
         t,
       })
     : null;
-  const displayFiatPrimary = quoteViewerFiat
+  const displayFiatPrimary = exchangeRange
+    ? estimatedFiatPrimary ?? fiatPrimary
+    : quoteViewerFiat
     ? estimatedFiatPrimary ?? fiatPrimary
     : fiatPrimary ?? estimatedFiatPrimary;
   const showFiatPrimary = amountDisplayMode === "fiat" && !!displayFiatPrimary;
@@ -226,7 +237,7 @@ export function TradeCard({
       )}
       {/* Storefront media stays on own-route Store/Exchange-menu tiles. External
           amber cards remain compact so route context stays the strongest signal. */}
-      {isStorefrontTile && (
+      {isStorefrontTile && storefrontImages.length === 0 && (
         <div aria-hidden="true" style={{
           position: "absolute", inset: 0, zIndex: -1,
           backgroundImage: `url(${STORE_WATERMARK})`,
@@ -497,6 +508,24 @@ export function TradeCard({
               </span>
             )}
           </div>
+          {exchangeBrackets.length > 0 && (
+            <div style={{
+              display: "flex", flexWrap: "wrap", gap: 6,
+              marginTop: -4, marginBottom: 11,
+            }}>
+              {exchangeBrackets.map(bracket => (
+                <span key={`${bracket.id}:${bracket.label}`} style={{
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  padding: "4px 7px", borderRadius: 999,
+                  border: `1px solid ${T.purple}55`, background: `${T.purple}12`,
+                  color: T.text, fontFamily: T.mono, fontSize: 9.5, fontWeight: 700,
+                }}>
+                  <span style={{ color: T.muted }}>{bracket.name}</span>
+                  <span style={{ color: T.accent }}>₿ {bracket.label}</span>
+                </span>
+              ))}
+            </div>
+          )}
           {paymentMethodsLine && (
             <div style={{
               marginTop: -5,
@@ -776,6 +805,19 @@ function satsRangeLabel(range: { minMsats: number; maxMsats: number }): string {
   const min = fmtSats(range.minMsats);
   const max = fmtSats(range.maxMsats);
   return min === max ? min : `${min}-${max}`;
+}
+
+function exchangeBracketLabels(items: NonNullable<EscrowState["items"]>): Array<{ id: string; name: string; label: string }> {
+  return items
+    .filter(item => item.kind === "exchange-bracket")
+    .map(item => ({
+      id: item.id,
+      name: item.label,
+      label: satsRangeLabel({
+        minMsats: item.minAmountMsats ?? item.amountMsats,
+        maxMsats: item.maxAmountMsats ?? item.amountMsats,
+      }),
+    }));
 }
 
 function paymentMethodsSummary(methods: string[] | undefined): string | null {

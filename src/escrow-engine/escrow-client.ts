@@ -582,6 +582,7 @@ export class EscrowClient {
   async createEscrow(params: {
     description: string;
     imageDataUrl?: string;
+    imageUrls?: string[];
     amountMsats: number;
     fiatAmount?: number;
     fiatCurrency?: string;
@@ -648,6 +649,7 @@ export class EscrowClient {
       type: "escrow:create",
       description: params.description,
       imageDataUrl: params.imageDataUrl,
+      imageUrls: params.imageUrls,
       amountMsats: params.amountMsats,
       fiatAmount: params.fiatAmount,
       fiatCurrency: params.fiatCurrency,

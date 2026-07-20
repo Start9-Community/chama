@@ -36,19 +36,9 @@ const PRICE_SOURCES: PriceSource[] = [
     parse: data => numberAt(data, ["data", "amount"]),
   },
   {
-    id: "coingecko",
-    url: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-    parse: data => numberAt(data, ["bitcoin", "usd"]),
-  },
-  {
     id: "kraken",
     url: "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
     parse: data => numberAt(data, ["result", "XXBTZUSD", "c", "0"]),
-  },
-  {
-    id: "bitstamp",
-    url: "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-    parse: data => numberAt(data, ["last"]),
   },
 ];
 

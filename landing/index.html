@@ -256,25 +256,48 @@ nav::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:1px;ba
 /* community chat */
 .chat-row{display:flex;gap:30px;align-items:center;margin-top:28px;flex-wrap:wrap}
 .chat-qr{display:flex;flex-direction:column;align-items:center;gap:10px}
-.chat-qr-frame{position:relative;display:grid;place-items:center;padding:18px;border-radius:22px;background:radial-gradient(circle at 28% 20%,rgba(46,230,214,.10),transparent 52%),rgba(10,10,10,.30)}
-.chat-qr-frame::before{content:'';position:absolute;inset:9px;border-radius:0;pointer-events:none;background:linear-gradient(var(--orange),var(--orange)) left top/32px 2px no-repeat,linear-gradient(var(--orange),var(--orange)) left top/2px 32px no-repeat,linear-gradient(var(--teal),var(--teal)) right top/32px 2px no-repeat,linear-gradient(var(--teal),var(--teal)) right top/2px 32px no-repeat,linear-gradient(var(--purple),var(--purple)) left bottom/32px 2px no-repeat,linear-gradient(var(--purple),var(--purple)) left bottom/2px 32px no-repeat,linear-gradient(var(--orange),var(--orange)) right bottom/32px 2px no-repeat,linear-gradient(var(--orange),var(--orange)) right bottom/2px 32px no-repeat;filter:drop-shadow(0 0 10px rgba(46,230,214,.24))}
-.chat-qr-frame>img{width:150px;height:150px;border-radius:14px;background:#fff;padding:9px;display:block;box-shadow:0 12px 34px rgba(0,0,0,.24),0 0 0 1px rgba(255,255,255,.92)}
-.chat-qr-logo{position:absolute;left:50%;top:50%;width:24px;height:24px;transform:translate(-50%,-50%);display:grid;place-items:center;border-radius:50%;background:#fff;border:1px solid rgba(10,10,10,.10);box-shadow:0 5px 16px rgba(0,0,0,.24),0 0 0 2px rgba(255,255,255,.92);pointer-events:none}
-.chat-qr-logo img{width:18px;height:18px;padding:0;border-radius:0;background:transparent;box-shadow:none}
+.chat-qr-frame{position:relative;display:grid;place-items:center;padding:20px;border-radius:22px;background:radial-gradient(circle at 28% 20%,rgba(46,230,214,.10),transparent 52%),rgba(10,10,10,.30)}
+.chat-qr-corner{position:absolute;width:30px;height:30px;pointer-events:none;filter:drop-shadow(0 0 10px rgba(46,230,214,.28))}
+.chat-qr-corner.tl{left:0;top:0;border-left:2px solid var(--orange);border-top:2px solid var(--orange);border-top-left-radius:10px}
+.chat-qr-corner.tr{right:0;top:0;border-right:2px solid var(--teal);border-top:2px solid var(--teal);border-top-right-radius:10px}
+.chat-qr-corner.bl{left:0;bottom:0;border-left:2px solid var(--purple);border-bottom:2px solid var(--purple);border-bottom-left-radius:10px}
+.chat-qr-corner.br{right:0;bottom:0;border-right:2px solid var(--orange);border-bottom:2px solid var(--orange);border-bottom-right-radius:10px}
+.chat-qr-frame>img{width:168px;height:168px;border-radius:14px;background:#fff;padding:10px;display:block;box-shadow:0 12px 34px rgba(0,0,0,.24),0 0 0 1px rgba(255,255,255,.92)}
+.chat-qr-logo{position:absolute;left:50%;top:50%;width:28px;height:28px;transform:translate(-50%,-50%);display:grid;place-items:center;border-radius:50%;background:#fff;border:1px solid rgba(10,10,10,.10);box-shadow:0 5px 16px rgba(0,0,0,.24),0 0 0 2px rgba(255,255,255,.92);pointer-events:none}
+.chat-qr-logo img{width:21px;height:21px;padding:0;border-radius:0;background:transparent;box-shadow:none}
 .chat-qr-label{font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;color:var(--t3);text-transform:uppercase}
+.chat-qr-mobile{display:none;max-width:230px;text-align:center;font-size:12px;line-height:1.5;color:var(--t4)}
+@media(max-width:760px){.chat-qr-mobile{display:block}.chat-qr:hover .chat-qr-mobile{color:var(--t2)}}
 .chat-links{display:flex;flex-direction:column;gap:14px}
 .chat-links a{font-family:var(--sora);font-weight:600;font-size:18px;letter-spacing:-.01em;color:var(--t1);display:inline-flex;gap:7px;align-items:center}
 .chat-links a:hover{color:var(--teal-m)}
 .flag{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9.5px;letter-spacing:.8px;text-transform:uppercase;color:#0A0A0A;background:linear-gradient(135deg,var(--orange),var(--orange-l));border:1px solid rgba(255,211,122,.45);box-shadow:0 0 28px rgba(255,179,64,.18);padding:3px 9px;border-radius:var(--r-pill);font-weight:700}
 .flag::before{content:'★';font-size:9px;line-height:1}
 /* footer */
-footer{position:relative;border-top:1px solid var(--hairline2);padding:26px 24px;margin-top:18px}
+footer{position:relative;border-top:1px solid var(--hairline2);padding:34px 24px 28px;margin-top:18px}
 footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;background:linear-gradient(90deg,var(--orange),var(--teal),var(--purple));opacity:.4}
-.ft{max-width:1180px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+.ft{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:minmax(260px,.9fr) minmax(360px,1.35fr);gap:28px 56px;align-items:start}
+.ft-brand{display:flex;flex-direction:column;gap:16px}
 .ft-l{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11px;color:var(--t5)}
-.ft-r{display:flex;gap:20px}
-.ft-r a{font-size:12px;color:var(--t4);transition:color .25s}
+.ft-ethos{display:block;max-width:430px;padding:16px 18px;border:1px solid var(--hairline2);border-radius:14px;background:linear-gradient(135deg,rgba(247,147,26,.07),rgba(191,90,242,.045));transition:border-color .25s,transform .25s}
+.ft-ethos:hover{border-color:rgba(255,179,64,.4);transform:translateY(-2px)}
+.ft-ethos-k{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:1.2px;text-transform:uppercase;color:var(--orange-l)}
+.ft-ethos-k::before{content:'';width:16px;height:1px;background:var(--orange)}
+.ft-ethos strong{display:block;font-family:var(--sora);font-size:15px;line-height:1.35;color:var(--t1);margin-bottom:5px}
+.ft-ethos-line{display:block;font-size:12.5px;line-height:1.5;color:var(--t4)}
+.ft-connect{display:flex;flex-direction:column;gap:14px}
+.ft-title{font-family:var(--mono);font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--t5)}
+.ft-socials{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.ft-social{display:flex;align-items:center;gap:11px;padding:11px 12px;border:1px solid var(--hairline2);border-radius:11px;color:var(--t3);transition:color .25s,border-color .25s,background .25s}
+.ft-social:hover{color:var(--t1);border-color:rgba(46,230,214,.32);background:rgba(46,230,214,.04)}
+.ft-social svg{width:17px;height:17px;flex:none;color:var(--teal-m)}
+.ft-social.ft-nostr .ft-nostr-mark{width:30px;height:30px;flex:none;object-fit:contain;margin:-6px -4px -6px -5px}
+.ft-social b{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.9px;text-transform:uppercase;color:var(--t5);margin-bottom:2px}
+.ft-social span{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ft-r{display:flex;flex-wrap:wrap;gap:10px 18px;padding-top:2px}
+.ft-r a{font-size:11px;color:var(--t5);transition:color .25s}
 .ft-r a:hover{color:var(--t1)}
+@media(max-width:760px){.ft{grid-template-columns:1fr}.ft-socials{grid-template-columns:1fr}.ft-ethos{max-width:none}}
 </style>
 <!-- favicons -->
 <link rel="icon" type="image/x-icon" href="icons/favicon.ico">
@@ -610,9 +633,9 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
   <section class="blk chat" id="chat">
     <div class="kick r" style="--ac:var(--teal-m)"><span class="node"></span><span data-i18n="chat.kick">Community chat</span></div>
     <h2 class="hl r d1" data-i18n="chat.h2">Come say hi.</h2>
-    <p class="lead r d2" data-i18n="chat.lead">A place to say hi, thank someone, or share feedback — on Fedi. Scan to join every room at once, or pick yours.</p>
+    <p class="lead r d2" data-i18n="chat.lead">A place to say hi, thank someone, or share feedback — on Fedi. One scan joins both Chama spaces, or pick yours.</p>
     <div class="chat-row r d2">
-      <a class="chat-qr" href="https://app.fedi.xyz/link#screen=join&id=fed11qgqyj3mfwfhksw309ajrwvmxvenxgvpkvyursenxxvur2c3sv4jkxdfcxf3kgdmyvs6nzcehvc6xzctzxumrxdmr89jnwdtpv5enqwtpxqmrsvfh89skxv34qqqjpzytwrkr28r8mjas4ej467utd7excr7fapj7ukgc4ugacm6nu2u73k7ram" target="_blank" rel="noopener"><span class="chat-qr-frame"><img src="img/fedi-qr.png" alt="Scan to join the Chama community chat on Fedi" width="150" height="150" loading="lazy"><span class="chat-qr-logo" aria-hidden="true"><img src="icons/chama-mark-64.png" alt=""></span></span><span class="chat-qr-label" data-i18n="chat.scan">Scan — join all rooms</span></a>
+      <a class="chat-qr" href="https://app.fedi.xyz/link#screen=join&id=fed11qgqyj3mfwfhksw309ajrwvmxvenxgvpkvyursenxxvur2c3sv4jkxdfcxf3kgdmyvs6nzcehvc6xzctzxumrxdmr89jnwdtpv5enqwtpxqmrsvfh89skxv34qqqjpzytwrkr28r8mjas4ej467utd7excr7fapj7ukgc4ugacm6nu2u73k7ram" target="_blank" rel="noopener"><span class="chat-qr-frame"><span class="chat-qr-corner tl" aria-hidden="true"></span><span class="chat-qr-corner tr" aria-hidden="true"></span><span class="chat-qr-corner bl" aria-hidden="true"></span><span class="chat-qr-corner br" aria-hidden="true"></span><img src="img/fedi-qr.png" alt="Scan once to join both Chama spaces on Fedi" width="168" height="168" loading="lazy"><span class="chat-qr-logo" aria-hidden="true"><img src="icons/chama-mark-64.png" alt=""></span></span><span class="chat-qr-label" data-i18n="chat.scan">Scan — join both spaces</span><span class="chat-qr-mobile" data-i18n="chat.tap">On mobile? Install Fedi first, then tap this QR to open Fedi and join both spaces.</span></a>
       <div class="chat-links">
         <a href="https://app.fedi.xyz/link#screen=join&id=community210v3xzat5dphhyhmsw43xketeygazyv33vvmnzvmxx5unqwpkxdnxxvfs893rjwfcvsukxcmzxsmkxcnyvf3kywpnxscxzdnyxq6rvcmpxuengvp4xdsn2wfcvymrgvpexesjytpzvdhk6mt4de5hg72lw46kjezldpjhsg36yfskyephv5cnqwpjvdnrqenrxpnrxvmrxs6nscfkxymnvdrpv4jngwpjvdskgce3xy6nvdf5vfjxyef4x9jrvceevejrvcenxcekydtrygkzyer9vde8jur5d9hkuhmtv4ujyw3zvymkvmr0gcu4wuth2eh9zkr9vdc8z3m4w4m56v60w3j9zwrpxdvhw3n9ga3kwcfcgc4kk0fz05fkv4p3" target="_blank" rel="noopener"><span data-i18n="chat.en">English room</span> <span class="arrow">→</span></a>
         <a href="https://app.fedi.xyz/link#screen=join&id=community210v3xzat5dphhyhmsw43xketeygazyde5xf3kzvpnx9skzdnyxpjrvdm9xpskzc3kxucrxwpex33xxe3exvmnxvtxv9jryefexsmnqvty8yunvd35vgunywrzxvmrsvpj8q6jytpzvdhk6mt4de5hg72lw46kjezldpjhsg36yfnrqcf3vserxvfevyck2wtyxanxzvf5x9skgdfhvd3rwc3jv5crsetyx3jxvdesxserxerpvdskzcehxpjr2wf5vymkxenpx56kvwrpygkzyer9vde8jur5d9hkuhmtv4ujyw3zfphhy3t3vym8sd6vg4a9v6n2fsek7m6k23ux6v6ytp65jeekd4pkj5nzw39xcanh0pkrg0fz055t3dve" target="_blank" rel="noopener"><span data-i18n="chat.fr">Salle française</span> <span class="arrow">→</span></a>
@@ -624,13 +647,39 @@ footer::before{content:'';position:absolute;top:-1px;left:0;right:0;height:1px;b
 <!-- FOOTER -->
 <footer>
   <div class="ft">
-    <div class="ft-l"><img src="icons/chama-mark-64.png" width="18" height="18" alt="">Chama · est. block 934,669 · chama.community</div>
-    <div class="ft-r">
-      <a href="faq.html">FAQ</a>
-      <a href="https://github.com/jesuspirate/chama" target="_blank" rel="noopener">GitHub</a>
-      <a href="https://zapstore.dev/apps/app.chama.market" target="_blank" rel="noopener" data-i18n="footer.app">App</a>
-      <a href="https://stacker.news" target="_blank" rel="noopener">Stacker News</a>
-      <a href="https://unsplash.com" target="_blank" rel="noopener">Photos: Unsplash</a>
+    <div class="ft-brand">
+      <div class="ft-l"><img src="icons/chama-mark-64.png" width="18" height="18" alt="">Chama · est. block 934,669 · chama.community</div>
+      <a class="ft-ethos" href="https://x.com/getchama_app/status/2077491057613549686" target="_blank" rel="noopener">
+        <span class="ft-ethos-k">The public ethos · read on X</span>
+        <strong>The Missing Human Layer of Bitcoin</strong>
+        <span class="ft-ethos-line">“When a community moves together, no one has to stand alone.” →</span>
+      </a>
+    </div>
+    <div class="ft-connect">
+      <div class="ft-title">Find us in public</div>
+      <div class="ft-socials">
+        <a class="ft-social" href="https://x.com/getchama_app" target="_blank" rel="me noopener" aria-label="Chama on X, @getchama_app">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-6.77 7.74L23.2 22h-6.24l-4.89-6.4L6.48 22H3.36l7.26-8.3L2.98 2h6.4l4.42 5.84L18.9 2Zm-1.1 17.84h1.73L8.44 4.05H6.58L17.8 19.84Z"/></svg>
+          <span><b>X</b>@getchama_app</span>
+        </a>
+        <a class="ft-social ft-nostr" href="https://primal.net/chama" target="_blank" rel="me noopener" aria-label="Chama on Nostr, chama@primal.net">
+          <img class="ft-nostr-mark" src="img/nostr-ostrich-footer-v1.png" width="30" height="30" alt="" aria-hidden="true">
+          <span><b>Nostr</b>chama@primal.net</span>
+        </a>
+        <a class="ft-social" href="https://t.me/getchama" target="_blank" rel="me noopener" aria-label="Chama on Telegram, @getchama">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21.7 3.1 18.5 20c-.24 1.2-.88 1.5-1.78.93l-4.87-3.59-2.35 2.26c-.26.26-.48.48-.98.48l.35-4.96 9.02-8.15c.39-.35-.09-.55-.61-.2L6.13 13.8 1.33 12.3C.29 11.98.27 11.26 1.55 10.76L20.3 3.53c.87-.32 1.63.2 1.4-.43Z"/></svg>
+          <span><b>Telegram</b>@getchama</span>
+        </a>
+        <a class="ft-social" href="mailto:getchama@proton.me" aria-label="Email Chama at getchama@proton.me">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 5.5h18v13H3zM4 7l8 6 8-6"/></svg>
+          <span><b>Email</b>getchama@proton.me</span>
+        </a>
+      </div>
+      <div class="ft-r">
+        <a href="faq.html">FAQ</a>
+        <a href="https://github.com/jesuspirate/chama" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://zapstore.dev/apps/app.chama.market" target="_blank" rel="noopener" data-i18n="footer.app">App</a>
+      </div>
     </div>
   </div>
 </footer>
@@ -723,7 +772,7 @@ en:{
  'cta.h2':'Your community.<br>Your money.<br><em>Your rules.</em>',
  'cta.p':'Open source. No incorporation. No token. Just cryptography, community, and freedom.',
  'cta.btn1':'Try the sandbox','cta.btn2':'Get it on Zapstore','footer.app':'App',
- 'chat.kick':'Community chat','chat.h2':'Come say hi.','chat.lead':'A place to say hi, thank someone, or share feedback — on Fedi. Scan to join every room at once, or pick yours.','chat.scan':'Scan — join all rooms','chat.en':'English room','chat.fr':'Salle française'
+ 'chat.kick':'Community chat','chat.h2':'Come say hi.','chat.lead':'A place to say hi, thank someone, or share feedback — on Fedi. One scan joins both Chama spaces, or pick yours.','chat.scan':'Scan — join both spaces','chat.tap':'On mobile? Install Fedi first, then tap this QR to open Fedi and join both spaces.','chat.en':'English room','chat.fr':'Salle française'
 },
 fr:{
  'meta.title':'Chama — Le commerce Bitcoin tissé de confiance communautaire',
@@ -806,7 +855,7 @@ fr:{
  'cta.h2':'Votre communauté.<br>Votre argent.<br><em>Vos règles.</em>',
  'cta.p':'Open source. Pas de société. Pas de token. Juste de la cryptographie, de la communauté et de la liberté.',
  'cta.btn1':'Essayer le bac à sable','cta.btn2':'Obtenir sur Zapstore','footer.app':'App',
- 'chat.kick':'Discussion communautaire','chat.h2':'Venez dire bonjour.','chat.lead':'Un endroit pour dire bonjour, remercier ou partager vos retours — sur Fedi. Scannez pour rejoindre toutes les salles d’un coup, ou choisissez la vôtre.','chat.scan':'Scanner — toutes les salles','chat.en':'Salle anglaise','chat.fr':'Salle française'
+ 'chat.kick':'Discussion communautaire','chat.h2':'Venez dire bonjour.','chat.lead':'Un endroit pour dire bonjour, remercier ou partager vos retours — sur Fedi. Un scan rejoint les deux espaces Chama, ou choisissez le vôtre.','chat.scan':'Scanner — les deux espaces','chat.tap':'Sur mobile ? Installez d’abord Fedi, puis touchez ce QR pour ouvrir Fedi et rejoindre les deux espaces.','chat.en':'Salle anglaise','chat.fr':'Salle française'
 },
 es:{
  'meta.title':'Chama — Comercio Bitcoin tejido con la confianza de la comunidad',
@@ -889,7 +938,7 @@ es:{
  'cta.h2':'Tu comunidad.<br>Tu dinero.<br><em>Tus reglas.</em>',
  'cta.p':'Código abierto. Sin sociedad. Sin token. Solo criptografía, comunidad y libertad.',
  'cta.btn1':'Probar el sandbox','cta.btn2':'Conseguir en Zapstore','footer.app':'App',
- 'chat.kick':'Chat comunitario','chat.h2':'Ven a saludar.','chat.lead':'Un lugar para saludar, agradecer o compartir comentarios — en Fedi. Escanea para unirte a todas las salas a la vez, o elige la tuya.','chat.scan':'Escanea — todas las salas','chat.en':'Sala en inglés','chat.fr':'Sala en francés'
+ 'chat.kick':'Chat comunitario','chat.h2':'Ven a saludar.','chat.lead':'Un lugar para saludar, agradecer o compartir comentarios — en Fedi. Un escaneo une ambos espacios de Chama, o elige el tuyo.','chat.scan':'Escanea — ambos espacios','chat.tap':'¿Estás en móvil? Instala Fedi primero y toca este QR para abrir Fedi y unirte a ambos espacios.','chat.en':'Sala en inglés','chat.fr':'Sala en francés'
 }};
 
 function setLang(l){

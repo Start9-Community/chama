@@ -3474,6 +3474,7 @@ export default function App() {
               amountDisplayMode={amountDisplayMode}
               communitySlug={browseCommunity}
               fetchCommunityBonds={actions.fetchCommunityBonds}
+              authorizeImageUpload={actions.authorizeImageUpload}
             />
           )}
         </div>
@@ -3865,6 +3866,7 @@ export default function App() {
               amountDisplayMode={amountDisplayMode}
               communitySlug={browseCommunity}
               fetchCommunityBonds={actions.fetchCommunityBonds}
+              authorizeImageUpload={actions.authorizeImageUpload}
             />
           </div>
         </>

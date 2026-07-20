@@ -201,6 +201,7 @@ export function autoRenewableListings(
 export interface RenewCreateParams {
   description: string;
   imageDataUrl?: string;
+  imageUrls?: string[];
   amountMsats: number;
   fiatAmount?: number;
   fiatCurrency?: string;
@@ -234,6 +235,7 @@ export function buildRenewCreateParams(state: EscrowState): RenewCreateParams {
   return {
     description: state.description,
     ...(state.imageDataUrl ? { imageDataUrl: state.imageDataUrl } : {}),
+    ...(state.imageUrls?.length ? { imageUrls: [...state.imageUrls] } : {}),
     amountMsats: state.amountMsats,
     ...(state.fiatAmount !== undefined ? { fiatAmount: state.fiatAmount } : {}),
     ...(state.fiatCurrency !== undefined ? { fiatCurrency: state.fiatCurrency } : {}),

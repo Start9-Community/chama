@@ -14,8 +14,9 @@ export function compactSelectedMenuItems(
 ): SelectedMenuItem[] | undefined {
   if (!items) return undefined;
   return items.map(item => {
-    const { imageDataUrl: _legacyImage, ...compact } = item as SelectedMenuItem & {
+    const { imageDataUrl: _legacyImage, imageUrls: _legacyImages, ...compact } = item as SelectedMenuItem & {
       imageDataUrl?: unknown;
+      imageUrls?: unknown;
     };
     return compact;
   });

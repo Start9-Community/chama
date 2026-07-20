@@ -79,7 +79,8 @@ import {
 } from "../amount-display.js";
 import { useBitcoinPrice } from "../hooks/useBitcoinPrice.js";
 import { useFiatRates } from "../hooks/useFiatRates.js";
-import { ensureRemoteListingImage } from "../../media/listing-image-upload.js";
+import { ensureRemoteListingImage, MAX_LISTING_IMAGE_REFS, type ListingImageUploadAuthorizer } from "../../media/listing-image-upload.js";
+import { SwipeImageGallery } from "../components/SwipeImageGallery.js";
 
 type Step = 1 | 2 | 3;
 type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
@@ -105,8 +106,10 @@ const VERTICALS: { id: string; labelKey: string; icon: string; descriptionKey: s
 interface FormState {
   listingMode: ListingMode;
   desc: string;
-  /** Product photo for a single Store listing. Storefront photos live on items. */
+  /** Product cover for a single listing, or the one storefront cover/logo. */
   imageDataUrl: string;
+  /** Ordered single-listing gallery, or a one-entry storefront cover. */
+  imageUrls: string[];
   sats: string;
   fiat: string;
   cur: string;
@@ -144,6 +147,7 @@ interface MenuDraftItem {
   description: string;
   fulfillment: Fulfillment;
   imageDataUrl: string;
+  imageUrls: string[];
   dueDate: string;
   termDays: string;
   apr: string;
@@ -154,6 +158,7 @@ interface MenuDraftItem {
 const DRAFT_KEY_PREFIX = "chama_create_draft_";
 const FIRST_PUBLISH_KEY_PREFIX = "chama_first_publish_done_";
 const MAX_MENU_ITEMS = 20;
+const MAX_LISTING_IMAGES = MAX_LISTING_IMAGE_REFS;
 const MAX_MENU_IMAGE_DATA_URL_CHARS = 500_000;
 const MENU_IMAGE_MAX_EDGE_PX = 1280;
 const MENU_IMAGE_ACCEPT = [
@@ -188,6 +193,7 @@ function newMenuDraftItem(): MenuDraftItem {
     description: "",
     fulfillment: "service",
     imageDataUrl: "",
+    imageUrls: [],
     dueDate: "",
     termDays: "",
     apr: "",
@@ -198,6 +204,7 @@ function newMenuDraftItem(): MenuDraftItem {
 
 function normalizeMenuDraftItem(raw: any): MenuDraftItem | null {
   if (!raw || typeof raw !== "object") return null;
+  const legacyImage = typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "";
   return {
     id: typeof raw.id === "string" && raw.id.trim()
       ? raw.id
@@ -210,7 +217,8 @@ function normalizeMenuDraftItem(raw: any): MenuDraftItem | null {
     fulfillment: raw.fulfillment === "physical" || raw.fulfillment === "digital" || raw.fulfillment === "service"
       ? raw.fulfillment
       : "service",
-    imageDataUrl: typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "",
+    imageDataUrl: legacyImage,
+    imageUrls: Array.isArray(raw.imageUrls) ? raw.imageUrls.filter((v: unknown): v is string => typeof v === "string").slice(0, MAX_LISTING_IMAGES) : legacyImage ? [legacyImage] : [],
     dueDate: typeof raw.dueDate === "string" ? raw.dueDate : "",
     termDays: typeof raw.termDays === "string" || typeof raw.termDays === "number" ? String(raw.termDays) : "",
     apr: typeof raw.apr === "string" || typeof raw.apr === "number" ? String(raw.apr) : "",
@@ -294,6 +302,24 @@ async function prepareMenuImageDataUrl(file: File): Promise<string> {
   throw new Error("That screenshot is too large for this release. Try a tighter crop.");
 }
 
+async function prepareImagesSequentially(files: File[]): Promise<string[]> {
+  const prepared: string[] = [];
+  for (const file of files) prepared.push(await prepareMenuImageDataUrl(file));
+  return prepared;
+}
+
+async function uploadImageRefsSequentially(
+  refs: string[],
+  filenameFor: (index: number) => string,
+  authorize?: ListingImageUploadAuthorizer,
+): Promise<string[]> {
+  const uploaded: string[] = [];
+  for (let index = 0; index < refs.length; index += 1) {
+    uploaded.push(await ensureRemoteListingImage(refs[index], filenameFor(index), authorize));
+  }
+  return uploaded;
+}
+
 function normalizeFormState(raw: any, currency = "USD"): FormState {
   const fallback = emptyCreateFormState(currency);
   if (!raw || typeof raw !== "object") return fallback;
@@ -310,11 +336,13 @@ function normalizeFormState(raw: any, currency = "USD"): FormState {
       : menuItems.length > 0
         ? "menu"
         : fallback.listingMode;
+  const legacyImage = typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "";
   return {
     ...fallback,
     ...raw,
     listingMode,
-    imageDataUrl: typeof raw.imageDataUrl === "string" ? raw.imageDataUrl : "",
+    imageDataUrl: legacyImage,
+    imageUrls: Array.isArray(raw.imageUrls) ? raw.imageUrls.filter((v: unknown): v is string => typeof v === "string").slice(0, listingMode === "menu" ? 1 : MAX_LISTING_IMAGES) : legacyImage ? [legacyImage] : [],
     cur: fallback.cur,
     premium: typeof raw.premium === "string" || typeof raw.premium === "number" ? String(raw.premium) : fallback.premium,
     billType: typeof raw.billType === "string" ? raw.billType : "",
@@ -439,8 +467,12 @@ function normalizeMenuItems(form: FormState, vertical: Vertical): MenuItem[] {
       description: item.description.trim() || undefined,
       fiatAmount: Number.isFinite(fiatAmount) ? fiatAmount : undefined,
       fiatCurrency: Number.isFinite(fiatAmount) ? form.cur : undefined,
-      fulfillment: vertical === "marketplace" ? item.fulfillment : undefined,
+      // A storefront has one delivery promise. Individual product rows inherit
+      // it so buyers never see a Shipping store containing Service items (or
+      // the reverse). Legacy drafts are normalized here at publish time too.
+      fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
       imageDataUrl: menuImagesAllowedForVertical(vertical) && item.imageDataUrl ? item.imageDataUrl : undefined,
+      imageUrls: menuImagesAllowedForVertical(vertical) && item.imageUrls.length ? item.imageUrls : undefined,
       dueAt: vertical === "bill-pay" ? parseDueDate(item.dueDate) : undefined,
       termDays: vertical === "lending" ? parseOptionalPositiveInt(item.termDays) : undefined,
       aprBps: vertical === "lending"
@@ -472,6 +504,7 @@ function hasPartialMenuRows(form: FormState, vertical: Vertical): boolean {
       || item.fiat.trim()
       || item.description.trim()
       || item.imageDataUrl
+      || item.imageUrls.length > 0
       || item.dueDate.trim()
       || item.termDays.trim()
       || item.apr.trim()
@@ -507,6 +540,7 @@ function hasDraftContent(form: FormState): boolean {
   return !!(
     form.desc.trim()
     || form.imageDataUrl
+    || form.imageUrls.length > 0
     || form.sats.trim()
     || form.fiat.trim()
     || form.premium.trim()
@@ -518,6 +552,7 @@ function hasDraftContent(form: FormState): boolean {
       || item.fiat.trim()
       || item.description.trim()
       || item.imageDataUrl
+      || item.imageUrls.length > 0
       || item.dueDate.trim()
       || item.termDays.trim()
       || item.apr.trim()
@@ -982,6 +1017,7 @@ export function emptyCreateFormState(currency = "USD"): FormState {
     listingMode: "single",
     desc: "",
     imageDataUrl: "",
+    imageUrls: [],
     sats: "",
     fiat: "",
     cur: currency,
@@ -1004,6 +1040,7 @@ export function CreateForm({
   amountDisplayMode,
   communitySlug,
   fetchCommunityBonds,
+  authorizeImageUpload,
 }: {
   onCreate: (params: any) => void;
   onClose: () => void;
@@ -1018,6 +1055,8 @@ export function CreateForm({
    *  its pool (alongside the always-present OG cabinet). Optional + fail-soft —
    *  absent/throwing just leaves the OG pool, never blocks publish. */
   fetchCommunityBonds?: (community: string) => Promise<VerifiedBond[]>;
+  /** NIP-98 authorization from the active Chama signer for the photo host. */
+  authorizeImageUpload?: ListingImageUploadAuthorizer;
   /** v2.1.1: the community the shell is currently presenting as the
    *  user's identity (the header/Browse pill). Create stamps THIS, so
    *  what the user sees is what they publish. Previously this read the
@@ -1071,6 +1110,7 @@ export function CreateForm({
     emptyCreateFormState(communityCurrency),
   );
   const [submitting, setSubmitting] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
   const [arbiterDismissed, setArbiterDismissed] = useState(false);
   const [drafts, setDrafts] = useState<SavedDraft[]>(() => readAllDrafts());
   const [showAllDrafts, setShowAllDrafts] = useState(false);
@@ -1080,11 +1120,13 @@ export function CreateForm({
   const setListingMode = (listingMode: ListingMode) => {
     setForm(prev => {
       const nextItems = listingMode === "menu" && prev.menuItems.length === 0
-        ? [newMenuDraftItem()]
+        ? [{ ...newMenuDraftItem(), fulfillment: prev.fulfillment }]
         : prev.menuItems;
       return {
         ...prev,
         listingMode,
+        imageDataUrl: listingMode === "menu" ? (prev.imageUrls[0] ?? prev.imageDataUrl) : prev.imageDataUrl,
+        imageUrls: listingMode === "menu" ? prev.imageUrls.slice(0, 1) : prev.imageUrls,
         isSubscription: listingMode === "menu" ? false : prev.isSubscription,
         menuItems: nextItems,
       };
@@ -1132,6 +1174,7 @@ export function CreateForm({
   };
 
   const handlePublish = async () => {
+    setPublishError(null);
     let menuItems = normalizeMenuItems(form, vertical);
     const hasMenu = menuItems.length > 0;
     const description = buildListingDescription(form, vertical, menuItems);
@@ -1152,26 +1195,38 @@ export function CreateForm({
     try {
       // Old drafts may still contain inline data URLs. Upload them before CREATE
       // so the Nostr event stays small enough for normal relay frame limits.
-      let listingImageRef = form.imageDataUrl;
+      let listingImageRefs = form.imageUrls.length
+        ? [...form.imageUrls]
+        : form.imageDataUrl ? [form.imageDataUrl] : [];
+      if (vertical === "marketplace" && listingImageRefs.length) {
+        listingImageRefs = await uploadImageRefsSequentially(
+          listingImageRefs,
+          index => `chama-listing-${index + 1}.jpg`,
+          authorizeImageUpload,
+        );
+        setForm(previous => ({ ...previous, imageDataUrl: listingImageRefs[0] ?? "", imageUrls: listingImageRefs }));
+      }
       if (vertical === "marketplace" && hasMenu) {
         for (let index = 0; index < menuItems.length; index += 1) {
           const item = menuItems[index];
-          if (!item.imageDataUrl?.startsWith("data:image/")) continue;
-          const imageUrl = await ensureRemoteListingImage(item.imageDataUrl, `chama-item-${index + 1}.jpg`);
+          const refs = item.imageUrls?.length ? item.imageUrls : item.imageDataUrl ? [item.imageDataUrl] : [];
+          const uploaded = await uploadImageRefsSequentially(
+            refs,
+            imageIndex => `chama-item-${index + 1}-${imageIndex + 1}.jpg`,
+            authorizeImageUpload,
+          );
+          if (uploaded.length === 0) continue;
+          const imageUrl = uploaded[0];
           menuItems = menuItems.map(candidate => candidate.id === item.id
-            ? { ...candidate, imageDataUrl: imageUrl }
+            ? { ...candidate, imageDataUrl: imageUrl, imageUrls: uploaded }
             : candidate);
           setForm(previous => ({
             ...previous,
             menuItems: previous.menuItems.map(candidate => candidate.id === item.id
-              ? { ...candidate, imageDataUrl: imageUrl }
+              ? { ...candidate, imageDataUrl: imageUrl, imageUrls: uploaded }
               : candidate),
           }));
         }
-      } else if (vertical === "marketplace" && listingImageRef?.startsWith("data:image/")) {
-        listingImageRef = await ensureRemoteListingImage(listingImageRef, "chama-listing.jpg");
-        const uploadedImageRef = listingImageRef;
-        setForm(previous => ({ ...previous, imageDataUrl: uploadedImageRef }));
       }
 
       const singleLockSats = !hasMenu && vertical === "bill-pay"
@@ -1231,9 +1286,8 @@ export function CreateForm({
           return undefined;
         })(),
         category: vertical,
-        imageDataUrl: vertical === "marketplace" && !hasMenu && listingImageRef
-          ? listingImageRef
-          : undefined,
+        imageDataUrl: vertical === "marketplace" ? listingImageRefs[0] : undefined,
+        imageUrls: vertical === "marketplace" ? listingImageRefs : undefined,
         community: effectiveCommunity,
         // v3.1 (B3): stamp the community's ISO country so the listing self-describes
         // its flag + currency on devices that don't know this (custom) community.
@@ -1285,6 +1339,8 @@ export function CreateForm({
       clearDraft(vertical);
       markFirstPublished(userPubkey);
       onClose();
+    } catch (error: any) {
+      setPublishError(error?.message || "Couldn't publish this listing. Your draft is still here.");
     } finally {
       setSubmitting(false);
     }
@@ -1344,6 +1400,7 @@ export function CreateForm({
           homeCommunity={homeCommunity}
           canOfferSubscription={canOfferSubscription}
           amountDisplayMode={amountDisplayMode}
+          authorizeImageUpload={authorizeImageUpload}
           onBack={() => setStep(1)}
           onNext={() => setStep(3)}
         />
@@ -1366,6 +1423,12 @@ export function CreateForm({
         </div>
       )}
       {step === 3 && (
+        <>
+        {publishError && (
+          <div style={{ margin: "0 0 12px", padding: "10px 12px", borderRadius: T.rs, background: T.redDim, border: `1px solid ${T.red}55`, color: T.red, fontFamily: T.mono, fontSize: 11, lineHeight: 1.5 }}>
+            ⚠ {publishError}
+          </div>
+        )}
         <Step3
           vertical={vertical}
           form={form}
@@ -1382,6 +1445,7 @@ export function CreateForm({
             onClose();
           }}
         />
+        </>
       )}
     </div>
   );
@@ -1857,6 +1921,7 @@ function Step2({
   homeCommunity,
   canOfferSubscription,
   amountDisplayMode,
+  authorizeImageUpload,
   onBack, onNext,
 }: {
   vertical: Vertical;
@@ -1865,6 +1930,7 @@ function Step2({
   homeCommunity: ReturnType<typeof getCommunityBySlug>;
   canOfferSubscription: boolean;
   amountDisplayMode: AmountDisplayMode;
+  authorizeImageUpload?: ListingImageUploadAuthorizer;
   onBack: () => void;
   onNext: () => void;
 }) {
@@ -1902,6 +1968,13 @@ function Step2({
     !lendingCapExceeded;
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
+  const setStoreFulfillment = (fulfillment: Fulfillment) => {
+    setForm(prev => ({
+      ...prev,
+      fulfillment,
+      menuItems: prev.menuItems.map(item => ({ ...item, fulfillment })),
+    }));
+  };
   const syncSingleSats = (value: string) => {
     setForm(prev => {
       const next: FormState = { ...prev, sats: value };
@@ -2051,7 +2124,7 @@ function Step2({
       isSubscription: false,
       menuItems: prev.menuItems.length >= MAX_MENU_ITEMS
         ? prev.menuItems
-        : [...prev.menuItems, newMenuDraftItem()],
+        : [...prev.menuItems, { ...newMenuDraftItem(), fulfillment: prev.fulfillment }],
     }));
   };
   const updateMenuItem = (id: string, patch: Partial<MenuDraftItem>) => {
@@ -2075,19 +2148,28 @@ function Step2({
       return next;
     });
   };
-  const updateMenuImage = (id: string, file: File | null) => {
-    if (!file) {
-      updateMenuItem(id, { imageDataUrl: "" });
+  const updateMenuImages = (id: string, files: File[]) => {
+    if (files.length === 0) {
+      updateMenuItem(id, { imageDataUrl: "", imageUrls: [] });
       return;
     }
     void (async () => {
       markImageUploading(id, true);
       try {
-        const imageDataUrl = await prepareMenuImageDataUrl(file);
-        updateMenuItem(id, { imageDataUrl });
-        const imageUrl = await ensureRemoteListingImage(imageDataUrl, file.name);
-        setImageError(null);
-        updateMenuItem(id, { imageDataUrl: imageUrl });
+        const current = form.menuItems.find(item => item.id === id)?.imageUrls ?? [];
+        const slots = Math.max(0, MAX_LISTING_IMAGES - current.length);
+        const overflowed = files.length > slots;
+        const chosen = files.slice(0, slots);
+        const prepared = await prepareImagesSequentially(chosen);
+        updateMenuItem(id, { imageDataUrl: current[0] ?? prepared[0] ?? "", imageUrls: [...current, ...prepared] });
+        const uploaded = await uploadImageRefsSequentially(
+          prepared,
+          index => chosen[index]?.name || `chama-product-${index + 1}.jpg`,
+          authorizeImageUpload,
+        );
+        const imageUrls = [...current, ...uploaded];
+        setImageError(overflowed ? `Maximum ${MAX_LISTING_IMAGES} photos per product. Extra files were not added.` : null);
+        updateMenuItem(id, { imageDataUrl: imageUrls[0] ?? "", imageUrls });
       } catch (e: any) {
         setImageError(e?.message || t("create.photoUploadFailed"));
       } finally {
@@ -2098,22 +2180,36 @@ function Step2({
 
   const clearMenuImage = (id: string) => {
     setImageError(null);
-    updateMenuItem(id, { imageDataUrl: "" });
+    updateMenuItem(id, { imageDataUrl: "", imageUrls: [] });
   };
 
-  const updateSingleImage = (file: File | null) => {
-    if (!file) {
-      set("imageDataUrl", "");
+  const updateListingImages = (files: File[]) => {
+    if (files.length === 0) {
+      setForm(prev => ({ ...prev, imageDataUrl: "", imageUrls: [] }));
       return;
     }
     void (async () => {
       markImageUploading("single", true);
       try {
-        const imageDataUrl = await prepareMenuImageDataUrl(file);
-        set("imageDataUrl", imageDataUrl);
-        const imageUrl = await ensureRemoteListingImage(imageDataUrl, file.name);
-        setImageError(null);
-        set("imageDataUrl", imageUrl);
+        const listingImageLimit = usingMenu ? 1 : MAX_LISTING_IMAGES;
+        const slots = Math.max(0, listingImageLimit - form.imageUrls.length);
+        const overflowed = files.length > slots;
+        const chosen = files.slice(0, slots);
+        const prepared = await prepareImagesSequentially(chosen);
+        const previewUrls = [...form.imageUrls, ...prepared];
+        setForm(prev => ({ ...prev, imageDataUrl: previewUrls[0] ?? "", imageUrls: previewUrls }));
+        const uploaded = await uploadImageRefsSequentially(
+          prepared,
+          index => chosen[index]?.name || `chama-listing-${index + 1}.jpg`,
+          authorizeImageUpload,
+        );
+        const imageUrls = [...form.imageUrls, ...uploaded];
+        setImageError(overflowed
+          ? usingMenu
+            ? "A storefront has one store photo. Extra files were not added."
+            : `Maximum ${MAX_LISTING_IMAGES} photos. Extra files were not added.`
+          : null);
+        setForm(prev => ({ ...prev, imageDataUrl: imageUrls[0] ?? "", imageUrls }));
       } catch (e: any) {
         setImageError(e?.message || t("create.photoUploadFailed"));
       } finally {
@@ -2142,7 +2238,7 @@ function Step2({
       {categoryAllowsFulfillmentChoice(vertical) && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>{t("create.fulfillmentLabel")}</div>
-          <select value={form.fulfillment} onChange={e => set("fulfillment", e.target.value as Fulfillment)}
+          <select value={form.fulfillment} onChange={e => setStoreFulfillment(e.target.value as Fulfillment)}
             style={{ ...inputStyle, color: T.text, background: T.surface }}>
             <option value="physical">{t("create.fulfillmentShipping")}</option>
             <option value="service">{t("create.fulfillmentService")}</option>
@@ -2182,32 +2278,37 @@ function Step2({
       </div>
       )}
 
-      {vertical === "marketplace" && !usingMenu && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+      {vertical === "marketplace" && (
+        <div style={{ marginBottom: 16 }}>
+          {usingMenu && <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>STORE PHOTO</div>}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <label style={{
             display: "inline-flex", alignItems: "center", justifyContent: "center",
             padding: "9px 10px", borderRadius: T.rs, border: `1px solid ${T.border}`,
-            background: T.card, color: form.imageDataUrl ? T.accent : T.muted,
+            background: T.card, color: form.imageUrls.length ? T.accent : T.muted,
             fontFamily: T.mono, fontSize: 10, fontWeight: 800, cursor: "pointer",
           }}>
             {uploadingImageIds.has("single")
               ? t("create.uploadingPhoto")
-              : form.imageDataUrl ? t("create.changePhoto") : t("create.addPhoto")}
+              : usingMenu
+                ? form.imageUrls.length ? "Change store photo" : "Add store photo"
+                : "Add photos"}
             <input
               type="file"
               accept={MENU_IMAGE_ACCEPT}
+              multiple={!usingMenu}
               disabled={uploadingImageIds.has("single")}
               onChange={e => {
-                updateSingleImage(e.target.files?.[0] ?? null);
+                updateListingImages(Array.from(e.target.files ?? []));
                 e.currentTarget.value = "";
               }}
               style={{ display: "none" }}
             />
           </label>
-          {form.imageDataUrl && (
-            <>
+          {form.imageUrls.map((src, index) => (
+            <span key={`${src}:${index}`} style={{ display: "contents" }}>
               <img
-                src={form.imageDataUrl}
+                src={src}
                 alt=""
                 style={{ width: 54, height: 42, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.border}` }}
               />
@@ -2215,14 +2316,19 @@ function Step2({
                 type="button"
                 onClick={() => {
                   setImageError(null);
-                  set("imageDataUrl", "");
+                  const imageUrls = form.imageUrls.filter((_, candidate) => candidate !== index);
+                  setForm(prev => ({ ...prev, imageDataUrl: imageUrls[0] ?? "", imageUrls }));
                 }}
                 style={{ border: "none", background: "none", color: T.muted, fontFamily: T.mono, fontSize: 10, fontWeight: 800, cursor: "pointer" }}
               >
-                {t("create.removePhoto")}
+                ×
               </button>
-            </>
-          )}
+            </span>
+          ))}
+          <span style={{ color: form.imageUrls.length >= (usingMenu ? 1 : MAX_LISTING_IMAGES) ? T.amber : T.muted, fontFamily: T.mono, fontSize: 10, fontWeight: 700 }}>
+            {usingMenu ? `${form.imageUrls.length}/1 store photo` : `${form.imageUrls.length}/${MAX_LISTING_IMAGES} photos`}
+          </span>
+          </div>
         </div>
       )}
 
@@ -2790,9 +2896,11 @@ function Step2({
                   )}
                   {vertical === "marketplace" && (
                     <select
-                      value={item.fulfillment}
-                      onChange={e => updateMenuItem(item.id, { fulfillment: e.target.value as Fulfillment })}
-                      style={{ ...inputStyle, width: 108, padding: "12px 6px", fontSize: 11, color: T.text, background: T.card }}
+                      value={form.fulfillment}
+                      disabled
+                      aria-label="Inherited storefront fulfillment"
+                      title="Inherited from the storefront fulfillment above"
+                      style={{ ...inputStyle, width: 108, padding: "12px 6px", fontSize: 11, color: T.muted, background: T.card, opacity: 0.8 }}
                     >
                       <option value="physical">{t("create.fulfillmentShipping")}</option>
                       <option value="service">{t("create.fulfillmentService")}</option>
@@ -2839,22 +2947,23 @@ function Step2({
                     }}>
                       {uploadingImageIds.has(item.id)
                         ? t("create.uploadingPhoto")
-                        : item.imageDataUrl ? t("create.changePhoto") : t("create.addPhoto")}
+                        : "+ Photos"}
                       <input
                         type="file"
                         accept={MENU_IMAGE_ACCEPT}
+                        multiple
                         disabled={uploadingImageIds.has(item.id)}
                         onChange={e => {
-                          updateMenuImage(item.id, e.target.files?.[0] ?? null);
+                          updateMenuImages(item.id, Array.from(e.target.files ?? []));
                           e.currentTarget.value = "";
                         }}
                         style={{ display: "none" }}
                       />
                     </label>
-                    {item.imageDataUrl && (
+                    {item.imageUrls.length > 0 && (
                       <>
                         <img
-                          src={item.imageDataUrl}
+                          src={item.imageUrls[0]}
                           alt=""
                           style={{
                             width: 54,
@@ -2880,6 +2989,9 @@ function Step2({
                         </button>
                       </>
                     )}
+                    <span style={{ color: item.imageUrls.length >= MAX_LISTING_IMAGES ? T.amber : T.muted, fontFamily: T.mono, fontSize: 9, fontWeight: 700 }}>
+                      {item.imageUrls.length}/{MAX_LISTING_IMAGES} photos
+                    </span>
                     {vertical === "marketplace" && (
                       <label
                         style={{
@@ -3071,6 +3183,13 @@ function Step3({
   const v = VERTICALS.find(vert => vert.id === vertical)!;
   const menuItems = normalizeMenuItems(form, vertical);
   const hasMenu = menuItems.length > 0;
+  const previewImages = vertical === "marketplace" ? [
+    ...(form.imageUrls.length ? form.imageUrls : form.imageDataUrl ? [form.imageDataUrl] : []),
+    ...(hasMenu ? menuItems.flatMap(item => {
+      const leadImage = item.imageUrls?.[0] ?? item.imageDataUrl;
+      return leadImage ? [leadImage] : [];
+    }) : []),
+  ] : [];
   const listingDescription = buildListingDescription(form, vertical, menuItems);
   const totalSats = effectiveListingSats(form, vertical);
   const partialMenuRows = hasPartialMenuRows(form, vertical);
@@ -3202,6 +3321,11 @@ function Step3({
             ))}
           </div>
         )}
+        {previewImages.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <SwipeImageGallery images={previewImages} height={156} />
+          </div>
+        )}
         {hasMenu ? (
           <>
             <div style={{
@@ -3298,13 +3422,6 @@ function Step3({
           </>
         ) : (
           <>
-            {form.imageDataUrl && vertical === "marketplace" && (
-              <img
-                src={form.imageDataUrl}
-                alt=""
-                style={{ width: "100%", height: 156, objectFit: "cover", display: "block", borderRadius: T.r, marginBottom: 12 }}
-              />
-            )}
             <div style={{
               fontSize: 14,
               fontWeight: 700,

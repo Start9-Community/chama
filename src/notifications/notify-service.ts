@@ -419,7 +419,20 @@ async function deliver(n: TradeNotification): Promise<void> {
       return;
     }
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-      // tag de-dupes within the OS notification center too.
+      // Android Chrome/PWA requires service-worker delivery. Prefer it on every
+      // browser so foreground and background delivery share one tap route.
+      if ("serviceWorker" in navigator) {
+        const registration = await navigator.serviceWorker.ready;
+        await registration.showNotification(n.title, {
+          body: n.body,
+          tag: n.tag,
+          icon: "/icons/android-chrome-192x192.png",
+          badge: "/icons/favicon-96x96.png",
+          data: { escrowId: n.escrowId },
+        });
+        return;
+      }
+      // Desktop browsers without service workers retain the page constructor.
       const notif = new Notification(n.title, { body: n.body, tag: n.tag });
       // Tap → focus the tab and open this trade. escrowId rides the closure (the
       // web Notification API carries no custom payload).
@@ -632,6 +645,11 @@ export async function notifySelfTest(): Promise<void> {
   } catch {
     return;
   }
+  await sendNotificationSelfTest();
+}
+
+/** User-triggered end-to-end permission + delivery test. */
+export async function sendNotificationSelfTest(): Promise<boolean> {
   const n: TradeNotification = {
     escrowId: "sm_selftest",
     title: translate(getCurrentLang(), "notify.selfTestTitle"),
@@ -643,4 +661,5 @@ export async function notifySelfTest(): Promise<void> {
   notifyDebug(() => `self-test permission=${allowed} platform=${platformName()}`);
   if (allowed) await deliver(n);
   notifyDebug(() => `self-test done allowed=${allowed} — no buzz on Tauri/macOS ⇒ dev posts as "Terminal" / unsigned prod is dropped (not an app bug)`);
+  return allowed;
 }

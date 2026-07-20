@@ -98,6 +98,23 @@ function removeEscrowId(id: string, pubkey?: string | null) {
   } catch {}
 }
 
+const EXPIRED_UNFUNDED_KEY_PREFIX = "chama_expired_unfunded_v1:";
+
+function getExpiredUnfundedIds(pubkey: string): Set<string> {
+  try {
+    return new Set(parseSavedEscrowIds(localStorage.getItem(EXPIRED_UNFUNDED_KEY_PREFIX + pubkey)));
+  } catch { return new Set(); }
+}
+
+function rememberExpiredUnfundedId(id: string, pubkey: string): void {
+  try {
+    const ids = [...getExpiredUnfundedIds(pubkey)];
+    if (!ids.includes(id)) ids.unshift(id);
+    localStorage.setItem(EXPIRED_UNFUNDED_KEY_PREFIX + pubkey, JSON.stringify(ids.slice(0, 200)));
+    removeEscrowId(id, pubkey);
+  } catch {}
+}
+
 // Forgotten-trade denylist lives in its own testable module (storage/
 // forgotten-trades.ts).
 
@@ -354,6 +371,7 @@ async function discoverAndLoadMyTrades(
   try {
     const ids = await client.discoverMyEscrowIds(pubkey);
     const known = new Set(getSavedEscrowIds(pubkey));
+    const expiredUnfunded = getExpiredUnfundedIds(pubkey);
 
     // Round 3b fix (a): RE-HEAL, don't just hydrate-new. The old code only
     // loaded brand-new ids (`fresh = !known && !forgotten`), so a KNOWN trade
@@ -374,6 +392,10 @@ async function discoverAndLoadMyTrades(
     const toHeal: { id: string; wasKnown: boolean }[] = [];
     for (const id of ids) {
       const wasKnown = known.has(id);
+      if (expiredUnfunded.has(id)) {
+        idDiags.push({ id, cls: wasKnown ? "known" : "fresh", outcome: "expired-unfunded (skipped)", discarded: true, terminal: true });
+        continue;
+      }
       if (forgottenIds.has(id)) {
         forgottenCount++;
         idDiags.push({ id, cls: "forgotten", outcome: "(forgotten — skipped)" });
@@ -425,6 +447,7 @@ async function discoverAndLoadMyTrades(
           // real trade being healed. `done` — nothing to retry.
           (client as any).states?.delete?.(id);
           (client as any).rawEvents?.delete?.(id);
+          rememberExpiredUnfundedId(id, pubkey);
           return {
             id, wasKnown, done: true,
             diag: { id, cls, outcome: `discarded:expired-unfunded (was ${loaded.status})`, discarded: true, terminal: isHydrateTerminal(loaded.status) } as HydrateIdDiag,
@@ -470,6 +493,7 @@ async function discoverAndLoadMyTrades(
         if (expiredUnfunded) {
           (client as any).states?.delete?.(r.id);
           (client as any).rawEvents?.delete?.(r.id);
+          rememberExpiredUnfundedId(r.id, pubkey);
         }
         const updated: HydrateIdDiag = !reloaded
           ? { id: r.id, cls, outcome: "load-null [seq]" }
@@ -481,6 +505,10 @@ async function discoverAndLoadMyTrades(
       } catch (e) {
         console.debug(`[chama] discovery: sequential reload failed ${r.id}:`, e);
       }
+      // Give rendering/input a turn between historical replay jobs. Without
+      // this, a large recovered account can monopolize Chrome's main thread
+      // long enough to trigger its "Page Unresponsive" dialog.
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
     }
 
     for (const { id, wasKnown } of overCap) {
@@ -652,6 +680,8 @@ export interface UseEscrowActions {
   /** Create a new escrow trade */
   createEscrow: (params: {
     description: string;
+    imageDataUrl?: string;
+    imageUrls?: string[];
     amountMsats: number;
     fiatAmount?: number;
     fiatCurrency?: string;
@@ -663,6 +693,8 @@ export interface UseEscrowActions {
     expirySeconds?: number;
     communityArbiters?: string[];
   }) => Promise<{ escrowId: string; state: EscrowState }>;
+  /** Create a NIP-98 Authorization header for the authenticated photo host. */
+  authorizeImageUpload: (url: string, method: "POST") => Promise<string>;
   /** Join an existing escrow as buyer or arbiter; menu buyers can later
    *  re-publish JOIN with selectedItems to save their order. */
   joinEscrow: (
@@ -1110,6 +1142,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
   // honor it the instant Browse events arrive — before `state.pubkey` has even
   // re-rendered. Kept in sync by forgetEscrow / loadEscrow.
   const forgottenIdsRef = useRef<Set<string>>(new Set());
+  const hiddenExpiredIdsRef = useRef<Set<string>>(new Set());
   // Liquidity/attention notifications: the second this signed-in session went
   // live. Buyer-interest + new-listing buzzes use it as their backlog guard (the
   // analogue of the transition core's prev-must-be-non-null rule) so a cold-boot
@@ -1203,7 +1236,12 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         next.delete(escrowId);
         return { ...prev, escrows: next };
       });
-      console.info(`[chama] Hid expired unfunded escrow ${escrowId} from local state; saved pointer kept for relay recovery`);
+      const notifyPubkey = stateRef.current?.pubkey;
+      if (notifyPubkey) rememberExpiredUnfundedId(escrowId, notifyPubkey);
+      if (!hiddenExpiredIdsRef.current.has(escrowId)) {
+        hiddenExpiredIdsRef.current.add(escrowId);
+        console.info(`[chama] Hid expired unfunded escrow ${escrowId} from local state`);
+      }
       return;
     }
 
@@ -1579,15 +1617,21 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         // v0.1.66.32: cap raised 10 → 50 to match save cap.
         // Users with >10 saved trades were silently having older
         // escrows skipped on cold start, causing stale-forever state.
+        let savedReloadIndex = 0;
         for (const id of savedIds.slice(0, 50)) {
           try {
             const loaded = await client.loadEscrow(id);
             if (loaded && isExpiredUnfundedEscrow(loaded)) {
               (client as any).states?.delete?.(id);
               (client as any).rawEvents?.delete?.(id);
+              rememberExpiredUnfundedId(id, pubkey);
             }
           } catch (e) {
             console.debug(`[chama] Could not reload ${id}:`, e);
+          }
+          savedReloadIndex += 1;
+          if (savedReloadIndex % 3 === 0) {
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
           }
         }
       }
@@ -4786,6 +4830,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // Reuse the active signer (NsecSigner et al.) — detectSigner() can't see
       // an nsec login, so the sender must be handed the signer explicitly.
       return sendCommunityRequestToGlobalArbiters(input, { signer });
+    },
+    authorizeImageUpload: async (url: string, method: "POST") => {
+      const signer = signerRef.current;
+      if (!signer) throw new Error("Reconnect your signer before uploading photos.");
+      const signed = await signer.signEvent({
+        kind: 27235,
+        created_at: Math.floor(Date.now() / 1000),
+        content: "",
+        // A nonce makes rapid multi-image uploads distinct even when several
+        // signatures share the same one-second Nostr timestamp. Some hosts
+        // reject an identical NIP-98 event as a replay.
+        tags: [["u", url], ["method", method], ["nonce", crypto.randomUUID()]],
+      });
+      return `Nostr ${btoa(JSON.stringify(signed))}`;
     },
     fetchArbiterApplications: async (community: string, excludePubkeys?: string[]) => {
       const client = clientRef.current;
