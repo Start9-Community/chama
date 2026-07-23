@@ -69,6 +69,8 @@ import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { BitcoinPricePill } from "../components/BitcoinPricePill.js";
 import { SwipeImageGallery } from "../components/SwipeImageGallery.js";
 import { NwcStatusBanner } from "../components/NwcStatusBanner.js";
+import { nip99ListingUri } from "../../escrow-engine/nip99-listing.js";
+import { DEFAULT_RELAYS } from "../../escrow-engine/default-relays.js";
 import { ChatPanel } from "../panels/ChatPanel.js";
 import { PagerPills } from "./tradedetail/PagerPills.js";
 import {
@@ -823,6 +825,9 @@ export function TradeDetail({
   const billTypeChip = state.category === "bill-pay" ? billTypeDisplay(state.billType) : null;
   const showHeroFiat = amountDisplayMode === "fiat" && !!heroFiatLabel;
   const shortTradeId = state.id.length > 18 ? `${state.id.slice(0, 10)}…${state.id.slice(-6)}` : state.id;
+  const publicStoreListingUri = state.category === "marketplace" && !isChildOrder(state)
+    ? nip99ListingUri(state.initiator.pubkey, state.id, DEFAULT_RELAYS.slice(0, 3))
+    : null;
   const releaseVoteCount = Object.values(state.votes).filter(v => v === Outcome.RELEASE).length;
   const refundVoteCount = Object.values(state.votes).filter(v => v === Outcome.REFUND).length;
   // v3.2: dispute is a first-class header state — "A call is needed" the
@@ -3027,6 +3032,45 @@ export function TradeDetail({
               </span>
             </div>
           )}
+        </div>
+      )}
+
+      {publicStoreListingUri && (
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          background: T.card,
+          border: `1px solid ${T.border}`,
+          borderRadius: T.r,
+          padding: "10px 12px",
+          marginBottom: 12,
+        }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ color: T.text, fontFamily: T.mono, fontSize: 11, fontWeight: 800 }}>
+              {t("trade.nostrListing")}
+            </div>
+            <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.45, marginTop: 2 }}>
+              {t("trade.nostrListingHint")}
+            </div>
+          </div>
+          <CopyButton
+            value={publicStoreListingUri}
+            label={t("common.copyLink")}
+            style={{
+              flexShrink: 0,
+              background: T.surface,
+              border: `1px solid ${T.accent}`,
+              borderRadius: T.rs,
+              color: T.accent,
+              fontFamily: T.mono,
+              fontSize: 10,
+              fontWeight: 800,
+              padding: "7px 10px",
+              whiteSpace: "nowrap",
+            }}
+          />
         </div>
       )}
 

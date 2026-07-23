@@ -152,6 +152,12 @@ export interface ArbiterEarningRecord {
   updatedAt: number; // ms
 }
 
+/** Return a defensive snapshot for relay-backed cross-device reconciliation. */
+export function listArbiterEarningRecords(): ArbiterEarningRecord[] {
+  return Object.values(loadStore<ArbiterEarningRecord>(ARBITER_EARNINGS_KEY))
+    .map((record) => ({ ...record }));
+}
+
 export function getEarningRecord(eventId: string): ArbiterEarningRecord | null {
   return loadStore<ArbiterEarningRecord>(ARBITER_EARNINGS_KEY)[eventId] ?? null;
 }
@@ -180,6 +186,35 @@ export function recordEarningRedeemed(entry: {
     updatedAt: Date.now(),
   };
   saveStore(ARBITER_EARNINGS_KEY, store, ARBITER_EARNINGS_MAX);
+}
+
+/** Merge a receipt recovered from the user's self-encrypted Nostr history.
+ * A remote redeemed receipt may upgrade a local failed attempt, but an older
+ * receipt never rewinds the local timestamp or mutates an already-redeemed
+ * amount. The premium event id is the global dedupe key. */
+export function mergeSyncedEarningRedeemed(entry: {
+  eventId: string;
+  escrowId: string;
+  payer: string;
+  amountMsats: number;
+  noteKind: "ambient" | "dispute";
+  redeemedAt: number;
+}): boolean {
+  const store = loadStore<ArbiterEarningRecord>(ARBITER_EARNINGS_KEY);
+  const previous = store[entry.eventId];
+  if (previous?.status === "redeemed") return false;
+  store[entry.eventId] = {
+    eventId: entry.eventId,
+    escrowId: entry.escrowId,
+    payer: entry.payer,
+    amountMsats: entry.amountMsats,
+    noteKind: entry.noteKind,
+    status: "redeemed",
+    attempts: previous?.attempts ?? 0,
+    updatedAt: entry.redeemedAt,
+  };
+  saveStore(ARBITER_EARNINGS_KEY, store, ARBITER_EARNINGS_MAX);
+  return true;
 }
 
 /** Bump the failure counter (never downgrades a redeemed record). */

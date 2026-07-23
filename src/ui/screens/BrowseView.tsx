@@ -102,6 +102,14 @@ export function BrowseView({
     () => countOwnListings(matchingListings, pubkey) + countOwnListings(nonMatchingListings, pubkey),
     [matchingListings, nonMatchingListings, pubkey],
   );
+  // A persisted Mine preference should not strand a returning user on an empty
+  // feed. Wait until discovery settles, then fall back to All when they own 0.
+  useEffect(() => {
+    if (!listingsLoading && showOwn && ownListingCount === 0) {
+      setShowOwnState(false);
+      setBrowseShowOwn(false);
+    }
+  }, [listingsLoading, showOwn, ownListingCount]);
   const ownHiddenCount = showOwn ? 0 : ownListingCount;
   const ownFilteredMatching = useMemo(
     () => filterOwnListings(matchingListings, pubkey, showOwn),

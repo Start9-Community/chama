@@ -314,6 +314,45 @@ export function buildReclaimTx(params: {
   return bytesToHex(tx.extract());
 }
 
+/** Direct mature-bond rollover. This spends the old owner-only CLTV leaf straight
+ * into a freshly-derived commitment output; the sats never enter Fedimint or an
+ * intermediate wallet. The replacement term must begin in the future and meet
+ * the same minimum-term policy as a newly posted bond. */
+export function buildBondRolloverTx(params: {
+  oldBond: CommitmentBond;
+  newBond: CommitmentBond;
+  utxos: BondUtxo[];
+  oldOwnerPriv: Uint8Array;
+  feeSats: bigint;
+  currentHeight: number;
+  network?: BtcNetwork;
+}): string {
+  const { oldBond, newBond, utxos, oldOwnerPriv, feeSats, currentHeight } = params;
+  const network = params.network ?? oldBond.network;
+  if (oldBond.network !== network || newBond.network !== network) throw new Error("Bond rollover network mismatch");
+  if (!Number.isInteger(currentHeight) || currentHeight < oldBond.lockUntil) throw new Error("Old bond has not matured yet");
+  if (newBond.lockUntil < currentHeight + MIN_COMMITMENT_TERM_BLOCKS) throw new Error("Replacement bond term is too short");
+  // Recompute both scripts locally. Never accept a caller-supplied address/script
+  // as the authority for a real-money rollover.
+  const oldRecomputed = buildCommitmentBond(oldBond.ownerXonly, oldBond.lockUntil, network);
+  const nextRecomputed = buildCommitmentBond(newBond.ownerXonly, newBond.lockUntil, network);
+  if (oldRecomputed.address !== oldBond.address || bytesToHex(oldRecomputed.script) !== bytesToHex(oldBond.script)) {
+    throw new Error("Old bond descriptor failed recomputation");
+  }
+  if (nextRecomputed.address !== newBond.address || bytesToHex(nextRecomputed.script) !== bytesToHex(newBond.script)) {
+    throw new Error("Replacement bond descriptor failed recomputation");
+  }
+  return buildReclaimTx({
+    bond: oldRecomputed,
+    utxos,
+    ownerPriv: oldOwnerPriv,
+    destination: nextRecomputed.address,
+    feeSats,
+    txLockTime: oldBond.lockUntil,
+    network,
+  });
+}
+
 /** Spend the owner's normal BIP86 Taproot return output to a chosen destination.
  *  This is NOT the timelocked bond spend; it is the follow-up sweep of the plain
  *  return address produced by a reclaim. It lets the app credit already-reclaimed

@@ -50,10 +50,9 @@
 //   silently-unsaved stash would re-open the exact window this closes.
 // * An entry is cleared ONLY on a positively-confirmed outcome. Unknown
 //   trade state (relay fetch failed / fed mismatch) ⇒ keep, do nothing.
-// * Re-absorb of a `publish-attempted` entry additionally requires a
-//   healthy relay read (the fetched chain shows no LOCK AND ≥2 relays are
-//   connected) — a degraded read could hide a LOCK that our crash-window
-//   publish actually landed, and re-absorbing would hollow our OWN escrow.
+// * A `publish-attempted` entry is NEVER re-absorbed from relay absence alone.
+//   Relays may age out a valid LOCK that another device still retains; only
+//   positive chain evidence may decide it.
 //
 // ── Storage ────────────────────────────────────────────────────────────────
 //
@@ -111,7 +110,7 @@ export const NATIVE_LOCK_SUPPRESS_MAX_MS = 7 * 24 * 60 * 60 * 1000;
  * Matches the relay-manager's adaptive-quorum floor: below this, a fetched
  * "no LOCK exists" is too weak to bet the counterparty's escrow on.
  */
-export const NATIVE_LOCK_HEALTHY_RELAY_MIN = 2;
+export const NATIVE_LOCK_HEALTHY_RELAY_MIN = 2; // legacy export; absence no longer authorizes re-absorb
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -532,7 +531,7 @@ export async function recoverPendingNativeLock(
   //    relay pool BEFORE the fetch as well as after (F16): the fetch's own
   //    quorum freezes at REQ dispatch, so a boot-race where one relay
   //    answered and more connected afterwards must not read as healthy. ──
-  const relaysBeforeFetch = deps.getConnectedRelayCount();
+  deps.getConnectedRelayCount(); // diagnostic capability retained; not proof of event absence
   let state: EscrowState | null = null;
   try {
     state = await deps.loadEscrow(entry.escrowId);
@@ -572,13 +571,7 @@ export async function recoverPendingNativeLock(
     // publish-attempted: "no LOCK in the fetch" is only trustworthy on a
     // healthy read — a degraded pool could hide a LOCK that one relay took.
     // Both samples (pre-fetch + now) must clear the bar.
-    if (
-      relaysBeforeFetch >= NATIVE_LOCK_HEALTHY_RELAY_MIN &&
-      deps.getConnectedRelayCount() >= NATIVE_LOCK_HEALTHY_RELAY_MIN
-    ) {
-      return reabsorb(entry, deps, state);
-    }
-    noteKept(entry.escrowId, "publish-attempted entry needs a healthy relay read", { bumpAttempts: false });
+    noteKept(entry.escrowId, "publish-attempted LOCK absent from relays; waiting for positive evidence", { bumpAttempts: false });
     return "kept";
   }
 

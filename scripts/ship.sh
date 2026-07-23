@@ -223,7 +223,11 @@ echo "  zapstore note: $([ "$HAVE_ZAP" = 1 ] && echo "$ZAP_NOTES" || echo "(none
 echo "  push to main : $([ "$DO_PUSH" = 1 ] && echo yes || echo "no (--no-push)")"
 echo "  full release : $([ "$DO_RELEASE" = 1 ] && echo yes || echo "no (--no-release)")"
 echo "  steps:"
-echo "    1) npm version $([ -n "$SET_VERSION" ] && echo "$SET_VERSION" || echo "$BUMP") --no-git-tag-version"
+if [ "$NEW_VERSION" = "$CURRENT_VERSION" ]; then
+  echo "    1) keep existing untagged package version $NEW_VERSION"
+else
+  echo "    1) npm version $([ -n "$SET_VERSION" ] && echo "$SET_VERSION" || echo "$BUMP") --no-git-tag-version"
+fi
 echo "    2) git add -A && git commit -F \"$REL_NOTES\"$([ "$DO_PUSH" = 1 ] && echo " && git push origin main")"
 [ "$DO_RELEASE" = 1 ] && echo "    3) npm run release:all -- ${RELEASE_FLAGS[*]}"
 if [ -n "$PREFLIGHT_WARN" ]; then
@@ -244,7 +248,13 @@ fi
 
 # ── 1. Bump package.json (no tag — release.sh --current tags later) ───────
 echo "🔧 npm version → v$NEW_VERSION"
-if [ -n "$SET_VERSION" ]; then
+if [ "$NEW_VERSION" = "$CURRENT_VERSION" ]; then
+  if git rev-parse -q --verify "refs/tags/v$NEW_VERSION" >/dev/null; then
+    echo "❌ v$NEW_VERSION is already tagged; refusing to re-ship it."
+    exit 1
+  fi
+  echo "↷ package files already declare v$NEW_VERSION; keeping the untagged release version."
+elif [ -n "$SET_VERSION" ]; then
   npm version "$SET_VERSION" --no-git-tag-version >/dev/null
 else
   npm version "$BUMP" --no-git-tag-version >/dev/null

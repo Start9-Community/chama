@@ -125,7 +125,7 @@ export const claim: Record<string, string> = {
     "Saved Lightning Addresses for claims and recovery. These stay local to this browser and are never shown to a trade counterparty.",
   "claim.lnFast": "LN · FAST",
   "claim.longRunningEscape":
-    "Taking longer than expected. Your claim is published and your sats are safe — close and check back, or let it finish in the background.",
+    "Taking longer than expected. Your claim is published, but wallet credit is not confirmed yet — close and check back, or let Chama keep checking in the background.",
   "claim.mask": "Mask",
   "claim.methodOnchainSlow": "ONCHAIN · SLOW",
   "claim.moreOptionsClosed": "▸ More options",

@@ -71,6 +71,10 @@ import { simTagOrNull, shouldDropForSimPolicy } from "../sim/simMode.js";
 import { verifyEvent as verifyNostrEventSignature } from "nostr-tools/pure";
 import { randomId } from "../storage/random-id.js";
 import { compactSelectedMenuItems } from "./selected-menu-items.js";
+import {
+  buildNip99ListingEvent,
+  nip99ListingCoordinate,
+} from "./nip99-listing.js";
 
 // ══════════════════════════════════════════════════════════════════════════
 // SIGNER INTERFACE — Injected dependency for key operations
@@ -714,12 +718,38 @@ export class EscrowClient {
         // relay-discoverable from the seller's side (discoverMyEscrowIds)
         // before they ever act on it. Additive; replay ignores this tag.
         ...(params.sellerPubkey ? [[TAGS.PARTICIPANT, params.sellerPubkey]] : []),
+        // Store listings have a standard NIP-99 public identity. The Chama
+        // CREATE remains the escrow-capable source of truth and points to its
+        // interoperable classified-listing mirror by addressable coordinate.
+        ...(params.category === "marketplace" && !params.parent
+          ? [["a", nip99ListingCoordinate(pubkey, escrowId)]]
+          : []),
       ],
       content,
     };
 
     const signed = await this.signWithSimTag(unsigned);
     await this.relayManager.publish(signed);
+
+    // Best-effort dual publication: a relay/signer failure in the NIP-99
+    // mirror must not turn the already-published escrow CREATE into a false
+    // failure. Only Store parents/standalone listings are mirrored; buyer-
+    // authored child orders and Chama's other verticals stay private to the
+    // escrow protocol.
+    const nip99Unsigned = buildNip99ListingEvent({
+      payload,
+      pubkey,
+      escrowId,
+      createdAt: now,
+    });
+    if (nip99Unsigned) {
+      try {
+        const nip99Signed = await this.signWithSimTag(nip99Unsigned);
+        await this.relayManager.publish(nip99Signed);
+      } catch (error) {
+        console.warn(`[chama] NIP-99 mirror publish failed for ${escrowId}:`, error);
+      }
+    }
 
     // Apply locally immediately (optimistic)
     const parsed = parseEscrowEvent(signed, JSON.stringify(payload), true);

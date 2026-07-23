@@ -197,6 +197,7 @@ import * as btcSigner from "@scure/btc-signer";
 import { findBondFundingUtxos, esploraFetcher, defaultEsploraBase, defaultMinConfs, esploraTipHeight, esploraBroadcast, esploraOutspend, esploraRecommendedFeeRate } from "../bond-multisig/fund-watcher.js";
 import {
   buildCommitmentBond,
+  buildBondRolloverTx,
   buildReclaimTx,
   buildKeyPathSweepTx,
   deriveBondSigningKey,
@@ -311,6 +312,7 @@ import {
   recordEarningRedeemed,
   recordEarningAttemptFailed,
 } from "../arbiters/arbiter-earnings.js";
+import { syncArbiterEarnings } from "../arbiters/arbiter-earnings-sync.js";
 import {
   MIN_REAL_ATOMIC_FUNDING_MSATS,
   minimumAtomicFundingMessage,
@@ -648,6 +650,8 @@ export interface UseEscrowState {
   loading: boolean;
   /** Browse has connected but is still verifying public listing chains. */
   publicListingsLoading: boolean;
+  /** Increments when the local earnings view changes or relay receipts merge. */
+  earningsRevision: number;
   /** Fedimint wallet state */
   fedimint: FedimintState;
   /**
@@ -939,6 +943,12 @@ export interface UseEscrowActions {
    *  deposit landing after the first is still recorded) → mark/keep it LOCKED with
    *  the full UTXO set. { locked:false } = nothing confirmed yet, keep waiting. */
   checkCommitmentFunding: (bondId: string) => Promise<{ locked: boolean; txid?: string; lockedSats?: bigint; deposits?: number }>;
+  getCommitmentReclaimQuote: (bondId: string) => Promise<{ finalityDelay: number; minimumDepositSats: number; pegInFeeSats: number; minerFeeSats: bigint; estimatedNetSats: bigint } | null>;
+  /** Spend a mature bond directly into a fresh owner-only CLTV bond. The new
+   * record stays pending until the normal on-chain confirmation gate promotes it. */
+  renewCommitmentBond: (bondId: string, termBlocks: number) => Promise<{
+    bondId: string; txid: string; amountSats: bigint; feeSats: bigint; lockUntil: number; pending: boolean;
+  }>;
   /** After the term (tip ≥ lockUntil), sweep EVERY UTXO at the bond address back to
    *  the arbiter's own key and broadcast. ⚠ moves the arbiter's OWN sats. Consensus
    *  is the authority: a too-early attempt is rejected by the network and surfaced
@@ -1188,6 +1198,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     error: null,
     loading: false,
     publicListingsLoading: false,
+    earningsRevision: 0,
     fundingInProgress: false,
     claimPayoutInProgress: false,
     fedimint: {
@@ -1436,6 +1447,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       // These flow through the same onStateUpdate callback and land in `escrows`;
       // the UI filters by "am I a participant" to split Browse from My trades.
       client.watchPublicListings();
+
+      // Identity-wide accounting: recover self-encrypted premium receipts from
+      // relays, then backfill receipts for legacy local-only redemptions. This
+      // is history synchronization only; bearer ecash stays device-local.
+      void syncArbiterEarnings(client)
+        .then(() => setState(prev => ({ ...prev, earningsRevision: prev.earningsRevision + 1 })))
+        .catch(() => { /* fail-soft; the next boot/reconnect retries */ });
 
       // A public CREATE is intentionally hidden until its complete chain has
       // been quorum-verified (otherwise a stale completed offer can flash as
@@ -1686,6 +1704,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       error: null,
       loading: false,
       publicListingsLoading: false,
+      earningsRevision: 0,
       fundingInProgress: false,
       claimPayoutInProgress: false,
       fedimint: {
@@ -1758,6 +1777,13 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     const t = setTimeout(() => {
       lastDiscoveryRelayCountRef.current = grewTo;
       void runDiscovery(client, pk);
+      // The connect-time earnings sync can begin before a slow Android WebView
+      // has any usable relay socket. Retry as the relay set comes alive so a
+      // legacy v5.3 local premium (first opened under v5.4) is actually
+      // backfilled instead of waiting for another app restart.
+      void syncArbiterEarnings(client)
+        .then(() => setState(prev => ({ ...prev, earningsRevision: prev.earningsRevision + 1 })))
+        .catch(() => {});
     }, delay);
     return () => clearTimeout(t);
   }, [state.connected, state.pubkey, state.connectedRelays, runDiscovery]);
@@ -2204,6 +2230,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       return result;
     } catch (e: any) {
       const msg = e?.message || String(e);
+
+      // A published CLAIM is not proof that the wallet received the ecash.
+      // The bridge marks terminal mint outcomes separately; propagate those
+      // so the payout orchestrator can run its absolute-balance cover check
+      // and, when no matching credit exists, show the honest terminal error.
+      // The unresolved redemption record remains available for recovery.
+      if (e?.claimPublished && e?.settlementFailed) {
+        console.error(
+          "[chama] Claim published, but wallet settlement was not confirmed:",
+          msg,
+        );
+        notify?.({ phase: "failure", escrowId, reason: msg });
+        throw e;
+      }
 
       // v0.1.63: partial-success claim — chain correct, redeem in flight
       // ─────────────────────────────────────────────────────────────────
@@ -4185,7 +4225,15 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         console.warn("[chama] arbiter premium: redeem failed:", e);
       }
     }
-    if (redeemedAny) refreshBalanceRef.current?.().catch(() => {});
+    if (redeemedAny) {
+      setState(prev => ({ ...prev, earningsRevision: prev.earningsRevision + 1 }));
+      refreshBalanceRef.current?.().catch(() => {});
+      // Publish the newly redeemed receipt and opportunistically backfill any
+      // pre-v5.4 local records. Never block redemption success on relay health.
+      void syncArbiterEarnings(client)
+        .then(() => setState(prev => ({ ...prev, earningsRevision: prev.earningsRevision + 1 })))
+        .catch(() => {});
+    }
   };
 
   // Task #62 arbiter redeem-probe. The App redeem sweep only walks LOADED
@@ -4364,6 +4412,105 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       const total = utxos.reduce((s, u) => s + u.amountSats, 0n);
       const locked = upsertCommitmentBond({ ...rec, phase: "locked", utxos, amountSats: total });
       return { locked: true, txid: locked.utxos?.[0]?.txid, lockedSats: total, deposits: utxos.length };
+    },
+    getCommitmentReclaimQuote: async (bondId: string) => {
+      const rec = getCommitmentBond(bondId);
+      const fedimint = fedimintRef.current;
+      if (!rec || !fedimint?.isInitialized() || !fedimint.isJoined()) return null;
+      const info = await fedimint.getOnchainInfo();
+      const utxos = rec.utxos ?? [];
+      if (utxos.length === 0) return null;
+      const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
+      const rate = await esploraRecommendedFeeRate(fetchJson, { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
+      const minerFeeSats = estimateReclaimFeeSats(rec.bond, utxos.length, rate);
+      const total = utxos.reduce((sum, u) => sum + u.amountSats, 0n);
+      return {
+        finalityDelay: Math.max(0, Math.trunc(info.finalityDelay)),
+        minimumDepositSats: Math.max(0, Math.trunc(info.minimumDepositSats)),
+        pegInFeeSats: Math.max(0, Math.trunc(info.pegInFeeSats)),
+        minerFeeSats,
+        estimatedNetSats: total - minerFeeSats - BigInt(Math.max(0, Math.trunc(info.pegInFeeSats))),
+      };
+    },
+    renewCommitmentBond: async (bondId: string, termBlocks: number) => {
+      const old = getCommitmentBond(bondId);
+      if (!old) throw new Error("Unknown bond.");
+      if (old.phase !== "locked") throw new Error("Only a funded bond can be renewed.");
+      if (!Number.isInteger(termBlocks) || termBlocks < MIN_COMMITMENT_TERM_BLOCKS) {
+        throw new Error(`A renewed bond must lock for at least ${MIN_COMMITMENT_TERM_BLOCKS} blocks.`);
+      }
+      // Idempotent resume: the raw transaction is journaled before its first
+      // broadcast. A double tap or restart re-broadcasts the same transaction.
+      if (old.renewalToBondId) {
+        const next = getCommitmentBond(old.renewalToBondId);
+        if (!next?.renewalRawTx) throw new Error("Renewal journal is incomplete; no sats were moved.");
+        let txid = next.renewalTxid;
+        if (!txid) {
+          try { txid = await esploraBroadcast(defaultEsploraBase(BOND_NETWORK), next.renewalRawTx); }
+          catch (error: any) {
+            if (!/missingorspent|already.*(mempool|chain|known)|txn-already/i.test(error?.message ?? "")) throw error;
+            const first = old.utxos?.[0];
+            const out = first ? await esploraOutspend(esploraFetcher(defaultEsploraBase(BOND_NETWORK)), first.txid, first.index).catch(() => null) : null;
+            if (!out?.spent || !out.txid) throw error;
+            txid = out.txid;
+          }
+        }
+        if (txid !== next.renewalTxid) {
+          upsertCommitmentBond({ ...next, renewalTxid: txid, renewalBroadcastAt: Date.now() });
+          upsertCommitmentBond({ ...old, renewalTxid: txid, renewalBroadcastAt: Date.now() });
+        }
+        return { bondId: next.bondId, txid, amountSats: next.amountSats, feeSats: next.renewalFeeSats ?? 0n, lockUntil: next.bond.lockUntil, pending: next.phase !== "locked" };
+      }
+      const client = clientRef.current;
+      const signer = signerRef.current;
+      if (!client || !signer) throw new Error("Reconnect to renew — your bond remains safe on-chain.");
+      const base = defaultEsploraBase(BOND_NETWORK);
+      const fetchJson = esploraFetcher(base);
+      const tip = await esploraTipHeight(fetchJson);
+      if (tip < old.bond.lockUntil) throw new Error(`This bond unlocks at block ${old.bond.lockUntil}; it cannot renew before then.`);
+      const fresh = await findBondFundingUtxos({ address: old.bond.address, fetchJson, minConfs: defaultMinConfs(BOND_NETWORK) });
+      const utxos = fresh.map((f) => f.utxo);
+      if (utxos.length === 0) {
+        const cached = old.utxos ?? [];
+        const out = cached[0] ? await esploraOutspend(fetchJson, cached[0].txid, cached[0].index).catch(() => null) : null;
+        if (out?.spent && out.txid) throw new Error(`This bond was already spent in ${out.txid}; it cannot be renewed.`);
+        throw new Error("No unspent bond output was found. Nothing was broadcast.");
+      }
+      const words = await getOrCreateSeed(client, signer);
+      const oldKey = deriveBondSigningKey(words.join(" "), { network: BOND_NETWORK, index: old.keyIndex ?? 0 });
+      if (!oldKey.xonly.every((b, i) => b === old.bond.ownerXonly[i])) throw new Error("Bond key mismatch — renewal refused.");
+      const keyIndex = listCommitmentBonds().reduce((m, b) => Math.max(m, b.keyIndex ?? 0), -1) + 1;
+      const nextKey = deriveBondSigningKey(words.join(" "), { network: BOND_NETWORK, index: keyIndex });
+      const lockUntil = tip + termBlocks;
+      const nextBond = buildCommitmentBond(nextKey.xonly, lockUntil, BOND_NETWORK);
+      const feeRate = await esploraRecommendedFeeRate(fetchJson, { floorPerVb: DEFAULT_RECLAIM_FEE_RATE });
+      const feeSats = estimateReclaimFeeSats(old.bond, utxos.length, feeRate);
+      const total = utxos.reduce((sum, u) => sum + u.amountSats, 0n);
+      const amountSats = total - feeSats;
+      const rawTx = buildBondRolloverTx({ oldBond: old.bond, newBond: nextBond, utxos, oldOwnerPriv: oldKey.priv, feeSats, currentHeight: tip, network: BOND_NETWORK });
+      const nextBondId = newBondId();
+      const createdAt = Math.floor(Date.now() / 1000);
+      upsertCommitmentBond({
+        bondId: nextBondId, bond: nextBond, amountSats, phase: "created", keyIndex,
+        renewedFromBondId: old.bondId, renewalRawTx: rawTx, renewalFeeSats: feeSats, createdAt,
+      });
+      upsertCommitmentBond({ ...old, renewalToBondId: nextBondId, renewalRawTx: rawTx, renewalFeeSats: feeSats });
+      let txid: string;
+      try {
+        txid = await esploraBroadcast(base, rawTx);
+      } catch (error: any) {
+        const msg = error?.message ?? "";
+        if (/missingorspent|already.*(mempool|chain|known)|txn-already/i.test(msg)) {
+          const out = await esploraOutspend(fetchJson, utxos[0].txid, utxos[0].index).catch(() => null);
+          if (!out?.spent || !out.txid) throw error;
+          txid = out.txid;
+        } else throw error;
+      }
+      const broadcastAt = Date.now();
+      const next = getCommitmentBond(nextBondId)!;
+      upsertCommitmentBond({ ...next, renewalTxid: txid, renewalBroadcastAt: broadcastAt });
+      upsertCommitmentBond({ ...old, renewalToBondId: nextBondId, renewalTxid: txid, renewalBroadcastAt: broadcastAt });
+      return { bondId: nextBondId, txid, amountSats, feeSats, lockUntil, pending: true };
     },
     reclaimCommitmentBond: async (bondId: string, destinationChoice: ReclaimDestinationChoice = { kind: "chama" }) => {
       const rec = getCommitmentBond(bondId);

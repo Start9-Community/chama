@@ -70,6 +70,14 @@ export interface CommitmentRecord {
   /** Set once the Fedimint on-chain deposit (peg-in) has confirmed and the ecash
    *  landed in the spendable Chama balance — the "credit landed" signal the UI shows. */
   creditConfirmedAt?: number;
+  /** v5.4 direct rollover journal. The replacement record remains `created`
+   * until its output reaches the normal bond confirmation policy. */
+  renewedFromBondId?: string;
+  renewalToBondId?: string;
+  renewalTxid?: string;
+  renewalRawTx?: string;
+  renewalFeeSats?: bigint;
+  renewalBroadcastAt?: number;
   createdAt: number;
 }
 
@@ -93,6 +101,12 @@ interface SerializedCommitment {
   creditTxid?: string;
   creditOperationId?: string;
   creditConfirmedAt?: number;
+  renewedFromBondId?: string;
+  renewalToBondId?: string;
+  renewalTxid?: string;
+  renewalRawTx?: string;
+  renewalFeeSats?: string;
+  renewalBroadcastAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -118,6 +132,12 @@ export function serializeCommitment(rec: CommitmentRecord): SerializedCommitment
     ...(rec.creditTxid ? { creditTxid: rec.creditTxid } : {}),
     ...(rec.creditConfirmedAt ? { creditConfirmedAt: rec.creditConfirmedAt } : {}),
     ...(rec.creditOperationId ? { creditOperationId: rec.creditOperationId } : {}),
+    ...(rec.renewedFromBondId ? { renewedFromBondId: rec.renewedFromBondId } : {}),
+    ...(rec.renewalToBondId ? { renewalToBondId: rec.renewalToBondId } : {}),
+    ...(rec.renewalTxid ? { renewalTxid: rec.renewalTxid } : {}),
+    ...(rec.renewalRawTx ? { renewalRawTx: rec.renewalRawTx } : {}),
+    ...(rec.renewalFeeSats !== undefined ? { renewalFeeSats: rec.renewalFeeSats.toString() } : {}),
+    ...(rec.renewalBroadcastAt ? { renewalBroadcastAt: rec.renewalBroadcastAt } : {}),
     createdAt: rec.createdAt,
     updatedAt: Date.now(),
   };
@@ -128,6 +148,7 @@ export function serializeCommitment(rec: CommitmentRecord): SerializedCommitment
 export function deserializeCommitment(s: SerializedCommitment): CommitmentRecord | null {
   try {
     if (!/^\d+$/.test(s.amountSats)) return null;
+    if (s.renewalFeeSats !== undefined && !/^\d+$/.test(s.renewalFeeSats)) return null;
     const ownerXonly = hexToBytes(s.ownerXonly);
     if (ownerXonly.length !== 32) return null;
     const network = netFromLabel(s.network);
@@ -166,6 +187,12 @@ export function deserializeCommitment(s: SerializedCommitment): CommitmentRecord
       ...(s.creditTxid ? { creditTxid: s.creditTxid } : {}),
       ...(s.creditOperationId ? { creditOperationId: s.creditOperationId } : {}),
       ...(s.creditConfirmedAt ? { creditConfirmedAt: s.creditConfirmedAt } : {}),
+      ...(s.renewedFromBondId ? { renewedFromBondId: s.renewedFromBondId } : {}),
+      ...(s.renewalToBondId ? { renewalToBondId: s.renewalToBondId } : {}),
+      ...(s.renewalTxid ? { renewalTxid: s.renewalTxid } : {}),
+      ...(s.renewalRawTx ? { renewalRawTx: s.renewalRawTx } : {}),
+      ...(s.renewalFeeSats !== undefined ? { renewalFeeSats: BigInt(s.renewalFeeSats) } : {}),
+      ...(s.renewalBroadcastAt ? { renewalBroadcastAt: s.renewalBroadcastAt } : {}),
       createdAt: s.createdAt,
     };
   } catch {
@@ -315,6 +342,12 @@ export function upsertCommitmentBond(rec: CommitmentRecord): CommitmentRecord {
         creditTxid: rec.creditTxid ?? existing.creditTxid,
         creditOperationId: rec.creditOperationId ?? existing.creditOperationId,
         creditConfirmedAt: rec.creditConfirmedAt ?? existing.creditConfirmedAt,
+        renewedFromBondId: rec.renewedFromBondId ?? existing.renewedFromBondId,
+        renewalToBondId: rec.renewalToBondId ?? existing.renewalToBondId,
+        renewalTxid: rec.renewalTxid ?? existing.renewalTxid,
+        renewalRawTx: rec.renewalRawTx ?? existing.renewalRawTx,
+        renewalFeeSats: rec.renewalFeeSats ?? existing.renewalFeeSats,
+        renewalBroadcastAt: rec.renewalBroadcastAt ?? existing.renewalBroadcastAt,
       }
     : rec;
   map[rec.bondId] = serializeCommitment(merged);

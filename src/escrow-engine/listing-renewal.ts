@@ -28,6 +28,7 @@
 
 import { EscrowStatus, Role, type EscrowState } from "./types.js";
 import type { VerifiedBond } from "../bond-multisig/bond-announcement.js";
+import type { CommitmentRecord } from "../bond-multisig/commitment-store.js";
 
 /** Case-insensitive hex-pubkey compare (per-file helper convention). */
 function samePubkey(a?: string | null, b?: string | null): boolean {
@@ -51,6 +52,25 @@ export const BONDED_TENURE_SECONDS = 7 * 24 * 60 * 60;
  *  — re-declared locally to keep this pure escrow-engine module free of an
  *  arbiters import cycle. */
 export const LISTING_BOND_FLOOR_SATS = 10_000n;
+/** A broadcast rollover may bridge store renewal only while the replacement is
+ * awaiting its first confirmation. This grace never enters bond verification,
+ * arbiter assignment, ratings, or liveness. */
+export const STORE_ROLLOVER_GRACE_MS = 24 * 60 * 60 * 1000;
+
+export function hasPendingStoreRollover(
+  records: readonly CommitmentRecord[],
+  tip: number | null,
+  nowMs: number = Date.now(),
+): boolean {
+  if (tip == null) return false;
+  const byId = new Map(records.map((r) => [r.bondId, r]));
+  return records.some((next) => {
+    if (next.phase !== "created" || !next.renewedFromBondId || !next.renewalTxid || !next.renewalBroadcastAt) return false;
+    if (next.amountSats < LISTING_BOND_FLOOR_SATS || nowMs - next.renewalBroadcastAt > STORE_ROLLOVER_GRACE_MS) return false;
+    const old = byId.get(next.renewedFromBondId);
+    return !!old && old.phase === "locked" && old.renewalToBondId === next.bondId && old.renewalTxid === next.renewalTxid && tip >= old.bond.lockUntil;
+  });
+}
 
 /** True when `npub` holds a chain-verified, funded, still-active 38135 bond at
  *  or above the storefront-license floor. Drives Tier 3 tenure. */

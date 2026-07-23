@@ -1,6 +1,8 @@
 android/.idea/
+/.startos
 node_modules/
 dist/
+/javascript/
 *.db
 *.db-journal
 .env

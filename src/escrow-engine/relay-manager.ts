@@ -129,6 +129,8 @@ const MAX_RETRY_MS = 60_000;
 const PUBLISH_TIMEOUT_MS = 8_000;
 const PUBLISH_CONNECT_WAIT_MS = 8_000;
 const PUBLISH_CONNECT_POLL_MS = 250;
+const PREFERRED_RELAY_URL = "wss://relay.chama.community";
+const PREFERRED_RELAY_ACK_GRACE_MS = 1_500;
 // Webview-safe fetch quorum. A one-shot REQ must not resolve against a single
 // fast relay while the rest are still handshaking — iOS in-app browser / Fedi
 // webview bring sockets up slowly and staggered, so a fetch that fired with
@@ -583,7 +585,8 @@ export class RelayManager {
     // same accepted>=1 rule as before); stragglers settle in the background
     // and are logged for relay health. Zero accepts still rejects with the
     // same error as before.
-    const sends = connected.map(relay => this.publishToSingleRelay(relay, event));
+    const sends = connected.map(relay => ({ relay, promise: this.publishToSingleRelay(relay, event) }));
+    const preferredConnected = connected.some((relay) => relay.url === PREFERRED_RELAY_URL);
 
     return await new Promise((resolve, reject) => {
       let settledCount = 0;
@@ -591,8 +594,18 @@ export class RelayManager {
       let rejected = 0;
       const errors: string[] = [];
       let resolvedEarly = false;
+      let fallbackAccept: { accepted: number; rejected: number; errors: string[] } | null = null;
+      let preferredSettled = !preferredConnected;
+      let preferredGrace: ReturnType<typeof setTimeout> | null = null;
 
-      for (const send of sends) {
+      const resolveAccepted = () => {
+        if (resolvedEarly || !fallbackAccept) return;
+        resolvedEarly = true;
+        if (preferredGrace) clearTimeout(preferredGrace);
+        resolve(fallbackAccept);
+      };
+
+      for (const { relay, promise: send } of sends) {
         // publishToSingleRelay never rejects (timeouts resolve as
         // {accepted:false, message}), so .then is exhaustive here.
         void send.then(result => {
@@ -604,9 +617,22 @@ export class RelayManager {
             errors.push(result.message);
           }
 
+          if (relay.url === PREFERRED_RELAY_URL) preferredSettled = true;
+
           if (!resolvedEarly && result.accepted) {
-            resolvedEarly = true;
-            resolve({ accepted, rejected, errors: [...errors] });
+            fallbackAccept = { accepted, rejected, errors: [...errors] };
+            // When Chama's relay is connected, give its durable ACK a short
+            // priority window. Public relays remain the bounded fallback.
+            if (relay.url === PREFERRED_RELAY_URL || preferredSettled) {
+              resolveAccepted();
+            } else if (!preferredGrace) {
+              preferredGrace = setTimeout(resolveAccepted, PREFERRED_RELAY_ACK_GRACE_MS);
+            }
+            return;
+          }
+
+          if (!resolvedEarly && relay.url === PREFERRED_RELAY_URL && preferredSettled && fallbackAccept) {
+            resolveAccepted();
             return;
           }
 

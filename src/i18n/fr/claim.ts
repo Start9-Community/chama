@@ -129,7 +129,7 @@ export const claim: Record<string, string> = {
     "Adresses Lightning enregistrées pour les réclamations et la récupération. Elles restent locales à ce navigateur et ne sont jamais montrées à une contrepartie d'échange.",
   "claim.lnFast": "LN · RAPIDE",
   "claim.longRunningEscape":
-    "C'est plus long que prévu. Votre réclamation est publiée et vos sats sont en sécurité — fermez et revenez voir, ou laissez finir en arrière-plan.",
+    "C'est plus long que prévu. Votre réclamation est publiée, mais le crédit du portefeuille n'est pas encore confirmé — fermez et revenez voir, ou laissez Chama continuer à vérifier en arrière-plan.",
   "claim.mask": "Masquer",
   "claim.methodOnchainSlow": "ONCHAIN · LENT",
   "claim.moreOptionsClosed": "▸ Plus d'options",

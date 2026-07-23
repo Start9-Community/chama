@@ -119,7 +119,7 @@ export const claim: Record<string, string> = {
     "Direcciones Lightning guardadas para cobros y recuperación. Se quedan locales en este navegador y nunca se muestran a la contraparte de un intercambio.",
   "claim.lnFast": "LN · RÁPIDO",
   "claim.longRunningEscape":
-    "Está tardando más de lo esperado. Tu cobro está publicado y tus sats están a salvo — cierra y vuelve a revisar, o deja que termine en segundo plano.",
+    "Está tardando más de lo esperado. Tu cobro está publicado, pero el abono en la billetera aún no está confirmado — cierra y vuelve a revisar, o deja que Chama siga comprobándolo en segundo plano.",
   "claim.mask": "Ocultar",
   "claim.methodOnchainSlow": "EN CADENA · LENTO",
   "claim.moreOptionsClosed": "▸ Más opciones",

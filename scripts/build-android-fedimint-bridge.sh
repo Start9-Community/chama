@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST_PATH="$ROOT_DIR/native/fedimint-bridge/Cargo.toml"
 TARGET="${CHAMA_ANDROID_RUST_TARGET:-aarch64-linux-android}"
 ABI="${CHAMA_ANDROID_ABI:-arm64-v8a}"
-ANDROID_API="${CHAMA_ANDROID_API:-23}"
+ANDROID_API="${CHAMA_ANDROID_API:-24}"
 OUTPUT_DIR="$ROOT_DIR/android/app/build/generated/jniLibs/chamaFedimintBridge"
 
 usage() {
@@ -13,9 +13,10 @@ usage() {
 Usage:
   scripts/build-android-fedimint-bridge.sh [--output-dir DIR]
 
-Builds the Chama Fedimint Rust bridge for Android arm64 and writes it as:
-  DIR/arm64-v8a/libchama_fedimint_bridge.so
-  DIR/arm64-v8a/libc++_shared.so
+Builds the Chama Fedimint Rust bridge for the ABI selected by
+CHAMA_ANDROID_ABI / CHAMA_ANDROID_RUST_TARGET and writes it as:
+  DIR/<abi>/libchama_fedimint_bridge.so
+  DIR/<abi>/libc++_shared.so
 
 Required:
   Android NDK side-by-side install, or ANDROID_NDK_HOME/ANDROID_NDK_ROOT.
@@ -102,8 +103,23 @@ fi
 
 TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/$NDK_HOST/bin"
 SYSROOT="$NDK_DIR/toolchains/llvm/prebuilt/$NDK_HOST/sysroot"
-CLANG="$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang"
-CLANGXX="$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang++"
+case "$TARGET:$ABI" in
+  aarch64-linux-android:arm64-v8a)
+    CLANG_TRIPLE="aarch64-linux-android"
+    SYSROOT_TRIPLE="aarch64-linux-android"
+    ;;
+  armv7-linux-androideabi:armeabi-v7a)
+    CLANG_TRIPLE="armv7a-linux-androideabi"
+    SYSROOT_TRIPLE="arm-linux-androideabi"
+    ;;
+  *)
+    echo "❌ Unsupported Android Rust target / ABI pair: $TARGET / $ABI"
+    echo "   Supported: aarch64-linux-android/arm64-v8a, armv7-linux-androideabi/armeabi-v7a"
+    exit 1
+    ;;
+esac
+CLANG="$TOOLCHAIN/${CLANG_TRIPLE}${ANDROID_API}-clang"
+CLANGXX="$TOOLCHAIN/${CLANG_TRIPLE}${ANDROID_API}-clang++"
 AR="$TOOLCHAIN/llvm-ar"
 
 if [ ! -x "$CLANG" ] || [ ! -x "$CLANGXX" ] || [ ! -x "$AR" ]; then
@@ -140,7 +156,7 @@ env \
   "ANDROID_NDK_HOME=$NDK_DIR" \
   "ANDROID_NDK_ROOT=$NDK_DIR" \
   "CMAKE_TOOLCHAIN_FILE=$NDK_DIR/build/cmake/android.toolchain.cmake" \
-  "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$SYSROOT -I$SYSROOT/usr/include -I$SYSROOT/usr/include/aarch64-linux-android" \
+  "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$SYSROOT -I$SYSROOT/usr/include -I$SYSROOT/usr/include/$SYSROOT_TRIPLE" \
   "CC_${TARGET//-/_}=$CLANG" \
   "CXX_${TARGET//-/_}=$CLANGXX" \
   "AR_${TARGET//-/_}=$AR" \
@@ -156,7 +172,7 @@ env \
 SOURCE_BIN="$TARGET_DIR/$TARGET/release/chama-fedimint-bridge"
 DEST_DIR="$OUTPUT_DIR/$ABI"
 DEST_BIN="$DEST_DIR/libchama_fedimint_bridge.so"
-SOURCE_LIBCXX="$SYSROOT/usr/lib/$TARGET/libc++_shared.so"
+SOURCE_LIBCXX="$SYSROOT/usr/lib/$SYSROOT_TRIPLE/libc++_shared.so"
 DEST_LIBCXX="$DEST_DIR/libc++_shared.so"
 
 if [ ! -f "$SOURCE_BIN" ]; then

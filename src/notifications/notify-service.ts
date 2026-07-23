@@ -30,6 +30,10 @@ const DM_PREF_KEY = "chama_dm_notifications";
 const FIRED_KEY = "chama_notifications_fired_v1";
 /** Cap the persisted fired-tag set so it can't grow unbounded over a lifetime. */
 const MAX_FIRED_TAGS = 500;
+/** Session-only reservation while permission + OS scheduling are in flight.
+ * Persisting before scheduling used to turn one denied/failed attempt into a
+ * permanent false "already fired" result. */
+const notificationInFlight = new Set<string>();
 
 // ── Platform detection (inlined; keeps notifications decoupled from fedimint) ─
 
@@ -372,22 +376,43 @@ export async function ensureNotificationPermission(): Promise<boolean> {
 
 // ── Delivery ─────────────────────────────────────────────────────────────────
 
-async function deliver(n: TradeNotification): Promise<void> {
+async function deliver(n: TradeNotification): Promise<boolean> {
   notifyDebug(() => `deliver tag=${n.tag} platform=${platformName()}`);
   try {
     if (isCapacitorNative()) {
       const { LocalNotifications } = await import("@capacitor/local-notifications");
+      // Android freezes a channel's importance after first creation. The old
+      // implicit `default` channel was DEFAULT importance: it made a sound and
+      // entered the shade, but did not reliably show a heads-up card. Use a
+      // versioned HIGH channel so trade moments are visible as well as audible.
+      // createChannel is Android-only; Capacitor treats it as a harmless no-op
+      // on native platforms that do not expose notification channels.
+      const tradeChannelId = "trade-updates-v1";
+      let tradeChannelReady = false;
+      try {
+        await LocalNotifications.createChannel({
+          id: tradeChannelId,
+          name: "Trade updates",
+          description: "Buyer interest, locked trades, claims, and completion",
+          importance: 4,
+        });
+        tradeChannelReady = true;
+      } catch {
+        // Scheduling without the explicit channel is still better than losing
+        // the notification on an unusual/older native implementation.
+      }
       await LocalNotifications.schedule({
         notifications: [{
           // A stable small int id from the tag so re-fires would coalesce.
           id: (hashTag(n.tag) % 2_000_000_000) + 1,
           title: n.title,
           body: n.body,
+          ...(tradeChannelReady ? { channelId: tradeChannelId } : {}),
           extra: { escrowId: n.escrowId },
         }],
       });
       notifyDebug(() => `capacitor scheduled tag=${n.tag}`);
-      return;
+      return true;
     }
     if (isTauriNative()) {
       // `extra` rides the notification so onAction (deep-link.ts) can route the
@@ -416,7 +441,7 @@ async function deliver(n: TradeNotification): Promise<void> {
       } catch (e) {
         console.warn("[chama/notify] tauri notify IPC failed", e);
       }
-      return;
+      return true;
     }
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       // Android Chrome/PWA requires service-worker delivery. Prefer it on every
@@ -430,7 +455,7 @@ async function deliver(n: TradeNotification): Promise<void> {
           badge: "/icons/favicon-96x96.png",
           data: { escrowId: n.escrowId },
         });
-        return;
+        return true;
       }
       // Desktop browsers without service workers retain the page constructor.
       const notif = new Notification(n.title, { body: n.body, tag: n.tag });
@@ -441,10 +466,29 @@ async function deliver(n: TradeNotification): Promise<void> {
         setPendingTradeDeepLink(n.escrowId);
         try { notif.close(); } catch { /* ignore */ }
       };
+      return true;
     }
   } catch {
     /* a failed buzz must never surface to the user mid-trade */
   }
+  return false;
+}
+
+/** Deliver a fire-once notification, but only persist the dedupe token after
+ * the platform has actually accepted it. Permission denial and OS/plugin
+ * scheduling failures stay retryable on a later observation. */
+function deliverOnce(n: TradeNotification, context: string): void {
+  if (readFiredTags().has(n.tag) || notificationInFlight.has(n.tag)) return;
+  notificationInFlight.add(n.tag);
+  void (async () => {
+    try {
+      const allowed = await ensureNotificationPermission();
+      notifyDebug(() => `fire ${context} tag=${n.tag} platform=${platformName()} permission=${allowed}`);
+      if (allowed && await deliver(n)) recordFiredTag(n.tag);
+    } finally {
+      notificationInFlight.delete(n.tag);
+    }
+  })();
 }
 
 function hashTag(tag: string): number {
@@ -487,14 +531,7 @@ export function maybeNotifyTransition(
     notifyDebug(() => `skip (already fired) tag=${n.tag}`);
     return;
   }
-  // Reserve the tag synchronously so a burst of replays can't double-fire while
-  // the async permission/delivery is in flight.
-  recordFiredTag(n.tag);
-  void (async () => {
-    const allowed = await ensureNotificationPermission();
-    notifyDebug(() => `fire tag=${n.tag} platform=${platformName()} permission=${allowed} coldCatchup=${coldCatchup}`);
-    if (allowed) await deliver(n);
-  })();
+  deliverOnce(n, `transition coldCatchup=${coldCatchup}`);
 }
 
 /**
@@ -539,13 +576,7 @@ export function maybeNotifyBuyerInterest(
   if (!notificationsEnabled()) return;
   const n = buyerInterestNotificationFor(prev, next, userPubkey, liveSinceSec);
   if (!n) return;
-  if (readFiredTags().has(n.tag)) return;
-  recordFiredTag(n.tag); // reserve synchronously against replay double-fire
-  void (async () => {
-    const allowed = await ensureNotificationPermission();
-    notifyDebug(() => `fire buyer-interest tag=${n.tag} platform=${platformName()} permission=${allowed}`);
-    if (allowed) await deliver(n);
-  })();
+  deliverOnce(n, "buyer-interest");
 }
 
 /**
@@ -567,13 +598,7 @@ export function maybeNotifyNewListing(
   const label = (home && getCommunityBySlug(home)?.displayName) || home || "";
   const n = newListingNotificationFor(prev, next, userPubkey, home, label, liveSinceSec);
   if (!n) return;
-  if (readFiredTags().has(n.tag)) return;
-  recordFiredTag(n.tag);
-  void (async () => {
-    const allowed = await ensureNotificationPermission();
-    notifyDebug(() => `fire new-listing tag=${n.tag} platform=${platformName()} permission=${allowed}`);
-    if (allowed) await deliver(n);
-  })();
+  deliverOnce(n, "new-listing");
 }
 
 /**
@@ -659,7 +684,7 @@ export async function sendNotificationSelfTest(): Promise<boolean> {
   notifyDebug(() => `self-test start platform=${platformName()}`);
   const allowed = await ensureNotificationPermission();
   notifyDebug(() => `self-test permission=${allowed} platform=${platformName()}`);
-  if (allowed) await deliver(n);
+  const delivered = allowed ? await deliver(n) : false;
   notifyDebug(() => `self-test done allowed=${allowed} — no buzz on Tauri/macOS ⇒ dev posts as "Terminal" / unsigned prod is dropped (not an app bug)`);
-  return allowed;
+  return delivered;
 }

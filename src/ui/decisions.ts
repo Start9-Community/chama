@@ -642,6 +642,29 @@ export function selectNeedsYouTrades(inputs: {
   return ranked.map((r) => r.trade);
 }
 
+/**
+ * A seller's untouched parent listing opens in inventory management. Once a
+ * buyer has a live reservation, however, that same CREATED parent is an active
+ * order room: the seller must see the buyer/cart/countdown, not edit/cancel.
+ */
+export function shouldOpenSellerListingManagement(inputs: {
+  escrow: EscrowState;
+  viewerPubkey: string | null | undefined;
+  nowSec?: number;
+}): boolean {
+  const { escrow, viewerPubkey } = inputs;
+  if (
+    escrow.status !== EscrowStatus.CREATED
+    || escrow.initiator.role !== Role.SELLER
+    || !samePk(escrow.initiator.pubkey, viewerPubkey)
+    || escrow.parent
+  ) return false;
+
+  const nowSec = inputs.nowSec ?? Math.floor(Date.now() / 1000);
+  const buyerHold = escrow.joinHolds?.[Role.BUYER];
+  return !buyerHold || buyerHold.expiresAt <= nowSec;
+}
+
 /** The urgency reason (if any) a trade needs the user to act on — the public
  *  accessor over the private needsYouReason so the attention hero can render a
  *  one-line "what's owed" WITHOUT reimplementing the urgency logic. Returns

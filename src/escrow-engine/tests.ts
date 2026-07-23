@@ -104,6 +104,8 @@ import {
   listingNeverFunded,
   buildRenewCreateParams,
   sellerIsBonded,
+  hasPendingStoreRollover,
+  STORE_ROLLOVER_GRACE_MS,
   resolveListingTenure,
   isSellerOwnedListing,
   lapsedRenewableListings,
@@ -112,6 +114,7 @@ import {
 } from "./listing-renewal.js";
 import {
   isDueForRepost,
+  supersededRecurringSeriesIds,
   priorInstanceBlocks,
   nextRepostAt,
   RECURRENCE_PERIOD_SECONDS,
@@ -136,6 +139,13 @@ import {
   type UnsignedEvent,
 } from "./escrow-client.js";
 import { RelayManager, RelayStatus } from "./relay-manager.js";
+import {
+  buildNip99ListingEvent,
+  chamaEscrowCoordinate,
+  nip99ListingCoordinate,
+  nip99ListingNaddr,
+  nip99ListingUri,
+} from "./nip99-listing.js";
 
 // PR 2 imports
 import {
@@ -416,6 +426,7 @@ import {
 import { findBondFundingUtxos, esploraFetcher, esploraOutspend, esploraRecommendedFeeRate, defaultEsploraBase, defaultMinConfs, type EsploraFetch } from "../bond-multisig/fund-watcher.js";
 import {
   buildCommitmentBond, recomputeCommitmentAddress, buildReclaimTx, buildTimelockLeaf,
+  buildBondRolloverTx,
   buildKeyPathSweepTx, estimateReclaimVsize, estimateReclaimFeeSats,
   estimateKeyPathSweepVsize, estimateKeyPathSweepFeeSats, deriveBondSigningKey as deriveCommitmentKey,
   bip86BondPath, MIN_COMMITMENT_TERM_BLOCKS, DEFAULT_RECLAIM_FEE_RATE,
@@ -885,6 +896,52 @@ function buildToLocked(): { state: any; lock: ParsedEscrowEvent<LockPayload> } {
   const r2 = applyEvent(r1.state, lock);
   if (!r2.ok) throw new Error("LOCK failed in helper: " + r2.error.message);
   return { state: r2.state, lock };
+}
+
+console.log("\n── NIP-99 Store listing interoperability ──");
+{
+  const pubkey = "11".repeat(32);
+  const payload = {
+    type: "escrow:create",
+    description: "Handmade table\nSolid wood, local pickup.",
+    imageDataUrl: "data:image/jpeg;base64,private-inline-image",
+    imageUrls: ["https://cdn.example/table.jpg", "data:image/png;base64,ignored"],
+    amountMsats: 125_000_000,
+    fiatAmount: 120_000,
+    fiatCurrency: "kes",
+    category: "marketplace",
+    fulfillment: "physical",
+    community: "ke-kes",
+    country: "ke",
+    mintUrl: "fed1example",
+    platformFeeBps: 100,
+    platformFeePubkey: pubkey,
+    expirySeconds: 86_400,
+    createdAt: 1_700_000_000,
+  } satisfies CreatePayload;
+  const event = buildNip99ListingEvent({ payload, pubkey, escrowId: "listing-123", createdAt: 1_700_000_001 });
+  assert(event?.kind === 30402, "Store CREATE builds a standard kind:30402 classified listing");
+  assert(event?.tags.some(tag => tag.join(":") === "d:listing-123") === true,
+    "NIP-99 mirror reuses the Chama escrow id as its stable d identifier");
+  assert(event?.tags.some(tag => tag.join(":") === "price:120000:KES") === true,
+    "NIP-99 mirror prefers the listing's native fiat price");
+  assert(event?.tags.some(tag => tag.join(":") === "expiration:1700086400") === true,
+    "NIP-99 mirror expires with the Chama listing instead of leaving stale inventory");
+  assert(event?.tags.some(tag => tag.join(":") === `a:${chamaEscrowCoordinate(pubkey, "listing-123")}`) === true,
+    "NIP-99 mirror links back to the Chama escrow coordinate");
+  assert(event?.tags.some(tag => tag[0] === "image" && tag[1] === "https://cdn.example/table.jpg") === true
+      && event?.tags.every(tag => tag[0] !== "image" || !tag[1].startsWith("data:")) === true,
+    "NIP-99 exposes fetchable image URLs but never inline data images");
+  assert(nip99ListingCoordinate(pubkey, "listing-123") === `30402:${pubkey}:listing-123`,
+    "Chama CREATE can link forward to the NIP-99 addressable coordinate");
+  const naddr = nip99ListingNaddr(pubkey, "listing-123", ["wss://relay.example"]);
+  assert(naddr.startsWith("naddr1") && nip99ListingUri(pubkey, "listing-123").startsWith("nostr:naddr1"),
+    "Store listings have copyable NIP-19/NIP-21 naddr links");
+
+  assert(buildNip99ListingEvent({ payload: { ...payload, category: "p2p-trade" }, pubkey, escrowId: "p2p", createdAt: 1 }) === null,
+    "P2P vertical is not misrepresented as a NIP-99 Store listing");
+  assert(buildNip99ListingEvent({ payload: { ...payload, parent: "store-parent", sellerPubkey: pubkey }, pubkey, escrowId: "order", createdAt: 1 }) === null,
+    "Buyer-authored child orders are not published as public classifieds");
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -1762,6 +1819,26 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
     "store: bonded ⇒ auto-renew + 7-day store horizon");
   assert(!unbondedT.autoRenew && unbondedT.maxTenureSeconds === UNBONDED_TENURE_SECONDS,
     "store: unbonded ⇒ manual renew only + 24h horizon");
+  const graceOwner = btcMs.utils.pubSchnorr(btcMs.utils.randomPrivateKeyBytes());
+  const oldGraceBond = buildCommitmentBond(graceOwner, 900_000, MS_MAINNET);
+  const nextGraceBond = buildCommitmentBond(graceOwner, 901_008, MS_MAINNET);
+  const graceNow = 1_700_000_000_000;
+  const oldGrace: CommitmentRecord = {
+    bondId: "old", bond: oldGraceBond, amountSats: 20_000n, phase: "locked", createdAt: 1,
+    renewalToBondId: "next", renewalTxid: "aa".repeat(32),
+  };
+  const nextGrace: CommitmentRecord = {
+    bondId: "next", bond: nextGraceBond, amountSats: 19_700n, phase: "created", createdAt: 2,
+    renewedFromBondId: "old", renewalTxid: "aa".repeat(32), renewalBroadcastAt: graceNow,
+  };
+  assert(hasPendingStoreRollover([oldGrace, nextGrace], 900_000, graceNow),
+    "store-rollover: matched broadcast journal bridges storefront renewal while replacement confirms");
+  assert(!hasPendingStoreRollover([oldGrace, { ...nextGrace, phase: "locked" }], 900_000, graceNow),
+    "store-rollover: confirmed replacement exits grace (normal verified bond path takes over)");
+  assert(!hasPendingStoreRollover([oldGrace, nextGrace], 900_000, graceNow + STORE_ROLLOVER_GRACE_MS + 1),
+    "store-rollover: pending grace is bounded to 24h");
+  assert(!hasPendingStoreRollover([oldGrace, { ...nextGrace, renewalTxid: "bb".repeat(32) }], 900_000, graceNow),
+    "store-rollover: mismatched journals never grant storefront continuity");
 }
 
 // 3k.5. MONTHLY CBP RECURRENCE — the pure cadence + anti-stacking gates. A
@@ -1807,6 +1884,29 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
     "cbp: a lapsed (EXPIRED) prior instance no longer blocks");
   assert(!priorInstanceBlocks(cfg, new Map()),
     "cbp: an unloaded prior instance (aged off) doesn't block — cadence ≫ 24h expiry");
+
+  const sameBill = (id: string, createdAt: number): EscrowState => ({
+    id,
+    description: "Electricity bundle",
+    amountMsats: 525_000,
+    category: "bill-pay",
+    community: "ke-kes",
+    billType: "electricity",
+    createdAt,
+  } as EscrowState);
+  const duplicateConfigs: CbpRecurrenceConfig[] = [
+    { ...cfg, seriesId: "series_old", lastPostId: "post_old", createdAt: T0 - 100 },
+    { ...cfg, seriesId: "series_new", lastPostId: "post_new", createdAt: T0 },
+  ];
+  const duplicateStates = new Map<string, EscrowState>([
+    ["post_old", sameBill("post_old", T0 - 100)],
+    ["post_new", sameBill("post_new", T0)],
+  ]);
+  assert(supersededRecurringSeriesIds(duplicateConfigs, duplicateStates).join(",") === "series_old",
+    "cbp: duplicate historical series keep only the newest identical bill registration");
+  duplicateStates.set("post_old", { ...sameBill("post_old", T0 - 100), description: "Water bill" });
+  assert(supersededRecurringSeriesIds(duplicateConfigs, duplicateStates).length === 0,
+    "cbp: distinct recurring bills are never collapsed");
 }
 
 // 3k.4. #7 Stage 6 — concurrency + replay sweep. The races the design flagged
@@ -2958,6 +3058,27 @@ console.log("\n── Bond commitment (single-key CLTV timelock) ──");
   const rawEarly = buildReclaimTx({ bond, utxos: [utxo], ownerPriv: owner.bp, destination: dest, feeSats: 500n, txLockTime: T - 1 });
   assert(btcMs.Transaction.fromRaw(msHexToBytes(rawEarly)).lockTime === T - 1, "⭐ bondcltv: an EARLY reclaim (nLockTime<T) builds — the consensus-invalid tx a Bitcoin node rejects");
   assert(rawEarly !== rawValid, "bondcltv: early and valid reclaims differ only by the locktime commitment");
+
+  // v5.4 direct rollover: old mature CLTV output → fresh CLTV output, no
+  // Fedimint/intermediate address. The old term remains the transaction locktime;
+  // the new term and fresh owner key are committed by output 0.
+  const nextOwner = (() => { const bp = btcMs.utils.randomPrivateKeyBytes(); return { bp, x: btcMs.utils.pubSchnorr(bp) }; })();
+  const nextBond = buildCommitmentBond(nextOwner.x, T + MIN_COMMITMENT_TERM_BLOCKS, MS_NET);
+  const rawRollover = buildBondRolloverTx({ oldBond: bond, newBond: nextBond, utxos: [utxo], oldOwnerPriv: owner.bp, feeSats: 500n, currentHeight: T, network: MS_NET });
+  const rollover = btcMs.Transaction.fromRaw(msHexToBytes(rawRollover));
+  const rolloverOut = rollover.getOutput(0);
+  const rolloverAddress = btcMs.Address(MS_NET).encode(btcMs.OutScript.decode(rolloverOut.script!));
+  assert(rollover.lockTime === T && rolloverAddress === nextBond.address, "⭐ bond-rollover: mature old leaf spends directly to the recomputed fresh bond output");
+  assert(rolloverOut.amount === utxo.amountSats - 500n, "bond-rollover: replacement amount is input minus disclosed miner fee");
+  let earlyRolloverThrew = false;
+  try { buildBondRolloverTx({ oldBond: bond, newBond: nextBond, utxos: [utxo], oldOwnerPriv: owner.bp, feeSats: 500n, currentHeight: T - 1, network: MS_NET }); }
+  catch { earlyRolloverThrew = true; }
+  assert(earlyRolloverThrew, "⭐ bond-rollover: hook/builder refuses a pre-maturity rollover before broadcast");
+  let shortRolloverThrew = false;
+  const shortBond = buildCommitmentBond(nextOwner.x, T + MIN_COMMITMENT_TERM_BLOCKS - 1, MS_NET);
+  try { buildBondRolloverTx({ oldBond: bond, newBond: shortBond, utxos: [utxo], oldOwnerPriv: owner.bp, feeSats: 500n, currentHeight: T, network: MS_NET }); }
+  catch { shortRolloverThrew = true; }
+  assert(shortRolloverThrew, "bond-rollover: replacement shorter than the future minimum term is rejected");
 
   // ⭐ Multi-UTXO sweep: fund the address twice → reclaim spends BOTH inputs to one
   // output (this is what fixes "I sent 2 UTXOs and nothing showed"). Accept any amount.
@@ -7368,6 +7489,7 @@ import {
   decideArbiterWarning,
   MAIN_SURFACE_RECOVERY_MIN_SATS,
   activeCommittedMsats,
+  shouldOpenSellerListingManagement,
 } from "../ui/decisions.js";
 import { pickArbiterFromPool, pickPreferredArbiter } from "../arbiters/pool.js";
 // BP_FEDERATION_INVITE / BLF_FEDERATION_INVITE already imported above
@@ -8764,7 +8886,7 @@ console.log("\n── Native lock crash-safety: pending-native-locks (#37) ─�
   }
 
   // 5. Decision table — CREATED, stage spent (publish never started) ⇒ re-absorb.
-  //    CREATED, stage publish-attempted ⇒ re-absorb ONLY on a healthy relay read.
+  //    CREATED, stage publish-attempted ⇒ relay absence NEVER proves no LOCK.
   {
     clearAllPendingNativeLocks();
     upgradeNativeLockToSpent({ escrowId: "t5", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
@@ -8780,8 +8902,10 @@ console.log("\n── Native lock crash-safety: pending-native-locks (#37) ─�
     assert(degraded.calls.redeem.length === 0,
       "native-lock recovery: degraded-read keep performs no redeem");
     const healthy = makeDeps({ state: createdState(null), relays: 2 });
-    assert(await recoverPendingNativeLock(getPendingNativeLock("t5b")!, healthy.deps) === "reabsorbed",
-      "native-lock recovery: publish-attempted + healthy quorum read re-absorbs");
+    assert(await recoverPendingNativeLock(getPendingNativeLock("t5b")!, healthy.deps) === "kept",
+      "⭐ native-lock recovery: even a healthy quorum missing a publish-attempted LOCK cannot authorize re-absorb");
+    assert(healthy.calls.redeem.length === 0,
+      "native-lock recovery: relay absence never hollows a possibly-live escrow");
   }
 
   // 6. Fail-closed: unknown trade state / wrong fed ⇒ keep, touch nothing.
@@ -8879,7 +9003,6 @@ console.log("\n── Native lock crash-safety: pending-native-locks (#37) ─�
     // (a) still lockable (CREATED, no deadline) → downgrade to fresh intent.
     clearAllPendingNativeLocks();
     upgradeNativeLockToSpent({ escrowId: "rb1", oobNotes: NOTES, amountMsats: AMOUNT, federationId: FED });
-    markNativeLockPublishAttempted("rb1");
     {
       const { deps, calls } = makeReabsorbDeps(lockableState());
       const out = await recoverPendingNativeLock(getPendingNativeLock("rb1")!, deps);
@@ -8958,7 +9081,6 @@ console.log("\n── Native lock crash-safety: pending-native-locks (#37) ─�
     clearAllPendingNativeLocks();
     upgradeNativeLockToSpent({ escrowId: "d1", oobNotes: "notes-d1", amountMsats: AMOUNT, federationId: FED });
     upgradeNativeLockToSpent({ escrowId: "d2", oobNotes: "notes-d2", amountMsats: AMOUNT, federationId: FED });
-    markNativeLockPublishAttempted("d2");
     const { deps } = makeDeps({ state: createdState(null) });
     const p1 = drainPendingNativeLocks(deps);
     const p2 = drainPendingNativeLocks(deps);
@@ -19292,6 +19414,7 @@ console.log("\n── Liquidity & attention (buyerInterest / newListing / needsY
     id: "sm_liq_0001",
     category: "marketplace",
     status: EscrowStatus.CREATED,
+    initiator: { role: Role.SELLER, pubkey: SELLER },
     participants: { [Role.BUYER]: null, [Role.SELLER]: SELLER, [Role.ARBITER]: null },
     votes: {},
     resolvedOutcome: null,
@@ -19378,6 +19501,20 @@ console.log("\n── Liquidity & attention (buyerInterest / newListing / needsY
     "needs-you: count matches the attention set size");
   assert(countNeedsYou({ escrows: [waiting, claim, vote, idle], userPubkey: STRANGER, nowSec }) === 0,
     "needs-you: a non-participant has zero attention items");
+
+  // Seller navigation: untouched inventory is manageable, but a live buyer
+  // reservation makes the CREATED parent an order room until its hold lapses.
+  assert(shouldOpenSellerListingManagement({ escrow: idle, viewerPubkey: SELLER, nowSec }),
+    "seller routing: an idle parent listing opens inventory management");
+  assert(!shouldOpenSellerListingManagement({ escrow: waiting, viewerPubkey: SELLER, nowSec }),
+    "seller routing: a live buyer hold opens the trade room, not edit/cancel");
+  const lapsed = mk({ id: "t_lapsed", joinHolds: {
+    [Role.BUYER]: { role: Role.BUYER, pubkey: BUYER, joinedAt: nowSec - 100, expiresAt: nowSec - 1, eventId: "jl" },
+  } });
+  assert(shouldOpenSellerListingManagement({ escrow: lapsed, viewerPubkey: SELLER, nowSec }),
+    "seller routing: after the buyer hold lapses, the parent returns to management");
+  assert(!shouldOpenSellerListingManagement({ escrow: idle, viewerPubkey: STRANGER, nowSec }),
+    "seller routing: a non-owner never enters another seller's management screen");
 }
 
 // ── Ratings primitive (kind:38123) — the reputation keystone ──
@@ -20725,6 +20862,7 @@ console.log("\n── ARBITER PREMIUM (compute + kind 38113 + ledger) ──");
 {
   const ap = await import("../arbiters/arbiter-premium.js");
   const led = await import("../arbiters/arbiter-earnings.js");
+  const sync = await import("../arbiters/arbiter-earnings-sync.js");
   const { setLocalStorageUserScope } = await import("../storage/user-scope.js");
   const { createEnvelope, decryptFromEnvelope } = await import("./envelope.js");
 
@@ -20974,6 +21112,42 @@ console.log("\n── ARBITER PREMIUM (compute + kind 38113 + ledger) ──");
   const sum = led.summarizeArbiterEarnings();
   assert(sum.totalMsats === 60_000 && sum.tradeCount === 2 && sum.noteCount === 3,
     "ledger: summary counts redeemed msats, distinct trades, and notes");
+
+  // Cross-device receipt schema + merge: the premium event id is the global
+  // dedupe key, so two installations converge without double-counting.
+  const syncedEventId = "ab".repeat(32);
+  const syncedReceipt = sync.parseSyncedArbiterEarning({
+    version: 1,
+    premiumEventId: syncedEventId,
+    escrowId: "pl-cross-device",
+    payer: BUYER_PK,
+    amountMsats: 14_000,
+    noteKind: "ambient",
+    redeemedAt: Date.now(),
+  });
+  assert(syncedReceipt?.amountMsats === 14_000,
+    "earnings-sync: validates a private signed receipt payload");
+  assert(sync.parseSyncedArbiterEarning({ ...syncedReceipt, amountMsats: -1 }) === null,
+    "earnings-sync: rejects malformed/negative accounting receipts");
+  assert(!!syncedReceipt && led.mergeSyncedEarningRedeemed({
+    eventId: syncedReceipt.premiumEventId,
+    escrowId: syncedReceipt.escrowId,
+    payer: syncedReceipt.payer,
+    amountMsats: syncedReceipt.amountMsats,
+    noteKind: syncedReceipt.noteKind,
+    redeemedAt: syncedReceipt.redeemedAt,
+  }), "earnings-sync: a fresh-device receipt hydrates the local identity ledger");
+  assert(!!syncedReceipt && !led.mergeSyncedEarningRedeemed({
+    eventId: syncedReceipt.premiumEventId,
+    escrowId: syncedReceipt.escrowId,
+    payer: syncedReceipt.payer,
+    amountMsats: syncedReceipt.amountMsats,
+    noteKind: syncedReceipt.noteKind,
+    redeemedAt: syncedReceipt.redeemedAt,
+  }), "earnings-sync: duplicate receipt merge is idempotent");
+  const syncedSummary = led.summarizeArbiterEarnings();
+  assert(syncedSummary.totalMsats === 74_000 && syncedSummary.tradeCount === 3 && syncedSummary.noteCount === 4,
+    "earnings-sync: remote history joins local history exactly once");
 
   led.clearArbiterEarningStores();
   assert(led.summarizeArbiterEarnings().noteCount === 0,

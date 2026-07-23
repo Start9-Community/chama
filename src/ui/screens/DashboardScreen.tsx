@@ -41,7 +41,9 @@ export function DashboardScreen({
   livenessBlocksPerDay = 144,
   onOpenBondCeremony,
   balanceMsats = 0,
+  earningsRevision = 0,
   fetchMyBonds,
+  getBondChainTip,
 }: {
   pubkey: string;
   /** The user's own trade-verified public rating (null until it can verify any). */
@@ -54,9 +56,12 @@ export function DashboardScreen({
   onOpenBondCeremony?: () => void;
   /** The user's spendable Chama (Fedimint ecash) balance, in msats. */
   balanceMsats?: number;
+  /** Relay/local earnings reconciliation revision from useEscrow. */
+  earningsRevision?: number;
   /** #77: fetch the signed-in npub's own chain-verified announced bonds, so a bond
    *  shows cross-device (a fresh install has no local commitment record). Fail-soft. */
   fetchMyBonds?: () => Promise<VerifiedBond[]>;
+  getBondChainTip?: () => Promise<number>;
 }) {
   const { t } = useT();
   const lower = pubkey.toLowerCase();
@@ -74,12 +79,19 @@ export function DashboardScreen({
     return { total: myTrades.length, completed, live, asArbiter };
   }, [myTrades, lower]);
 
-  const bonds = useMemo(() => listCommitmentBonds(), []);
+  // Read on every Dashboard render. Bond funding/renewal mutates the scoped
+  // local store outside React; memoizing forever left a freshly confirmed bond
+  // stuck visually at "awaiting funding" until the whole app remounted.
+  const bonds = listCommitmentBonds();
+  const [bondTip, setBondTip] = useState<number | null>(null);
   // Arbiter earnings (task #53 E1): sync ledger read, recomputed when the
   // trade set changes (a redeem lands via the App sweep → escrows update →
   // myTrades identity changes → fresh summary).
-  const earnings = useMemo(() => summarizeArbiterEarnings(), [myTrades]);
-  const localActive = useMemo(() => bonds.filter((b) => b.phase !== "reclaimed"), [bonds]);
+  const earnings = useMemo(() => summarizeArbiterEarnings(), [myTrades, earningsRevision]);
+  const localActive = useMemo(
+    () => bonds.filter((b) => b.phase === "created" || (b.phase === "locked" && (bondTip == null || b.bond.lockUntil > bondTip))),
+    [bonds, bondTip],
+  );
 
   // #77: cross-device bond visibility. Fetch-once-on-mount (keyed on pubkey),
   // fail-soft — a relay/esplora hiccup leaves the local set unchanged. Merged
@@ -94,6 +106,14 @@ export function DashboardScreen({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lower]);
+  useEffect(() => {
+    if (!getBondChainTip) return;
+    let cancelled = false;
+    const pull = () => void getBondChainTip().then((tip) => { if (!cancelled) setBondTip((old) => old == null ? tip : Math.max(old, tip)); }).catch(() => {});
+    pull();
+    const id = setInterval(pull, 60_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [getBondChainTip]);
 
   const mergedBonds = useMemo(
     () => mergeDashboardBonds(localActive, announcedBonds, lower),
@@ -198,9 +218,16 @@ export function DashboardScreen({
                 <div key={b.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs }}>
                   <span style={{ fontSize: 14, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
                     <BitcoinAmount sats={b.amountSats} size={14} gap={4} glyphScale={1.18} color={T.text} glyphColor={T.muted} />
+                    {bondTip != null && b.locked && b.lockUntil - bondTip <= 4_320 && (
+                      <span style={{ display: "block", marginTop: 4, fontSize: 9.5, color: b.lockUntil <= bondTip ? T.red : T.amber, fontWeight: 700 }}>
+                        {b.lockUntil <= bondTip
+                          ? t("bond.dashExpired")
+                          : t("bond.dashExpiresIn", { blocks: b.lockUntil - bondTip })}
+                      </span>
+                    )}
                   </span>
-                  <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, fontFamily: T.mono, color: b.locked ? T.green : T.amber, border: `1px solid ${b.locked ? T.green : T.amber}`, borderRadius: 99, padding: "2px 8px" }}>
-                    {b.locked ? t("bond.chipLockedEmoji") : t("bond.chipAwaitingFunding")}
+                  <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, fontFamily: T.mono, color: b.locked && (bondTip == null || b.lockUntil > bondTip) ? T.green : T.amber, border: `1px solid ${b.locked && (bondTip == null || b.lockUntil > bondTip) ? T.green : T.amber}`, borderRadius: 99, padding: "2px 8px" }}>
+                    {b.locked ? (bondTip != null && b.lockUntil <= bondTip ? t("bond.chipTermEnded") : t("bond.chipLockedEmoji")) : t("bond.chipAwaitingFunding")}
                   </span>
                 </div>
               ))}

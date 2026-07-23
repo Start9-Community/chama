@@ -73,6 +73,8 @@ export interface BondCeremonyModalProps {
   createCommitmentBond: (p: { amountSats: bigint; termBlocks: number }) =>
     Promise<{ bondId: string; address: string; lockUntil: number; amountSats: bigint; tipAtCreate: number }>;
   checkCommitmentFunding: (bondId: string) => Promise<{ locked: boolean; txid?: string; lockedSats?: bigint; deposits?: number }>;
+  getCommitmentReclaimQuote: (bondId: string) => Promise<{ finalityDelay: number; minimumDepositSats: number; pegInFeeSats: number; minerFeeSats: bigint; estimatedNetSats: bigint } | null>;
+  renewCommitmentBond: (bondId: string, termBlocks: number) => Promise<{ bondId: string; txid: string; amountSats: bigint; feeSats: bigint; lockUntil: number; pending: boolean }>;
   /** Rebuild this device's bond records from the user's own on-chain announcements + seed. */
   recoverMyBonds: () => Promise<{ recovered: number }>;
   reclaimCommitmentBond: (bondId: string, destination?: ReclaimDestinationChoice) => Promise<{
@@ -110,7 +112,7 @@ type View =
     }
   | { kind: "error"; message: string };
 
-export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding, recoverMyBonds, reclaimCommitmentBond, creditReclaimedCommitmentBond, getBondChainTip, publishBondAnnouncement, onClose }: BondCeremonyModalProps) {
+export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding, getCommitmentReclaimQuote, renewCommitmentBond, recoverMyBonds, reclaimCommitmentBond, creditReclaimedCommitmentBond, getBondChainTip, publishBondAnnouncement, onClose }: BondCeremonyModalProps) {
   const { t } = useT();
   // Open on the list when any bond exists; straight to describe on a first run.
   const [view, setView] = useState<View>(() => (listCommitmentBonds().length > 0 ? { kind: "list" } : { kind: "describe" }));
@@ -122,6 +124,7 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
   const [confirmReclaim, setConfirmReclaim] = useState(false);
   const [reclaimChoice, setReclaimChoice] = useState<ReclaimDestinationKind>("chama");
   const [externalReclaimAddress, setExternalReclaimAddress] = useState("");
+  const [reclaimQuote, setReclaimQuote] = useState<{ finalityDelay: number; minimumDepositSats: number; pegInFeeSats: number; minerFeeSats: bigint; estimatedNetSats: bigint } | null>(null);
   // Announce-to-community state (locked screen). Default to the user's own community.
   const [announceSlug, setAnnounceSlug] = useState<string>(() => getUserCommunitySlug());
   const [announcing, setAnnouncing] = useState(false);
@@ -168,7 +171,7 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
     if (cleanedDraftsRef.current) return;
     cleanedDraftsRef.current = true;
     const stale = listCommitmentBonds().filter(
-      (b) => b.phase === "created" && Date.now() - b.createdAt > PLANNED_BOND_TTL_MS,
+      (b) => b.phase === "created" && !b.renewedFromBondId && Date.now() - b.createdAt > PLANNED_BOND_TTL_MS,
     );
     if (stale.length === 0) return;
     void (async () => {
@@ -235,6 +238,7 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
     setConfirmReclaim(false);
     setReclaimChoice("chama");
     setExternalReclaimAddress("");
+    setReclaimQuote(null);
   };
   const backToList = () => { setNote(null); resetReclaimForm(); setAnnouncedTo(null); setAnnounceErr(null); setStoreRev((n) => n + 1); setView({ kind: "list" }); };
 
@@ -294,6 +298,17 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
         reclaimDestination,
       });
     } catch (e: any) { setNote(e?.message || t("bond.reclaimFailed")); }
+    finally { setBusy(false); }
+  };
+
+  const renew = async (bondId: string) => {
+    setBusy(true); setNote(null);
+    try {
+      const r = await renewCommitmentBond(bondId, termBlocks);
+      setStoreRev((n) => n + 1);
+      setView({ kind: "funding", bondId: r.bondId });
+      setNote(t("bond.renewBroadcast", { sats: r.amountSats.toString(), fee: r.feeSats.toString() }));
+    } catch (e: any) { setNote(e?.message || t("bond.renewFailed")); }
     finally { setBusy(false); }
   };
 
@@ -408,13 +423,14 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
         {view.kind === "funding" && (() => {
           const rec = getCommitmentBond(view.bondId);
           if (!rec) return <MissingBond onBack={backToList} />;
+          const isRenewal = !!rec.renewedFromBondId;
           const toGo = tip != null ? rec.bond.lockUntil - tip : null;
           return (
             <div>
               <BackToBonds onClick={backToList} />
-              <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono, marginBottom: 4 }}>{t("bond.fundHeading")}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono, marginBottom: 4 }}>{t(isRenewal ? "bond.renewConfirmingTitle" : "bond.fundHeading")}</div>
               <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 12, lineHeight: 1.5 }}>
-                {t("bond.fundSendBefore")}<b style={{ color: T.text }}>{t("bond.fundSendAtLeast", { sats: rec.amountSats.toString() })}</b>{t("bond.fundSendMiddle")}<b style={{ color: T.text }}>{rec.bond.lockUntil}</b>{t("bond.fundSendAfter")}
+                {isRenewal ? t("bond.renewConfirmingBody", { source: (rec.amountSats + (rec.renewalFeeSats ?? 0n)).toString(), sats: rec.amountSats.toString(), block: rec.bond.lockUntil, fee: (rec.renewalFeeSats ?? 0n).toString() }) : <>{t("bond.fundSendBefore")}<b style={{ color: T.text }}>{t("bond.fundSendAtLeast", { sats: rec.amountSats.toString() })}</b>{t("bond.fundSendMiddle")}<b style={{ color: T.text }}>{rec.bond.lockUntil}</b>{t("bond.fundSendAfter")}</>}
               </div>
               {toGo != null && toGo > 0 && (
                 <div style={{ fontSize: 11, color: T.text, fontFamily: T.mono, marginBottom: 12, lineHeight: 1.55, background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "9px 11px" }}>
@@ -431,23 +447,25 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
                   {t(toGo === 1 ? "bond.nearEndOne" : "bond.nearEndMany", { blocks: toGo, time: humanTime(toGo) })}
                 </div>
               )}
-              <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+              {!isRenewal && <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
                 <Suspense fallback={<div style={{ width: 180, height: 180, background: T.surface, borderRadius: T.rs }} />}>
                   <QRCode data={rec.bond.address} size={180} />
                 </Suspense>
-              </div>
-              <div style={{ fontSize: 10.5, color: T.text, fontFamily: T.mono, wordBreak: "break-all", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "8px 10px", marginBottom: 8 }}>{rec.bond.address}</div>
-              <CopyButton value={rec.bond.address} label={t("bond.copyAddress")} style={secondaryBtn} />
+              </div>}
+              {!isRenewal && <><div style={{ fontSize: 10.5, color: T.text, fontFamily: T.mono, wordBreak: "break-all", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "8px 10px", marginBottom: 8 }}>{rec.bond.address}</div><CopyButton value={rec.bond.address} label={t("bond.copyAddress")} style={secondaryBtn} /></>}
+              {isRenewal && rec.renewalTxid && (
+                <CopyableValue heading={t("bond.renewalTxid")} label={t("bond.copyTxid")} value={rec.renewalTxid} />
+              )}
               <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, textAlign: "center", marginTop: 4, lineHeight: 1.5 }}>
                 {t("bond.watchingChain", { secs: FUNDING_POLL_MS / 1000 })}
               </div>
               <button onClick={() => void checkNow(view.bondId)} disabled={busy} style={{ ...secondaryBtn, marginTop: 8 }}>
                 {busy ? t("bond.checking") : t("bond.checkNow")}
               </button>
-              <button onClick={() => discardDraft(view.bondId)} disabled={busy}
+              {!isRenewal && <button onClick={() => discardDraft(view.bondId)} disabled={busy}
                 style={{ ...secondaryBtn, color: T.muted, borderColor: T.border, marginTop: 2 }}>
                 {t("bond.discardDraft")}
-              </button>
+              </button>}
               {note && <div style={{ fontSize: 10.5, color: T.amber, fontFamily: T.mono, marginTop: 6, lineHeight: 1.5, textAlign: "center" }}>{note}</div>}
             </div>
           );
@@ -516,13 +534,28 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
                   externalAddress={externalReclaimAddress}
                   onExternalAddress={setExternalReclaimAddress}
                   busy={busy}
+                  quote={reclaimQuote}
                   onSubmit={(destination) => { resetReclaimForm(); void reclaim(view.bondId, destination); }}
                   onCancel={resetReclaimForm}
                 />
               ) : expired ? (
                 <>
-                  <button onClick={() => { setNote(null); setConfirmReclaim(true); }}
-                    style={{ ...primaryBtn(true), background: T.accent, borderColor: T.accent, boxShadow: `0 0 14px ${T.accent}66` }}>
+                  <div style={{ textAlign: "left", margin: "0 0 10px" }}>
+                    <label style={labelStyle}>{t("bond.renewTermLabel")}</label>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {TERM_PRESETS.map((p) => (
+                        <button key={p.blocks} onClick={() => setTermBlocks(p.blocks)} disabled={busy}
+                          style={{ ...secondaryBtn, marginBottom: 0, textAlign: "left", border: `1px solid ${termBlocks === p.blocks ? T.accent : T.border}`, color: termBlocks === p.blocks ? T.text : T.muted }}>
+                          {termBlocks === p.blocks ? "◉ " : "○ "}{t(p.labelKey, p.labelParams)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <button onClick={() => void renew(view.bondId)} disabled={busy} style={primaryBtn(!busy)}>
+                    {busy ? t("bond.renewing") : t("bond.renewBond")}
+                  </button>
+                  <button onClick={() => { setNote(null); setConfirmReclaim(true); void getCommitmentReclaimQuote(view.bondId).then(setReclaimQuote).catch(() => setReclaimQuote(null)); }}
+                    style={{ ...secondaryBtn, marginTop: 6 }}>
                     {t("bond.reclaimMyBond")}
                   </button>
                   <button onClick={onClose} style={{ ...secondaryBtn, marginTop: 6 }}>{t("bond.notNow")}</button>
@@ -530,7 +563,7 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
               ) : (
                 <>
                   <button onClick={onClose} style={primaryBtn(true)}>{t("common.done")}</button>
-                  <button onClick={() => { setNote(null); setConfirmReclaim(true); }} style={{ ...secondaryBtn, marginTop: 6 }}>{t("bond.reclaimMyBond")}</button>
+                  <button onClick={() => { setNote(null); setConfirmReclaim(true); void getCommitmentReclaimQuote(view.bondId).then(setReclaimQuote).catch(() => setReclaimQuote(null)); }} style={{ ...secondaryBtn, marginTop: 6 }}>{t("bond.reclaimMyBond")}</button>
                 </>
               )}
               {note && <div style={{ fontSize: 10.5, color: T.red, fontFamily: T.mono, marginTop: 10, lineHeight: 1.5 }}>{note}</div>}
@@ -614,22 +647,28 @@ function BondList({ bonds, tip, onOpen, onPostNew }: {
   onPostNew: () => void;
 }) {
   const { t } = useT();
-  const active = bonds.filter((b) => b.phase !== "reclaimed");
-  const past = bonds.filter((b) => b.phase === "reclaimed");
+  const [showPast, setShowPast] = useState(false);
+  const expired = tip == null ? undefined : bonds.find((b) => b.phase === "locked" && tip >= b.bond.lockUntil);
+  const current = bonds.filter((b) => b.phase === "created" || (b.phase === "locked" && (tip == null || tip < b.bond.lockUntil)));
+  const past = bonds.filter((b) => b.phase === "reclaimed" || (b.phase === "locked" && tip != null && tip >= b.bond.lockUntil));
   return (
     <div>
-      <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono, marginBottom: 10 }}>{t("bond.yourBonds")}</div>
-      {active.length === 0 && (
+      <div style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono, marginBottom: 10 }}>{t("bond.currentBond")}</div>
+      {current.length === 0 && (
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 12 }}>
           {t("bond.noLiveBond")}
         </div>
       )}
-      {active.map((b) => <BondRow key={b.bondId} rec={b} tip={tip} onOpen={onOpen} />)}
-      <button onClick={onPostNew} style={{ ...primaryBtn(true), marginTop: 6 }}>{t("bond.postNewBond")}</button>
+      {current.map((b) => <BondRow key={b.bondId} rec={b} tip={tip} onOpen={onOpen} />)}
+      {expired && <button onClick={() => onOpen(expired)} style={{ ...primaryBtn(true), marginTop: 6 }}>{t("bond.renewPreferred")}</button>}
+      <button onClick={onPostNew} style={{ ...secondaryBtn, marginTop: 6 }}>{t(expired ? "bond.postAdditionalBond" : "bond.postNewBond")}</button>
       {past.length > 0 && (
         <div style={{ marginTop: 14 }}>
-          <div style={{ fontSize: 9, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 6 }}>{t("bond.pastBonds")}</div>
-          {past.map((b) => <BondRow key={b.bondId} rec={b} tip={tip} onOpen={onOpen} />)}
+          <button type="button" onClick={() => setShowPast((v) => !v)}
+            style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "transparent", border: 0, color: T.muted, fontFamily: T.mono, fontSize: 9, letterSpacing: 1, padding: "6px 0", cursor: "pointer" }}>
+            <span>{t("bond.pastBondsCount", { count: past.length })}</span><span>{showPast ? "▴" : "▾"}</span>
+          </button>
+          {showPast && past.map((b) => <BondRow key={b.bondId} rec={b} tip={tip} onOpen={onOpen} />)}
         </div>
       )}
     </div>
@@ -640,6 +679,10 @@ function BondRow({ rec, tip, onOpen }: { rec: CommitmentRecord; tip: number | nu
   const { t } = useT();
   const toGo = tip != null ? rec.bond.lockUntil - tip : null;
   const status = (() => {
+    if (rec.phase === "created" && rec.renewedFromBondId) return {
+      chip: t("bond.chipConfirming"), color: T.amber,
+      line: rec.renewalTxid ? t("bond.rowLineRenewalTx", { txid: `${rec.renewalTxid.slice(0, 10)}…` }) : t("bond.rowLineRenewalPrepared"),
+    };
     if (rec.phase === "created") return { chip: t("bond.chipAwaitingFunding"), color: T.amber, line: t("bond.rowLineActivate") };
     const actual = rec.reclaimDestination?.actual;
     const requested = rec.reclaimDestination?.requested;
@@ -654,6 +697,10 @@ function BondRow({ rec, tip, onOpen }: { rec: CommitmentRecord; tip: number | nu
         : rec.reclaimTxid ? t("bond.rowLineSweptTx", { txid: rec.reclaimTxid.slice(0, 10) }) : t("bond.rowLineSwept"),
     };
     if (toGo != null && toGo <= 0) return { chip: t("bond.chipTermEnded"), color: T.accent, line: t("bond.rowLineReclaimable") };
+    if (toGo != null && toGo <= 4_320) {
+      const window = toGo <= 144 ? "~1 day" : toGo <= 1_008 ? "~7 days" : "~30 days";
+      return { chip: t("bond.chipEndingSoon"), color: T.amber, line: t("bond.rowLineRenewSoon", { window, blocks: toGo, time: humanTime(toGo) }) };
+    }
     return { chip: t("bond.chipLocked"), color: T.green, line: toGo != null ? t("bond.rowLineUnlocksIn", { blocks: toGo, time: humanTime(toGo) }) : t("bond.rowLineUnlocksAt", { block: rec.bond.lockUntil }) };
   })();
   return (
@@ -661,7 +708,7 @@ function BondRow({ rec, tip, onOpen }: { rec: CommitmentRecord; tip: number | nu
       style={{ display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "10px 12px", marginBottom: 8, cursor: "pointer" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 13, fontWeight: 700, color: T.text, fontFamily: T.mono }}>
-          {rec.phase === "created" ? t("bond.satsPlanned", { sats: rec.amountSats.toString() }) : t("bond.satsAmount", { sats: rec.amountSats.toString() })}
+          {rec.phase === "created" && !rec.renewedFromBondId ? t("bond.satsPlanned", { sats: rec.amountSats.toString() }) : t("bond.satsAmount", { sats: rec.amountSats.toString() })}
         </span>
         <span style={{ fontSize: 8.5, fontWeight: 800, color: status.color, fontFamily: T.mono, letterSpacing: 1, border: `1px solid ${status.color}`, borderRadius: 99, padding: "2px 8px", flexShrink: 0 }}>
           {status.chip}
@@ -674,12 +721,13 @@ function BondRow({ rec, tip, onOpen }: { rec: CommitmentRecord; tip: number | nu
   );
 }
 
-function ReclaimDestinationPicker({ choice, onChoice, externalAddress, onExternalAddress, busy, onSubmit, onCancel }: {
+function ReclaimDestinationPicker({ choice, onChoice, externalAddress, onExternalAddress, busy, quote, onSubmit, onCancel }: {
   choice: ReclaimDestinationKind;
   onChoice: (choice: ReclaimDestinationKind) => void;
   externalAddress: string;
   onExternalAddress: (address: string) => void;
   busy: boolean;
+  quote: { finalityDelay: number; minimumDepositSats: number; pegInFeeSats: number; minerFeeSats: bigint; estimatedNetSats: bigint } | null;
   onSubmit: (destination: ReclaimDestinationChoice) => void;
   onCancel: () => void;
 }) {
@@ -702,6 +750,11 @@ function ReclaimDestinationPicker({ choice, onChoice, externalAddress, onExterna
       <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginBottom: 10 }}>
         {t("bond.confirmReclaimBefore")}<b style={{ color: T.text }}>{t("bond.confirmReclaimBold")}</b>{t("bond.confirmReclaimAfter")} {t("bond.reclaimDestinationBody")}
       </div>
+      {choice === "chama" && quote && (
+        <div style={{ fontSize: 10, color: T.amber, fontFamily: T.mono, lineHeight: 1.55, marginBottom: 10, padding: "8px 10px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs }}>
+          {t("bond.reclaimQuote", { confirmations: quote.finalityDelay, minimum: quote.minimumDepositSats, pegFee: quote.pegInFeeSats, minerFee: quote.minerFeeSats.toString(), net: quote.estimatedNetSats.toString() })}
+        </div>
+      )}
       <div style={{ display: "grid", gap: 7, marginBottom: 10 }}>
         <ReclaimOptionButton
           selected={choice === "chama"}

@@ -47,16 +47,16 @@ export const recovery: Record<string, string> = {
   "recovery.fundsReturnedBody1":
     "Un échange que vous avez financé ne s'est pas conclu, alors vos",
   "recovery.fundsReturnedBody2":
-    "sont revenus dans votre portefeuille — en sécurité et à vous. Envoyez",
+    "sont revenus dans le portefeuille Chama de cet appareil — en sécurité et à vous. Envoyez",
   "recovery.fundsReturnedBody3": "vers votre adresse Lightning",
   "recovery.fundsReturnedBody4": ", ou laissez-les simplement ici.",
   "recovery.fundsReturnedReserveAfter": "reste pour les frais)",
   "recovery.fundsReturnedReserveBefore": "(environ",
   "recovery.fundsReturnedTag": "↩ Fonds revenus",
   "recovery.guardNote":
-    "Cette protection se base sur le solde local du portefeuille, pas sur l'historique des échanges.",
+    "Cette protection se base sur le solde de cet appareil, pas sur l'historique global de l'identité.",
   "recovery.headlineFundsReturned":
-    "Votre financement est revenu dans votre portefeuille",
+    "Votre financement est revenu sur cet appareil",
   "recovery.headlineLastTrade":
     "Votre dernier échange ne s'est pas terminé proprement",
   "recovery.headlineLeftoverSats":
@@ -98,7 +98,7 @@ export const recovery: Record<string, string> = {
   "recovery.roleSeller": "Vendeur",
   "recovery.satsLandFooter":
     "Les sats arrivent à votre adresse Lightning · Chama garde votre portefeuille local vide",
-  "recovery.strandedBody1": "sont toujours dans votre Chama local.",
+  "recovery.strandedBody1": "sont toujours dans le portefeuille Chama de cet appareil.",
   "recovery.strandedBody2":
     "peuvent être envoyés vers votre adresse Lightning maintenant",
   "recovery.strandedReserveAfter": "gardés pour les frais Lightning",

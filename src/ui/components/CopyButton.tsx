@@ -66,6 +66,7 @@ export function CopyButton({
 
   return (
     <button
+      type="button"
       onClick={copy}
       disabled={disabled}
       style={{

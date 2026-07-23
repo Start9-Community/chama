@@ -3,7 +3,6 @@ import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
 
 import { useEscrow } from "../hooks/useEscrow.js";
-import { listCommitmentBonds } from "../bond-multisig/commitment-store.js";
 import {
   registerNotificationTapHandlers,
   consumePendingTradeDeepLink,
@@ -31,9 +30,11 @@ import {
   autoRenewableListings,
   ownUnfundedListings,
   sellerIsBonded,
+  hasPendingStoreRollover,
   isSellerOwnedListing,
   listingNeverFunded,
 } from "../escrow-engine/listing-renewal.js";
+import { listCommitmentBonds } from "../bond-multisig/commitment-store.js";
 import {
   retireListing,
   getRetiredIds,
@@ -54,6 +55,7 @@ import {
   cancelCbpRecurrence,
   activeCbpRecurrence,
   dueRecurringSeries,
+  supersededRecurringSeriesIds,
 } from "../escrow-engine/cbp-recurrence.js";
 import {
   CURATED_PRESETS,
@@ -113,6 +115,7 @@ import {
   decideChamaBarLabel,
   findActiveTrade,
   selectNeedsYouTrades,
+  shouldOpenSellerListingManagement,
   identifyStrandedEcashSource,
   isMidFunding,
   shouldShowOnBrowse,
@@ -457,6 +460,7 @@ export default function App() {
     error,
     loading,
     publicListingsLoading,
+    earningsRevision,
     fedimint,
     fundingInProgress,
     claimPayoutInProgress,
@@ -1127,6 +1131,7 @@ export default function App() {
   // while online; unbonded ⇒ manual renew only) and the card's copy. Resolved
   // once per connect via the existing fetchCommunityBonds/esplora path.
   const [sellerBonded, setSellerBonded] = useState(false);
+  const [bondTip, setBondTip] = useState<number | null>(null);
   // Auto-renew dedupe: an id we've already re-published this session so the
   // online effect can't re-fire on the same lapsed listing every tick.
   const autoRenewedRef = useRef<Set<string>>(new Set());
@@ -1167,12 +1172,12 @@ export default function App() {
   // Tier 3 bond resolution: chain-verify the seller's own bond once per connect
   // (fail-soft — any hiccup leaves them unbonded ⇒ manual renew only).
   useEffect(() => {
-    if (!connected || !pubkey || !browseCommunity) { setSellerBonded(false); return; }
+    if (!connected || !pubkey || !browseCommunity) { setSellerBonded(false); setBondTip(null); return; }
     let cancelled = false;
     void (async () => {
       try {
-        const bonds = await actions.fetchCommunityBonds(browseCommunity);
-        if (!cancelled) setSellerBonded(sellerIsBonded(bonds, pubkey));
+        const [bonds, tip] = await Promise.all([actions.fetchCommunityBonds(browseCommunity), actions.getBondChainTip()]);
+        if (!cancelled) { setSellerBonded(sellerIsBonded(bonds, pubkey)); setBondTip(tip); }
       } catch { if (!cancelled) setSellerBonded(false); }
     })();
     return () => { cancelled = true; };
@@ -1184,7 +1189,11 @@ export default function App() {
   // online (a vanished owner's store SHOULD lapse — auto-renew is a liveness
   // signal). Unbonded sellers get manual renew only, so this no-ops for them.
   useEffect(() => {
-    if (!connected || !pubkey || !sellerBonded) return;
+    // A locally journaled+broadcast direct rollover gets a tightly bounded
+    // storefront-only bridge while its replacement waits for 1 confirmation.
+    // It never flows into the verified bond pool used for arbiter privileges.
+    const storeBondContinuity = sellerBonded || hasPendingStoreRollover(listCommitmentBonds(), bondTip, Date.now());
+    if (!connected || !pubkey || !storeBondContinuity) return;
     // Persistent retired ledger is the cross-reload guard; autoRenewedRef stays
     // the in-session guard on top. Cap per pass so a pathological state can't
     // burst dozens of relay publishes on one load — the rest resolve next pass.
@@ -1213,7 +1222,7 @@ export default function App() {
           console.warn("[chama] auto-renew failed:", l.id, e?.message || e);
         });
     }
-  }, [connected, pubkey, sellerBonded, escrows, now]);
+  }, [connected, pubkey, sellerBonded, bondTip, escrows, now]);
 
   // One-time dedupe (#74/#75): collapse an existing pile of accidental renewals
   // (the pre-fix +N-per-open duplication) down to one live listing per unique
@@ -1260,6 +1269,17 @@ export default function App() {
     setToast({ message: t("me.recurringStopped"), type: "info" });
     setRecurringTick((n) => n + 1); // re-render so the card drops immediately
   };
+
+  // Retire duplicate historical recurrence registrations before the repost
+  // effect below runs. This is intentionally identity-exact and never touches
+  // already-published/funded trades; it only prevents another clone next month.
+  useEffect(() => {
+    if (!connected || !pubkey) return;
+    const duplicates = supersededRecurringSeriesIds(activeCbpRecurrence(), escrows);
+    if (duplicates.length === 0) return;
+    for (const seriesId of duplicates) cancelCbpRecurrence(seriesId);
+    setRecurringTick((n) => n + 1);
+  }, [connected, pubkey, escrows]);
 
   // Auto-repost effect (online-gated, NO bond gate — CBP is self-limiting).
   // Home-community-only + zero-sats are inherent: repostRecurringCbp reuses
@@ -1950,12 +1970,7 @@ export default function App() {
     // not an active trade. Its owner gets management actions instead of the
     // buyer-oriented TradeDetail. Spawned/funded child orders still pass
     // through normally because those are real trades requiring attention.
-    if (
-      local.status === EscrowStatus.CREATED &&
-      local.initiator.role === Role.SELLER &&
-      local.initiator.pubkey === pubkey &&
-      !local.parent
-    ) {
+    if (shouldOpenSellerListingManagement({ escrow: local, viewerPubkey: pubkey })) {
       setSellerManageId(id);
       return;
     }
@@ -2671,6 +2686,8 @@ export default function App() {
         <BondCeremonyModal
           createCommitmentBond={actions.createCommitmentBond}
           checkCommitmentFunding={actions.checkCommitmentFunding}
+          getCommitmentReclaimQuote={actions.getCommitmentReclaimQuote}
+          renewCommitmentBond={actions.renewCommitmentBond}
           recoverMyBonds={actions.recoverMyBonds}
           reclaimCommitmentBond={actions.reclaimCommitmentBond}
           creditReclaimedCommitmentBond={actions.creditReclaimedCommitmentBond}
@@ -3491,7 +3508,9 @@ export default function App() {
           livenessBlocksPerDay={BOND_LIVENESS_BLOCKS_PER_DAY}
           onOpenBondCeremony={() => setShowBondCeremony(true)}
           balanceMsats={fedimint.balanceMsats ?? 0}
+          earningsRevision={earningsRevision}
           fetchMyBonds={actions.fetchMyBonds}
+          getBondChainTip={actions.getBondChainTip}
         />
       ) : view === "me" ? (
         <div style={{ animation: "fadeIn 0.3s ease" }}>

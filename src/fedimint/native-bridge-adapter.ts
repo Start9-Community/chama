@@ -442,6 +442,10 @@ function nativeBridgeCompatibilityError(
 }
 
 export function isNativeBridgeModeOn(): boolean {
+  // Managed deployments such as StartOS ship the bridge as part of the service.
+  // This hard requirement intentionally outranks stale per-origin browser settings.
+  if (isEnabledSetting(getImportEnv("VITE_CHAMA_NATIVE_BRIDGE_REQUIRED"))) return true;
+
   const params = getBrowserSearchParams();
   const urlFlag =
     params?.get("nativeFedimint") ??
@@ -465,6 +469,11 @@ export function isNativeBridgeModeOn(): boolean {
 }
 
 export function getNativeBridgeUrl(): string {
+  const managedBridgeUrl = isEnabledSetting(getImportEnv("VITE_CHAMA_NATIVE_BRIDGE_REQUIRED"))
+    ? getImportEnv("VITE_CHAMA_NATIVE_BRIDGE_URL")
+    : null;
+  if (managedBridgeUrl) return normalizeBaseUrl(managedBridgeUrl);
+
   const params = getBrowserSearchParams();
   const url =
     params?.get("nativeFedimintUrl") ??

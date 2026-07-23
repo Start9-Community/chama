@@ -229,6 +229,12 @@ function AttentionCard({
               {t("me.withCounterparty", { who: counterparty.slice(0, 6) + "…" })}
             </div>
           )}
+          <div style={{
+            marginTop: 3, fontFamily: T.mono, fontSize: 9, color: T.muted,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const,
+          }}>
+            {trade.id}
+          </div>
         </div>
         <div style={{ flexShrink: 0, textAlign: "right" as const }}>
           <BitcoinAmount msats={trade.amountMsats} size={13} gap={3} glyphScale={1.15} color={tone} glyphColor={T.muted} />

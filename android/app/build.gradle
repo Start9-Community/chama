@@ -8,6 +8,7 @@ def appVersionName = appPackageJson.version as String
 def appVersionParts = appVersionName.tokenize("-")[0].tokenize(".").collect { it as int }
 while (appVersionParts.size() < 3) appVersionParts << 0
 def appVersionCode = appVersionParts[0] * 10000 + appVersionParts[1] * 100 + appVersionParts[2]
+def appAbi = System.getenv("CHAMA_ANDROID_ABI") ?: "arm64-v8a"
 
 def keystoreProperties = new Properties()
 def keystorePropertiesFile = rootProject.file("keystore.properties")
@@ -42,7 +43,7 @@ android {
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            abiFilters "arm64-v8a"
+            abiFilters appAbi
         }
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

@@ -425,4 +425,6 @@ export const trade: Record<string, string> = {
   "trade.selectionTitleLending": "Choisissez au moins une offre de prêt avant de verrouiller.",
   "trade.selectionTitleMarketplace": "Ajoutez au moins un article de la boutique avant de verrouiller.",
   "trade.selectionTitleDefault": "Sélectionnez au moins un article du menu.",
+  "trade.nostrListing": "Annonce Nostr",
+  "trade.nostrListingHint": "Lien NIP-99 standard · s’ouvre dans les clients Nostr compatibles",
 };

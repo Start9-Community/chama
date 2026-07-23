@@ -1,0 +1,13 @@
+.git
+.github
+.startos
+android
+dist
+javascript
+native
+node_modules
+outputs
+src-tauri
+tmp
+*.s9pk
+*.pdf

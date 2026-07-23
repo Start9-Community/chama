@@ -122,8 +122,7 @@ export function SimEntryModal() {
   const exit = () => {
     try { localStorage.removeItem(ACK_KEY); } catch {}
     setSimMode(false);
-    // The public sim URL is sticky by design (`?sim=1` re-enables sim mode
-    // on load), so exiting must also remove that URL flag before reloading.
+    // Keep the destination unambiguously in real mode when exiting the demo.
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("sim", "0");

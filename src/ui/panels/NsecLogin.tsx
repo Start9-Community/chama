@@ -54,6 +54,21 @@ export function NsecLogin({
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [inputError, setInputError] = useState<string | null>(null);
   const autoSubmittedKeyRef = useRef<string | null>(null);
+  const credentialUsernameRef = useRef<HTMLInputElement | null>(null);
+  const [credentialUsername, setCredentialUsername] = useState("Chama Nostr account");
+
+  const identifyCredential = async (secretKey: Uint8Array): Promise<string> => {
+    const [{ getPublicKey }, { nip19 }] = await Promise.all([
+      import("nostr-tools/pure"),
+      import("nostr-tools"),
+    ]);
+    const username = nip19.npubEncode(getPublicKey(secretKey));
+    setCredentialUsername(username);
+    // Password managers inspect the form at submission time. React's state
+    // render may not have flushed yet, so update the actual form control too.
+    if (credentialUsernameRef.current) credentialUsernameRef.current.value = username;
+    return username;
+  };
 
   const handleGenerate = async () => {
     setMode("create");
@@ -65,7 +80,9 @@ export function NsecLogin({
         import("nostr-tools/pure"),
         import("nostr-tools"),
       ]);
-      const nsec = nip19.nsecEncode(generateSecretKey());
+      const secretKey = generateSecretKey();
+      const nsec = nip19.nsecEncode(secretKey);
+      await identifyCredential(secretKey);
       setNsecInput(nsec);
       setGeneratedNsec(nsec);
       setBackupConfirmed(false);
@@ -86,6 +103,7 @@ export function NsecLogin({
       return;
     }
     setInputError(null);
+    await identifyCredential(validated.secretKey);
     // v2.5: tell the shell whether this key was generated in Chama (so only
     // generated keys get the master-key reveal in Me › Advanced). The submitted
     // key matching the just-generated one is the signal.
@@ -107,6 +125,8 @@ export function NsecLogin({
     const timer = window.setTimeout(async () => {
       const validated = await validateRecoveryKeyInput(value);
       if (cancelled || !validated.ok) return;
+      await identifyCredential(validated.secretKey);
+      if (cancelled) return;
       autoSubmittedKeyRef.current = value;
       setInputError(null);
       // Auto-submit only fires for a PASTED key (gated on !generatedActive
@@ -196,7 +216,31 @@ export function NsecLogin({
   }
 
   return (
-    <div style={{ marginTop: isNative ? 0 : 8, width: "100%", maxWidth: 360 }}>
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void handleSubmit();
+      }}
+      style={{ marginTop: isNative ? 0 : 8, width: "100%", maxWidth: 360 }}
+    >
+      {/* A real username/password form is the contract used by browser and
+          Android WebView autofill. The npub labels the saved account without
+          exposing the nsec twice. Keep it visually hidden, not type=hidden,
+          because password managers ignore hidden credential controls. */}
+      <input
+        ref={credentialUsernameRef}
+        name="username"
+        value={credentialUsername}
+        readOnly
+        autoComplete="username"
+        aria-label="Nostr public account"
+        tabIndex={-1}
+        style={{
+          position: "absolute", width: 1, height: 1, padding: 0, margin: -1,
+          overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap",
+          border: 0,
+        }}
+      />
       {isNative && (
         <div style={{
           fontSize: 10, color: T.muted, fontFamily: T.mono,
@@ -208,6 +252,7 @@ export function NsecLogin({
 
       {friendly && (
         <button
+          type="button"
           onClick={() => {
             setMode("choice");
             setNsecInput("");
@@ -228,6 +273,7 @@ export function NsecLogin({
       {showPasteInput && (
         <>
           <input
+            name="password"
             value={nsecInput}
             onChange={(e) => {
               setNsecInput(e.target.value);
@@ -240,7 +286,7 @@ export function NsecLogin({
             onKeyDown={(e) => e.key === "Enter" && void handleSubmit()}
             placeholder={t("chat.pasteRecoveryKey")}
             type={showKey ? "text" : "password"}
-            autoComplete="off"
+            autoComplete={generatedActive ? "new-password" : "current-password"}
             autoCapitalize="off"
             autoCorrect="off"
             spellCheck={false}
@@ -259,6 +305,7 @@ export function NsecLogin({
           }}>
             {allowCreate && (
               <button
+                type="button"
                 onClick={handleGenerate}
                 disabled={generating}
                 style={{
@@ -273,6 +320,7 @@ export function NsecLogin({
               </button>
             )}
             <button
+              type="button"
               onClick={() => setShowKey(!showKey)}
               disabled={!nsecInput.trim()}
               style={{
@@ -360,7 +408,7 @@ export function NsecLogin({
           is required) and the native sign-in. */}
       {!minimalPaste && (
         <button
-          onClick={() => void handleSubmit()}
+          type="submit"
           disabled={submitDisabled}
           style={{
             width: "100%", padding: "14px",
@@ -390,7 +438,7 @@ export function NsecLogin({
                 : t("chat.footerPasteWeb"))}
         </div>
       )}
-    </div>
+    </form>
   );
 }
 

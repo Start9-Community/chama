@@ -37,6 +37,7 @@ import {
   removeScopedStorageItem,
 } from "../storage/user-scope.js";
 import { type EscrowState, EscrowStatus } from "./types.js";
+import { listingIdentityKey } from "./listing-renewal-ledger.js";
 
 /** Versioned, user-scoped localStorage key. */
 export const CBP_RECURRENCE_KEY = "chama_cbp_recurrence_v1";
@@ -202,6 +203,40 @@ export function dueRecurringSeries(
   return activeCbpRecurrence().filter(
     (cfg) => isDueForRepost(cfg, nowSec) && !priorInstanceBlocks(cfg, statesById),
   );
+}
+
+/**
+ * Historical test cycles could register the same bill as several independent
+ * active series. When all became due, one innocent state update woke every
+ * copy and produced a repost burst. Collapse only byte-identical bill series
+ * whose source state is loaded, keeping the newest registration. Distinct
+ * bills—even in the same community—remain independent.
+ */
+export function supersededRecurringSeriesIds(
+  configs: readonly CbpRecurrenceConfig[],
+  statesById: ReadonlyMap<string, EscrowState>,
+): string[] {
+  const groups = new Map<string, CbpRecurrenceConfig[]>();
+  for (const cfg of configs) {
+    const state = statesById.get(cfg.lastPostId) ?? statesById.get(cfg.seriesId);
+    if (!state) continue;
+    const key = listingIdentityKey(state);
+    const group = groups.get(key);
+    if (group) group.push(cfg);
+    else groups.set(key, [cfg]);
+  }
+  const out: string[] = [];
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    let newest = group[0];
+    for (const cfg of group) {
+      if (cfg.createdAt > newest.createdAt) newest = cfg;
+    }
+    for (const cfg of group) {
+      if (cfg.seriesId !== newest.seriesId) out.push(cfg.seriesId);
+    }
+  }
+  return out;
 }
 
 /** The next-post timestamp (Unix SECONDS) for display. */

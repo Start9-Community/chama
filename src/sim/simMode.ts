@@ -9,12 +9,13 @@
 //
 // Activation
 // ──────────
-//   ?sim=1  → turn sim mode on and persist (localStorage `chama_sim_mode`)
-//   ?sim=0  → turn sim mode off and clear the flag
+//   ?sim=1  → turn sim mode on for this app session
+//   ?sim=0  → turn sim mode off
 //
-// There is no UI toggle. The URL flag is the only way in. Once on, it
-// survives reloads via localStorage so a tester can navigate freely
-// without re-pasting the URL.
+// There is no UI toggle. The URL flag is the public entry point. A normal
+// `getchama.app` visit always clears a prior sim session: users must never
+// land in a fake-money experience simply because they explored the sandbox
+// earlier.
 //
 // Sim mode is independent of `powerUserMode` (the former `sandboxMode`).
 // Power-user mode gates dangerous surfaces in production; sim mode swaps
@@ -33,7 +34,9 @@ let _cachedReadAtStartup: boolean | null = null;
 
 /**
  * Read the `?sim=` URL parameter once at module load and apply it to
- * localStorage. After this, `isSimModeOn()` is a pure localStorage read.
+ * localStorage. `?sim=1` opts in; `?sim=0` *and a normal URL with no sim
+ * parameter* opt out. After this, `isSimModeOn()` is a pure localStorage
+ * read for the current app session.
  *
  * Called automatically on first `isSimModeOn()` invocation.
  */
@@ -48,12 +51,12 @@ function applyUrlFlagOnce(): void {
   } catch {
     return;
   }
-  if (param === null) return;
-
   try {
     if (param === "1") {
       localStorage.setItem(SIM_STORAGE_KEY, "1");
-    } else if (param === "0") {
+    } else {
+      // A bare production URL is an explicit return to real mode. This also
+      // fixes older sticky `chama_sim_mode` values left by sandbox visits.
       localStorage.removeItem(SIM_STORAGE_KEY);
     }
   } catch {
@@ -62,9 +65,8 @@ function applyUrlFlagOnce(): void {
 }
 
 /**
- * Whether sim mode is currently active. Honors both the URL flag (on
- * first read this session) and the persisted localStorage flag from
- * a previous session.
+ * Whether sim mode is currently active. The URL is applied once at startup;
+ * a bare production URL cannot inherit a prior sandbox session.
  */
 export function isSimModeOn(): boolean {
   applyUrlFlagOnce();

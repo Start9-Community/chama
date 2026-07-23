@@ -15,6 +15,10 @@ npm run dev
 
 The development server runs at `http://localhost:3000`.
 
+### StartOS package
+
+The StartOS 0.4 package exposes three separate Chama clients, each backed by its own native Rust Fedimint wallet. From a configured StartOS packaging workspace, build with `make x86` or `make arm`, sideload the result with `make install`, and publish it to the configured personal registry with `make publish`.
+
 Before opening a pull request:
 
 ```bash

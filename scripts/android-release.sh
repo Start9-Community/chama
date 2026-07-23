@@ -487,7 +487,12 @@ fi
 VERSION=$(node -p "require('./package.json').version")
 TAG="${TAG:-v$VERSION}"
 REPO="${REPO:-$(default_repo)}"
-RELEASE_DIR="${RELEASE_DIR:-/private/tmp/chama-$TAG-release-assets}"
+EXPECTED_ANDROID_ABI="${CHAMA_ANDROID_ABI:-arm64-v8a}"
+ABI_RELEASE_SUFFIX=""
+if [ "$EXPECTED_ANDROID_ABI" != "arm64-v8a" ]; then
+  ABI_RELEASE_SUFFIX="-$EXPECTED_ANDROID_ABI"
+fi
+RELEASE_DIR="${RELEASE_DIR:-/private/tmp/chama-$TAG$ABI_RELEASE_SUFFIX-release-assets}"
 RELEASE_APK="$RELEASE_DIR/app-release.apk"
 SHA_FILE="$RELEASE_DIR/app-release.apk.sha256"
 ASC_FILE="$SHA_FILE.asc"
@@ -543,12 +548,12 @@ mkdir -p "$RELEASE_DIR"
 cp "$APK_PATH" "$RELEASE_APK"
 if command -v unzip >/dev/null 2>&1; then
   APK_LISTING=$(unzip -l "$RELEASE_APK")
-  if ! grep -q 'lib/arm64-v8a/libchama_fedimint_bridge.so' <<<"$APK_LISTING"; then
+  if ! grep -q "lib/$EXPECTED_ANDROID_ABI/libchama_fedimint_bridge.so" <<<"$APK_LISTING"; then
     echo "❌ Release APK is missing the native Fedimint bridge binary."
     echo "   Refusing to prepare Zapstore assets that would fall back to the browser SDK path."
     exit 1
   fi
-  if ! grep -q 'lib/arm64-v8a/libc++_shared.so' <<<"$APK_LISTING"; then
+  if ! grep -q "lib/$EXPECTED_ANDROID_ABI/libc++_shared.so" <<<"$APK_LISTING"; then
     echo "❌ Release APK is missing libc++_shared.so."
     echo "   The native Fedimint bridge links against the Android C++ runtime and will not start without it."
     exit 1

@@ -27,6 +27,7 @@ export interface DashboardBond {
   /** True ⇒ this device holds the local record → reclaimable here. False ⇒
    *  known only from the announcement → visible but not reclaimable here. */
   local: boolean;
+  lockUntil: number;
 }
 
 const samePubkey = (a: string, b: string): boolean =>
@@ -48,7 +49,7 @@ export function mergeDashboardBonds(
     const key = b.bond.address;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ key, amountSats: Number(b.amountSats), locked: b.phase === "locked", local: true });
+    out.push({ key, amountSats: Number(b.amountSats), locked: b.phase === "locked", local: true, lockUntil: b.bond.lockUntil });
   }
   for (const v of announced) {
     if (!v.funded || !v.active) continue;
@@ -56,7 +57,7 @@ export function mergeDashboardBonds(
     const key = v.address;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ key, amountSats: Number(v.actualSats), locked: v.active, local: false });
+    out.push({ key, amountSats: Number(v.actualSats), locked: v.active, local: false, lockUntil: v.lockUntil });
   }
   return out;
 }
