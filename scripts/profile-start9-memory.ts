@@ -25,7 +25,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join, normalize } from "node:path";
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import puppeteer, { type Browser, type CDPSession, type Page } from "puppeteer-core";
 import { WebSocketServer } from "ws";
 import { NsecSigner } from "../src/escrow-engine/nsec-signer.js";
 import { createEnvelope } from "../src/escrow-engine/envelope.js";
@@ -54,6 +54,12 @@ const MAX_FOOTPRINT_BYTES =
   Number(process.env.CHAMA_PROFILE_MAX_FOOTPRINT_MB ?? 1536) * 1024 * 1024;
 const MAX_FOOTPRINT_SLOPE_BYTES_PER_MIN =
   Number(process.env.CHAMA_PROFILE_MAX_FOOTPRINT_SLOPE_MB_MIN ?? 10) * 1024 * 1024;
+const MiB = 1024 * 1024;
+// The observed runaway burns ~1.6 GiB/min; a healthy tab peaks under 60 MiB.
+// Dumping the allocation profile at this JS-heap threshold beats V8's ~2.9 GiB
+// OOM ceiling by minutes.
+const ALLOC_DUMP_TRIGGER_BYTES =
+  Number(process.env.CHAMA_PROFILE_ALLOC_DUMP_MB ?? 200) * 1024 * 1024;
 
 const SELLER_SECRET = "11".repeat(32);
 const BUYER_SECRET = "22".repeat(32);
@@ -381,6 +387,29 @@ function slopePerMinute(points: Array<{ at: number; value: number }>): number {
   return (last.value - first.value) / minutes;
 }
 
+interface SamplingProfileNode {
+  callFrame?: { functionName?: string; url?: string; lineNumber?: number };
+  selfSize?: number;
+  children?: SamplingProfileNode[];
+}
+
+function summarizeTopAllocators(head: SamplingProfileNode, limit: number): Array<{ frame: string; selfBytes: number }> {
+  const totals = new Map<string, number>();
+  const stack: SamplingProfileNode[] = [head];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    const callFrame = node.callFrame ?? {};
+    const frame = `${callFrame.functionName || "(anonymous)"} @ ${callFrame.url || "?"}:${(callFrame.lineNumber ?? -1) + 1}`;
+    const selfSize = node.selfSize ?? 0;
+    if (selfSize > 0) totals.set(frame, (totals.get(frame) ?? 0) + selfSize);
+    for (const child of node.children ?? []) stack.push(child);
+  }
+  return [...totals.entries()]
+    .map(([frame, selfBytes]) => ({ frame, selfBytes }))
+    .sort((a, b) => b.selfBytes - a.selfBytes)
+    .slice(0, limit);
+}
+
 async function fieldMain(): Promise<void> {
   const userDataDir = process.env.CHAMA_PROFILE_USER_DATA_DIR
     ?? await mkdtemp(join(tmpdir(), "chama-field-profile-"));
@@ -402,30 +431,129 @@ async function fieldMain(): Promise<void> {
   if (!browserPid) throw new Error("Chrome process PID unavailable — cannot sample renderer footprint");
 
   const crashes: Array<{ url: string; at: number; message: string }> = [];
-  const pages: Page[] = [];
+
+  interface TrackedTab {
+    id: number;
+    page: Page;
+    session: CDPSession | null;
+    lastUrl: string;
+    dumpedThisDocument: boolean;
+    allocDumps: string[];
+  }
+  const tracked: TrackedTab[] = [];
+  let nextTabId = 1;
+
+  const startSamplingOn = async (session: CDPSession): Promise<void> => {
+    await session.send("Performance.enable");
+    await session.send("HeapProfiler.enable");
+    try {
+      await session.send("HeapProfiler.startSampling", { samplingInterval: 65536 });
+    } catch (error) {
+      // Same-document/same-process navigations leave the profiler running —
+      // that's the accumulation we want, not a failure.
+      if (!/already/i.test(String(error))) throw error;
+    }
+  };
+
+  const armSampling = async (tab: TrackedTab): Promise<void> => {
+    try {
+      if (!tab.session) tab.session = await tab.page.createCDPSession();
+      await startSamplingOn(tab.session);
+    } catch {
+      // Cross-process navigation (or a crash) killed the old session.
+      try {
+        tab.session = await tab.page.createCDPSession();
+        await startSamplingOn(tab.session);
+      } catch (error) {
+        tab.session = null;
+        console.warn(`[field] sampling arm failed for ${tab.lastUrl}: ${String(error)}`);
+      }
+    }
+  };
+
+  const dumpAllocations = async (tab: TrackedTab, reason: string): Promise<void> => {
+    if (!tab.session || tab.dumpedThisDocument) return;
+    tab.dumpedThisDocument = true;
+    try {
+      const { profile } = await tab.session.send("HeapProfiler.getSamplingProfile");
+      const topAllocators = summarizeTopAllocators(profile.head, 15);
+      const path = join(tmpdir(), `chama-start9-alloc-tab${tab.id}-${Date.now()}.json`);
+      await writeFile(path, JSON.stringify(
+        { url: tab.lastUrl, reason, at: Date.now(), topAllocators, profile },
+        null,
+        2,
+      ));
+      tab.allocDumps.push(path);
+      console.error(`[field] ALLOCATION DUMP (${reason}) for ${tab.lastUrl}: ${path}`);
+      for (const row of topAllocators.slice(0, 8)) {
+        console.error(`  ${(row.selfBytes / MiB).toFixed(1)} MiB  ${row.frame}`);
+      }
+    } catch (error) {
+      tab.dumpedThisDocument = false; // dump failed — allow a retry next sample
+      console.warn(`[field] allocation dump failed for ${tab.lastUrl}: ${String(error)}`);
+    }
+  };
+
+  const attachTab = async (page: Page): Promise<TrackedTab> => {
+    const tab: TrackedTab = {
+      id: nextTabId++,
+      page,
+      session: null,
+      lastUrl: page.url(),
+      dumpedThisDocument: false,
+      allocDumps: [],
+    };
+    page.on("error", (error) => {
+      crashes.push({ url: tab.lastUrl, at: Date.now(), message: error.message });
+      console.error(`[field] RENDERER CRASH on ${tab.lastUrl}: ${error.message}`);
+    });
+    page.on("framenavigated", (frame) => {
+      if (frame.parentFrame() !== null) return;
+      tab.lastUrl = frame.url() || tab.lastUrl;
+      tab.dumpedThisDocument = false; // a new document may earn its own dump
+      void armSampling(tab);
+    });
+    await armSampling(tab);
+    tracked.push(tab);
+    return tab;
+  };
+
   // One shared profile, one tab per origin — the real lab shape. Same-site
   // tabs may share a renderer process; the per-PID series captures that too.
   for (const [index, url] of TARGET_URLS.entries()) {
     const page = index === 0
       ? ((await browser.pages())[0] ?? await browser.newPage())
       : await browser.newPage();
-    page.on("error", (error) => {
-      crashes.push({ url, at: Date.now(), message: error.message });
-      console.error(`[field] RENDERER CRASH on ${url}: ${error.message}`);
-    });
+    const tab = await attachTab(page);
+    tab.lastUrl = url;
     try {
       await page.goto(url, { waitUntil: "load", timeout: 60_000 });
     } catch (error) {
       console.warn(`[field] initial load of ${url} did not settle: ${String(error)} — sampling anyway`);
     }
-    pages.push(page);
   }
 
+  // Tabs the operator opens by hand (tonight's third-tab repro) get the same
+  // crash listener + allocation sampling as harness-managed tabs.
+  browser.on("targetcreated", (target) => {
+    void (async () => {
+      try {
+        if (target.type() !== "page") return;
+        const page = await target.page();
+        if (!page || tracked.some(tab => tab.page === page)) return;
+        const tab = await attachTab(page);
+        console.log(`[field] attached to manually opened tab ${tab.id} (${tab.lastUrl || "about:blank"})`);
+      } catch {
+        // A tab that vanished before attach carries no evidence.
+      }
+    })();
+  });
+
   if (FIELD_NSECS.length > 0) {
-    for (const [index, page] of pages.entries()) {
+    for (const [index, tab] of tracked.entries()) {
       const secret = FIELD_NSECS[index] ?? FIELD_NSECS[0]!;
       try {
-        await signIn(page, secret);
+        await signIn(tab.page, secret);
         console.log(`[field] signed in on ${TARGET_URLS[index]}`);
       } catch (error) {
         console.warn(`[field] auto-login failed on ${TARGET_URLS[index]}: ${String(error)}`);
@@ -437,32 +565,35 @@ async function fieldMain(): Promise<void> {
     console.warn("[field] headless without CHAMA_PROFILE_NSEC — measuring the signed-out surface only.");
   }
 
-  const sessions = await Promise.all(pages.map(async (page) => {
-    try {
-      const session = await page.createCDPSession();
-      await session.send("Performance.enable");
-      return session;
-    } catch {
-      return null;
-    }
-  }));
-
   interface FieldSample {
     at: number;
     renderers: RendererProcessSample[];
-    tabs: Array<TabMetrics | null>;
+    tabs: Array<{ id: number; url: string; metrics: TabMetrics }>;
   }
   const samples: FieldSample[] = [];
   const started = Date.now();
   while (Date.now() - started < DURATION_MS) {
-    const tabs = await Promise.all(sessions.map(async (session) => {
-      if (!session) return null;
+    const tabs: FieldSample["tabs"] = [];
+    for (const tab of [...tracked]) {
+      if (!tab.session) continue;
       try {
-        return await readTabMetrics(session);
+        tab.lastUrl = tab.page.url() || tab.lastUrl;
       } catch {
-        return null; // crashed / detached tab — the crash listener records it
+        // keep the last known URL for crash attribution
       }
-    }));
+      try {
+        const metrics = await readTabMetrics(tab.session);
+        tabs.push({ id: tab.id, url: tab.lastUrl, metrics });
+        if (metrics.jsHeapUsed > ALLOC_DUMP_TRIGGER_BYTES) {
+          void dumpAllocations(
+            tab,
+            `jsHeapUsed ${(metrics.jsHeapUsed / MiB).toFixed(0)} MiB crossed the ${(ALLOC_DUMP_TRIGGER_BYTES / MiB).toFixed(0)} MiB trigger`,
+          );
+        }
+      } catch {
+        // crashed / detached tab — the crash listener records it
+      }
+    }
     samples.push({ at: Date.now(), renderers: sampleRendererProcesses(browserPid), tabs });
     await new Promise(resolve => setTimeout(resolve, SAMPLE_MS));
   }
@@ -494,31 +625,49 @@ async function fieldMain(): Promise<void> {
       steadyRssSlopeBytesPerMin: slopePerMinute(steady),
     };
   });
-  const tabResults = pages.map((_, tab) => {
-    const points = samples
-      .map(sample => ({ at: sample.at, metrics: sample.tabs[tab] }))
-      .filter((point): point is { at: number; metrics: TabMetrics } => point.metrics !== null);
-    if (points.length < 2) return null;
+  const finalAllocators = await Promise.all(tracked.map(async (tab) => {
+    if (!tab.session) return null;
+    try {
+      const { profile } = await tab.session.send("HeapProfiler.getSamplingProfile");
+      return summarizeTopAllocators(profile.head, 10);
+    } catch {
+      return null;
+    }
+  }));
+  const tabResults = tracked.map((tab, index) => {
+    const points = samples.flatMap(sample =>
+      sample.tabs
+        .filter(item => item.id === tab.id)
+        .map(item => ({ at: sample.at, metrics: item.metrics })),
+    );
     const heaps = points.map(point => ({ at: point.at, value: point.metrics.jsHeapUsed }));
     return {
-      url: TARGET_URLS[tab],
+      id: tab.id,
+      url: tab.lastUrl,
       samples: points.length,
-      startHeap: heaps[0]!.value,
-      endHeap: heaps.at(-1)!.value,
-      maxHeap: Math.max(...heaps.map(point => point.value)),
-      heapSlopeBytesPerMin: slopePerMinute(heaps),
-      taskDurationDeltaSeconds:
-        points.at(-1)!.metrics.taskDuration - points[0]!.metrics.taskDuration,
-      nodesDelta: points.at(-1)!.metrics.nodes - points[0]!.metrics.nodes,
-      listenersDelta: points.at(-1)!.metrics.listeners - points[0]!.metrics.listeners,
+      allocDumps: tab.allocDumps,
+      topAllocators: finalAllocators[index],
+      ...(points.length >= 2
+        ? {
+          startHeap: heaps[0]!.value,
+          endHeap: heaps.at(-1)!.value,
+          maxHeap: Math.max(...heaps.map(point => point.value)),
+          heapSlopeBytesPerMin: slopePerMinute(heaps),
+          taskDurationDeltaSeconds:
+            points.at(-1)!.metrics.taskDuration - points[0]!.metrics.taskDuration,
+          nodesDelta: points.at(-1)!.metrics.nodes - points[0]!.metrics.nodes,
+          listenersDelta: points.at(-1)!.metrics.listeners - points[0]!.metrics.listeners,
+        }
+        : {}),
     };
   });
-  const diagnostics = await Promise.all(pages.map(async (page) => {
+  const diagnostics = await Promise.all(tracked.map(async (tab) => {
     try {
-      return await page.evaluate(() => ({
+      const rings = await tab.page.evaluate(() => ({
         liveness: JSON.parse(localStorage.getItem("chama_liveness_diagnostics_v1") ?? "[]"),
         hydration: JSON.parse(localStorage.getItem("chama_hydration_diagnostics_v1") ?? "[]"),
       }));
+      return { url: tab.lastUrl, ...rings };
     } catch {
       return null; // a crashed tab yields no diagnostics — the crash entry stands
     }
@@ -531,8 +680,8 @@ async function fieldMain(): Promise<void> {
         && result.steadyRssSlopeBytesPerMin < MAX_FOOTPRINT_SLOPE_BYTES_PER_MIN
     )
     && tabResults.every(result =>
-      result === null
-        || (result.maxHeap < MAX_HEAP_BYTES && result.heapSlopeBytesPerMin < MAX_SLOPE_BYTES_PER_MIN)
+      result.maxHeap === undefined
+        || (result.maxHeap < MAX_HEAP_BYTES && result.heapSlopeBytesPerMin! < MAX_SLOPE_BYTES_PER_MIN)
     );
 
   const summary = {
@@ -545,6 +694,7 @@ async function fieldMain(): Promise<void> {
       maxSteadyFootprintSlopeBytesPerMin: MAX_FOOTPRINT_SLOPE_BYTES_PER_MIN,
       maxHeapBytes: MAX_HEAP_BYTES,
       maxHeapSlopeBytesPerMin: MAX_SLOPE_BYTES_PER_MIN,
+      allocDumpTriggerBytes: ALLOC_DUMP_TRIGGER_BYTES,
     },
     crashes,
     rendererResults,
