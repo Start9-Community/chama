@@ -40,7 +40,6 @@ export function DashboardScreen({
   loadLiveness,
   livenessBlocksPerDay = 144,
   onOpenBondCeremony,
-  balanceMsats = 0,
   earningsRevision = 0,
   fetchMyBonds,
   getBondChainTip,
@@ -50,12 +49,10 @@ export function DashboardScreen({
   ratings: AggregateRatings | null;
   myTrades: EscrowState[];
   communitySlug?: string | null;
-  loadLiveness?: (slug: string) => Promise<ChamaLiveness | null>;
+  loadLiveness?: (slug: string, signal?: AbortSignal) => Promise<ChamaLiveness | null>;
   livenessBlocksPerDay?: number;
   /** Open the bond ceremony (dev-gated). */
   onOpenBondCeremony?: () => void;
-  /** The user's spendable Chama (Fedimint ecash) balance, in msats. */
-  balanceMsats?: number;
   /** Relay/local earnings reconciliation revision from useEscrow. */
   earningsRevision?: number;
   /** #77: fetch the signed-in npub's own chain-verified announced bonds, so a bond
@@ -120,7 +117,7 @@ export function DashboardScreen({
     [localActive, announcedBonds, lower],
   );
 
-  const { liveness, loading: livenessLoading } = useLiveness(communitySlug ?? null, loadLiveness, { intervalMs: 90_000 });
+  const { liveness, loading: livenessLoading, outcome: livenessOutcome } = useLiveness(communitySlug ?? null, loadLiveness, { intervalMs: 90_000 });
 
   const ratePct = ratings && ratings.count > 0 ? Math.round((ratings.positive / ratings.count) * 100) : null;
 
@@ -133,21 +130,7 @@ export function DashboardScreen({
         {t("bond.dashTitle")}
       </div>
 
-      {/* 0. YOUR SATS — spendable balance where earnings, reclaimed bonds, and
-          payouts land. Deliberately NOT called a "Wallet" (PHILOSOPHY §2.1 Option B
-          killed that mental model): framed as transient sats to sweep out, never a
-          store of value. The number users look for first. */}
-      <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 20, marginBottom: 14 }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 10 }}>
-          {t("bond.dashWallet")}
-        </div>
-        <BitcoinAmount sats={Math.floor(Math.max(0, balanceMsats) / 1000)} size={30} gap={7} glyphScale={1.15} color={T.text} glyphColor={T.accent} />
-        <div style={{ fontSize: 10.5, color: T.muted, fontFamily: T.mono, lineHeight: 1.5, marginTop: 10 }}>
-          {t("bond.dashWalletHint")}
-        </div>
-      </div>
-
-      {/* 0b. EARNINGS (task #53 E1) — insurance premiums redeemed as a bonded
+      {/* 0. EARNINGS (task #53 E1) — insurance premiums redeemed as a bonded
           arbiter. THE recruitment ad: shown whenever the ceremony is exposed,
           with honest zero-state copy until the first premium lands. */}
       {(earnings.noteCount > 0 || SHOW_BOND_CEREMONY) && (
@@ -257,7 +240,7 @@ export function DashboardScreen({
           <div style={{ fontSize: 10, fontWeight: 700, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 8 }}>
             {community?.flagEmoji ?? "🌍"} {community?.displayName ?? communitySlug}
           </div>
-          <LivenessSignal liveness={liveness} loading={livenessLoading} blocksPerDay={livenessBlocksPerDay} />
+          <LivenessSignal liveness={liveness} loading={livenessLoading} outcome={livenessOutcome} blocksPerDay={livenessBlocksPerDay} />
         </div>
       )}
 

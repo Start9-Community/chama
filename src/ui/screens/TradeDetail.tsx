@@ -999,6 +999,16 @@ export function TradeDetail({
     }
     setActivePane(clamped);
   };
+  // Joining is an async state transition. On StartOS the trade room can finish
+  // laying itself out after the role update has already fired, which lets the
+  // scroll container fall back to its physical first pane (Chat). Re-assert the
+  // pre-lock Details destination after layout; this is tied to the explicit join
+  // action, so it cannot yank somebody who later swipes on their own.
+  const landOnDetailsAfterJoin = () => {
+    userMovedPaneRef.current = false;
+    goPane(1);
+    requestAnimationFrame(() => requestAnimationFrame(() => goPane(1)));
+  };
   // A pane move the USER initiated (pill tap / pills drag) — disables auto-focus.
   const userGoPane = (i: number) => { userMovedPaneRef.current = true; goPane(i); };
   const onPagerScroll = () => {
@@ -1028,9 +1038,17 @@ export function TradeDetail({
   // NOTE: decideVotePrompt returns "buttons" for only the FIRST voter at a time, so
   // buyer/seller key off LOCKED directly; the responder's buttons just appear in the
   // already-on-top action card when their turn unlocks.
+  const lockedLandingPane =
+    state.status === EscrowStatus.LOCKED && (myRole === Role.BUYER || myRole === Role.SELLER)
+      ? (!titleDisputed && myRole === fiatPayerRole) ? 1 : 0
+      : null;
   const landing: { key: string; pane: number } | null =
-    (state.status === EscrowStatus.LOCKED && (myRole === Role.BUYER || myRole === Role.SELLER))
-      ? { key: `${state.id}:locked`, pane: (!titleDisputed && myRole === fiatPayerRole) ? 1 : 0 }
+    lockedLandingPane !== null
+      // Include the role + destination pane in the transition key. A spectator can
+      // open an already-LOCKED trade before accepting it; the old id-only key was
+      // consumed while myRole was null, so becoming the buyer could not focus the
+      // Details pane afterward and left them stranded in Chat.
+      ? { key: `${state.id}:locked:${myRole}:${lockedLandingPane}`, pane: lockedLandingPane }
       : votePrompt.kind === "buttons"
         ? { key: `${state.id}:vote:${votePrompt.role}`, pane: 0 }
         : null;
@@ -1075,7 +1093,9 @@ export function TradeDetail({
   // a CHILD order reads as an order (with the buyer short-id) — so a seller can
   // tell the persistent shopfront apart from a live sale at a glance. These win
   // over the generic vertical kicker; everything else keeps its vertical.
-  const verticalKicker = isParentStorefront(state)
+  const verticalKicker = state.listingKind === "work"
+    ? t("trade.kickerWork")
+    : isParentStorefront(state)
     ? t("trade.kickerStorefront")
     : isChildOrder(state)
     ? (state.participants[Role.BUYER]
@@ -1537,6 +1557,7 @@ export function TradeDetail({
               )}
 
               <button
+                type="button"
                 disabled={locking || directNwcFundPhase !== null || fundingInProgress || !participants.buyer || fundUnavailable || lockBlockedByNoArbiter || menuSelectionMissing || menuOrderNotFinal}
                 title={fundingInProgress
                   ? t("trade.fundingInProgressNote")
@@ -2389,7 +2410,10 @@ export function TradeDetail({
                 {canJoinAsBuyer && (
                   <button disabled={joining} onClick={async () => {
                     setJoining(true);
-                    try { await onJoin(Role.BUYER); } finally { setJoining(false); }
+                    try {
+                      await onJoin(Role.BUYER);
+                      landOnDetailsAfterJoin();
+                    } finally { setJoining(false); }
                   }} style={{
                     flex: 1, padding: "14px", borderRadius: T.rs,
                     background: `${ROLE_COLOR.buyer}22`, border: `1px solid ${ROLE_COLOR.buyer}44`,
@@ -2406,7 +2430,10 @@ export function TradeDetail({
                 {canJoinAsArbiter && (
                   <button disabled={joining} onClick={async () => {
                     setJoining(true);
-                    try { await onJoin(Role.ARBITER); } finally { setJoining(false); }
+                    try {
+                      await onJoin(Role.ARBITER);
+                      landOnDetailsAfterJoin();
+                    } finally { setJoining(false); }
                   }} style={{
                     flex: 1, padding: "14px", borderRadius: T.rs,
                     background: `${ROLE_COLOR.arbiter}22`, border: `1px solid ${ROLE_COLOR.arbiter}44`,
@@ -2420,7 +2447,10 @@ export function TradeDetail({
               {canJoinAsSeller && (
                 <button disabled={joining} onClick={async () => {
                   setJoining(true);
-                  try { await onJoin(Role.SELLER); } finally { setJoining(false); }
+                  try {
+                    await onJoin(Role.SELLER);
+                    landOnDetailsAfterJoin();
+                  } finally { setJoining(false); }
                 }} style={{
                   width: "100%", marginTop: 10, padding: "14px", borderRadius: T.rs,
                   background: `${ROLE_COLOR.seller}22`, border: `1px solid ${ROLE_COLOR.seller}44`,
@@ -2885,6 +2915,7 @@ export function TradeDetail({
                       selectedItems: selectedMenuItems,
                       amountMsats: selectedMenuAmountMsats,
                     });
+                    landOnDetailsAfterJoin();
                   } finally {
                     setJoining(false);
                   }
@@ -2923,6 +2954,7 @@ export function TradeDetail({
                       amountMsats: selectedMenuAmountMsats,
                       orderFinalized: true,
                     });
+                    landOnDetailsAfterJoin();
                   } finally {
                     setJoining(false);
                   }

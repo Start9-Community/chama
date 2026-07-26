@@ -134,6 +134,7 @@ export const bond: Record<string, string> = {
   "bond.livenessTipLabel": "What makes a chama live?",
   "bond.livenessTipTitle": "WHAT MAKES A CHAMA LIVE",
   "bond.livenessUnknown": "liveness lights up once you're in",
+  "bond.livenessTimeout": "Bond verification timed out — showing the last verified status when available.",
   "bond.lockedAcrossBefore": " across ",
   "bond.lockedAcrossDeposits": "{count} deposits",
   "bond.lockedCommitted": " committed on-chain",

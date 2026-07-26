@@ -1,7 +1,7 @@
 {
   "name": "chama",
   "private": true,
-  "version": "5.4.0",
+  "version": "5.5.0",
   "license": "MIT",
   "type": "module",
   "description": "Chama — Nostr-native P2P escrow client. Non-custodial. No server.",
@@ -10,7 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "android:sync": "npm run build && npx cap sync android",
-    "test": "npx tsx src/escrow-engine/tests.ts",
+    "test": "npx tsx src/escrow-engine/tests.ts && npx tsx src/guided/tests.ts && npx tsx src/chip-in/tests.ts && npx tsx src/stack/tests.ts",
     "typecheck": "tsc --noEmit",
     "repo:hygiene": "./scripts/check-repo-hygiene.sh",
     "predeploy": "npm run repo:hygiene && npm run typecheck && npm test",
@@ -23,7 +23,8 @@
     "tauri:dev": "tauri dev",
     "tauri:sidecar": "./scripts/build-tauri-fedimint-bridge.sh",
     "startos:check": "tsc --noEmit -p tsconfig.startos.json",
-    "startos:build": "rm -rf javascript && ncc build startos/index.ts -o javascript --transpile-only"
+    "startos:build": "rm -rf javascript && ncc build startos/index.ts -o javascript --transpile-only",
+    "profile:start9-memory": "tsx scripts/profile-start9-memory.ts"
   },
   "dependencies": {
     "@capacitor-mlkit/barcode-scanning": "^8.0.1",
@@ -50,18 +51,21 @@
     "shamir-secret-sharing": "^0.0.4"
   },
   "devDependencies": {
+    "@start9labs/start-sdk": "1.5.3",
     "@tauri-apps/cli": "^2.11.2",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.18.1",
+    "@vercel/ncc": "^0.38.4",
     "@vitejs/plugin-react": "^4.3.0",
+    "puppeteer-core": "^24.16.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
     "vite": "^5.4.0",
     "vite-plugin-top-level-await": "^1.4.0",
     "vite-plugin-wasm": "^3.3.0",
-    "@start9labs/start-sdk": "2.0.6",
-    "@vercel/ncc": "^0.38.4"
+    "ws": "^8.18.3"
   },
   "//security_overrides": "SECURITY: vite 5 ships esbuild <= 0.24.2 with GHSA-67mh-4wv8-2f99 (any website can request from the dev server and read responses) — exploitable on a dev box running `npm run dev` while browsing untrusted sites. The override below forces the patched esbuild even on vite 5. Vite 8 would also fix it, but vite-plugin-top-level-await@1.6 (latest) still requires rollup and pulls uuid@10.0.0 — it isn't compatible with vite 8's rolldown pipeline yet. Drop the override and bump vite to 8 once that plugin ships a rolldown-compatible release.",
   "overrides": {

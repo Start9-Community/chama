@@ -64,8 +64,16 @@ scripts/remote-bridge/
 chama-pulse-log.md
 
 # Local agent memory + internal design briefs — NEVER pushed to the public repo
-# (restored 2026-07-13 after the "clean public repository" cleanup removed them).
+# (restored 2026-07-13 after the "clean public repository" cleanup removed them;
+#  PHILOSOPHY/DECISIONS/INVARIANTS/BACKLOG restored 2026-07-25 from 7e4162c).
 # Keep on disk for Claude/CC continuity; push only if explicitly needed.
 CLAUDE.md
 Codex.md
+PHILOSOPHY.md
+DECISIONS.md
+INVARIANTS.md
+BACKLOG.md
 design/mockups/
+
+# Local StartOS package artifacts (rebuild; do not commit)
+*.s9pk

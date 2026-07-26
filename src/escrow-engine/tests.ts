@@ -73,6 +73,24 @@ import {
   getSummary,
   type TransitionResult,
 } from "./state-machine.js";
+import { workOffersForWorker, workerPubkeyForListing } from "../ui/work-resume.js";
+import { BROWSE_CATS } from "../ui/theme.js";
+import {
+  BROWSER_RUNTIME_LEASE_TTL_MS,
+  browserRuntimeLeaseIsActive,
+  parseBrowserRuntimeLease,
+} from "../fedimint/browser-runtime-lease.js";
+import {
+  HYDRATION_DIAGNOSTICS_KEY,
+  readHydrationDiagnostics,
+} from "./hydration-diagnostics.js";
+import {
+  LIVENESS_CACHE_KEY,
+  LIVENESS_DIAGNOSTICS_KEY,
+  getLivenessDiagnostics,
+  loadCoordinatedLiveness,
+  resetLivenessCoordinator,
+} from "../arbiters/liveness-coordinator.js";
 import {
   holderRoleForShareIndex,
   shareIndexForRole,
@@ -134,7 +152,11 @@ import {
   isPerformanceContest,
 } from "./arbiter-substitution.js";
 import {
+  compactHotRawEvents,
+  escrowDeltaSince,
   EscrowClient,
+  recoveryReadQuorum,
+  relayPoolNeedsRecoveryBackfill,
   type Signer,
   type UnsignedEvent,
 } from "./escrow-client.js";
@@ -887,6 +909,103 @@ function assertErr(result: TransitionResult, expectedCode: string, name: string)
   }
 }
 
+// ── Bounded liveness generation coordinator ──────────────────────────────
+{
+  resetLivenessCoordinator();
+  localStorage.removeItem(LIVENESS_CACHE_KEY);
+  localStorage.removeItem(LIVENESS_DIAGNOSTICS_KEY);
+  let loaderCalls = 0;
+  const neverSettles = () => {
+    loaderCalls++;
+    return new Promise<any>(() => {});
+  };
+  const loads = Array.from(
+    { length: 5 },
+    () => loadCoordinatedLiveness("us-blf", neverSettles, 20),
+  );
+  assert(
+    loads.every(load => load === loads[0]) && loaderCalls === 1,
+    "liveness coordinator: repeated mount/interval/focus callers share one generation",
+  );
+
+  // A stuck liveness request is independent of the escrow transition core:
+  // active-trade reconstruction remains synchronous and completes while the
+  // external chain read is still pending.
+  const coldTrade = buildToLocked();
+  assert(
+    coldTrade.state.status === EscrowStatus.LOCKED,
+    "liveness coordinator: a stalled bond read cannot block cold active-trade reconstruction",
+  );
+
+  const settled = await Promise.all(loads);
+  assert(
+    settled.every(result => result.outcome === "timeout" && result.liveness === null),
+    "liveness coordinator: a never-resolving loader is force-settled by the generation deadline",
+  );
+  const diagnostic = getLivenessDiagnostics().at(-1);
+  assert(
+    loaderCalls === 1
+      && diagnostic?.outcome === "timeout"
+      && diagnostic.joinedCallers === 4
+      && diagnostic.finishedAt !== null,
+    "liveness coordinator: timeout releases one bounded generation with persisted join diagnostics",
+    JSON.stringify(diagnostic),
+  );
+
+  const verifiedLiveness = {
+    community: "us-blf",
+    isLive: true,
+    arbiterCount: 1,
+    totalBondSats: 50_000n,
+    bondWeightSatBlocks: 5_000_000n,
+    avgRemainingBlocks: 100,
+    ratings: { count: 1, positive: 1, negative: 0, positiveRate: 1 },
+    score: 42,
+  };
+  const verified = await loadCoordinatedLiveness(
+    "us-blf",
+    async () => verifiedLiveness,
+    20,
+  );
+  const cachedAfterTimeout = await loadCoordinatedLiveness(
+    "us-blf",
+    neverSettles,
+    20,
+  );
+  assert(
+    verified.source === "live"
+      && cachedAfterTimeout.outcome === "timeout"
+      && cachedAfterTimeout.source === "cache"
+      && cachedAfterTimeout.liveness?.totalBondSats === 50_000n,
+    "liveness coordinator: timeout settles onto the last verified cached result",
+  );
+  resetLivenessCoordinator();
+}
+
+// ── Browser wallet runtime lease (cross-port Start9 split-view guard) ─────
+{
+  const now = 1_900_000_000_000;
+  const lease = parseBrowserRuntimeLease(
+    `other=value; chama_fedimint_runtime=tab-a.${now}; another=value`,
+  );
+  assert(
+    lease?.token === "tab-a" && lease.touchedAt === now,
+    "runtime lease: parses the host cookie among unrelated cookies",
+  );
+  assert(
+    browserRuntimeLeaseIsActive(lease, now + BROWSER_RUNTIME_LEASE_TTL_MS - 1),
+    "runtime lease: a fresh heartbeat blocks a second WASM wallet",
+  );
+  assert(
+    !browserRuntimeLeaseIsActive(lease, now + BROWSER_RUNTIME_LEASE_TTL_MS),
+    "runtime lease: a crashed tab's stale claim self-heals at the TTL",
+  );
+  assert(
+    parseBrowserRuntimeLease("chama_fedimint_runtime=malformed") === null,
+    "runtime lease: malformed cookies fail open without throwing",
+  );
+}
+
 // Helper: drive a fresh chain to LOCKED. Useful for tests downstream of LOCK.
 function buildToLocked(): { state: any; lock: ParsedEscrowEvent<LockPayload> } {
   const create = createEvent();
@@ -899,6 +1018,11 @@ function buildToLocked(): { state: any; lock: ParsedEscrowEvent<LockPayload> } {
 }
 
 console.log("\n── NIP-99 Store listing interoperability ──");
+assert(
+  BROWSE_CATS.some(category => category.id === "work")
+    && !BROWSE_CATS.some(category => category.id === "lending"),
+  "Browse exposes Work but keeps the legacy Lending vertical internal",
+);
 {
   const pubkey = "11".repeat(32);
   const payload = {
@@ -937,6 +1061,34 @@ console.log("\n── NIP-99 Store listing interoperability ──");
   const naddr = nip99ListingNaddr(pubkey, "listing-123", ["wss://relay.example"]);
   assert(naddr.startsWith("naddr1") && nip99ListingUri(pubkey, "listing-123").startsWith("nostr:naddr1"),
     "Store listings have copyable NIP-19/NIP-21 naddr links");
+
+  const workEvent = buildNip99ListingEvent({
+    payload: { ...payload, listingKind: "work", fulfillment: "service" },
+    pubkey,
+    escrowId: "work-123",
+    createdAt: 1_700_000_001,
+  });
+  assert(workEvent?.kind === 30402
+      && workEvent.tags.some(tag => tag.join(":") === "t:work")
+      && workEvent.tags.some(tag => tag.join(":") === "t:service")
+      && !workEvent.tags.some(tag => tag.join(":") === "t:marketplace"),
+    "Work offers use standard NIP-99 classifieds with work/service discovery tags");
+
+  const workListing = {
+    id: "work-resume-1",
+    listingKind: "work",
+    participants: { [Role.BUYER]: null, [Role.SELLER]: pubkey, [Role.ARBITER]: null },
+    initiator: { pubkey, role: Role.SELLER },
+  } as EscrowState;
+  const storeListing = {
+    ...workListing,
+    id: "store-resume-1",
+    listingKind: undefined,
+  } as EscrowState;
+  assert(workerPubkeyForListing(workListing) === pubkey,
+    "Work résumé resolves the economic worker from the seller seat");
+  assert(workOffersForWorker([workListing, storeListing, workListing], pubkey.toUpperCase()).length === 1,
+    "Work résumé selects this worker's offers, excludes Stores, and deduplicates relay copies");
 
   assert(buildNip99ListingEvent({ payload: { ...payload, category: "p2p-trade" }, pubkey, escrowId: "p2p", createdAt: 1 }) === null,
     "P2P vertical is not misrepresented as a NIP-99 Store listing");
@@ -1785,6 +1937,15 @@ console.log("\n── ATOMIC LOCK (CREATED → LOCKED, no FUNDED hop) ──");
       "store: the seller's own lapsed unfunded listing is renewable");
     assert(!canRenewListing(listing, BUYER_PK, lapsedAt),
       "store: only the seller may renew, even once lapsed");
+    assert(!canRenewListing({ ...listing, category: "p2p-trade" } as EscrowState, SELLER_PK, lapsedAt),
+      "store: Exchange listings never inherit Storefront renewal");
+    assert(!canRenewListing({ ...listing, listingKind: "work" } as EscrowState, SELLER_PK, lapsedAt),
+      "store: Work offers never silently inherit Storefront renewal");
+    assert(lapsedRenewableListings([
+      { ...listing, category: "bill-pay" } as EscrowState,
+      { ...listing, category: "lending" } as EscrowState,
+    ], SELLER_PK, lapsedAt).length === 0,
+      "store: Bill Pay and Lending stay out of the manual Storefront renewal card");
     // Manual-card feed: only truly-lapsed listings.
     const lapsedList = lapsedRenewableListings([listing], SELLER_PK, lapsedAt);
     assert(lapsedList.length === 1 && lapsedList[0].id === listing.id,
@@ -3946,14 +4107,17 @@ console.log("\n── CHAT ──");
   assert(!!replacedSlotPayload.bodyEnvelope?.encryptedFor[replacedBuyer],
     "The replacement buyer in the named slot is a chat recipient");
 
-  // v3.1.1 (chat-safety, FIX 1 regression): the sent chat raw MUST be persisted
-  // to the durable rawEvents cache. CHAT is intentionally NOT in eventChain, so
-  // without this a reload (which seeds replay from rawEvents) rebuilds chat from
-  // an incomplete relay fetch and silently drops it — the chat-absorption root
-  // cause Jetty hit on a live two-device trade.
+  // The exact signed chat is persisted to IndexedDB by sendChat, but its
+  // potentially multi-megabyte recipient ciphertext must not remain in the
+  // renderer's hot raw-event graph. The decrypted local echo remains visible.
   const cachedChatRaws = (chatClient as any).rawEvents.get(state.id) as NostrEvent[] | undefined;
-  assert(!!cachedChatRaws?.some(e => e.id === capturedChat.id),
-    "FIX 1: the sent chat raw is persisted to the durable rawEvents cache");
+  const hotSentChat = chatClient.getState(state.id)?.chatMessages
+    .find(message => message.raw.id === capturedChat.id);
+  assert(!cachedChatRaws?.some(e => e.id === capturedChat.id),
+    "Sent chat ciphertext is not retained in the hot rawEvents map");
+  assert(hotSentChat?.payload.message === "receipt paid"
+      && hotSentChat.raw.content === "",
+    "Sent chat stays visible while its parsed raw ciphertext is stripped");
 
   // v3.1.1 (chat-safety, FIX 3 regression): an oversized image must FAIL LOUDLY
   // before publish (relays silently DROP events over 128 KiB on receive), not
@@ -7285,7 +7449,7 @@ console.log("\n── ENVELOPE PUBLISH + RECEIVE (v1.2.2 PROD encryption) ──
     },
   };
 
-  const votePayload = {
+  const votePayload: VotePayload = {
     type: "escrow:vote",
     outcome: Outcome.RELEASE,
     role: Role.BUYER,
@@ -7335,6 +7499,54 @@ console.log("\n── ENVELOPE PUBLISH + RECEIVE (v1.2.2 PROD encryption) ──
            decoded.votedAt === 1_700_000_000,
       `(publish) ${viewer.name} decrypts their slot to the original VOTE payload`);
   }
+
+  // Relay-size regression: holder-only shares are already encrypted for the
+  // payout recipient and can be tens of KiB. The old generic fanout copied the
+  // full share into all three outer ciphertexts, making real votes ~69 KiB and
+  // leaving them on only one permissive relay. The vote-specific fanout must
+  // give everyone the private vote while carrying the share in ONE slot only.
+  const largeShareCiphertext = "v".repeat(22_000);
+  const voteWithShare: VotePayload = {
+    ...votePayload,
+    shareEnvelope: {
+      shareIndex: 0,
+      outcome: Outcome.RELEASE,
+      notesHash: "relay-size-regression",
+      recipientPubkey: sellerPub_,
+      encryptedFor: { [sellerPub_]: largeShareCiphertext },
+    },
+  };
+  const compactVoteContent: string = await (client as any).encryptVoteToParticipants(
+    voteWithShare,
+    fakeState,
+  );
+  const compactVoteEnvelope = JSON.parse(compactVoteContent);
+  const decodedBuyerVote = JSON.parse(await buyerCrypto.decrypt(
+    compactVoteEnvelope.encryptedFor[buyerPub_],
+    buyerPub_,
+  ));
+  const decodedSellerVote = JSON.parse(await sellerCrypto.decrypt(
+    compactVoteEnvelope.encryptedFor[sellerPub_],
+    buyerPub_,
+  ));
+  const decodedArbiterVote = JSON.parse(await arbiterCrypto.decrypt(
+    compactVoteEnvelope.encryptedFor[arbiterPub_],
+    buyerPub_,
+  ));
+  assert(decodedBuyerVote.outcome === Outcome.RELEASE &&
+         decodedArbiterVote.outcome === Outcome.RELEASE,
+    "(publish) Compact VOTE still reveals the private vote to every participant");
+  assert(decodedBuyerVote.shareEnvelope === undefined &&
+         decodedArbiterVote.shareEnvelope === undefined,
+    "(publish) Compact VOTE omits the large holder share from non-recipient slots");
+  assert(decodedSellerVote.shareEnvelope?.encryptedFor?.[sellerPub_] === largeShareCiphertext,
+    "(publish) Compact VOTE carries the holder share in the payout recipient slot");
+  const legacyVoteContent = await (client as any).encryptToParticipants(
+    voteWithShare,
+    fakeState,
+  );
+  assert(compactVoteContent.length < legacyVoteContent.length / 2,
+    "(publish) Compact VOTE stays below half the legacy three-copy wire size");
 
   // ── receive side: decryptEventContent ────────────────────────────
 
@@ -11972,6 +12184,34 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
       assert(Array.isArray(diagnostics?.requiredCapabilities) &&
         diagnostics.requiredCapabilities.includes("effective_iroh_config"),
         "Native bridge stale-sidecar diagnostics require effective iroh config reporting");
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  }
+
+  {
+    const originalFetch = (globalThis as any).fetch;
+    const calls: string[] = [];
+    (globalThis as any).fetch = async (url: unknown) => {
+      const path = String(url);
+      calls.push(path);
+      if (path.endsWith("/health")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          joined: false,
+          api_version: 2,
+          capabilities: ["reset", "idempotent_join", "effective_iroh_config"],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: "unexpected cold-open request" }), { status: 500 });
+    };
+    try {
+      const wallet = new NativeBridgeWallet("http://127.0.0.1:8788");
+      await wallet.open();
+      assert(!wallet.isOpen(),
+        "Fresh native bridge stays closed until join");
+      assert(calls.length === 1 && calls[0].endsWith("/health"),
+        "Fresh native bridge open uses joined=false health and never calls crash-prone /info");
     } finally {
       (globalThis as any).fetch = originalFetch;
     }
@@ -18591,6 +18831,72 @@ console.log("\n── SIM MODE — cross-mode policy + BOLT11 parser ──");
     "Parser returns null for empty string");
 }
 
+console.log("\n── RELAY RECOVERY — bounded delta + hot-cache policy ──");
+{
+  const stateRaw = {
+    id: "state-raw",
+    pubkey: "p",
+    created_at: 100,
+    kind: EscrowEventKind.LOCK,
+    tags: [["d", "trade"]],
+    content: "small",
+    sig: "sig",
+  } as NostrEvent;
+  const sameSecondStateRaw = {
+    ...stateRaw,
+    id: "same-second",
+    created_at: 102,
+  };
+  const largeChatRaw = {
+    ...stateRaw,
+    id: "large-chat",
+    created_at: 101,
+    kind: EscrowEventKind.CHAT,
+    content: "x".repeat(120_000),
+  };
+
+  assert(
+    escrowDeltaSince([stateRaw, sameSecondStateRaw]) === 100,
+    "Small-event delta cursor overlaps the newest cached second",
+  );
+  assert(
+    escrowDeltaSince([stateRaw, sameSecondStateRaw, {
+      ...largeChatRaw,
+      created_at: 103,
+    }]) === 104,
+    "Chat-bearing delta cursor advances past the cached heavy event",
+  );
+  assert(
+    escrowDeltaSince([]) === undefined,
+    "Cold escrow hydration keeps a full-history fetch",
+  );
+
+  const hot = compactHotRawEvents([
+    stateRaw,
+    largeChatRaw,
+    stateRaw,
+    sameSecondStateRaw,
+  ]);
+  assert(
+    hot.length === 2 && hot.every(event => event.kind !== EscrowEventKind.CHAT),
+    "Hot raw cache drops CHAT ciphertext and deduplicates state-chain raws",
+  );
+  assert(
+    largeChatRaw.content.length === 120_000,
+    "Raw CHAT fixture remains available for durable-cache persistence",
+  );
+
+  assert(recoveryReadQuorum(7) === 3, "Seven-relay recovery quorum remains three");
+  assert(
+    !relayPoolNeedsRecoveryBackfill(6, 7),
+    "One flapping relay cannot trigger a watched-trade backfill",
+  );
+  assert(
+    relayPoolNeedsRecoveryBackfill(2, 7),
+    "A real below-quorum pool outage arms one recovery backfill",
+  );
+}
+
 console.log("\n── RELAY MANAGER — one-shot fetch isolation ──");
 {
   class FakeWebSocket {
@@ -18697,6 +19003,26 @@ console.log("\n── RELAY MANAGER — one-shot fetch isolation ──");
   coldSocket.emit(["EOSE", coldFetchReq[1]]);
   const coldFetched = await coldFetch;
   assert(coldFetched.length === 0, "Cold fetch resolves after the connected relay EOSEs");
+
+  const deltaFetch = coldRelayManager.fetchEscrowEvents(
+    "sm_cold_start_trade",
+    1_000,
+    1_234,
+  );
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const deltaReq = coldSocket.sent
+    .map(raw => JSON.parse(raw))
+    .find(msg =>
+      msg[0] === "REQ" &&
+      String(msg[1]).startsWith("sm_fetch_") &&
+      msg[2]?.since === 1_234
+    );
+  assert(
+    deltaReq?.[2]?.["#d"]?.[0] === "sm_cold_start_trade",
+    "Escrow delta fetch carries the since cursor with the original #d filter",
+  );
+  coldSocket.emit(["EOSE", deltaReq[1]]);
+  await deltaFetch;
 
   FakeWebSocket.instances = [];
   const closingRelayManager = new RelayManager(
@@ -19699,6 +20025,7 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
 
   const updates: EscrowState[] = [];
   const listingHydrationCounts: number[] = [];
+  let publicListingsSettled = 0;
   const client = new EscrowClient(
     fakeSigner,
     {
@@ -19712,6 +20039,7 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
     {
       onStateUpdate: (_id, state) => updates.push(state),
       onPublicListingHydration: (pending) => listingHydrationCounts.push(pending),
+      onPublicListingsSettled: () => { publicListingsSettled++; },
     },
   );
 
@@ -19724,6 +20052,16 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
     .map(raw => JSON.parse(raw))
     .find(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_sub_"));
   assert(!!publicReq, "Browse public-listing subscription is active");
+  socket.emit(["EOSE", publicReq[1]]);
+  assert(
+    publicListingsSettled === 1,
+    "Browse settles its initial public reading as soon as relay EOSE quorum arrives",
+  );
+  socket.emit(["EOSE", publicReq[1]]);
+  assert(
+    publicListingsSettled === 1,
+    "Browse initial-settled callback fires only once",
+  );
 
   const create = createEvent();
   const lock = lockEvent(create.raw.id);
@@ -19771,6 +20109,69 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
   );
 
   client.disconnect();
+
+  // One escrow hydration generation owns relay/decrypt/replay work. A second
+  // cold-start caller joins the exact promise instead of opening another fetch.
+  FakeWebSocket.instances = [];
+  (globalThis as any).localStorage.removeItem(HYDRATION_DIAGNOSTICS_KEY);
+  const coalescedClient = new EscrowClient(
+    fakeSigner,
+    {
+      relays: ["wss://relay.test"],
+      wsImpl: FakeWebSocket as unknown as typeof WebSocket,
+      verifyEvent: () => true,
+    },
+  );
+  coalescedClient.connect();
+  const coalescedSocket = FakeWebSocket.instances[0]!;
+  coalescedSocket.onopen?.({} as Event);
+  resetLivenessCoordinator();
+  const stalledColdLiveness = loadCoordinatedLiveness(
+    "us-blf",
+    () => new Promise<any>(() => {}),
+    1_000,
+  );
+  const joinedLoadA = coalescedClient.loadEscrow(ESCROW_ID);
+  const joinedLoadB = coalescedClient.loadEscrow(ESCROW_ID);
+  assert(
+    joinedLoadA === joinedLoadB,
+    "Hydration coalescing: concurrent callers share the exact generation promise",
+  );
+  const coalescedFetchReqs = coalescedSocket.sent
+    .map(raw => JSON.parse(raw))
+    .filter(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_"));
+  assert(
+    coalescedFetchReqs.length === 1,
+    "Hydration coalescing: concurrent callers open only one relay fetch",
+  );
+  for (const event of [create, lock, voteBuyer, voteSeller, resolve, claim, complete]) {
+    coalescedSocket.emit(["EVENT", coalescedFetchReqs[0][1], rawFromParsed(event)]);
+  }
+  coalescedSocket.emit(["EOSE", coalescedFetchReqs[0][1]]);
+  const [joinedStateA, joinedStateB] = await Promise.all([joinedLoadA, joinedLoadB]);
+  assert(
+    joinedStateA === joinedStateB && joinedStateA?.status === EscrowStatus.COMPLETED,
+    "Hydration coalescing: every waiter receives the same completed state",
+  );
+  resetLivenessCoordinator();
+  const stalledColdLivenessResult = await stalledColdLiveness;
+  assert(
+    joinedStateA?.status === EscrowStatus.COMPLETED
+      && stalledColdLivenessResult.outcome === "aborted",
+    "Cold active-trade hydration completes independently of a stalled liveness generation",
+  );
+  const coalescedDiag = readHydrationDiagnostics().at(-1);
+  assert(
+    coalescedDiag?.escrowId === ESCROW_ID
+      && coalescedDiag.coalescedCallers >= 1
+      && coalescedDiag.attempts === 1
+      && coalescedDiag.fetchedEvents === 7
+      && coalescedDiag.totalContentBytes > 0
+      && coalescedDiag.outcome === `state:${EscrowStatus.COMPLETED}`,
+    "Hydration diagnostics: bounded persisted record captures coalescing, attempts, bytes, and outcome",
+    JSON.stringify(coalescedDiag),
+  );
+  coalescedClient.disconnect();
 
   FakeWebSocket.instances = [];
   const orderClient = new EscrowClient(

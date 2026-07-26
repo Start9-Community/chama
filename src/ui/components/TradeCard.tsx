@@ -52,6 +52,7 @@ export function TradeCard({
   stockLeft,
   orderIndicator,
   onResumeOrder,
+  onOpenWorkerProfile,
 }: {
   state: EscrowState;
   pubkey: string;
@@ -71,6 +72,9 @@ export function TradeCard({
   orderIndicator?: { orders: number; unread: number; viewerOrderId?: string };
   /** Buyer-only shortcut from the parent listing to their spawned child order. */
   onResumeOrder?: (id: string) => void;
+  /** Work offers turn the author into a live public résumé. Kept separate
+   *  from onSelect so tapping the identity never starts the hire flow. */
+  onOpenWorkerProfile?: (pubkey: string) => void;
 }) {
   const { t } = useT();
   const btcPrice = useBitcoinPrice();
@@ -281,7 +285,8 @@ export function TradeCard({
                   seller can tell the persistent shopfront apart from a live sale
                   in the trade list. The emoji rides the label; other verticals
                   keep the CAT_ICON glyph. */}
-              {isParentStorefront(state) ? t("card.categoryStorefront")
+              {state.listingKind === "work" ? t("card.categoryWork")
+                : isParentStorefront(state) ? t("card.categoryStorefront")
                 : isChildOrder(state) ? t("card.categoryOrder")
                 : state.category === "marketplace" ? t("card.categorySingleListing")
                 : <>
@@ -360,18 +365,37 @@ export function TradeCard({
             marginBottom: 8, flexWrap: "wrap",
           }}>
             {state.category === "marketplace" && sellerPubkey && (
-              <span style={{
+              <span
+                role={state.listingKind === "work" && onOpenWorkerProfile ? "button" : undefined}
+                tabIndex={state.listingKind === "work" && onOpenWorkerProfile ? 0 : undefined}
+                onClick={state.listingKind === "work" && onOpenWorkerProfile
+                  ? (event) => {
+                      event.stopPropagation();
+                      onOpenWorkerProfile(sellerPubkey);
+                    }
+                  : undefined}
+                onKeyDown={state.listingKind === "work" && onOpenWorkerProfile
+                  ? (event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onOpenWorkerProfile(sellerPubkey);
+                    }
+                  : undefined}
+                title={state.listingKind === "work" ? t("card.viewWorkerProfile") : undefined}
+                style={{
                 fontSize: 10, padding: "3px 9px", borderRadius: 999,
                 background: isParentStorefront(state) ? `${T.teal}12` : T.surface,
-                color: isParentStorefront(state) ? T.teal : T.muted,
+                color: state.listingKind === "work" ? T.green : isParentStorefront(state) ? T.teal : T.muted,
                 border: `1px solid ${isParentStorefront(state) ? `${T.teal}3d` : T.border}`,
                 fontFamily: T.mono, fontWeight: 800,
                 display: "inline-flex", alignItems: "center", gap: 4,
                 maxWidth: "100%",
+                cursor: state.listingKind === "work" && onOpenWorkerProfile ? "pointer" : "default",
               }}>
-                <span aria-hidden="true">★</span>
+                <span aria-hidden="true">{state.listingKind === "work" ? "👤" : "★"}</span>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {t(isParentStorefront(state) ? "card.storeLine" : "card.sellerLine", {
+                  {t(state.listingKind === "work" ? "card.workerLine" : isParentStorefront(state) ? "card.storeLine" : "card.sellerLine", {
                     name: sellerName ?? shortPubkey(sellerPubkey),
                   })}
                 </span>

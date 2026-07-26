@@ -718,6 +718,10 @@ export function shouldShowOnBrowse(inputs: {
   if (inputs.isSoldOut) return false;
   if (browseCategory === "all") return true;
   if (browseCategory === "subscription") return escrow.subscription !== null;
+  if (browseCategory === "work") return escrow.listingKind === "work";
+  if (browseCategory === "marketplace") {
+    return escrow.category === "marketplace" && escrow.listingKind !== "work";
+  }
   return escrow.category === browseCategory;
 }
 

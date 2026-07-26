@@ -52,6 +52,10 @@ import {
 } from "./types.js";
 
 import { applyEvent, replayEventChain, canVote, getWinner, payoutRecipientFor, type TransitionResult } from "./state-machine.js";
+import {
+  beginHydrationDiagnostic,
+  type HydrationDiagnosticRun,
+} from "./hydration-diagnostics.js";
 import { buildChildCreateParams, remainingStock, unsoldStock, isSoldOut, isLastUnitContested } from "./storefront.js";
 import { HOLDER_ONLY_SHARE_POLICY, shareIndexForRole } from "./holder-shares.js";
 import { arbiterVotePriority, arbiterPriorityOrder, isPerformanceContest } from "./arbiter-substitution.js";
@@ -150,6 +154,9 @@ export interface EscrowClientCallbacks {
   /** Number of public CREATE chains currently being verified before they are
    *  safe to surface in Browse. */
   onPublicListingHydration?: (pending: number) => void;
+  /** The initial public-listing subscription reached EOSE quorum. CREATEs
+   *  already received may still be undergoing full-chain hydration. */
+  onPublicListingsSettled?: () => void;
 }
 
 function statusProgressRank(status: EscrowStatus): number {
@@ -181,7 +188,12 @@ const COMPLETENESS_MAX_ATTEMPTS = 2;
 // the throttle caps how often the backfill can run so a flapping pool can't
 // storm re-fetches.
 const RECOVERY_BACKFILL_DEBOUNCE_MS = 2_000;
-const RECOVERY_BACKFILL_THROTTLE_MS = 8_000;
+const RECOVERY_BACKFILL_THROTTLE_MS = 60_000;
+/** Small inclusive overlap for delta reads. Nostr `since` is second-granular;
+ * backing up two seconds keeps same-timestamp siblings and modest relay clock
+ * skew eligible while still avoiding full-history image/chat replay. */
+const ESCROW_DELTA_OVERLAP_SECS = 2;
+const HEAVY_CURSOR_EVENT_BYTES = 8 * 1024;
 
 function isPartialReplayDowngrade(current: EscrowState | undefined, incoming: EscrowState): boolean {
   if (!current) return false;
@@ -198,6 +210,74 @@ function mergeRawEventsById(primary: NostrEvent[], secondary: NostrEvent[]): Nos
   for (const event of primary) byId.set(event.id, event);
   for (const event of secondary) byId.set(event.id, event);
   return [...byId.values()];
+}
+
+/** Newest safe relay cursor for a chain already present in memory. */
+export function escrowDeltaSince(events: readonly NostrEvent[]): number | undefined {
+  let newest = -1;
+  for (const event of events) {
+    if (Number.isFinite(event?.created_at)) newest = Math.max(newest, event.created_at);
+  }
+  if (newest < 0) return undefined;
+  const newestEvents = events.filter(event => event.created_at === newest);
+  const newestIsHeavy = newestEvents.some(event =>
+    event.kind === EscrowEventKind.CHAT ||
+    event.content.length > HEAVY_CURSOR_EVENT_BYTES
+  );
+  // Nostr `since` is inclusive. Re-requesting the newest second is useful for
+  // small state events (same-second siblings), but disastrous when that second
+  // contains an inline photo. The full verified event is already cached and
+  // durable, so advance past a heavy/chat tip instead of downloading it again.
+  return newestIsHeavy
+    ? newest + 1
+    : Math.max(0, newest - ESCROW_DELTA_OVERLAP_SECS);
+}
+
+/** CHAT bodies can contain large inline attachments. The parsed state already
+ * owns the visible chat and IndexedDB owns the durable raw copy; retaining the
+ * same ciphertext again in rawEvents multiplies memory across every loaded
+ * trade. Keep only state-chain raws in the hot cache. */
+export function compactHotRawEvents(events: readonly NostrEvent[]): NostrEvent[] {
+  return dedupRawEvents(events.filter(event => event.kind !== EscrowEventKind.CHAT));
+}
+
+/** The same configured-pool quorum shape used by relay reads. Exported so the
+ * reconnect storm guard remains a pinned, testable policy. */
+export function recoveryReadQuorum(configuredRelayCount: number): number {
+  return Math.max(1, Math.min(3, configuredRelayCount - 1));
+}
+
+export function relayPoolNeedsRecoveryBackfill(
+  connectedRelayCount: number,
+  configuredRelayCount: number,
+): boolean {
+  return connectedRelayCount < recoveryReadQuorum(configuredRelayCount);
+}
+
+function dedupRawEvents(events: readonly NostrEvent[]): NostrEvent[] {
+  const seen = new Set<string>();
+  const compact: NostrEvent[] = [];
+  for (const event of events) {
+    if (!event?.id || seen.has(event.id)) continue;
+    seen.add(event.id);
+    compact.push(event);
+  }
+  return compact;
+}
+
+function durableRawSnapshot(events: readonly NostrEvent[]): NostrEvent[] {
+  return dedupRawEvents(events).map(event => ({
+    ...event,
+    tags: event.tags.map(tag => [...tag]),
+  }));
+}
+
+function stripParsedChatCiphertext(state: EscrowState): void {
+  state.chatMessages = state.chatMessages.map(message => (
+    message.raw.content
+      ? { ...message, raw: { ...message.raw, content: "" } }
+      : message
+  ));
 }
 
 // v3.1.1: mirror of relay-manager's per-event content cap (the size relays
@@ -257,6 +337,17 @@ export class EscrowClient {
   private _reloading: Set<string> = new Set();
   /** CREATE-only public listings being hydrated before they reach Browse. */
   private _listingHydration: Set<string> = new Set();
+  /** One fetch/decrypt/replay generation per escrow. All cold-start callers
+   *  share it; bounded completeness retries stay inside the owner. */
+  private _loadEscrowInFlight: Map<string, {
+    promise: Promise<EscrowState | null>;
+    diagnostic: HydrationDiagnosticRun;
+  }> = new Map();
+  /** Initial public-listing EOSE accounting. Live subscription remains open
+   *  after this reading settles. */
+  private publicListingsSubId: string | null = null;
+  private publicListingsEoseRelays: Set<string> = new Set();
+  private publicListingsSettled = false;
   /** Buffer for events that arrived before their predecessors */
   private retryBuffer: Map<string, { event: NostrEvent; relay: string; attempts: number }[]> = new Map();
   private callbacks: EscrowClientCallbacks;
@@ -283,6 +374,10 @@ export class EscrowClient {
   /** Wall-clock of the last backfill, so it runs at most once per throttle
    *  window even across separate recovery bursts. */
   private lastRecoveryBackfillAt = 0;
+  /** Recovery work is only justified after the connected pool actually fell
+   * below read quorum. A single flapping redundant relay must not re-download
+   * every watched trade. */
+  private recoveryPoolWasDegraded = false;
 
   /** Buffered events waiting for their predecessors — escrowId → events[] */
   private eventBuffer: Map<string, { event: NostrEvent; relay: string; attempts: number }[]> = new Map();
@@ -313,12 +408,40 @@ export class EscrowClient {
           // wave, plus any later recovery of a dropped/abandoned relay —
           // triggers a re-fetch so partial rehydration heals. loadEscrow merges
           // + never shrinks chat, so this is safe to over-fire; it is throttled.
+          const recoveryQuorum = recoveryReadQuorum(this.config.relays.length);
+          const connectedNow = this.relayManager.connectedRelayCount();
+          if (
+            this.sawFirstRelayConnect &&
+            (status === RelayStatus.DISCONNECTED || status === RelayStatus.ERROR) &&
+            relayPoolNeedsRecoveryBackfill(connectedNow, this.config.relays.length)
+          ) {
+            this.recoveryPoolWasDegraded = true;
+          }
           if (status === RelayStatus.CONNECTED) {
-            if (this.sawFirstRelayConnect) this.scheduleRecoveryBackfill();
+            if (
+              this.sawFirstRelayConnect &&
+              this.recoveryPoolWasDegraded &&
+              connectedNow >= recoveryQuorum
+            ) {
+              this.recoveryPoolWasDegraded = false;
+              this.scheduleRecoveryBackfill();
+            }
             this.sawFirstRelayConnect = true;
           }
         },
         onError: (err, relay) => console.warn(`[relay] ${relay}: ${err.message}`),
+        onEose: (subscriptionId, relayUrl) => {
+          if (
+            subscriptionId !== this.publicListingsSubId
+            || this.publicListingsSettled
+          ) return;
+          this.publicListingsEoseRelays.add(relayUrl);
+          const quorum = this.relayManager.connectedRelayQuorum();
+          if (quorum > 0 && this.publicListingsEoseRelays.size >= quorum) {
+            this.publicListingsSettled = true;
+            this.callbacks.onPublicListingsSettled?.();
+          }
+        },
         // v0.4.2 sim mode (hotfix round 2): wire the chokepoint drop so
         // sim-tagged events never enter prod state via fetch-based paths
         // (loadEscrow's fetchEscrowEvents, raw fetchOnce). Defense in
@@ -397,10 +520,9 @@ export class EscrowClient {
   }
 
   /**
-   * Re-fetch the full chain for each actively-watched, non-terminal trade after
-   * relays recover. A partial relay pool (or a relay that came back only after
-   * the initial load) leaves rehydration incomplete — most visibly chat, which
-   * isn't part of the replayed event chain (the chat-wipe-on-restart symptom).
+   * Delta-fetch each actively-watched, non-terminal trade after the relay pool
+   * recovers from a real below-quorum outage. A single redundant relay flap
+   * does not trigger this pass.
    * loadEscrow merges fetched + cached events (dedup by id) and re-seeds any
    * in-memory chat the fetch missed, so it can only ADD — never shrink — state.
    * Bounded to non-terminal trades and throttled, so it can't storm during a
@@ -585,6 +707,7 @@ export class EscrowClient {
 
   async createEscrow(params: {
     description: string;
+    listingKind?: "work";
     imageDataUrl?: string;
     imageUrls?: string[];
     amountMsats: number;
@@ -652,6 +775,7 @@ export class EscrowClient {
     const payload: CreatePayload = {
       type: "escrow:create",
       description: params.description,
+      listingKind: params.listingKind,
       imageDataUrl: params.imageDataUrl,
       imageUrls: params.imageUrls,
       amountMsats: params.amountMsats,
@@ -1137,7 +1261,7 @@ export class EscrowClient {
     // and no relay operator can read the cleartext. When off (DEV),
     // ship the JSON in the clear for easy debugging.
     const content = ENCRYPTION_CONFIG.encryptVote
-      ? await this.encryptToParticipants(payload, state)
+      ? await this.encryptVoteToParticipants(payload, state)
       : JSON.stringify(payload);
 
     const unsigned: UnsignedEvent = {
@@ -1384,15 +1508,23 @@ export class EscrowClient {
       if (currentChatState) {
         const chatResult = applyEvent(currentChatState, chatParsed.event);
         if (chatResult.ok) {
+          // Sender echoes take the same durable-first / bounded-hot path as
+          // received chat. The relay echo dedups, so persist the exact signed
+          // ciphertext here before releasing it from renderer memory.
+          const durable = mergeRawEventsById(
+            this.rawEvents.get(escrowId) ?? [],
+            [
+              ...chatResult.state.chatMessages.map(message => message.raw),
+              signed,
+            ],
+          );
+          void putCachedEvents(
+            escrowId,
+            durableRawSnapshot(durable),
+            chatResult.state.status,
+          );
+          stripParsedChatCiphertext(chatResult.state);
           this.states.set(escrowId, chatResult.state);
-          // v3.1.1 (chat-safety, FIX 1): durably cache the sent chat raw. CHAT
-          // is intentionally NOT in eventChain, and the relay echo dedups +
-          // returns early (alreadyHave below), so this is the ONLY cache write
-          // for our own messages — without it loadEscrow rebuilds chat from an
-          // incomplete relay fetch and loses everything we sent.
-          const cached = this.rawEvents.get(escrowId) || [];
-          cached.push(signed);
-          this.rawEvents.set(escrowId, cached);
           this.callbacks.onStateUpdate?.(escrowId, chatResult.state);
         }
       }
@@ -1565,6 +1697,44 @@ export class EscrowClient {
     return new Map(this.states);
   }
 
+  /** Content-free memory counters for the offline production-topology profiler.
+   * No keys, payloads, or ciphertext leave the client. */
+  getProfileMemorySnapshot(): {
+    loadedEscrows: number;
+    hotRawEvents: number;
+    hotRawChatEvents: number;
+    hotRawContentBytes: number;
+    parsedChatMessages: number;
+    parsedChatRawContentBytes: number;
+  } {
+    let hotRawEvents = 0;
+    let hotRawChatEvents = 0;
+    let hotRawContentBytes = 0;
+    for (const events of this.rawEvents.values()) {
+      hotRawEvents += events.length;
+      for (const event of events) {
+        hotRawContentBytes += event.content.length;
+        if (event.kind === EscrowEventKind.CHAT) hotRawChatEvents++;
+      }
+    }
+    let parsedChatMessages = 0;
+    let parsedChatRawContentBytes = 0;
+    for (const state of this.states.values()) {
+      parsedChatMessages += state.chatMessages.length;
+      for (const message of state.chatMessages) {
+        parsedChatRawContentBytes += message.raw.content.length;
+      }
+    }
+    return {
+      loadedEscrows: this.states.size,
+      hotRawEvents,
+      hotRawChatEvents,
+      hotRawContentBytes,
+      parsedChatMessages,
+      parsedChatRawContentBytes,
+    };
+  }
+
   getMyRole(state: EscrowState, pubkey?: string): Role | null {
     const pk = pubkey || this._pubkey;
     if (!pk) return null;
@@ -1611,6 +1781,9 @@ export class EscrowClient {
     const label = "public-listings";
     if (this.subscriptions.has(label)) return;
     const subId = this.relayManager.subscribeToPublicListings(since);
+    this.publicListingsSubId = subId;
+    this.publicListingsEoseRelays.clear();
+    this.publicListingsSettled = false;
     this.subscriptions.set(label, subId);
   }
 
@@ -1621,6 +1794,9 @@ export class EscrowClient {
     if (subId) {
       this.relayManager.unsubscribe(subId);
       this.subscriptions.delete(label);
+      this.publicListingsSubId = null;
+      this.publicListingsEoseRelays.clear();
+      this.publicListingsSettled = false;
     }
   }
 
@@ -1708,13 +1884,65 @@ export class EscrowClient {
     }
   }
 
-  /** Fetch and reconstruct full escrow state from relays */
-  async loadEscrow(escrowId: string, opts?: { completenessAttempt?: number }): Promise<EscrowState | null> {
+  /** Fetch and reconstruct full escrow state from relays. Concurrent callers
+   *  for the same id share one generation instead of multiplying relay,
+   *  decrypt, and replay work. */
+  loadEscrow(escrowId: string): Promise<EscrowState | null> {
+    const existing = this._loadEscrowInFlight.get(escrowId);
+    if (existing) {
+      existing.diagnostic.coalesced();
+      return existing.promise;
+    }
+
+    const diagnostic = beginHydrationDiagnostic(escrowId);
+    const promise = this.loadEscrowAttempt(escrowId, 0, diagnostic)
+      .then((state) => {
+        diagnostic.finish(state ? `state:${state.status}` : "null");
+        return state;
+      })
+      .catch((error) => {
+        diagnostic.finish(`error:${(error as Error)?.message || String(error)}`);
+        throw error;
+      })
+      .finally(() => {
+        if (this._loadEscrowInFlight.get(escrowId)?.promise === promise) {
+          this._loadEscrowInFlight.delete(escrowId);
+        }
+      });
+    this._loadEscrowInFlight.set(escrowId, { promise, diagnostic });
+    return promise;
+  }
+
+  /** One generation's internal attempt. Recursive completeness retries call
+   *  this directly so they never deadlock by joining their own public promise. */
+  private async loadEscrowAttempt(
+    escrowId: string,
+    completenessAttempt: number,
+    diagnostic: HydrationDiagnosticRun,
+  ): Promise<EscrowState | null> {
     const current = this.states.get(escrowId);
-    const fetchedRawEvents = await this.relayManager.fetchEscrowEvents(escrowId);
     const cachedRawEvents = mergeRawEventsById(
       this.rawEvents.get(escrowId) ?? [],
       current?.eventChain.map(event => event.raw) ?? [],
+    );
+    // Parsed chat releases ciphertext but keeps its signed metadata (kind,
+    // id, created_at). Include that metadata in the cursor calculation so a
+    // chat tip advances past its heavy second instead of falling back to the
+    // older state-chain tip and re-downloading the photo.
+    const cursorEvents = mergeRawEventsById(
+      cachedRawEvents,
+      current?.chatMessages.map(message => message.raw) ?? [],
+    );
+    const since = escrowDeltaSince(cursorEvents);
+    const fetchStarted = globalThis.performance?.now?.() ?? Date.now();
+    const fetchedRawEvents = await this.relayManager.fetchEscrowEvents(
+      escrowId,
+      15_000,
+      since,
+    );
+    diagnostic.step(
+      `fetch:${completenessAttempt}`,
+      (globalThis.performance?.now?.() ?? Date.now()) - fetchStarted,
     );
     let rawEvents = mergeRawEventsById(cachedRawEvents, fetchedRawEvents);
     // Durable rebuild is a FALLBACK, not a hot-path seed: only reach for the
@@ -1730,6 +1958,7 @@ export class EscrowClient {
         rawEvents = mergeRawEventsById(durable, fetchedRawEvents);
       }
     }
+    diagnostic.attempt(fetchedRawEvents, rawEvents.length);
     console.debug(
       `[escrow] loadEscrow ${escrowId}: fetched ${fetchedRawEvents.length} raw events from relays` +
         (cachedRawEvents.length > 0 ? `, replaying ${rawEvents.length} with local cache` : ""),
@@ -1741,19 +1970,26 @@ export class EscrowClient {
     // raw NIP-44) and returns null for "not for me / malformed / not
     // recognised" cases. Skip those silently so a stale or wrong-
     // recipient event in a relay's cache doesn't blow up the load.
+    const decryptStarted = globalThis.performance?.now?.() ?? Date.now();
     const parsed: ParsedEscrowEvent[] = [];
+    let skippedEvents = 0;
     for (const raw of rawEvents) {
       const content = await this.decryptEventContent(raw);
       if (content === null) {
-        console.debug(`[escrow] Skipping event ${raw.id.slice(0, 8)} (not for me / malformed)`);
+        skippedEvents++;
         continue;
       }
       const result = parseEscrowEvent(raw, content, true);
       if (result.ok) parsed.push(result.event);
     }
+    diagnostic.step(
+      `decrypt:${completenessAttempt}`,
+      (globalThis.performance?.now?.() ?? Date.now()) - decryptStarted,
+    );
 
     console.debug(`[escrow] loadEscrow ${escrowId}: parsed ${parsed.length}/${rawEvents.length} events`,
-      parsed.map(e => `kind:${e.kind}`).join(', '));
+      parsed.map(e => `kind:${e.kind}`).join(', '),
+      skippedEvents > 0 ? `(${skippedEvents} skipped)` : "");
     if (parsed.length === 0) return null;
 
     // Resolve only LOCK handle envelopes first, then preflight the
@@ -1789,7 +2025,12 @@ export class EscrowClient {
     const sorted = sortEventChain(readableParsed);
     console.debug(`[escrow] loadEscrow ${escrowId}: sorted chain`, 
       sorted.map(e => `kind:${e.kind}(${e.raw.id.slice(0,6)})`).join(' → '));
+    const replayStarted = globalThis.performance?.now?.() ?? Date.now();
     const result = replayEventChain(sorted);
+    diagnostic.step(
+      `replay:${completenessAttempt}`,
+      (globalThis.performance?.now?.() ?? Date.now()) - replayStarted,
+    );
 
     if (!result.ok) {
       console.debug(`[escrow] loadEscrow ${escrowId}: replay FAILED — ${result.error.code}: ${result.error.message}`);
@@ -1814,8 +2055,13 @@ export class EscrowClient {
     const isTrulyTerminal =
       result.state.status === EscrowStatus.COMPLETED ||
       result.state.status === EscrowStatus.CANCELLED;
-    const completenessAttempt = opts?.completenessAttempt ?? 0;
-    if (!isTrulyTerminal && completenessAttempt < COMPLETENESS_MAX_ATTEMPTS) {
+    const shouldCompletenessRetry =
+      cachedRawEvents.length === 0 || fetchedRawEvents.length > 0;
+    if (
+      !isTrulyTerminal &&
+      completenessAttempt < COMPLETENESS_MAX_ATTEMPTS &&
+      shouldCompletenessRetry
+    ) {
       console.debug(
         `[escrow] loadEscrow ${escrowId}: non-terminal (${result.state.status}) — ` +
           `completeness retry ${completenessAttempt + 1}/${COMPLETENESS_MAX_ATTEMPTS}`,
@@ -1823,14 +2069,14 @@ export class EscrowClient {
       // Carry forward what we just fetched so the retry replays the union.
       const merged = new Map((this.rawEvents.get(escrowId) ?? []).map(e => [e.id, e]));
       for (const e of rawEvents) merged.set(e.id, e);
-      this.rawEvents.set(escrowId, [...merged.values()]);
-      return this.loadEscrow(escrowId, { completenessAttempt: completenessAttempt + 1 });
+      this.rawEvents.set(escrowId, compactHotRawEvents([...merged.values()]));
+      return this.loadEscrowAttempt(escrowId, completenessAttempt + 1, diagnostic);
     }
 
     if (isPartialReplayDowngrade(current, result.state)) {
       const known = new Map((this.rawEvents.get(escrowId) ?? []).map(event => [event.id, event]));
       for (const event of rawEvents) known.set(event.id, event);
-      this.rawEvents.set(escrowId, [...known.values()]);
+      this.rawEvents.set(escrowId, compactHotRawEvents([...known.values()]));
       console.warn(
         `[escrow] loadEscrow ${escrowId}: ignoring partial relay downgrade ${current!.status} → ${result.state.status}`,
       );
@@ -1854,12 +2100,18 @@ export class EscrowClient {
       }
     }
 
-    this.states.set(escrowId, result.state);
-    this.rawEvents.set(escrowId, rawEvents);
     // Durable event cache: persist the full chain so it rebuilds offline next
     // session even if the relays have dropped it. Fire-and-forget; the status
-    // drives evict-oldest-terminal priority.
-    void putCachedEvents(escrowId, rawEvents, result.state.status);
+    // drives evict-oldest-terminal priority. Snapshot first because the parsed
+    // UI state below deliberately releases encrypted CHAT content.
+    void putCachedEvents(
+      escrowId,
+      durableRawSnapshot(rawEvents),
+      result.state.status,
+    );
+    stripParsedChatCiphertext(result.state);
+    this.states.set(escrowId, result.state);
+    this.rawEvents.set(escrowId, compactHotRawEvents(rawEvents));
 
     // Notify UI of the reconstructed state
     this.callbacks.onStateUpdate?.(escrowId, result.state);
@@ -1972,12 +2224,19 @@ export class EscrowClient {
 
         const result = applyEvent(state, parsed);
         if (result.ok) {
+          // Persist CHAT durably but do not retain its potentially-large
+          // ciphertext in the hot rawEvents map. Parsed chat remains in state.
+          const durable = mergeRawEventsById(
+            this.rawEvents.get(escrowId) ?? [],
+            result.state.chatMessages.map(message => message.raw),
+          );
+          void putCachedEvents(
+            escrowId,
+            durableRawSnapshot(durable),
+            result.state.status,
+          );
+          stripParsedChatCiphertext(result.state);
           this.states.set(escrowId, result.state);
-          // v3.1.1 (chat-safety, FIX 1): durably cache the received chat raw so
-          // loadEscrow's cache carries it forward (CHAT is not in eventChain).
-          const cached = this.rawEvents.get(escrowId) || [];
-          cached.push(event);
-          this.rawEvents.set(escrowId, cached);
           this.callbacks.onChatMessage?.(escrowId, parsed as ParsedEscrowEvent<ChatPayload>);
         }
       }
@@ -2015,8 +2274,7 @@ export class EscrowClient {
 
       // Store raw event
       const existing = this.rawEvents.get(escrowId) || [];
-      existing.push(event);
-      this.rawEvents.set(escrowId, existing);
+      this.rawEvents.set(escrowId, compactHotRawEvents([...existing, event]));
 
       this.callbacks.onStateUpdate?.(escrowId, result.state);
 
@@ -2359,6 +2617,68 @@ export class EscrowClient {
     payload: unknown,
     state: EscrowState,
   ): Promise<string> {
+    const recipients = this.envelopeRecipients(state);
+
+    if (recipients.length === 0) {
+      throw new Error(
+        "encryptToParticipants: no participant pubkeys in state — " +
+          "cannot envelope-encrypt before LOCK fills in buyer/seller/arbiter.",
+      );
+    }
+
+    const envelope = await createEnvelope(
+      JSON.stringify(payload),
+      recipients,
+      (pt, pk) => this.signer.nip44Encrypt(pt, pk),
+    );
+    return JSON.stringify(envelope);
+  }
+
+  /** VOTE payloads can carry a holder-only SSS share that is already NIP-44
+   * encrypted for exactly one payout recipient. Encrypting the SAME full vote
+   * to all three participants duplicated that large ciphertext three times,
+   * producing ~69 KiB events that common relays reject at their 64 KiB limit.
+   *
+   * Every participant still receives the private vote fields. Only the
+   * share's intended recipient receives the optional shareEnvelope in their
+   * outer slot. The reducer already treats shareEnvelope as optional, and no
+   * other participant can use that ciphertext, so consensus semantics and
+   * vote privacy are unchanged while the wire event drops to ~one third. */
+  private async encryptVoteToParticipants(
+    payload: VotePayload,
+    state: EscrowState,
+  ): Promise<string> {
+    const recipients = this.envelopeRecipients(state);
+    if (recipients.length === 0) {
+      throw new Error(
+        "encryptVoteToParticipants: no participant pubkeys in state — " +
+          "cannot envelope-encrypt before LOCK fills in buyer/seller/arbiter.",
+      );
+    }
+
+    const encryptedFor: Record<string, string> = {};
+    const compactPayload: VotePayload = payload.shareEnvelope
+      ? {
+          type: payload.type,
+          outcome: payload.outcome,
+          role: payload.role,
+          votedAt: payload.votedAt,
+        }
+      : payload;
+
+    for (const pk of recipients) {
+      if (!pk || encryptedFor[pk] !== undefined) continue;
+      const slotPayload =
+        payload.shareEnvelope?.recipientPubkey === pk ? payload : compactPayload;
+      encryptedFor[pk] = await this.signer.nip44Encrypt(
+        JSON.stringify(slotPayload),
+        pk,
+      );
+    }
+    return JSON.stringify({ encryptedFor });
+  }
+
+  private envelopeRecipients(state: EscrowState): string[] {
     const recipients = [
       state.participants[Role.BUYER],
       state.participants[Role.SELLER],
@@ -2380,20 +2700,7 @@ export class EscrowClient {
         if (typeof pk === "string" && pk.length > 0) recipients.push(pk);
       }
     }
-
-    if (recipients.length === 0) {
-      throw new Error(
-        "encryptToParticipants: no participant pubkeys in state — " +
-          "cannot envelope-encrypt before LOCK fills in buyer/seller/arbiter.",
-      );
-    }
-
-    const envelope = await createEnvelope(
-      JSON.stringify(payload),
-      recipients,
-      (pt, pk) => this.signer.nip44Encrypt(pt, pk),
-    );
-    return JSON.stringify(envelope);
+    return [...new Set(recipients)];
   }
 
   private applyLocally(escrowId: string, signed: NostrEvent, payload: EscrowPayload): EscrowState {

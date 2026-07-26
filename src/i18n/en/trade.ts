@@ -120,6 +120,7 @@ export const trade: Record<string, string> = {
   "trade.kickerP2p": "P2P EXCHANGE",
   "trade.kickerService": "SERVICE",
   "trade.kickerStorefront": "🏪 STOREFRONT",
+  "trade.kickerWork": "🛠️ WORK CONTRACT",
   "trade.storefrontOrderRow": "Order from {buyer}",
   "trade.storefrontOrdersTitle": "🛒 {count} orders in progress",
   "trade.latestChamaNote": "Make sure everyone in this trade is on the latest Chama, so the decision settles the same for all.",

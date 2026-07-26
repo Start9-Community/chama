@@ -135,6 +135,14 @@ export function listingHasLapsed(state: EscrowState, nowSec: number): boolean {
   return nowSec >= state.expiresAt;
 }
 
+/** Store-permanence belongs only to the Market storefront vertical. Work uses
+ *  marketplace escrow routing for compatibility, but it is a distinct product
+ *  and must not silently inherit Store renewal policy. Other verticals have
+ *  their own explicit recurrence decisions (for example monthly CBP). */
+export function isRenewableStorefront(state: EscrowState): boolean {
+  return state.category === "marketplace" && state.listingKind !== "work";
+}
+
 /** Auto-renew eligibility: the seller's own unfunded listing that has lapsed OR
  *  is within the lead window. Never a funded/locked/settled/cancelled trade, and
  *  never an id already RETIRED (superseded by a prior renewal — the durable
@@ -148,6 +156,7 @@ export function canRenewListing(
 ): boolean {
   return (
     !retired.has(state.id) &&
+    isRenewableStorefront(state) &&
     isSellerOwnedListing(state, userPubkey) &&
     listingNeverFunded(state) &&
     nowSec >= state.expiresAt - RENEW_LEAD_SECONDS
@@ -170,6 +179,7 @@ export function lapsedRenewableListings(
   for (const s of states) {
     if (
       !retired.has(s.id) &&
+      isRenewableStorefront(s) &&
       isSellerOwnedListing(s, userPubkey) &&
       listingNeverFunded(s) &&
       listingHasLapsed(s, nowSec)
@@ -220,6 +230,7 @@ export function autoRenewableListings(
  *  ~24h. No `parent`/`claimedQuantity` (a storefront is never a child). */
 export interface RenewCreateParams {
   description: string;
+  listingKind?: "work";
   imageDataUrl?: string;
   imageUrls?: string[];
   amountMsats: number;
@@ -254,6 +265,7 @@ export function buildRenewCreateParams(state: EscrowState): RenewCreateParams {
   }
   return {
     description: state.description,
+    ...(state.listingKind ? { listingKind: state.listingKind } : {}),
     ...(state.imageDataUrl ? { imageDataUrl: state.imageDataUrl } : {}),
     ...(state.imageUrls?.length ? { imageUrls: [...state.imageUrls] } : {}),
     amountMsats: state.amountMsats,

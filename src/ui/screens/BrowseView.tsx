@@ -1,15 +1,19 @@
 import { useMemo, useState, useEffect } from "react";
 import { type EscrowState } from "../../escrow-engine/types.js";
 import { getCommunityBySlug, type Community } from "../../communities/registry.js";
-import { T, ROLE_COLOR, BROWSE_CATS, inputStyle } from "../theme.js";
+import { T, ROLE_COLOR, BROWSE_CATS, inputStyle, fmtSats } from "../theme.js";
 import { TradeCard } from "../components/TradeCard.js";
 import { BOTTOM_NAV_HEIGHT } from "../components/BottomNav.js";
 import { ArbiterApplyForm } from "../components/ArbiterApplyForm.js";
 import { LoadTradeInput } from "../components/LoadTradeInput.js";
-import { type NostrProfileNameMap } from "../nostr-profiles.js";
+import { profileNameFor, type NostrProfileNameMap } from "../nostr-profiles.js";
 import { type AmountDisplayMode } from "../amount-display.js";
 import { getBrowseShowOwn, setBrowseShowOwn, filterOwnListings, countOwnListings } from "../browse-own-filter.js";
 import { useT } from "../../i18n/index.js";
+import { ReputationReadout } from "../components/ReputationReadout.js";
+import type { AggregateRatings } from "../../reputation/ratings.js";
+import { workOffersForWorker } from "../work-resume.js";
+import { GuidedBuyPanel, type GuidedConfirmPayload } from "../components/GuidedBuyPanel.js";
 
 // v4.2.1: the arbiter / recruitment on-ramp is hidden for now — it pushes a
 // leader decision at brand-new users before the bond exists. ArbiterApplyForm
@@ -41,7 +45,10 @@ export function BrowseView({
   kind0Enabled = false, profileNames,
   isFirstTime, onPasteCustomInvite,
   onOpenEscrow, onLoadById,
+  fetchRatingSummary,
   onCreate, onApplyAsArbiter,
+  onGuidedConfirm,
+  guidedBusy = false,
 }: {
   browseCategory: string;
   setBrowseCategory: (s: string) => void;
@@ -64,16 +71,21 @@ export function BrowseView({
   onPasteCustomInvite: (invite: string) => void | Promise<void>;
   onOpenEscrow: (id: string) => void;
   onLoadById: (id: string) => void | Promise<void>;
+  fetchRatingSummary?: (ratee: string) => Promise<AggregateRatings>;
   /** v3.1.1: floating-menu on-ramps — pencil opens Create; the ⚖️ FAB opens the
    *  arbiter application form inline (no bounce to Me). */
   onCreate: () => void;
   onApplyAsArbiter: (community: string, statement: string) => Promise<void>;
+  /** Guided / Automated confirm → existing join (never auto-spend). */
+  onGuidedConfirm?: (payload: GuidedConfirmPayload) => void | Promise<void>;
+  guidedBusy?: boolean;
 }) {
   const { t } = useT();
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showRecruit, setShowRecruit] = useState(false);
   const [customInviteInput, setCustomInviteInput] = useState("");
+  const [resumePubkey, setResumePubkey] = useState<string | null>(null);
   // Mutually-exclusive Browse modes: public listings (default, mine hidden) or
   // My listings only. Selecting owner mode intentionally hides everything else.
   const [showOwn, setShowOwnState] = useState<boolean>(() => getBrowseShowOwn());
@@ -146,9 +158,26 @@ export function BrowseView({
         total: totalListings.toLocaleString(),
       });
   const quoteCurrency = homeCommunity?.currency ?? null;
+  const resumeOffers = useMemo(() => {
+    if (!resumePubkey) return [];
+    return workOffersForWorker([...matchingListings, ...nonMatchingListings], resumePubkey);
+  }, [matchingListings, nonMatchingListings, resumePubkey]);
 
   return (
     <div style={{ padding: 16 }}>
+      {resumePubkey && (
+        <WorkerResume
+          pubkey={resumePubkey}
+          offers={resumeOffers}
+          name={profileNameFor(profileNames, resumePubkey, kind0Enabled)}
+          fetchRatingSummary={fetchRatingSummary}
+          onClose={() => setResumePubkey(null)}
+          onOpenOffer={(id) => {
+            setResumePubkey(null);
+            onOpenEscrow(id);
+          }}
+        />
+      )}
       {/* v3.1.1: blur the listings behind the menu while the arbiter application
           form is open, to focus attention on it. The FAB stack (zIndex 80) and
           the toast sit ABOVE this backdrop (79) and stay crisp; tapping the
@@ -398,6 +427,17 @@ export function BrowseView({
         )}
       </div>
 
+      {onGuidedConfirm && (
+        <GuidedBuyPanel
+          listings={[...matchingListings, ...nonMatchingListings]}
+          stockByListing={stockByListing}
+          browseCommunity={browseCommunity}
+          viewerPubkey={pubkey}
+          busy={guidedBusy}
+          onConfirm={onGuidedConfirm}
+        />
+      )}
+
       {search && totalListings > 0 && filteredTotal === 0 && (
         <div style={{
           textAlign: "center", padding: "24px 16px",
@@ -480,6 +520,7 @@ export function BrowseView({
                     quoteCurrency={quoteCurrency}
                     stockByListing={stockByListing}
                     orderIndicatorByListing={orderIndicatorByListing}
+                    onOpenWorkerProfile={setResumePubkey}
                   />
                 ))
               ) : (
@@ -497,6 +538,7 @@ export function BrowseView({
                         stockLeft={stockByListing?.get(s.id)}
                         orderIndicator={orderIndicatorByListing?.get(s.id)}
                         onResumeOrder={onOpenEscrow}
+                        onOpenWorkerProfile={setResumePubkey}
                       />
                     </div>
                   ))}
@@ -538,6 +580,7 @@ export function BrowseView({
                     quoteCurrency={quoteCurrency}
                     stockByListing={stockByListing}
                     orderIndicatorByListing={orderIndicatorByListing}
+                    onOpenWorkerProfile={setResumePubkey}
                   />
                 ))
               ) : (
@@ -556,6 +599,7 @@ export function BrowseView({
                         stockLeft={stockByListing?.get(s.id)}
                         orderIndicator={orderIndicatorByListing?.get(s.id)}
                         onResumeOrder={onOpenEscrow}
+                        onOpenWorkerProfile={setResumePubkey}
                       />
                     </div>
                   ))}
@@ -680,7 +724,12 @@ function groupListingsByVertical(listings: EscrowState[]): BrowseListingSection[
       id: c.id,
       label: c.l,
       icon: c.i,
-      listings: listings.filter(listing => listing.category === c.id),
+      listings: listings.filter(listing =>
+        c.id === "work"
+          ? listing.listingKind === "work"
+          : c.id === "marketplace"
+            ? listing.category === "marketplace" && listing.listingKind !== "work"
+            : listing.category === c.id),
     }))
     .filter(section => section.listings.length > 0);
 }
@@ -691,8 +740,131 @@ function countListingsByCategory(
   category: string,
 ): number {
   return [...matchingListings, ...nonMatchingListings]
-    .filter(listing => listing.category === category)
+    .filter(listing =>
+      category === "work"
+        ? listing.listingKind === "work"
+        : category === "marketplace"
+          ? listing.category === "marketplace" && listing.listingKind !== "work"
+          : listing.category === category)
     .length;
+}
+
+function WorkerResume({
+  pubkey,
+  name,
+  offers,
+  fetchRatingSummary,
+  onClose,
+  onOpenOffer,
+}: {
+  pubkey: string;
+  name?: string | null;
+  offers: EscrowState[];
+  fetchRatingSummary?: (ratee: string) => Promise<AggregateRatings>;
+  onClose: () => void;
+  onOpenOffer: (id: string) => void;
+}) {
+  const { t } = useT();
+  const displayName = name ?? `${pubkey.slice(0, 12)}…`;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("browse.workerResumeTitle")}
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 120,
+        background: "rgba(0,0,0,0.68)",
+        backdropFilter: "blur(7px)", WebkitBackdropFilter: "blur(7px)",
+        display: "flex", alignItems: "flex-end", justifyContent: "center",
+        padding: 12,
+      }}
+    >
+      <div
+        onClick={event => event.stopPropagation()}
+        style={{
+          width: "min(100%, 520px)", maxHeight: "88vh", overflowY: "auto",
+          padding: 18, borderRadius: `${T.r}px ${T.r}px 0 0`,
+          background: T.card, border: `1px solid ${T.green}55`,
+          boxShadow: "0 -16px 48px rgba(0,0,0,.55)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <div style={{
+            width: 48, height: 48, borderRadius: "50%",
+            display: "grid", placeItems: "center", flexShrink: 0,
+            background: `${T.green}18`, border: `1px solid ${T.green}55`,
+            fontSize: 23,
+          }}>👤</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ color: T.green, fontFamily: T.mono, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>
+              {t("browse.workerResumeEyebrow")}
+            </div>
+            <div style={{
+              color: T.text, fontFamily: T.sans, fontSize: 20, fontWeight: 850,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>{displayName}</div>
+            <div style={{
+              color: T.muted, fontFamily: T.mono, fontSize: 10,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>{pubkey}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("common.close")}
+            style={{
+              border: "none", background: T.surface, color: T.muted,
+              borderRadius: "50%", width: 32, height: 32, cursor: "pointer",
+              fontSize: 18,
+            }}
+          >×</button>
+        </div>
+
+        {fetchRatingSummary && (
+          <ReputationReadout pubkey={pubkey} name={name} fetchSummary={fetchRatingSummary} />
+        )}
+
+        <div style={{
+          marginTop: 18, marginBottom: 8, color: T.text,
+          fontFamily: T.mono, fontSize: 11, fontWeight: 800, letterSpacing: .7,
+        }}>
+          {t(offers.length === 1 ? "browse.workerOfferCountOne" : "browse.workerOfferCountMany", { count: offers.length })}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {offers.map(offer => (
+            <button
+              key={offer.id}
+              type="button"
+              onClick={() => onOpenOffer(offer.id)}
+              style={{
+                width: "100%", textAlign: "left", padding: "12px 13px",
+                borderRadius: T.rs, border: `1px solid ${T.border}`,
+                background: T.surface, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 10,
+              }}
+            >
+              <span style={{ fontSize: 18 }}>🛠️</span>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{
+                  display: "block", color: T.text, fontFamily: T.sans,
+                  fontSize: 13, fontWeight: 750,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>{offer.description}</span>
+                <span style={{ display: "block", marginTop: 3, color: T.muted, fontFamily: T.mono, fontSize: 10 }}>
+                  ₿ {fmtSats(offer.amountMsats)}
+                </span>
+              </span>
+              <span style={{ color: T.green, fontSize: 17 }}>›</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ marginTop: 14, color: T.muted, fontFamily: T.sans, fontSize: 11, lineHeight: 1.5 }}>
+          {t("browse.workerResumeFootnote")}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function BrowseSection({
@@ -706,6 +878,7 @@ function BrowseSection({
   quoteCurrency,
   stockByListing,
   orderIndicatorByListing,
+  onOpenWorkerProfile,
 }: {
   section: BrowseListingSection;
   pubkey: string;
@@ -717,6 +890,7 @@ function BrowseSection({
   quoteCurrency?: string | null;
   stockByListing?: Map<string, number>;
   orderIndicatorByListing?: Map<string, { orders: number; unread: number; viewerOrderId?: string }>;
+  onOpenWorkerProfile?: (pubkey: string) => void;
 }) {
   const { t } = useT();
   return (
@@ -765,6 +939,7 @@ function BrowseSection({
               stockLeft={stockByListing?.get(s.id)}
               orderIndicator={orderIndicatorByListing?.get(s.id)}
               onResumeOrder={onOpenEscrow}
+              onOpenWorkerProfile={onOpenWorkerProfile}
             />
           </div>
         ))}

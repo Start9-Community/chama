@@ -118,6 +118,7 @@ export const trade: Record<string, string> = {
   "trade.kickerP2p": "ÉCHANGE P2P",
   "trade.kickerService": "SERVICE",
   "trade.kickerStorefront": "🏪 BOUTIQUE",
+  "trade.kickerWork": "🛠️ CONTRAT DE TRAVAIL",
   "trade.storefrontOrderRow": "Commande de {buyer}",
   "trade.storefrontOrdersTitle": "🛒 {count} commandes en cours",
   "trade.latestChamaNote": "Assurez-vous que tout le monde dans cet échange est sur la dernière version de Chama, pour que la décision se règle pareil pour tous.",

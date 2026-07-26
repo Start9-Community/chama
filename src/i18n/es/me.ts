@@ -9,6 +9,9 @@ export const me: Record<string, string> = {
   "me.storeRenewing": "Renovando…",
   "me.storeRenewed": "Tienda renovada — de vuelta en Explorar.",
   "me.storeRenewFailed": "No se pudo renovar la tienda.",
+  "me.storeAutoRenew": "Mantener activas mis ofertas",
+  "me.storeAutoRenewHint": "Al activarlo, las ofertas sin financiar se renuevan mientras estás en línea. Desactivado por defecto.",
+  "me.storeAutoRenewBondRequired": "Disponible mientras tu fianza de compromiso esté activa.",
   // Clear unfunded listings (#82) — Settings row + confirm dialog.
   "me.clearListings": "Borrar mis anuncios sin financiar",
   "me.clearListingsHint": "{count} anuncios nunca financiados — quítalos de tu tienda.",

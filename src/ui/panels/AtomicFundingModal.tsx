@@ -472,7 +472,7 @@ export function AtomicFundingModal({
               </div>
             )}
           </div>
-          <button onClick={handleCancel} style={{
+          <button type="button" onClick={handleCancel} style={{
             background: "none", border: "none", color: T.muted,
             fontFamily: T.mono, fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1,
           }}>×</button>
@@ -720,6 +720,7 @@ function FundingMethodChooser({
         </div>
 
         <button
+          type="button"
           onClick={() => onSelect("lightning")}
           style={{
             width: "100%", minHeight: 64, padding: "14px 16px",
@@ -781,6 +782,7 @@ function FundingMethodChooser({
           <div style={{ display: "grid", gap: 6 }}>
             {savedNwcConnections.map((connection) => (
               <button
+                type="button"
                 key={connection.id}
                 onClick={() => onSelectNwc(connection.connectionString, true)}
                 style={{
@@ -812,6 +814,7 @@ function FundingMethodChooser({
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         <button
+          type="button"
           onClick={() => onSelect("lightning")}
           style={{
             minHeight: 118, padding: 12, borderRadius: T.r,
@@ -831,6 +834,7 @@ function FundingMethodChooser({
           </div>
         </button>
         <button
+          type="button"
           onClick={() => onSelect("onchain")}
           disabled={onchainGate.disabled}
           style={{
@@ -1626,6 +1630,12 @@ function ChapsmartMpesaPanel({
         value={codeInput}
         onChange={(e) => setCodeInput(e.target.value)}
         placeholder={t("fund.mpesaCodePlaceholder")}
+        name="chama-mpesa-confirmation-code"
+        autoComplete="off"
+        data-bwignore="true"
+        data-1p-ignore="true"
+        data-lpignore="true"
+        data-form-type="other"
         autoCapitalize="characters"
         autoCorrect="off"
         spellCheck={false}

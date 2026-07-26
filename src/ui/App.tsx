@@ -690,6 +690,7 @@ export default function App() {
   } | null>(null);
   // #37: true while the PendingLockCard's "Finish lock" call is in flight.
   const [pendingLockBusy, setPendingLockBusy] = useState(false);
+  const [guidedBusy, setGuidedBusy] = useState(false);
   // Stranded-payout recovery: escrows already swept by the once-per-session
   // background reattachPayout (the boot sweep effect below).
   const payoutReattachSweptRef = useRef<Set<string>>(new Set());
@@ -1132,6 +1133,39 @@ export default function App() {
   // once per connect via the existing fetchCommunityBonds/esplora path.
   const [sellerBonded, setSellerBonded] = useState(false);
   const [bondTip, setBondTip] = useState<number | null>(null);
+  // Store renewal is an explicit, per-identity preference. Older builds
+  // silently treated every bonded seller as opted in; defaulting OFF makes the
+  // behavior visible and consensual while leaving manual renewal untouched.
+  const autoRenewStorageKey = pubkey ? `chama_store_auto_renew_v1_${pubkey.toLowerCase()}` : null;
+  const [storeAutoRenewEnabled, setStoreAutoRenewEnabled] = useState(() => {
+    if (!pubkey || typeof localStorage === "undefined") return false;
+    try {
+      return localStorage.getItem(`chama_store_auto_renew_v1_${pubkey.toLowerCase()}`) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    if (!autoRenewStorageKey || typeof localStorage === "undefined") {
+      setStoreAutoRenewEnabled(false);
+      return;
+    }
+    try {
+      setStoreAutoRenewEnabled(localStorage.getItem(autoRenewStorageKey) === "1");
+    } catch {
+      setStoreAutoRenewEnabled(false);
+    }
+  }, [autoRenewStorageKey]);
+  const changeStoreAutoRenew = (enabled: boolean) => {
+    setStoreAutoRenewEnabled(enabled);
+    if (!autoRenewStorageKey || typeof localStorage === "undefined") return;
+    try {
+      if (enabled) localStorage.setItem(autoRenewStorageKey, "1");
+      else localStorage.removeItem(autoRenewStorageKey);
+    } catch {
+      // Best-effort preference; the in-memory choice still applies this session.
+    }
+  };
   // Auto-renew dedupe: an id we've already re-published this session so the
   // online effect can't re-fire on the same lapsed listing every tick.
   const autoRenewedRef = useRef<Set<string>>(new Set());
@@ -1193,7 +1227,7 @@ export default function App() {
     // storefront-only bridge while its replacement waits for 1 confirmation.
     // It never flows into the verified bond pool used for arbiter privileges.
     const storeBondContinuity = sellerBonded || hasPendingStoreRollover(listCommitmentBonds(), bondTip, Date.now());
-    if (!connected || !pubkey || !storeBondContinuity) return;
+    if (!connected || !pubkey || !storeBondContinuity || !storeAutoRenewEnabled) return;
     // Persistent retired ledger is the cross-reload guard; autoRenewedRef stays
     // the in-session guard on top. Cap per pass so a pathological state can't
     // burst dozens of relay publishes on one load — the rest resolve next pass.
@@ -1222,7 +1256,7 @@ export default function App() {
           console.warn("[chama] auto-renew failed:", l.id, e?.message || e);
         });
     }
-  }, [connected, pubkey, sellerBonded, bondTip, escrows, now]);
+  }, [connected, pubkey, sellerBonded, bondTip, storeAutoRenewEnabled, escrows, now]);
 
   // One-time dedupe (#74/#75): collapse an existing pile of accidental renewals
   // (the pre-fix +N-per-open duplication) down to one live listing per unique
@@ -1784,7 +1818,13 @@ export default function App() {
   const browseCategoryCounts = BROWSE_CATS.reduce((acc, cat) => {
     acc[cat.id] = cat.id === "all"
       ? allVisibleListings.length
-      : allVisibleListings.filter(listing => listing.category === cat.id).length;
+      : allVisibleListings.filter(listing =>
+          cat.id === "work"
+            ? listing.listingKind === "work"
+            : cat.id === "marketplace"
+              ? listing.category === "marketplace" && listing.listingKind !== "work"
+              : listing.category === cat.id
+        ).length;
     return acc;
   }, {} as Record<string, number>);
   const listingMatchesRoute = (s: EscrowState) => listingMatchesActiveRoute({
@@ -2552,7 +2592,7 @@ export default function App() {
         isBrowser: !Capacitor.isNativePlatform(),
         dismissed: browserBannerDismissed,
         simModeOn: simOn,
-      }) && (
+      }) && !isNativeBridgeModeOn() && (
         <BrowserSupportBanner onDismiss={dismissBrowserBanner} />
       )}
 
@@ -3507,7 +3547,6 @@ export default function App() {
           loadLiveness={actions.getChamaLiveness}
           livenessBlocksPerDay={BOND_LIVENESS_BLOCKS_PER_DAY}
           onOpenBondCeremony={() => setShowBondCeremony(true)}
-          balanceMsats={fedimint.balanceMsats ?? 0}
           earningsRevision={earningsRevision}
           fetchMyBonds={actions.fetchMyBonds}
           getBondChainTip={actions.getBondChainTip}
@@ -3527,6 +3566,9 @@ export default function App() {
           <LapsedStoreCard
             listings={lapsedListings}
             bonded={sellerBonded}
+            showAutoRenew={sellerBonded || clearableListings.length > 0}
+            autoRenewEnabled={storeAutoRenewEnabled}
+            onAutoRenewChange={changeStoreAutoRenew}
             renewingId={renewingId}
             onRenew={renewListing}
           />
@@ -3731,6 +3773,7 @@ export default function App() {
               pubkey={pubkey!}
               kind0Enabled={kind0Enabled}
               profileNames={nostrProfiles}
+              fetchRatingSummary={actions.fetchRatingSummary}
               onCreate={() => setCreateOverlayOpen(true)}
               onApplyAsArbiter={async (community, statement) => {
                 await actions.applyAsArbiter(community, statement);
@@ -3750,6 +3793,44 @@ export default function App() {
                   }
                 } catch (e: any) {
                   setToast({ message: e.message || t("app.loadFailed"), type: "error" });
+                }
+              }}
+              guidedBusy={guidedBusy}
+              onGuidedConfirm={async ({ listingId, amountMsats, selectedItems }) => {
+                setGuidedBusy(true);
+                try {
+                  setToast({ message: t("app.joiningAsRole", { role: "buyer" }), type: "info" });
+                  await actions.loadEscrow(listingId);
+                  await actions.joinEscrow(listingId, Role.BUYER, {
+                    amountMsats,
+                    ...(selectedItems?.length ? { selectedItems, orderFinalized: true } : {}),
+                  });
+                  setToast({ message: t("app.joinedAsRole", { role: "buyer" }), type: "success" });
+                  setDetailBackView("browse");
+                  setSelectedId(listingId);
+                  setView("detail");
+                } catch (e: any) {
+                  if (e?.code === "FED_MISMATCH") {
+                    const listing = escrows.get(listingId);
+                    if (listing?.community) {
+                      setPendingFedSwitch({
+                        community: listing.community,
+                        retry: async () => {
+                          await actions.joinEscrow(listingId, Role.BUYER, {
+                            amountMsats,
+                            ...(selectedItems?.length ? { selectedItems, orderFinalized: true } : {}),
+                          });
+                          setDetailBackView("browse");
+                          setSelectedId(listingId);
+                          setView("detail");
+                        },
+                      });
+                      return;
+                    }
+                  }
+                  setToast({ message: e.message || t("app.joinFailed"), type: "error" });
+                } finally {
+                  setGuidedBusy(false);
                 }
               }}
             />
@@ -3928,6 +4009,18 @@ const globalCss = () => `
      confirming second tap. */
   @keyframes armPulse{0%,100%{box-shadow:0 0 0 0 ${T.amber}00}50%{box-shadow:0 0 0 4px ${T.amber}22}}
   @media (prefers-reduced-motion: reduce){
+    .spine-node-live{animation:none!important}
+    .spine-beam{animation:none!important;transform:translateX(80%)!important}
+    .td-pager-nudge{animation:none!important}
+    .td-armed{animation:none!important}
+  }
+  /* Start9 split view gives each active-trade renderer a narrow viewport.
+     Chrome 150 was observed driving one such renderer to a 3.5 GB physical
+     footprint while two trade rooms continuously composited the glow/beam/
+     nudge effects. Keep the exact static affordances at phone/split widths,
+     but stop perpetual decorative compositor work. Trade state, chat, voting,
+     and one-shot progress animations are unchanged. */
+  @media (max-width:760px){
     .spine-node-live{animation:none!important}
     .spine-beam{animation:none!important;transform:translateX(80%)!important}
     .td-pager-nudge{animation:none!important}

@@ -128,6 +128,7 @@ export const bond: Record<string, string> = {
   "bond.livenessTipLabel": "¿Qué hace que un Chama esté vivo?",
   "bond.livenessTipTitle": "QUÉ HACE QUE UN CHAMA ESTÉ VIVO",
   "bond.livenessUnknown": "la vitalidad se enciende cuando entras",
+  "bond.livenessTimeout": "La verificación de fianzas agotó el tiempo — se muestra el último estado verificado cuando está disponible.",
   "bond.lockedAcrossBefore": " repartidos en ",
   "bond.lockedAcrossDeposits": "{count} depósitos",
   "bond.lockedCommitted": " comprometidos on-chain",

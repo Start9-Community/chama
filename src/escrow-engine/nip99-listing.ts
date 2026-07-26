@@ -63,6 +63,7 @@ export function buildNip99ListingEvent(args: {
   if (!isNip99StoreListing(payload)) return null;
 
   const title = listingTitle(payload);
+  const isWork = payload.listingKind === "work";
   const tags: string[][] = [
     ["d", escrowId],
     ["title", title],
@@ -71,9 +72,9 @@ export function buildNip99ListingEvent(args: {
     ["expiration", String((payload.createdAt || createdAt) + payload.expirySeconds)],
     priceTag(payload),
     ["status", "active"],
-    ["t", "marketplace"],
+    ["t", isWork ? "work" : "marketplace"],
     ["t", "chama"],
-    ["t", payload.fulfillment ?? "physical"],
+    ["t", isWork ? "service" : (payload.fulfillment ?? "physical")],
     ["a", chamaEscrowCoordinate(pubkey, escrowId)],
     ...(payload.community ? [["t", `chama-${payload.community}`]] : []),
     ...(payload.country ? [["location", payload.country.toUpperCase()]] : []),

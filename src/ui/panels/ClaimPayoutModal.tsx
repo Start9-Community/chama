@@ -1320,7 +1320,12 @@ function TandoMpesaPicker({
         <input
           type="tel"
           inputMode="tel"
-          autoComplete="tel"
+          autoComplete="off"
+          name="chama-mpesa-payout-phone"
+          data-bwignore="true"
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-form-type="other"
           autoCorrect="off"
           spellCheck={false}
           value={phone}
@@ -1564,7 +1569,12 @@ function ChapsmartMpesaPicker({
         <input
           type="tel"
           inputMode="tel"
-          autoComplete="tel"
+          autoComplete="off"
+          name="chama-chapsmart-payout-phone"
+          data-bwignore="true"
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-form-type="other"
           autoCorrect="off"
           spellCheck={false}
           value={phone}

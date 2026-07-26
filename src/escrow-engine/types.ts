@@ -219,6 +219,10 @@ export const TAGS = {
 /** Content of a CREATE event */
 export interface CreatePayload {
   type: "escrow:create";
+  /** Public product treatment layered over the stable marketplace money
+   *  semantics. Work offers remain marketplace escrows (client funds, worker
+   *  receives) while rendering and syndicating as a labor listing. */
+  listingKind?: "work";
   description: string;
   /** Product photo for a single marketplace listing. */
   imageDataUrl?: string;
@@ -745,6 +749,9 @@ export interface EscrowState {
   status: EscrowStatus;
   /** Trade description */
   description: string;
+  /** Optional public product treatment. Absent keeps every historical listing
+   *  byte-for-byte on its existing marketplace presentation. */
+  listingKind?: "work";
   /** Product photo for a single marketplace listing. */
   imageDataUrl?: string;
   /** Ordered listing/store gallery. imageDataUrl remains the legacy cover. */

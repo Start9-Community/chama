@@ -189,6 +189,7 @@ function getPrevEventId(tags: string[][]): string | null {
 
 function validateCreatePayload(data: unknown): data is CreatePayload {
   const d = data as Record<string, unknown>;
+  if (d.listingKind !== undefined && d.listingKind !== "work") return false;
   if (d.imageDataUrl !== undefined && !isSupportedListingImageRef(d.imageDataUrl)) return false;
   if (d.imageUrls !== undefined && !areSupportedListingImageRefs(d.imageUrls)) return false;
   // v0.1.72 federation gates: fedPrefix and fed are optional (backwards

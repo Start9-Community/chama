@@ -83,22 +83,23 @@ import { ensureRemoteListingImage, MAX_LISTING_IMAGE_REFS, type ListingImageUplo
 import { SwipeImageGallery } from "../components/SwipeImageGallery.js";
 
 type Step = 1 | 2 | 3;
-type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "lending";
+type Vertical = "p2p-trade" | "bill-pay" | "marketplace" | "work" | "lending";
 type ListingMode = "single" | "menu";
 
 // Trade-type cards, mirroring the onboarding splash (INTRO_USE_CASES). The three
-// live verticals carry real `Vertical` ids; the coming-soon previews carry
+// Live verticals carry real `Vertical` ids; the coming-soon previews carry
 // display-only ids (never reach setVertical — the click is guarded on !soon) so
 // the wizard sells the same vision the splash does without promising a creatable
 // flow that isn't wired. `id` is `string` for that reason. Lending retired here
-// (Work replaces it); the "lending" Vertical + logic stay in code for back-compat.
+// Work now reuses marketplace money semantics via listingKind; the "lending"
+// Vertical + logic stay in code for back-compat.
 // i18n: label/description are DICTIONARY KEYS, resolved with t() at render
 // (module-level constants can't call hooks) — same pattern as INTRO_USE_CASES.
 const VERTICALS: { id: string; labelKey: string; icon: string; descriptionKey: string; comingSoon?: boolean }[] = [
   { id: "p2p-trade", labelKey: "create.verticalExchange", icon: "⚡", descriptionKey: "create.verticalExchangeDesc" },
   { id: "bill-pay", labelKey: "create.verticalBillPay", icon: "🧾", descriptionKey: "create.verticalBillPayDesc" },
   { id: "marketplace", labelKey: "create.verticalMarketplace", icon: "🏪", descriptionKey: "create.verticalMarketplaceDesc" },
-  { id: "work", labelKey: "create.verticalWork", icon: "🛠️", descriptionKey: "create.verticalWorkDesc", comingSoon: true },
+  { id: "work", labelKey: "create.verticalWork", icon: "🛠️", descriptionKey: "create.verticalWorkDesc" },
   { id: "chip-in", labelKey: "create.verticalChipIn", icon: "🤝", descriptionKey: "create.verticalChipInDesc", comingSoon: true },
   { id: "stack", labelKey: "create.verticalStack", icon: "🪙", descriptionKey: "create.verticalStackDesc", comingSoon: true },
 ];
@@ -436,7 +437,7 @@ function menuKindForVertical(vertical: Vertical): NonNullable<MenuItem["kind"]> 
 }
 
 function menuImagesAllowedForVertical(vertical: Vertical): boolean {
-  return vertical === "marketplace";
+  return vertical === "marketplace" || vertical === "work";
 }
 
 function normalizeMenuItems(form: FormState, vertical: Vertical): MenuItem[] {
@@ -654,6 +655,7 @@ function menuCurrencyHint(vertical: Vertical, currency: string): string {
 
 function singleModeLabel(vertical: Vertical): string {
   const lang = getCurrentLang();
+  if (vertical === "work") return translate(lang, "create.singleModeWork");
   if (vertical === "bill-pay") return translate(lang, "create.singleModeBillPay");
   if (vertical === "marketplace") return translate(lang, "create.singleModeMarket");
   if (vertical === "lending") return translate(lang, "create.singleModeLending");
@@ -670,6 +672,7 @@ function menuModeLabel(vertical: Vertical): string {
 
 function singleModeDescription(vertical: Vertical): string {
   const lang = getCurrentLang();
+  if (vertical === "work") return translate(lang, "create.singleModeDescWork");
   if (vertical === "bill-pay") return translate(lang, "create.singleModeDescBillPay");
   if (vertical === "marketplace") return translate(lang, "create.singleModeDescMarket");
   if (vertical === "lending") return translate(lang, "create.singleModeDescLending");
@@ -686,6 +689,7 @@ function menuModeDescription(vertical: Vertical): string {
 
 function descriptionLabel(vertical: Vertical, usingMenu: boolean): string {
   const lang = getCurrentLang();
+  if (vertical === "work") return translate(lang, "create.descLabelWork");
   if (usingMenu) {
     if (vertical === "bill-pay") return translate(lang, "create.descLabelBundle");
     if (vertical === "marketplace") return translate(lang, "create.descLabelStore");
@@ -697,6 +701,7 @@ function descriptionLabel(vertical: Vertical, usingMenu: boolean): string {
 
 function descriptionPlaceholder(vertical: Vertical, usingMenu: boolean): string {
   const lang = getCurrentLang();
+  if (vertical === "work") return translate(lang, "create.descPlaceholderWork");
   if (usingMenu) {
     if (vertical === "bill-pay") return translate(lang, "create.descPlaceholderBillsMenu");
     if (vertical === "marketplace") return translate(lang, "create.descPlaceholderStoreMenu");
@@ -1198,7 +1203,7 @@ export function CreateForm({
       let listingImageRefs = form.imageUrls.length
         ? [...form.imageUrls]
         : form.imageDataUrl ? [form.imageDataUrl] : [];
-      if (vertical === "marketplace" && listingImageRefs.length) {
+      if ((vertical === "marketplace" || vertical === "work") && listingImageRefs.length) {
         listingImageRefs = await uploadImageRefsSequentially(
           listingImageRefs,
           index => `chama-listing-${index + 1}.jpg`,
@@ -1268,8 +1273,8 @@ export function CreateForm({
       const params: any = {
         description,
         amountMsats,
-        fiatAmount: !hasMenu && form.fiat ? parseFloat(form.fiat) : undefined,
-        fiatCurrency: !hasMenu && form.fiat ? form.cur : undefined,
+        fiatAmount: vertical !== "work" && !hasMenu && form.fiat ? parseFloat(form.fiat) : undefined,
+        fiatCurrency: vertical !== "work" && !hasMenu && form.fiat ? form.cur : undefined,
         // v1.2.2 premium-display fix: when the seller leaves the
         // premium field blank on an Exchange / bill-pay listing,
         // persist an explicit 0 so the listing reads "0% premium"
@@ -1285,16 +1290,20 @@ export function CreateForm({
           if (vertical === "p2p-trade" || vertical === "bill-pay") return 0;
           return undefined;
         })(),
-        category: vertical,
-        imageDataUrl: vertical === "marketplace" ? listingImageRefs[0] : undefined,
-        imageUrls: vertical === "marketplace" ? listingImageRefs : undefined,
+        // Work deliberately keeps marketplace money semantics: the client is
+        // BUYER/funder and the offer author is SELLER/worker. listingKind gives
+        // it its own public identity without forking the escrow reducer.
+        category: vertical === "work" ? "marketplace" : vertical,
+        listingKind: vertical === "work" ? "work" : undefined,
+        imageDataUrl: vertical === "marketplace" || vertical === "work" ? listingImageRefs[0] : undefined,
+        imageUrls: vertical === "marketplace" || vertical === "work" ? listingImageRefs : undefined,
         community: effectiveCommunity,
         // v3.1 (B3): stamp the community's ISO country so the listing self-describes
         // its flag + currency on devices that don't know this (custom) community.
         country: getCommunityBySlug(effectiveCommunity)?.country ?? undefined,
         // v4.1 (#12): CBP bill type (single listing) — informational metadata only.
         billType: vertical === "bill-pay" && form.billType ? form.billType : undefined,
-        fulfillment: vertical === "marketplace" ? form.fulfillment : undefined,
+        fulfillment: vertical === "work" ? "service" : vertical === "marketplace" ? form.fulfillment : undefined,
         mintUrl,
         communityArbiters: communityArbiters.length > 0 ? communityArbiters : undefined,
         // 2B prefer-bonded: stamp the funded bonded subset (∩ the final pool) into
@@ -1754,7 +1763,12 @@ function Step1({
               key={v.id}
               type="button"
               disabled={soon}
-              onClick={() => { if (!soon) setVertical(v.id as Vertical); }}
+              onClick={() => {
+                if (soon) return;
+                const next = v.id as Vertical;
+                setVertical(next);
+                if (next === "work") setListingMode("single");
+              }}
               style={{
                 display: "flex", flexDirection: "column", alignItems: "flex-start",
                 gap: 6, padding: "16px 14px",
@@ -1795,7 +1809,7 @@ function Step1({
       {/* Stage 5 — "every seller is a Store": one light sub-step under the type
           pick. A sliding segmented control between a single listing and the
           vertical's multi/store mode, driving the same listingMode state. */}
-      <div style={{ marginBottom: 20 }}>
+      {vertical !== "work" && <div style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, letterSpacing: 1, marginBottom: 8 }}>
           {t("create.listingStyle")}
         </div>
@@ -1848,7 +1862,7 @@ function Step1({
             ? menuModeDescription(vertical)
             : singleModeDescription(vertical)}
         </div>
-      </div>
+      </div>}
 
       {/* Community context. v2.2.0: the line reflects the header
           identity (what you see is what you publish). When that differs
@@ -2192,18 +2206,24 @@ function Step2({
       markImageUploading("single", true);
       try {
         const listingImageLimit = usingMenu ? 1 : MAX_LISTING_IMAGES;
-        const slots = Math.max(0, listingImageLimit - form.imageUrls.length);
+        // A storefront has one hero image, so choosing a new file from the
+        // "Change store photo" button is a replacement operation. Previously the
+        // existing image consumed the only slot and the newly selected file was
+        // sliced away, making the button appear inert until the user deleted the
+        // old image manually.
+        const currentImages = usingMenu ? [] : form.imageUrls;
+        const slots = Math.max(0, listingImageLimit - currentImages.length);
         const overflowed = files.length > slots;
         const chosen = files.slice(0, slots);
         const prepared = await prepareImagesSequentially(chosen);
-        const previewUrls = [...form.imageUrls, ...prepared];
+        const previewUrls = [...currentImages, ...prepared];
         setForm(prev => ({ ...prev, imageDataUrl: previewUrls[0] ?? "", imageUrls: previewUrls }));
         const uploaded = await uploadImageRefsSequentially(
           prepared,
           index => chosen[index]?.name || `chama-listing-${index + 1}.jpg`,
           authorizeImageUpload,
         );
-        const imageUrls = [...form.imageUrls, ...uploaded];
+        const imageUrls = [...currentImages, ...uploaded];
         setImageError(overflowed
           ? usingMenu
             ? "A storefront has one store photo. Extra files were not added."
@@ -2278,7 +2298,7 @@ function Step2({
       </div>
       )}
 
-      {vertical === "marketplace" && (
+      {(vertical === "marketplace" || vertical === "work") && (
         <div style={{ marginBottom: 16 }}>
           {usingMenu && <div style={{ fontSize: 11, color: T.muted, fontFamily: T.mono, marginBottom: 6 }}>STORE PHOTO</div>}
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -3183,7 +3203,7 @@ function Step3({
   const v = VERTICALS.find(vert => vert.id === vertical)!;
   const menuItems = normalizeMenuItems(form, vertical);
   const hasMenu = menuItems.length > 0;
-  const previewImages = vertical === "marketplace" ? [
+  const previewImages = vertical === "marketplace" || vertical === "work" ? [
     ...(form.imageUrls.length ? form.imageUrls : form.imageDataUrl ? [form.imageDataUrl] : []),
     ...(hasMenu ? menuItems.flatMap(item => {
       const leadImage = item.imageUrls?.[0] ?? item.imageDataUrl;
@@ -3295,7 +3315,7 @@ function Step3({
         <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, marginBottom: 8 }}>
           {listingDescription || <span style={{ color: T.muted, fontStyle: "italic" }}>{t("create.noDescription")}</span>}
         </div>
-        {form.paymentMethods.length > 0 && (
+        {categoryUsesPaymentRails(vertical) && form.paymentMethods.length > 0 && (
           <div style={{
             display: "flex",
             flexWrap: "wrap",

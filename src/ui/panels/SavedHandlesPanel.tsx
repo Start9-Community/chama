@@ -456,7 +456,12 @@ export function SavedHandlesPanel({ communitySlug, onClose }: {
               onBlur={() => setPhoneValue(v => formatPhoneNumber(v))}
               placeholder={phoneInputPlaceholder}
               inputMode="tel"
-              autoComplete="tel"
+              autoComplete="off"
+              name="chama-private-payment-phone"
+              data-bwignore="true"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-form-type="other"
               style={{
                 ...inputStyle,
                 marginBottom: 0, border: "none", borderRadius: 0,

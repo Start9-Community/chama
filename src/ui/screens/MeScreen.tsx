@@ -197,7 +197,7 @@ export function MeScreen({
   /** Compute the user's OWN chama liveness (getChamaLiveness) — post-auth the
    *  client is connected, so this is a single cheap fetch. Absent ⇒ the card just
    *  omits the signal. */
-  loadLiveness?: (slug: string) => Promise<ChamaLiveness | null>;
+  loadLiveness?: (slug: string, signal?: AbortSignal) => Promise<ChamaLiveness | null>;
   /** Blocks/day for the "~D-day" term readout (signet ~2880, mainnet ~144). */
   livenessBlocksPerDay?: number;
   /** #37: an actionable pending lock attempt exists — the balance belongs
@@ -2014,7 +2014,7 @@ function YourChamaCard({
   communitySlug: string | null;
   hasActiveCommitment: boolean;
   onSelectCommunity: (slug: string) => void;
-  loadLiveness?: (slug: string) => Promise<ChamaLiveness | null>;
+  loadLiveness?: (slug: string, signal?: AbortSignal) => Promise<ChamaLiveness | null>;
   livenessBlocksPerDay?: number;
 }) {
   const { t } = useT();
@@ -2022,7 +2022,7 @@ function YourChamaCard({
   const [query, setQuery] = useState("");
   // Your own chama's chain-verified liveness — auto-refreshed (mount, focus, and a
   // gentle poll) so a bond appearing shows up without a manual reload. Fails soft.
-  const { liveness, loading: livenessLoading } = useLiveness(communitySlug, loadLiveness, { intervalMs: LIVENESS_POLL_MS });
+  const { liveness, loading: livenessLoading, outcome: livenessOutcome } = useLiveness(communitySlug, loadLiveness, { intervalMs: LIVENESS_POLL_MS });
   const current = communitySlug ? getCommunityBySlug(communitySlug) : null;
   const countries = getAllPickerCountries();
   const currentCountry = current?.country
@@ -2105,7 +2105,7 @@ function YourChamaCard({
 
       {loadLiveness && (
         <div style={{ marginTop: 12 }}>
-          <LivenessSignal liveness={liveness} loading={livenessLoading} blocksPerDay={livenessBlocksPerDay} />
+          <LivenessSignal liveness={liveness} loading={livenessLoading} outcome={livenessOutcome} blocksPerDay={livenessBlocksPerDay} />
         </div>
       )}
 

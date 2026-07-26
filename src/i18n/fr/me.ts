@@ -9,6 +9,9 @@ export const me: Record<string, string> = {
   "me.storeRenewing": "Renouvellement…",
   "me.storeRenewed": "Boutique renouvelée — de retour sur Parcourir.",
   "me.storeRenewFailed": "Impossible de renouveler la boutique.",
+  "me.storeAutoRenew": "Garder mes offres actives",
+  "me.storeAutoRenewHint": "Une fois activé, les offres non financées se renouvellent pendant votre présence en ligne. Désactivé par défaut.",
+  "me.storeAutoRenewBondRequired": "Disponible tant que votre caution d'engagement est active.",
   // Clear unfunded listings (#82) — Settings row + confirm dialog.
   "me.clearListings": "Effacer mes annonces non financées",
   "me.clearListingsHint": "{count} annonces jamais financées — retirez-les de votre vitrine.",

@@ -323,6 +323,7 @@ function handleCreate(event: ParsedEscrowEvent<CreatePayload>): TransitionResult
     id: event.escrowId,
     status: EscrowStatus.CREATED,
     description: p.description,
+    ...(p.listingKind ? { listingKind: p.listingKind } : {}),
     ...(p.category === "marketplace" && p.imageDataUrl ? { imageDataUrl: p.imageDataUrl } : {}),
     ...(p.category === "marketplace" && p.imageUrls?.length ? { imageUrls: [...p.imageUrls] } : {}),
     amountMsats: p.amountMsats,

@@ -12,6 +12,9 @@ export const me: Record<string, string> = {
   "me.storeRenewing": "Renewing…",
   "me.storeRenewed": "Store renewed — back on Browse.",
   "me.storeRenewFailed": "Couldn't renew the store.",
+  "me.storeAutoRenew": "Keep my offers live",
+  "me.storeAutoRenewHint": "When enabled, unfunded offers renew while you're online. Off by default.",
+  "me.storeAutoRenewBondRequired": "Available while your commitment bond is active.",
   // Clear unfunded listings (#82) — Settings row + confirm dialog.
   "me.clearListings": "Clear my unfunded listings",
   "me.clearListingsHint": "{count} never-funded listings — remove them from your storefront.",

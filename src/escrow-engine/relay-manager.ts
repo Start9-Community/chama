@@ -158,6 +158,7 @@ const FETCH_QUORUM_POLL_MS = 200;
 // The quorum itself is now adaptive (see effectiveQuorum()): min(FETCH_QUORUM,
 // relayCount-1), so a small/degraded pool still resolves instead of stalling.
 const EOSE_GRACE_MS = 1_000;
+const HEAVY_CURSOR_EVENT_BYTES = 8 * 1024;
 
 // ══════════════════════════════════════════════════════════════════════════
 // RELAY MANAGER
@@ -417,6 +418,21 @@ export class RelayManager {
         // filter alone wasn't enough: fetchEscrowEvents / fetchOnce
         // route raw events directly to their callers, bypassing it.
         if (this.callbacks.shouldDropEvent?.(event)) return;
+
+        // Advance only THIS relay's copy of the subscription cursor. Filters
+        // are intentionally cloned per relay (see subscribe/fetch below), so a
+        // fast relay cannot move a slower relay past history it has not yet
+        // delivered. Reconnect then resumes with a tiny inclusive overlap
+        // instead of replaying the entire chat-bearing trade history.
+        const relayFilter = this.relays.get(relayUrl)?.subscriptions.get(subId);
+        if (relayFilter && Number.isFinite(event.created_at)) {
+          const nextSince =
+            event.kind === EscrowEventKind.CHAT ||
+            event.content.length > HEAVY_CURSOR_EVENT_BYTES
+              ? event.created_at + 1
+              : Math.max(0, event.created_at - 2);
+          relayFilter.since = Math.max(relayFilter.since ?? 0, nextSince);
+        }
 
         // Route arbitrary one-shot fetches by their exact temporary
         // subscription ID. This must happen before global live-event dedup,
@@ -759,9 +775,9 @@ export class RelayManager {
     const subId = `sm_sub_${++this.subscriptionCounter}`;
 
     for (const [, relay] of this.relays) {
-      relay.subscriptions.set(subId, filter);
+      relay.subscriptions.set(subId, { ...filter });
       if (relay.status === RelayStatus.CONNECTED) {
-        this.sendToRelay(relay, ["REQ", subId, filter]);
+        this.sendToRelay(relay, ["REQ", subId, relay.subscriptions.get(subId)!]);
       }
     }
 
@@ -778,6 +794,21 @@ export class RelayManager {
         this.sendToRelay(relay, ["CLOSE", subscriptionId]);
       }
     }
+  }
+
+  /** Current connected-relay count, used by long-lived subscriptions to decide
+   *  when their initial EOSE reading has reached the same quorum as one-shot
+   *  fetches. This exposes no relay internals and does not alter fetch policy. */
+  connectedRelayCount(): number {
+    return [...this.relays.values()]
+      .filter(relay => relay.status === RelayStatus.CONNECTED)
+      .length;
+  }
+
+  /** Quorum required for a reading across the currently connected relay set. */
+  connectedRelayQuorum(): number {
+    const connected = this.connectedRelayCount();
+    return connected === 0 ? 0 : Math.min(connected, this.effectiveQuorum());
   }
 
   // ── Convenience: subscribe to a specific escrow's events ────────────────
@@ -854,7 +885,11 @@ export class RelayManager {
    * Fetch all events for an escrow and return them once all relays
    * have sent EOSE (end of stored events).
    */
-  async fetchEscrowEvents(escrowId: string, timeoutMs = 15_000): Promise<NostrEvent[]> {
+  async fetchEscrowEvents(
+    escrowId: string,
+    timeoutMs = 15_000,
+    since?: number,
+  ): Promise<NostrEvent[]> {
     // Quorum-gate before snapshotting the connected set: don't REQ a single
     // fast relay and EOSE partial (missing the resolve/complete tail). The
     // late relays that connect during/after this fetch also receive the REQ
@@ -895,12 +930,13 @@ export class RelayManager {
       const filter: NostrFilter = {
         kinds: Object.values(EscrowEventKind).filter(v => typeof v === "number") as number[],
         "#d": [escrowId],
+        ...(since !== undefined ? { since } : {}),
       };
 
       for (const [, relay] of this.relays) {
-        relay.subscriptions.set(subId, filter);
+        relay.subscriptions.set(subId, { ...filter });
         if (relay.status === RelayStatus.CONNECTED) {
-          this.sendToRelay(relay, ["REQ", subId, filter]);
+          this.sendToRelay(relay, ["REQ", subId, relay.subscriptions.get(subId)!]);
         }
       }
     });
@@ -1000,9 +1036,12 @@ export class RelayManager {
       }, timeoutMs);
 
       for (const [, relay] of this.relays) {
-        relay.subscriptions.set(subId, filter);
+        relay.subscriptions.set(subId, { ...filter });
         const connected = relay.status === RelayStatus.CONNECTED;
-        const reqSent = connected && this.sendToRelay(relay, ["REQ", subId, filter]);
+        const reqSent = connected && this.sendToRelay(
+          relay,
+          ["REQ", subId, relay.subscriptions.get(subId)!],
+        );
         probe?.noteDispatch(relay.url, connected, reqSent);
       }
     });

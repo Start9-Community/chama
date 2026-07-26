@@ -167,11 +167,12 @@ export const TRINITY_RING_ORDER: readonly Role[] = [
   Role.SELLER,
 ];
 
-export const CAT_ICON = { "p2p-trade": "⚡", "bill-pay": "🧾", marketplace: "🏪", lending: "🤝" } as Record<string, string>;
+export const CAT_ICON = { "p2p-trade": "⚡", "bill-pay": "🧾", marketplace: "🏪", work: "🛠️", lending: "🤝" } as Record<string, string>;
 export const CAT_LABEL: Record<string, string> = {
   "p2p-trade":   "⚡ Exchange",
   "bill-pay":    "🧾 Community Bill Pay",
   marketplace:   "🏪 Marketplace",
+  work:          "🛠️ Work",
   lending:       "🤝 Lending",
   "raw-escrow":  "🔧 Raw Escrow",
 };
@@ -186,7 +187,7 @@ export const BROWSE_CATS: { id: string; l: string; i: string }[] = [
   { id: "p2p-trade",    l: "browse.catExchange", i: "⚡" },
   { id: "bill-pay",     l: "browse.catBillPay",  i: "🧾" },
   { id: "marketplace",  l: "browse.catMarket",   i: "🏪" },
-  { id: "lending",      l: "browse.catLending",  i: "🤝" },
+  { id: "work",         l: "browse.catWork",     i: "🛠️" },
 ];
 
 export const fmtSats = (ms: number) => Math.floor(ms / 1000).toLocaleString();

@@ -14,6 +14,10 @@ import { T } from "../theme.js";
 import { useT, type TFunc } from "../../i18n/index.js";
 import { HelpTip } from "./HelpTip.js";
 import { type ChamaLiveness } from "../../arbiters/live-chama.js";
+import {
+  loadCoordinatedLiveness,
+  type LivenessGenerationDiagnostic,
+} from "../../arbiters/liveness-coordinator.js";
 
 /** Fetch + auto-keep-fresh a community's liveness. Refetches on mount, on window
  *  focus (returning to the app), and — if `intervalMs` > 0 — on a gentle poll.
@@ -22,11 +26,16 @@ import { type ChamaLiveness } from "../../arbiters/live-chama.js";
  *  Fails soft: any error just yields null (the caller omits the signal). */
 export function useLiveness(
   slug: string | null | undefined,
-  loadLiveness: ((slug: string) => Promise<ChamaLiveness | null>) | undefined,
+  loadLiveness: ((slug: string, signal?: AbortSignal) => Promise<ChamaLiveness | null>) | undefined,
   opts: { intervalMs?: number } = {},
-): { liveness: ChamaLiveness | null; loading: boolean } {
+): {
+  liveness: ChamaLiveness | null;
+  loading: boolean;
+  outcome: LivenessGenerationDiagnostic["outcome"] | null;
+} {
   const [liveness, setLiveness] = useState<ChamaLiveness | null>(null);
   const [loading, setLoading] = useState(false);
+  const [outcome, setOutcome] = useState<LivenessGenerationDiagnostic["outcome"] | null>(null);
   const loadRef = useRef(loadLiveness);
   loadRef.current = loadLiveness;
   const intervalMs = opts.intervalMs ?? 0;
@@ -37,9 +46,18 @@ export function useLiveness(
     let cancelled = false;
     const run = (showLoading: boolean) => {
       if (showLoading) setLoading(true);
-      load(slug)
-        .then((l) => { if (!cancelled) setLiveness(l); })
-        .catch(() => { if (!cancelled) setLiveness(null); })
+      loadCoordinatedLiveness(slug, (community, signal) => load(community, signal))
+        .then((result) => {
+          if (cancelled) return;
+          setLiveness(result.liveness);
+          setOutcome(result.outcome);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setLiveness(null);
+            setOutcome("error");
+          }
+        })
         .finally(() => { if (!cancelled) setLoading(false); });
     };
     run(true);
@@ -52,7 +70,7 @@ export function useLiveness(
       if (typeof window !== "undefined") window.removeEventListener("focus", onFocus);
     };
   }, [slug, intervalMs]);
-  return { liveness, loading };
+  return { liveness, loading, outcome };
 }
 
 const SEGMENTS = 5;
@@ -106,6 +124,7 @@ export interface LivenessSignalProps {
   /** The computed score, or null when it isn't known (pre-connect / no fetch). */
   liveness: ChamaLiveness | null;
   loading?: boolean;
+  outcome?: LivenessGenerationDiagnostic["outcome"] | null;
   /** Blocks per day for the "~D-day" term (signet ~2880, mainnet ~144). */
   blocksPerDay?: number;
   /** Optional — turns the thin-coverage nudge into a real CTA. Absent ⇒ the nudge
@@ -114,14 +133,16 @@ export interface LivenessSignalProps {
 }
 
 /** The full signal block: label + "?" + meter + honest readout + thin nudge. */
-export function LivenessSignal({ liveness, loading, blocksPerDay = 144, onBecomeArbiter }: LivenessSignalProps) {
+export function LivenessSignal({ liveness, loading, outcome, blocksPerDay = 144, onBecomeArbiter }: LivenessSignalProps) {
   const { t } = useT();
   const thin = !liveness || liveness.arbiterCount <= 1 || liveness.score < THIN_SCORE;
   const readout = loading
     ? t("bond.livenessChecking")
     : liveness
       ? localizedLivenessReadout(liveness, blocksPerDay, t)
-      : t("bond.livenessUnknown");
+      : outcome === "timeout"
+        ? t("bond.livenessTimeout")
+        : t("bond.livenessUnknown");
 
   return (
     <div style={{

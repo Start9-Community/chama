@@ -3,6 +3,7 @@ import { T } from "../theme.js";
 import { BrandHeader } from "../components/BrandHeader.js";
 import { GlobeHero } from "../components/GlobeHero.js";
 import { LivenessSignal } from "../components/LivenessSignal.js";
+import { loadCoordinatedLiveness, type LivenessGenerationDiagnostic } from "../../arbiters/liveness-coordinator.js";
 import { LanguagePills } from "../components/LanguagePills.js";
 import { useT } from "../../i18n/index.js";
 import type { ChamaLiveness } from "../../arbiters/live-chama.js";
@@ -70,7 +71,7 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
    *  Absent during pre-signer onboarding (no connected client) — the detail screen
    *  then falls back to the "trade today" reassurance, never a dark landing. When a
    *  caller CAN fetch (post-connect re-pick), the graduated signal renders for real. */
-  loadLiveness?: (slug: string) => Promise<ChamaLiveness | null>;
+  loadLiveness?: (slug: string, signal?: AbortSignal) => Promise<ChamaLiveness | null>;
   /** Optional: ONE batched per-community bonded-arbiter count (slug → count of
    *  chain-verified funded+active bonds; fetchBondedArbiterCounts). ADDITIVE over
    *  the registry tiers: rows with real bonds gain a "🛡 N bonded" note, rows
@@ -107,6 +108,7 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
   // Chain-verified liveness for the opened single-community landing (best-effort).
   const [liveness, setLiveness] = useState<ChamaLiveness | null>(null);
   const [livenessLoading, setLivenessLoading] = useState(false);
+  const [livenessOutcome, setLivenessOutcome] = useState<LivenessGenerationDiagnostic["outcome"] | null>(null);
 
   // The batched list signal: slug → chain-verified bonded-arbiter count.
   // Fetched once per mount, fail-soft (null ⇒ registry tiers stand alone).
@@ -141,9 +143,19 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
     const slug = selected.defaultCommunity.slug;
     let cancelled = false;
     setLivenessLoading(true);
-    loadLiveness(slug)
-      .then((l) => { if (!cancelled) setLiveness(l); })
-      .catch(() => { if (!cancelled) setLiveness(null); })
+    loadCoordinatedLiveness(slug, (community, signal) => loadLiveness(community, signal))
+      .then((result) => {
+        if (!cancelled) {
+          setLiveness(result.liveness);
+          setLivenessOutcome(result.outcome);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLiveness(null);
+          setLivenessOutcome("error");
+        }
+      })
       .finally(() => { if (!cancelled) setLivenessLoading(false); });
     return () => { cancelled = true; };
     // Key off the opened country only — `loadLiveness` is a fresh identity each
@@ -272,7 +284,7 @@ export function GlobeCountryPicker({ onSelect, loadLiveness, loadBondedCounts, l
                 Only when a fetcher is wired (post-connect); pre-signer onboarding
                 shows the reassurance below on its own, never a dark landing. */}
             {loadLiveness && (
-              <LivenessSignal liveness={liveness} loading={livenessLoading} blocksPerDay={livenessBlocksPerDay} />
+              <LivenessSignal liveness={liveness} loading={livenessLoading} outcome={livenessOutcome} blocksPerDay={livenessBlocksPerDay} />
             )}
             <div style={{
               padding: "14px 15px", borderRadius: T.r,

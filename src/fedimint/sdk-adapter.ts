@@ -2421,7 +2421,11 @@ export async function preloadRealWalletRuntime(): Promise<{
 export async function createRealWallet(
   opts: CreateRealWalletOptions = {}
 ): Promise<IFedimintWallet> {
-  const { WalletDirector, WasmWorkerTransport } = await preloadRealWalletRuntime();
+  const { acquireBrowserRuntimeLease } = await import("./browser-runtime-lease.js");
+  const releaseRuntimeLease = await acquireBrowserRuntimeLease();
+  let walletReady = false;
+  try {
+    const { WalletDirector, WasmWorkerTransport } = await preloadRealWalletRuntime();
 
   // Terminate any worker left over from a previous init in this session.
   // Handles HMR, double-init, and retry-after-failed-join. (This does NOT
@@ -2708,16 +2712,27 @@ export async function createRealWallet(
     }
   }
 
-  const wallet = await director.createWallet();
+    const wallet = await director.createWallet();
 
   // C12 (v3.4.0): register the settled OPFS filename as the mint-lock
   // scope, so every mint op in every tab of this origin serializes on
   // the same Web Lock for THIS wallet file (and only this one — other
   // identities' wallet files get their own lock).
-  setMintLockScope(filename);
+    setMintLockScope(filename);
 
-  return adaptRealWallet(
-    wallet as unknown as RealFedimintWallet,
-    clearRegisteredTransport
-  );
+    const adapted = adaptRealWallet(
+      wallet as unknown as RealFedimintWallet,
+      () => {
+        clearRegisteredTransport();
+        releaseRuntimeLease();
+      }
+    );
+    walletReady = true;
+    return adapted;
+  } finally {
+    if (!walletReady) {
+      terminateCurrentWorker();
+      releaseRuntimeLease();
+    }
+  }
 }

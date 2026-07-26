@@ -35,7 +35,13 @@ import puppeteer, { type Browser, type CDPSession, type Page } from "puppeteer-c
 import { WebSocketServer } from "ws";
 import { NsecSigner } from "../src/escrow-engine/nsec-signer.js";
 import { createEnvelope } from "../src/escrow-engine/envelope.js";
-import { EscrowEventKind, type NostrEvent } from "../src/escrow-engine/types.js";
+import {
+  EscrowEventKind,
+  Role,
+  type ChatBody,
+  type ChatPayload,
+  type NostrEvent,
+} from "../src/escrow-engine/types.js";
 
 const ROOT = process.cwd();
 const DIST = join(ROOT, "dist");
@@ -82,6 +88,11 @@ const BUYER_SECRET = "22".repeat(32);
 const ARBITER_SECRET = "33".repeat(32);
 const ESCROW_ID = "profile-active-trade-001";
 const NOW = Math.floor(Date.now() / 1000) - 60;
+const PROFILE_RELAY_COUNT = 4;
+const PROFILE_RELAY_URLS = Array.from(
+  { length: PROFILE_RELAY_COUNT },
+  (_, index) => `ws://127.0.0.1:${RELAY_PORT}/relay/${index}`,
+);
 
 const mime: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -166,7 +177,39 @@ async function fixture(): Promise<NostrEvent[]> {
     ],
     content: JSON.stringify(envelope),
   });
-  return [create, lock];
+  // Large enough to model a photo receipt after per-recipient NIP-44 fan-out,
+  // but below Chama's 128 KiB wire cap. The visible payload survives hydration;
+  // its encrypted raw content must not remain in the renderer hot cache.
+  const chatBody: ChatBody = {
+    message: "Deterministic chat-bearing profiling receipt",
+    attachments: [{
+      id: "profile-chat-image",
+      kind: "image",
+      mimeType: "image/png",
+      dataUrl: `data:image/png;base64,${"A".repeat(16 * 1024)}`,
+      name: "profile-receipt.png",
+      sizeBytes: 12 * 1024,
+    }],
+  };
+  const chatEnvelope = await createEnvelope(
+    JSON.stringify(chatBody),
+    [sellerPk, buyerPk, arbiterPk],
+    (plaintext, recipient) => seller.nip44Encrypt(plaintext, recipient),
+  );
+  const chatPayload: ChatPayload = {
+    type: "escrow:chat",
+    message: "",
+    bodyEnvelope: chatEnvelope,
+    senderRole: Role.SELLER,
+    sentAt: NOW + 2,
+  };
+  const chat = await seller.signEvent({
+    kind: EscrowEventKind.CHAT,
+    created_at: NOW + 2,
+    tags: [["d", ESCROW_ID], ["t", "escrow:chat"]],
+    content: JSON.stringify(chatPayload),
+  });
+  return [create, lock, chat];
 }
 
 function matches(event: NostrEvent, filter: Record<string, any>): boolean {
@@ -799,7 +842,7 @@ async function main(): Promise<void> {
       ...process.env,
       VITE_CHAMA_NATIVE_BRIDGE_REQUIRED: "1",
       VITE_CHAMA_NATIVE_BRIDGE_URL: "/bridge",
-      VITE_CHAMA_PROFILE_RELAY: `ws://127.0.0.1:${RELAY_PORT}/relay`,
+      VITE_CHAMA_PROFILE_RELAY: PROFILE_RELAY_URLS.join(","),
     },
   });
   if (build.status !== 0) process.exit(build.status ?? 1);
@@ -808,17 +851,62 @@ async function main(): Promise<void> {
   const relayHttp = createServer();
   activeServers.push(relayHttp);
   const relay = new WebSocketServer({ noServer: true });
+  type RelayReq = {
+    at: number;
+    relayIndex: number;
+    subId: string;
+    filters: Array<Record<string, any>>;
+  };
+  const relayRequests: RelayReq[] = [];
+  const relayDeliveries: Array<{
+    at: number;
+    relayIndex: number;
+    subId: string;
+    eventId: string;
+    kind: number;
+    contentBytes: number;
+    escrowFiltered: boolean;
+  }> = [];
+  const relaySockets = new Map<number, Set<import("ws").WebSocket>>();
+  for (let index = 0; index < PROFILE_RELAY_COUNT; index++) {
+    relaySockets.set(index, new Set());
+  }
   relayHttp.on("upgrade", (request, socket, head) => {
-    if (request.url !== "/relay") return socket.destroy();
-    relay.handleUpgrade(request, socket, head, ws => relay.emit("connection", ws, request));
+    const match = request.url?.match(/^\/relay\/(\d+)$/);
+    const relayIndex = match ? Number(match[1]) : -1;
+    if (relayIndex < 0 || relayIndex >= PROFILE_RELAY_COUNT) return socket.destroy();
+    relay.handleUpgrade(request, socket, head, ws => {
+      (ws as any).__profileRelayIndex = relayIndex;
+      relay.emit("connection", ws, request);
+    });
   });
   relay.on("connection", ws => {
+    const relayIndex = Number((ws as any).__profileRelayIndex);
+    relaySockets.get(relayIndex)!.add(ws);
+    ws.on("close", () => relaySockets.get(relayIndex)!.delete(ws));
     ws.on("message", raw => {
       const message = JSON.parse(raw.toString());
       if (message[0] !== "REQ") return;
       const [, subId, ...filters] = message;
+      relayRequests.push({
+        at: Date.now(),
+        relayIndex,
+        subId: String(subId),
+        filters,
+      });
       for (const event of events) {
         if (filters.some((filter: Record<string, any>) => matches(event, filter))) {
+          relayDeliveries.push({
+            at: Date.now(),
+            relayIndex,
+            subId: String(subId),
+            eventId: event.id,
+            kind: event.kind,
+            contentBytes: event.content.length,
+            escrowFiltered: filters.some((filter: Record<string, any>) =>
+              filter["#d"]?.includes(ESCROW_ID)
+            ),
+          });
           ws.send(JSON.stringify(["EVENT", subId, event]));
         }
       }
@@ -861,17 +949,68 @@ async function main(): Promise<void> {
     login(pages[1]!, BUYER_SECRET, ORIGIN_PORTS[1]!, false),
   ]);
   await Promise.all(pages.map(page => invokeLivenessScenario(page)));
+  await Promise.all(pages.map(page => page.waitForFunction(
+    () => {
+      const client = (globalThis as any).__CHAMA_PROFILE_CLIENT__;
+      const snapshot = client?.getProfileMemorySnapshot?.();
+      return snapshot?.parsedChatMessages >= 1;
+    },
+    { timeout: 30_000 },
+  )));
+
+  const closeRelay = (index: number): void => {
+    for (const ws of [...(relaySockets.get(index) ?? [])]) {
+      try { ws.close(1012, "profile flap"); } catch {}
+    }
+  };
+  const fetchReqCount = (): number => relayRequests.filter(request =>
+    request.subId.startsWith("sm_fetch_") &&
+    request.filters.some(filter => filter["#d"]?.includes(ESCROW_ID))
+  ).length;
+
+  // Discriminator A: one redundant relay flap must only resume its own
+  // subscription and must not schedule global watched-trade recovery.
+  const scenarioStartedAt = Date.now();
+  const beforeSingleFlapFetches = fetchReqCount();
+  closeRelay(3);
+  await new Promise(resolve => setTimeout(resolve, 6_000));
+  const afterSingleFlapFetches = fetchReqCount();
+
+  // Discriminator B: falling from four relays to two crosses the configured
+  // read quorum (3). Restoring it must schedule bounded delta recovery.
+  closeRelay(1);
+  closeRelay(2);
+  await new Promise(resolve => setTimeout(resolve, 8_000));
+  const afterQuorumFlapFetches = fetchReqCount();
+
   const sessions = await Promise.all(pages.map(page => page.createCDPSession()));
   await Promise.all(sessions.map(session => session.send("Performance.enable")));
+  // Blink's listener counter includes unreachable listeners on closed
+  // WebSocket wrappers until V8 collects them. Keep the normal, unforced
+  // samples below for heap slope/peak, but compare a collected baseline and
+  // endpoint so the listener gate measures retained listeners rather than GC
+  // scheduling.
+  await Promise.all(sessions.map(session => session.send("HeapProfiler.collectGarbage")));
+  const retainedStart = await Promise.all(sessions.map(session => readTabMetrics(session)));
   const samples: Array<{ at: number; tabs: Array<Record<string, number>> }> = [];
   const started = Date.now();
+  let nextQuorumFlapAt = started + 70_000;
+  let sustainedQuorumFlaps = 0;
   while (Date.now() - started < DURATION_MS) {
     const tabs: Array<Record<string, number>> = await Promise.all(
       sessions.map(session => readTabMetrics(session) as Promise<Record<string, number> & TabMetrics>),
     );
     samples.push({ at: Date.now(), tabs });
+    if (Date.now() >= nextQuorumFlapAt) {
+      closeRelay(1);
+      closeRelay(2);
+      sustainedQuorumFlaps++;
+      nextQuorumFlapAt += 70_000;
+    }
     await new Promise(resolve => setTimeout(resolve, SAMPLE_MS));
   }
+  await Promise.all(sessions.map(session => session.send("HeapProfiler.collectGarbage")));
+  const retainedEnd = await Promise.all(sessions.map(session => readTabMetrics(session)));
 
   const elapsedMinutes = Math.max(1 / 60, (samples.at(-1)!.at - samples[0]!.at) / 60_000);
   const results = samples[0]!.tabs.map((_, tab) => {
@@ -888,15 +1027,65 @@ async function main(): Promise<void> {
       taskDurationDeltaSeconds: last.taskDuration - first.taskDuration,
       documents: { start: first.documents, end: last.documents, delta: last.documents - first.documents },
       nodes: { start: first.nodes, end: last.nodes, delta: last.nodes - first.nodes },
-      listeners: { start: first.listeners, end: last.listeners, delta: last.listeners - first.listeners },
+      listeners: {
+        start: retainedStart[tab]!.listeners,
+        end: retainedEnd[tab]!.listeners,
+        delta: retainedEnd[tab]!.listeners - retainedStart[tab]!.listeners,
+        uncollectedEnd: last.listeners,
+      },
     };
   });
   const diagnostics = await Promise.all(pages.map(page => page.evaluate(() => ({
     liveness: JSON.parse(localStorage.getItem("chama_liveness_diagnostics_v1") ?? "[]"),
     hydration: JSON.parse(localStorage.getItem("chama_hydration_diagnostics_v1") ?? "[]"),
     livenessCache: JSON.parse(localStorage.getItem("chama_liveness_verified_cache_v1") ?? "{}"),
+    memory: (globalThis as any).__CHAMA_PROFILE_CLIENT__
+      ?.getProfileMemorySnapshot?.() ?? null,
     bodyText: document.body.innerText,
   }))));
+  const scenarioRequests = relayRequests.filter(request => request.at >= scenarioStartedAt);
+  const reconnectTradeRequests = scenarioRequests.filter(request =>
+    request.filters.some(filter => filter["#d"]?.includes(ESCROW_ID))
+  );
+  const reconnectWithoutSince = reconnectTradeRequests.filter(request =>
+    request.filters.some(filter =>
+      filter["#d"]?.includes(ESCROW_ID) && filter.since === undefined
+    )
+  );
+  const recoveryFetchRequests = reconnectTradeRequests.filter(request =>
+    request.subId.startsWith("sm_fetch_")
+  );
+  const scenarioTradeDeliveries = relayDeliveries.filter(delivery =>
+    delivery.at >= scenarioStartedAt && delivery.escrowFiltered
+  );
+  const relayScenario = {
+    relayCount: PROFILE_RELAY_COUNT,
+    singleFlapRecoveryFetchDelta: afterSingleFlapFetches - beforeSingleFlapFetches,
+    quorumFlapRecoveryFetchDelta: afterQuorumFlapFetches - afterSingleFlapFetches,
+    sustainedQuorumFlaps,
+    reconnectTradeRequestCount: reconnectTradeRequests.length,
+    reconnectWithoutSinceCount: reconnectWithoutSince.length,
+    recoveryFetchRequestCount: recoveryFetchRequests.length,
+    recoveryFetchWithoutSinceCount: recoveryFetchRequests.filter(request =>
+      request.filters.some(filter =>
+        filter["#d"]?.includes(ESCROW_ID) && filter.since === undefined
+      )
+    ).length,
+    deliveredTradeEventsAfterScenarioStart: scenarioTradeDeliveries.length,
+    deliveredTradeContentBytesAfterScenarioStart: scenarioTradeDeliveries.reduce(
+      (sum, delivery) => sum + delivery.contentBytes,
+      0,
+    ),
+    deliveredChatEventsAfterScenarioStart: scenarioTradeDeliveries.filter(
+      delivery => delivery.kind === EscrowEventKind.CHAT,
+    ).length,
+    minSince: Math.min(...reconnectTradeRequests.flatMap(request =>
+      request.filters
+        .filter(filter => filter["#d"]?.includes(ESCROW_ID))
+        .map(filter => Number(filter.since))
+        .filter(Number.isFinite)
+    )),
+  };
   const pass = results.every(result =>
     result.maxHeap < MAX_HEAP_BYTES
       && result.slope < MAX_SLOPE_BYTES_PER_MIN
@@ -904,18 +1093,45 @@ async function main(): Promise<void> {
       && result.nodes.delta <= MAX_NODE_GROWTH
       && result.listeners.delta <= MAX_LISTENER_GROWTH
   ) && diagnostics.every(item =>
-    item.liveness.length === 1
-      && item.liveness[0].finishedAt !== null
-      && item.liveness[0].durationMs <= 12_500
-      && item.liveness[0].maxSimultaneous === 1
+    item.liveness.length >= 1
       && item.liveness[0].joinedCallers >= 2
-      && item.liveness[0].outcome === "error"
-  ) && diagnostics[0]!.liveness.length === 1
+      && item.liveness.every((run: any) =>
+        run.finishedAt !== null
+          && run.durationMs <= 12_500
+          && run.maxSimultaneous === 1
+          && run.outcome === "error"
+      )
+  ) && diagnostics[0]!.liveness.length >= 1
     && !!diagnostics[0]!.livenessCache["us-blf"]
     && diagnostics[0]!.bodyText.includes("1 arbiter")
     && !diagnostics[1]!.livenessCache["us-blf"]
-    && diagnostics[1]!.bodyText.includes("liveness lights up once you're in");
-  console.log(JSON.stringify({ pass, durationMs: DURATION_MS, results, diagnostics }, null, 2));
+    && diagnostics[1]!.bodyText.includes("liveness lights up once you're in")
+    && relayScenario.singleFlapRecoveryFetchDelta === 0
+    && relayScenario.quorumFlapRecoveryFetchDelta > 0
+    && relayScenario.reconnectWithoutSinceCount === 0
+    && relayScenario.recoveryFetchWithoutSinceCount === 0
+    && relayScenario.deliveredChatEventsAfterScenarioStart === 0
+    && diagnostics.every(item =>
+      item.memory?.parsedChatMessages >= 1
+        && item.memory?.hotRawChatEvents === 0
+        && item.memory?.parsedChatRawContentBytes === 0
+    );
+  const summary = {
+    pass,
+    durationMs: DURATION_MS,
+    results,
+    relayScenario,
+    diagnostics,
+  };
+  const artifactPath = join(tmpdir(), `chama-start9-relay-profile-${Date.now()}.json`);
+  await writeFile(artifactPath, JSON.stringify({
+    ...summary,
+    relayRequests,
+    relayDeliveries,
+    samples,
+  }, null, 2));
+  console.log(JSON.stringify(summary, null, 2));
+  console.log(`[fixture] full sample series: ${artifactPath}`);
 
   await cleanup();
   if (!pass) process.exitCode = 1;

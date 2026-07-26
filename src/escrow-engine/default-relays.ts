@@ -33,5 +33,12 @@ const PUBLIC_RELAYS: string[] = [
   "wss://nostr.land",
 ];
 
+// Offline profiling harness only: a build-time relay override lets the
+// production bundle run against a deterministic local relay. Normal builds do
+// not define it and remain byte-for-byte on the production pool below.
+const PROFILE_RELAY = (import.meta as any).env?.VITE_CHAMA_PROFILE_RELAY?.trim?.();
+
 // Chama relay first (the reliable anchor); public pool as fallback / redundancy.
-export const DEFAULT_RELAYS: string[] = [CHAMA_RELAY, ...PUBLIC_RELAYS];
+export const DEFAULT_RELAYS: string[] = PROFILE_RELAY
+  ? PROFILE_RELAY.split(",").map((url: string) => url.trim()).filter(Boolean)
+  : [CHAMA_RELAY, ...PUBLIC_RELAYS];

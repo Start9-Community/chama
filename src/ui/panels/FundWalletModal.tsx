@@ -175,14 +175,22 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
             <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>{t("fund.amountSats")}</div>
             <input
               type="number"
+              name="chama-lightning-receive-amount"
+              autoComplete="off"
+              data-bwignore="true"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-form-type="other"
               value={amountSats}
               onChange={(e) => setAmountSats(e.target.value)}
               onWheel={blurNumberInputOnWheel}
               style={{ ...inputStyle, marginBottom: 12 }}
             />
             <div style={{ fontSize: 10, color: T.muted, fontFamily: T.mono, marginBottom: 4, letterSpacing: 1 }}>{t("fund.description")}</div>
-            <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} style={{ ...inputStyle, marginBottom: 16 }} />
-            <button disabled={busy} onClick={handleGenerate} style={{
+            <input type="text" name="chama-lightning-receive-description" autoComplete="off"
+              data-bwignore="true" data-1p-ignore="true" data-lpignore="true" data-form-type="other"
+              value={description} onChange={(e) => setDescription(e.target.value)} style={{ ...inputStyle, marginBottom: 16 }} />
+            <button type="button" disabled={busy} onClick={handleGenerate} style={{
               width: "100%", padding: "12px 16px", borderRadius: T.rs,
               background: busy ? T.surface : T.accent, border: `1px solid ${T.accent}`,
               color: busy ? T.muted : "#000", fontFamily: T.mono, fontSize: 12, fontWeight: 800,

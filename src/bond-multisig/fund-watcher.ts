@@ -49,8 +49,12 @@ export function defaultMinConfs(network: BtcNetwork): number {
   return network === SIGNET ? 1 : 1;
 }
 
-/** Build a `fetch`-backed EsploraFetch for the app (throws on non-2xx). */
-export function esploraFetcher(base: string): EsploraFetch {
+/** Build a deadline-bound `fetch`-backed EsploraFetch for the app (throws on
+ * non-2xx). An overall generation signal may cancel every chain read together. */
+export function esploraFetcher(
+  base: string,
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+): EsploraFetch {
   return async (path: string) => {
     // Never send a stale foreign-network address to an explorer. After the
     // v5 mainnet flip, old local signet bond records can still contain tb1…;
@@ -63,9 +67,22 @@ export function esploraFetcher(base: string): EsploraFetch {
     if (address && ((mainnetExplorer && address.startsWith("tb1")) || (!mainnetExplorer && address.startsWith("bc1")))) {
       throw new Error(`Bitcoin address network does not match explorer: ${address.slice(0, 8)}…`);
     }
-    const res = await fetch(`${base}${path}`);
-    if (!res.ok) throw new Error(`Esplora ${res.status} for ${path}`);
-    return res.json();
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(new DOMException("Esplora request timed out", "TimeoutError")),
+      opts.timeoutMs ?? 8_000,
+    );
+    const abortOverall = () => controller.abort(opts.signal?.reason);
+    if (opts.signal?.aborted) abortOverall();
+    else opts.signal?.addEventListener("abort", abortOverall, { once: true });
+    try {
+      const res = await fetch(`${base}${path}`, { signal: controller.signal });
+      if (!res.ok) throw new Error(`Esplora ${res.status} for ${path}`);
+      return res.json();
+    } finally {
+      clearTimeout(timeout);
+      opts.signal?.removeEventListener("abort", abortOverall);
+    }
   };
 }
 

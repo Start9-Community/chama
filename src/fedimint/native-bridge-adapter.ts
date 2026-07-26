@@ -577,7 +577,7 @@ export async function resetNativeBridgeWallet(baseUrl = getNativeBridgeUrl()): P
   });
 }
 
-async function assertNativeBridgeCompatible(baseUrl: string): Promise<void> {
+async function assertNativeBridgeCompatible(baseUrl: string): Promise<NativeHealthResponse> {
   let health: NativeHealthResponse;
   try {
     health = await nativeBridgeFetch<NativeHealthResponse>(baseUrl, "/health", {
@@ -602,6 +602,7 @@ async function assertNativeBridgeCompatible(baseUrl: string): Promise<void> {
       `missing bridge capability: ${missing.join(", ")}`,
     );
   }
+  return health;
 }
 
 async function nativeBridgeFetch<T>(
@@ -700,7 +701,16 @@ export class NativeBridgeWallet implements IFedimintWallet {
   }
 
   async open(): Promise<void> {
-    await assertNativeBridgeCompatible(this.baseUrl);
+    const health = await assertNativeBridgeCompatible(this.baseUrl);
+    // A fresh native client has no database to open yet. Avoid asking `/info`
+    // to construct/open a Fedimint client solely to rediscover that fact;
+    // Start9 field logs show that cold path can terminate the bridge worker.
+    // FedimintClient.init() will proceed to the normal `/join` path.
+    if (health.joined === false) {
+      this.openState = false;
+      this.federationId = null;
+      return;
+    }
     const info = await this.request<NativeInfoResponse>("/info", {
       timeoutMs: NATIVE_BRIDGE_INFO_TIMEOUT_MS,
     });

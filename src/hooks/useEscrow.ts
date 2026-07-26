@@ -992,7 +992,7 @@ export interface UseEscrowActions {
   /** Compute a community's live-chama liveness score: chain-verified bonds +
    *  arbiter ratings → coverage/commitment/reputation composite. Pure roll-up over
    *  fetchCommunityBonds; never a hardcoded "Kenya is green". */
-  getChamaLiveness: (community: string) => Promise<ChamaLiveness>;
+  getChamaLiveness: (community: string, signal?: AbortSignal) => Promise<ChamaLiveness>;
   /** The country-LIST companion to getChamaLiveness: ONE batched kind-38135 read
    *  (no `#d`) → per-community count of chain-verified FUNDED+ACTIVE bonded
    *  arbiters (slug → count; zero-count communities omitted). ADDITIVE over the
@@ -1430,6 +1430,21 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
           }
           setState(prev => ({ ...prev, publicListingsLoading: false }));
         },
+        onPublicListingsSettled: () => {
+          // EOSE quorum means the initial public query has a complete-enough
+          // relay reading. Give already-delivered CREATE handlers one brief
+          // turn to register their full-chain hydration, then settle an empty
+          // feed immediately instead of waiting out the 10s safety fallback.
+          if (publicListingsSettleTimerRef.current) {
+            clearTimeout(publicListingsSettleTimerRef.current);
+          }
+          publicListingsSettleTimerRef.current = setTimeout(() => {
+            publicListingsSettleTimerRef.current = null;
+            if (publicListingHydrationsPendingRef.current === 0) {
+              setState(prev => ({ ...prev, publicListingsLoading: false }));
+            }
+          }, 250);
+        },
       };
 
       const client = new EscrowClient(signer, {
@@ -1442,6 +1457,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
 
       client.connect();
       clientRef.current = client;
+      if ((import.meta as any).env?.VITE_CHAMA_PROFILE_RELAY) {
+        (globalThis as any).__CHAMA_PROFILE_CLIENT__ = client;
+      }
 
       // Start Browse feed — subscribe to public CREATE events from the last 7 days.
       // These flow through the same onStateUpdate callback and land in `escrows`;
@@ -4932,20 +4950,35 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
       }
       return counts;
     },
-    getChamaLiveness: async (community: string): Promise<ChamaLiveness> => {
+    getChamaLiveness: async (community: string, signal?: AbortSignal): Promise<ChamaLiveness> => {
       const client = clientRef.current;
       if (!client) throw new Error("Not connected");
+      const throwIfAborted = () => {
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      };
+      throwIfAborted();
       // 1. Chain-verified bonds for the community + the chain tip they were verified against.
-      const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK));
-      const tip = (await esploraTipHeight(fetchJson).catch(() => 0)) ?? 0;
+      const fetchJson = esploraFetcher(defaultEsploraBase(BOND_NETWORK), { signal, timeoutMs: 8_000 });
+      // A missing chain tip is UNKNOWN, never a verified zero-bond result.
+      // Let the coordinator retain the last verified cache (or render unknown)
+      // instead of overwriting it with a synthetic tip-height zero snapshot.
+      const tip = await esploraTipHeight(fetchJson);
+      throwIfAborted();
       const annEvents = await client.queryOnce(
         { kinds: [ARBITER_BOND_ANNOUNCEMENT_KIND], "#d": [community] } as any, 6_000,
       );
+      throwIfAborted();
       const bonds: VerifiedBond[] = [];
-      for (const a of selectLatestAnnouncements(annEvents as any)) {
-        const v = await verifyBondAnnouncement(a, { network: BOND_NETWORK, fetchJson, tipHeight: tip });
-        if (v) bonds.push(v);
-      }
+      const candidates = selectLatestAnnouncements(annEvents as any).slice(0, 12);
+      const verified = await mapPool(candidates, 3, async (announcement) => {
+        throwIfAborted();
+        return verifyBondAnnouncement(
+          announcement,
+          { network: BOND_NETWORK, fetchJson, tipHeight: tip },
+        ).catch(() => null);
+      });
+      for (const bond of verified) if (bond) bonds.push(bond);
+      throwIfAborted();
       // 2. Trade-verified ratings for exactly the bonded arbiters (one query, then
       //    the SAME verification fetchRatingSummary uses — a rating on a trade we
       //    can't see, or one that never settled, never counts).
@@ -4955,14 +4988,17 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         const events = await client.queryOnce(
           { kinds: [RATING_KIND], "#p": npubs, limit: 500 } as any, 6_000,
         );
+        throwIfAborted();
         const missingTradeIds = [...new Set(
           (events as any[])
             .map((e) => parseRatingEvent(e as any)?.tradeId ?? null)
             .filter((id): id is string => !!id && !client.getState(id)),
-        )].slice(0, 25);
-        await Promise.all(missingTradeIds.map(async (id) => {
+        )].slice(0, 12);
+        await mapPool(missingTradeIds, 3, async (id) => {
+          throwIfAborted();
           try { await client.loadEscrow(id); } catch { /* unverifiable → won't count */ }
-        }));
+        });
+        throwIfAborted();
         for (const npub of npubs) {
           const agg = aggregateVerifiedRatings(events as any, npub, (id) => client.getState(id));
           if (agg.count > 0) ratingsByNpub.set(npub, agg);
