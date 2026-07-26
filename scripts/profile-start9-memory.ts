@@ -18,6 +18,12 @@
 //   CHAMA_PROFILE_HEADLESS=1           headless (default headful for field)
 //   CHAMA_PROFILE_USER_DATA_DIR=<dir>  reuse a profile (default: fresh temp)
 //   CHAMA_PROFILE_MAX_FOOTPRINT_MB / CHAMA_PROFILE_MAX_FOOTPRINT_SLOPE_MB_MIN
+//   CHAMA_PROFILE_ALLOC_DUMP_MB=200    JS-heap/backingStorage dump trigger
+//   CHAMA_PROFILE_ALLOC_DUMP_RSS_MB=1200  renderer-RSS backstop dump trigger
+// Every tab (harness-managed or hand-opened) gets: heap-allocation sampling,
+// a console ring buffer (retry-storm evidence), crash listeners, and
+// threshold-triggered allocation dumps to /tmp — external-memory (ArrayBuffer)
+// runaways trigger via backingStorage/RSS even when the JS heap stays small.
 // Never touches the packaged service; read-only against the deployed origin.
 
 import { spawnSync } from "node:child_process";
@@ -60,6 +66,16 @@ const MiB = 1024 * 1024;
 // OOM ceiling by minutes.
 const ALLOC_DUMP_TRIGGER_BYTES =
   Number(process.env.CHAMA_PROFILE_ALLOC_DUMP_MB ?? 200) * 1024 * 1024;
+// Two of the three field crashes (12:38, 20:50) died with a SMALL JS heap —
+// the growth was external (ArrayBuffer backing stores / PartitionAlloc), which
+// jsHeapUsed cannot see. Trigger on the CDP backingStorage figure and, as the
+// backstop, on any renderer process RSS (which sees everything).
+const ALLOC_DUMP_RSS_TRIGGER_BYTES =
+  Number(process.env.CHAMA_PROFILE_ALLOC_DUMP_RSS_MB ?? 1200) * 1024 * 1024;
+// A sampling profile accumulates, so a later dump strictly supersedes an
+// earlier one; re-dump at most this often per document.
+const ALLOC_REDUMP_INTERVAL_MS = 5 * 60_000;
+const CONSOLE_RING_LIMIT = 400;
 
 const SELLER_SECRET = "11".repeat(32);
 const BUYER_SECRET = "22".repeat(32);
@@ -311,6 +327,10 @@ async function invokeLivenessScenario(page: Page): Promise<void> {
 interface TabMetrics {
   jsHeapUsed: number;
   jsHeapTotal: number;
+  /** ArrayBuffer/WASM backing stores — external to the V8 heap. Newer CDP
+   *  only; 0 when the field is absent. */
+  backingStorage: number;
+  embedderHeapUsed: number;
   documents: number;
   nodes: number;
   listeners: number;
@@ -324,9 +344,15 @@ async function readTabMetrics(session: import("puppeteer-core").CDPSession): Pro
     session.send("Memory.getDOMCounters"),
   ]);
   const metric = Object.fromEntries(performance.metrics.map(item => [item.name, item.value]));
+  const heapExtra = heap as typeof heap & {
+    backingStorageSize?: number;
+    embedderHeapUsedSize?: number;
+  };
   return {
     jsHeapUsed: heap.usedSize,
     jsHeapTotal: heap.totalSize,
+    backingStorage: heapExtra.backingStorageSize ?? 0,
+    embedderHeapUsed: heapExtra.embedderHeapUsedSize ?? 0,
     documents: dom.documents,
     nodes: dom.nodes,
     listeners: dom.jsEventListeners,
@@ -437,8 +463,12 @@ async function fieldMain(): Promise<void> {
     page: Page;
     session: CDPSession | null;
     lastUrl: string;
-    dumpedThisDocument: boolean;
+    lastDumpAt: number | null;
     allocDumps: string[];
+    /** Ring buffer of recent console output — captures retry-loop error
+     *  storms (the field consoles showed repeating bridge 500s) without
+     *  needing DevTools open in the profiled tab. */
+    consoleRing: Array<{ at: number; type: string; text: string }>;
   }
   const tracked: TrackedTab[] = [];
   let nextTabId = 1;
@@ -472,14 +502,21 @@ async function fieldMain(): Promise<void> {
   };
 
   const dumpAllocations = async (tab: TrackedTab, reason: string): Promise<void> => {
-    if (!tab.session || tab.dumpedThisDocument) return;
-    tab.dumpedThisDocument = true;
+    if (!tab.session) return;
+    // A sampling profile accumulates since arm time, so a later dump strictly
+    // supersedes an earlier one — but don't hammer: at most one per interval.
+    if (tab.lastDumpAt !== null && Date.now() - tab.lastDumpAt < ALLOC_REDUMP_INTERVAL_MS) return;
+    tab.lastDumpAt = Date.now();
     try {
       const { profile } = await tab.session.send("HeapProfiler.getSamplingProfile");
       const topAllocators = summarizeTopAllocators(profile.head, 15);
       const path = join(tmpdir(), `chama-start9-alloc-tab${tab.id}-${Date.now()}.json`);
       await writeFile(path, JSON.stringify(
-        { url: tab.lastUrl, reason, at: Date.now(), topAllocators, profile },
+        {
+          url: tab.lastUrl, reason, at: Date.now(), topAllocators,
+          recentConsole: tab.consoleRing.slice(-60),
+          profile,
+        },
         null,
         2,
       ));
@@ -489,7 +526,7 @@ async function fieldMain(): Promise<void> {
         console.error(`  ${(row.selfBytes / MiB).toFixed(1)} MiB  ${row.frame}`);
       }
     } catch (error) {
-      tab.dumpedThisDocument = false; // dump failed — allow a retry next sample
+      tab.lastDumpAt = null; // dump failed — allow a retry next sample
       console.warn(`[field] allocation dump failed for ${tab.lastUrl}: ${String(error)}`);
     }
   };
@@ -500,17 +537,30 @@ async function fieldMain(): Promise<void> {
       page,
       session: null,
       lastUrl: page.url(),
-      dumpedThisDocument: false,
+      lastDumpAt: null,
       allocDumps: [],
+      consoleRing: [],
     };
+    const pushConsole = (type: string, text: string) => {
+      tab.consoleRing.push({ at: Date.now(), type, text: text.slice(0, 400) });
+      if (tab.consoleRing.length > CONSOLE_RING_LIMIT) {
+        tab.consoleRing.splice(0, tab.consoleRing.length - CONSOLE_RING_LIMIT);
+      }
+    };
+    page.on("console", (message) => pushConsole(message.type(), message.text()));
+    page.on("pageerror", (error) => pushConsole("pageerror", error.message));
     page.on("error", (error) => {
       crashes.push({ url: tab.lastUrl, at: Date.now(), message: error.message });
       console.error(`[field] RENDERER CRASH on ${tab.lastUrl}: ${error.message}`);
+      console.error(`[field] last console lines before the crash on tab ${tab.id}:`);
+      for (const row of tab.consoleRing.slice(-12)) {
+        console.error(`  ${new Date(row.at).toISOString()} [${row.type}] ${row.text.slice(0, 200)}`);
+      }
     });
     page.on("framenavigated", (frame) => {
       if (frame.parentFrame() !== null) return;
       tab.lastUrl = frame.url() || tab.lastUrl;
-      tab.dumpedThisDocument = false; // a new document may earn its own dump
+      tab.lastDumpAt = null; // a new document may earn its own dump
       void armSampling(tab);
     });
     await armSampling(tab);
@@ -572,6 +622,7 @@ async function fieldMain(): Promise<void> {
   }
   const samples: FieldSample[] = [];
   const started = Date.now();
+  let lastProgressAt = 0;
   while (Date.now() - started < DURATION_MS) {
     const tabs: FieldSample["tabs"] = [];
     for (const tab of [...tracked]) {
@@ -589,12 +640,40 @@ async function fieldMain(): Promise<void> {
             tab,
             `jsHeapUsed ${(metrics.jsHeapUsed / MiB).toFixed(0)} MiB crossed the ${(ALLOC_DUMP_TRIGGER_BYTES / MiB).toFixed(0)} MiB trigger`,
           );
+        } else if (metrics.backingStorage > ALLOC_DUMP_TRIGGER_BYTES) {
+          // External ArrayBuffer growth — the shape of the 12:38/20:50 crashes,
+          // invisible to jsHeapUsed.
+          void dumpAllocations(
+            tab,
+            `backingStorage ${(metrics.backingStorage / MiB).toFixed(0)} MiB crossed the ${(ALLOC_DUMP_TRIGGER_BYTES / MiB).toFixed(0)} MiB trigger`,
+          );
         }
       } catch {
         // crashed / detached tab — the crash listener records it
       }
     }
-    samples.push({ at: Date.now(), renderers: sampleRendererProcesses(browserPid), tabs });
+    const renderers = sampleRendererProcesses(browserPid);
+    samples.push({ at: Date.now(), renderers, tabs });
+    // Backstop: RSS sees PartitionAlloc/Blink growth no CDP heap figure
+    // reports. Renderer PIDs don't map cleanly to tabs, so a breach dumps
+    // every tracked tab — sampling-profile dumps are cheap.
+    const fattest = renderers.reduce((max, r) => Math.max(max, r.rssBytes), 0);
+    if (fattest > ALLOC_DUMP_RSS_TRIGGER_BYTES) {
+      for (const tab of [...tracked]) {
+        void dumpAllocations(
+          tab,
+          `renderer RSS ${(fattest / MiB).toFixed(0)} MiB crossed the ${(ALLOC_DUMP_RSS_TRIGGER_BYTES / MiB).toFixed(0)} MiB backstop`,
+        );
+      }
+    }
+    if (Date.now() - lastProgressAt >= 60_000) {
+      lastProgressAt = Date.now();
+      const tabBits = tabs.map(item =>
+        `tab${item.id} heap ${(item.metrics.jsHeapUsed / MiB).toFixed(0)}M backing ${(item.metrics.backingStorage / MiB).toFixed(0)}M`);
+      console.log(
+        `[field] +${Math.round((Date.now() - started) / 60_000)}min maxRSS ${(fattest / MiB).toFixed(0)}M · ${tabBits.join(" · ") || "no live tabs"}`,
+      );
+    }
     await new Promise(resolve => setTimeout(resolve, SAMPLE_MS));
   }
 
@@ -647,6 +726,7 @@ async function fieldMain(): Promise<void> {
       samples: points.length,
       allocDumps: tab.allocDumps,
       topAllocators: finalAllocators[index],
+      recentConsole: tab.consoleRing.slice(-120),
       ...(points.length >= 2
         ? {
           startHeap: heaps[0]!.value,
