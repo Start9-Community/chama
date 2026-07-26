@@ -325,6 +325,7 @@ EOF
   # notes that feed the GitHub Release body.
   mkdir -p "$(dirname "$ZAPSTORE_NOTES_TARGET")"
   if [ -n "$ZAPSTORE_NOTES_FILE" ]; then
+    node "$ROOT_DIR/scripts/validate-zapstore-notes.mjs" "$ZAPSTORE_NOTES_FILE"
     cp "$ZAPSTORE_NOTES_FILE" "$ZAPSTORE_NOTES_TARGET"
     echo "📝 Zapstore notes: $ZAPSTORE_NOTES_FILE → $ZAPSTORE_NOTES_TARGET"
   else

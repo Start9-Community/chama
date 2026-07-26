@@ -26,8 +26,31 @@ release:all is given --notes-file pointing at this same file.
 
 
 ── chama-v<VERSION>_zapstore_notes (separate file) ──────────────────────────
-Short, friendly, user-facing notes shown on the Zapstore app card. One or two
-lines, no version number needed. Omit the file entirely for a dev-only release
-and release:all writes its standard placeholder instead.
+Curated, user-facing notes shown on the Zapstore app card. This format is a
+release protocol, not a suggestion:
 
-    Short, user-facing summary of what changed for the person using the app.
+    # Theme Name
+
+    ⚡ One-line benefit tagline.
+
+    🧰 First concrete user benefit.
+
+    🌍 Second concrete user benefit.
+
+    🛡️ Reliability or safety benefit.
+
+    N tests green · production build passed · physical-device verified
+
+Rules:
+
+- Start with one `# Theme` title. Do not put the version in this title.
+- Follow with a one-line ⚡ tagline.
+- Use emoji-led benefit bullets as separate paragraphs.
+- Keep a BLANK LINE between every emoji bullet; Zapstore collapses ordinary
+  single newlines and the card becomes an unreadable paragraph otherwise.
+- End with a short `·`-separated proof closer.
+- Never substitute a generic one-paragraph summary.
+
+`scripts/validate-zapstore-notes.mjs` enforces this shape before publication.
+Omit the file only for a dev-only release; public releases require curated
+notes.

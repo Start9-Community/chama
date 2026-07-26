@@ -177,6 +177,10 @@ fi
 HAVE_ZAP=0
 [ -f "$ZAP_NOTES" ] && HAVE_ZAP=1
 
+if [ "$HAVE_ZAP" = "1" ]; then
+  node "$ROOT_DIR/scripts/validate-zapstore-notes.mjs" "$ZAP_NOTES"
+fi
+
 # Soft guard: the commit subject should name the version we're shipping.
 FIRST_LINE="$(head -1 "$REL_NOTES")"
 case "$FIRST_LINE" in
