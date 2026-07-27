@@ -155,8 +155,10 @@ import {
   compactHotRawEvents,
   escrowDeltaSince,
   EscrowClient,
+  outOfOrderReloadCooldownMs,
   recoveryReadQuorum,
   relayPoolNeedsRecoveryBackfill,
+  selectHotRawEvictions,
   type Signer,
   type UnsignedEvent,
 } from "./escrow-client.js";
@@ -536,6 +538,7 @@ import {
   getConfiguredNativeBridgeCommunitySlug,
   getNativeBridgeCommunitySlug,
   getNativeBridgeUrl,
+  isBridgeTransportFailure,
   isNativeBridgeModeOn,
 } from "../fedimint/native-bridge-adapter.js";
 
@@ -12087,6 +12090,147 @@ console.log("\n── BOLT11 PAYOUT AMOUNT ROUTING ──");
     }
   }
 
+  // A reverse proxy in front of the bridge (StartOS runs nginx) enforces its own
+  // read timeout on the /await-invoice long poll. When it hangs up mid-wait it
+  // answers with its own HTML error page — which says NOTHING about the invoice.
+  // Reading that as a federation cancellation told users a live, payable invoice
+  // had been rejected and warned them not to pay it.
+  {
+    const originalFetch = (globalThis as any).fetch;
+    const proxy504 = () => new Response(
+      "<html>\r\n<head><title>504 Gateway Time-out</title></head>\r\n<body>\r\n" +
+        "<center><h1>504 Gateway Time-out</h1></center>\r\n<hr><center>nginx/1.27.5</center>\r\n</body>\r\n</html>",
+      { status: 504, headers: { "content-type": "text/html" } },
+    );
+    const bridgeInfo = {
+      federation_id: "fed_native_test", network: "bitcoin", total_amount_msat: 0, meta: {},
+    };
+    try {
+      // (1) A proxy's HTML error page is transport, not a verdict.
+      (globalThis as any).fetch = async () => proxy504();
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        let caught: unknown = null;
+        try { await wallet.lightning.payInvoice("lnbc100n1payout"); }
+        catch (e) { caught = e; }
+        assert(
+          isBridgeTransportFailure((caught as any)?.cause ?? caught) ||
+            /non-JSON|504/.test(String((caught as any)?.message)),
+          "A proxy 504 HTML page is recognised as a transport failure, not a bridge verdict",
+        );
+      }
+
+      // (2) The bridge's OWN error, in its own JSON, stays a verdict.
+      (globalThis as any).fetch = async (url: unknown) => (
+        String(url).endsWith("/info")
+          ? new Response(JSON.stringify(bridgeInfo), { status: 200 })
+          : new Response(JSON.stringify({ error: "invoice canceled: expired" }), { status: 500 })
+      );
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        let caught: unknown = null;
+        try { await wallet.lightning.payInvoice("lnbc100n1payout"); }
+        catch (e) { caught = e; }
+        assert(
+          !isBridgeTransportFailure(caught),
+          "A bridge error carried in the bridge's own JSON is never demoted to transport",
+        );
+      }
+
+      // (3) The regression itself: a dropped watch must re-arm and still report
+      // the payment, never a cancellation.
+      let awaitCalls = 0;
+      (globalThis as any).fetch = async (url: unknown) => {
+        const path = String(url);
+        if (path.endsWith("/invoice")) {
+          return new Response(
+            JSON.stringify({ invoice: "lnbc10u1watchtest", operation_id: "op_watch" }),
+            { status: 200 },
+          );
+        }
+        if (path.endsWith("/await-invoice")) {
+          awaitCalls++;
+          // First watch dies the way nginx kills it; the payer pays meanwhile.
+          if (awaitCalls === 1) return proxy504();
+          return new Response(
+            JSON.stringify({ status: "paid", operation_id: "op_watch", info: bridgeInfo }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify(bridgeInfo), { status: 200 });
+      };
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        const seen: string[] = [];
+        await wallet.lightning.createInvoice(1_000_000, "Fund Escrow", (kind) => {
+          seen.push(typeof kind === "string" ? kind : "canceled");
+        });
+        // Watch re-arms on a 2s backoff; give it room to land.
+        await new Promise(resolve => setTimeout(resolve, 2_600));
+        assert(
+          !seen.includes("canceled"),
+          "A proxy hangup on the invoice watch never reports the payment as canceled",
+        );
+        assert(
+          awaitCalls >= 2 && seen.includes("claimed"),
+          "The invoice watch re-arms after a proxy hangup and still sees the payment claimed",
+        );
+      }
+
+      // (4) B: a bounded bridge answers `pending` when its watch window ends
+      // with no outcome. That is an interim answer, not a failure — the client
+      // must ask again immediately, and must never read it as a cancellation.
+      let boundedCalls = 0;
+      let sentWaitSecs: unknown = "unset";
+      (globalThis as any).fetch = async (url: unknown, init: any) => {
+        const path = String(url);
+        if (path.endsWith("/invoice")) {
+          return new Response(
+            JSON.stringify({ invoice: "lnbc10u1boundedtest", operation_id: "op_bounded" }),
+            { status: 200 },
+          );
+        }
+        if (path.endsWith("/await-invoice")) {
+          boundedCalls++;
+          sentWaitSecs = JSON.parse(String(init?.body ?? "{}")).waitSecs;
+          if (boundedCalls <= 2) {
+            return new Response(
+              JSON.stringify({ status: "pending", operation_id: "op_bounded" }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({ status: "paid", operation_id: "op_bounded", info: bridgeInfo }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify(bridgeInfo), { status: 200 });
+      };
+      {
+        const wallet = new NativeBridgeWallet("http://bridge.test");
+        const seen: string[] = [];
+        await wallet.lightning.createInvoice(1_000_000, "Fund Escrow", (kind) => {
+          seen.push(typeof kind === "string" ? kind : "canceled");
+        });
+        await new Promise(resolve => setTimeout(resolve, 150));
+        assert(
+          typeof sentWaitSecs === "number" && sentWaitSecs > 0,
+          "The invoice watch asks the bridge to bound its own wait (waitSecs)",
+        );
+        assert(
+          !seen.includes("canceled"),
+          "A bounded-watch `pending` answer is never reported as a cancellation",
+        );
+        assert(
+          boundedCalls === 3 && seen.includes("claimed"),
+          "A `pending` answer re-asks immediately, with no backoff, until the payment lands",
+        );
+      }
+    } finally {
+      (globalThis as any).fetch = originalFetch;
+    }
+  }
+
   // #9 Part 3: awaitPayOutcome reconciles a submitted payout via /pay-outcome
   // without ever re-paying; unknown ⇒ keep the submitted record (refuse re-pay).
   {
@@ -18884,6 +19028,43 @@ console.log("\n── RELAY RECOVERY — bounded delta + hot-cache policy ──
   assert(
     largeChatRaw.content.length === 120_000,
     "Raw CHAT fixture remains available for durable-cache persistence",
+  );
+
+  // ── Redelivery-storm governors ──────────────────────────────────────────
+  // A reconnect re-REQs every live subscription, so whatever history still
+  // arrives must not be able to multiply itself into full chain re-fetches.
+  assert(
+    outOfOrderReloadCooldownMs(0) === 0,
+    "First out-of-order reload of a trade is immediate — real gaps heal fast",
+  );
+  assert(
+    outOfOrderReloadCooldownMs(1) === 30_000 &&
+      outOfOrderReloadCooldownMs(2) === 60_000,
+    "Repeat reloads of the same trade back off exponentially",
+  );
+  assert(
+    outOfOrderReloadCooldownMs(20) === 300_000,
+    "Reload backoff saturates instead of growing without bound",
+  );
+
+  const hotEntries = [
+    { id: "watched-old", touchedAt: 1, terminal: true },
+    { id: "settled-old", touchedAt: 2, terminal: true },
+    { id: "settled-new", touchedAt: 9, terminal: true },
+    { id: "live-old", touchedAt: 3, terminal: false },
+  ];
+  const evicted = selectHotRawEvictions(hotEntries, new Set(["watched-old"]), 2);
+  assert(
+    evicted.length === 2 && !evicted.includes("watched-old"),
+    "Hot raw eviction never drops a chain that is still taking live events",
+  );
+  assert(
+    evicted[0] === "settled-old" && evicted[1] === "settled-new",
+    "Hot raw eviction spends settled chains before live ones, oldest touch first",
+  );
+  assert(
+    selectHotRawEvictions(hotEntries, new Set(), 10).length === 0,
+    "Hot raw cache under cap evicts nothing",
   );
 
   assert(recoveryReadQuorum(7) === 3, "Seven-relay recovery quorum remains three");

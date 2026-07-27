@@ -195,6 +195,60 @@ const RECOVERY_BACKFILL_THROTTLE_MS = 60_000;
 const ESCROW_DELTA_OVERLAP_SECS = 2;
 const HEAVY_CURSOR_EVENT_BYTES = 8 * 1024;
 
+// ── Redelivery-storm governors ────────────────────────────────────────────
+// A relay reconnect re-REQs every live subscription, so a flapping pool
+// redelivers history in bulk. The per-relay cursor and the delta `since` keep
+// most of those bytes off the wire, but whatever still arrives must not be
+// able to multiply itself into full chain re-fetches. These bound that.
+
+/** Full chain hydrations of never-seen public listings running at once. A
+ *  Browse redelivery burst carries one CREATE per listing; without a cap each
+ *  one fires its own multi-relay chain fetch in parallel and the main thread
+ *  drowns in the responses. */
+const LISTING_HYDRATION_CONCURRENCY = 4;
+/** A listing whose chain won't replay (invalid/aged-off history) returns null
+ *  forever, so re-hydrating it on every redelivery is pure waste. Hold it down
+ *  for this long after a failed or empty hydration. */
+const LISTING_HYDRATION_RETRY_COOLDOWN_MS = 5 * 60_000;
+/** Out-of-order reload backoff. The first stale event that can't apply is
+ *  usually genuine ordering, so the first reload is cheap and near-immediate;
+ *  repeats on the same trade are a redelivery storm and get pushed out fast. */
+const OUT_OF_ORDER_RELOAD_DELAY_MS = 1_500;
+const OUT_OF_ORDER_RELOAD_BASE_COOLDOWN_MS = 30_000;
+const OUT_OF_ORDER_RELOAD_MAX_COOLDOWN_MS = 5 * 60_000;
+/** Trades whose raw chain stays in the hot in-memory map. IndexedDB holds the
+ *  durable copy and `state.eventChain` still supplies the delta cursor, so an
+ *  eviction costs nothing but a colder next read. */
+const HOT_RAW_TRADE_CAP = 120;
+
+/** Backoff for repeated out-of-order reloads of one trade. `attempts` counts
+ *  reloads already spent on it this session. */
+export function outOfOrderReloadCooldownMs(attempts: number): number {
+  if (attempts <= 0) return 0;
+  const backed = OUT_OF_ORDER_RELOAD_BASE_COOLDOWN_MS * 2 ** (attempts - 1);
+  return Math.min(backed, OUT_OF_ORDER_RELOAD_MAX_COOLDOWN_MS);
+}
+
+/** Which trades lose their hot raw chain once the map is over cap. Watched
+ *  trades are never evicted (they're the ones taking live events); among the
+ *  rest, settled chains go before live ones, then least-recently-touched. */
+export function selectHotRawEvictions(
+  entries: readonly { id: string; touchedAt: number; terminal: boolean }[],
+  watched: ReadonlySet<string>,
+  cap: number,
+): string[] {
+  const evictable = entries
+    .filter(entry => !watched.has(entry.id))
+    .sort((a, b) => (
+      a.terminal === b.terminal
+        ? a.touchedAt - b.touchedAt
+        : (a.terminal ? -1 : 1)
+    ));
+  const overflow = entries.length - cap;
+  if (overflow <= 0) return [];
+  return evictable.slice(0, overflow).map(entry => entry.id);
+}
+
 function isPartialReplayDowngrade(current: EscrowState | undefined, incoming: EscrowState): boolean {
   if (!current) return false;
   if (isTerminalStatus(incoming.status)) return false;
@@ -335,8 +389,16 @@ export class EscrowClient {
   private notifier: EscrowNotifier | null = null;
   /** Track which escrows are currently being reloaded to avoid duplicate reloads */
   private _reloading: Set<string> = new Set();
+  /** Out-of-order reload accounting per escrow. `_reloading` only dedupes an
+   *  in-flight reload; without this a redelivery storm re-arms a fresh full
+   *  chain fetch the moment the previous one lands. */
+  private _reloadHistory: Map<string, { attempts: number; lastAt: number }> = new Map();
   /** CREATE-only public listings being hydrated before they reach Browse. */
   private _listingHydration: Set<string> = new Set();
+  /** Listings waiting on a hydration slot, and the cooldown on listings whose
+   *  chain came back unusable. */
+  private _listingHydrationQueue: string[] = [];
+  private _listingHydrationCooldown: Map<string, number> = new Map();
   /** One fetch/decrypt/replay generation per escrow. All cold-start callers
    *  share it; bounded completeness retries stay inside the owner. */
   private _loadEscrowInFlight: Map<string, {
@@ -357,6 +419,9 @@ export class EscrowClient {
 
   /** Raw events per escrow — escrowId → events[] */
   private rawEvents: Map<string, NostrEvent[]> = new Map();
+
+  /** Last touch per hot raw chain, driving evict-oldest once over cap. */
+  private rawEventsTouchedAt: Map<string, number> = new Map();
 
   /** Active subscriptions */
   private subscriptions: Map<string, string> = new Map(); // label → subId
@@ -487,6 +552,10 @@ export class EscrowClient {
     }
     this.states.clear();
     this.rawEvents.clear();
+    this.rawEventsTouchedAt.clear();
+    this._reloadHistory.clear();
+    this._listingHydrationQueue.length = 0;
+    this._listingHydrationCooldown.clear();
   }
 
   /**
@@ -505,6 +574,50 @@ export class EscrowClient {
    *  enough of the pool actually answered). */
   getConnectedRelayCount(): number {
     return this.relayManager.getConnectedCount();
+  }
+
+  /** Escrows with a live subscription — the ones still taking events. */
+  private watchedEscrowIds(): Set<string> {
+    const watched = new Set<string>();
+    for (const label of this.subscriptions.keys()) {
+      if (label.startsWith("escrow:")) watched.add(label.slice("escrow:".length));
+    }
+    return watched;
+  }
+
+  /** Single writer for the hot raw chain map: stores, stamps the touch used by
+   *  eviction, and trims the map back to cap. The durable IndexedDB copy and
+   *  `state.eventChain` both survive an eviction, so the only cost is that the
+   *  next read of an evicted trade starts colder. */
+  private setHotRawEvents(escrowId: string, events: NostrEvent[]): void {
+    this.rawEvents.set(escrowId, events);
+    this.rawEventsTouchedAt.set(escrowId, Date.now());
+    if (this.rawEvents.size <= HOT_RAW_TRADE_CAP) return;
+
+    const entries = [...this.rawEvents.keys()].map(id => ({
+      id,
+      touchedAt: this.rawEventsTouchedAt.get(id) ?? 0,
+      terminal: isTerminalStatus(
+        this.states.get(id)?.status ?? EscrowStatus.CREATED,
+      ),
+    }));
+    for (const id of selectHotRawEvictions(entries, this.watchedEscrowIds(), HOT_RAW_TRADE_CAP)) {
+      this.rawEvents.delete(id);
+      this.rawEventsTouchedAt.delete(id);
+    }
+  }
+
+  /** True when this exact event is already part of what we hold for the trade
+   *  (hot raws, replayed chain, or parsed chat). A relay reconnect redelivers
+   *  history in bulk; without this check each redelivered frame pays a full
+   *  NIP-44 decrypt and a state-machine apply, and any that no longer applies
+   *  cleanly arms another full chain reload. */
+  private hasEventLocally(escrowId: string, eventId: string): boolean {
+    if ((this.rawEvents.get(escrowId) ?? []).some(event => event.id === eventId)) return true;
+    const state = this.states.get(escrowId);
+    if (!state) return false;
+    return state.eventChain.some(event => event.raw.id === eventId)
+      || state.chatMessages.some(message => message.raw.id === eventId);
   }
 
   // ── Part 6: relay-recovery chat/chain backfill ──────────────────────────
@@ -883,7 +996,7 @@ export class EscrowClient {
     if (!result.ok) throw new Error(`Local apply failed: ${result.error.message}`);
 
     this.states.set(escrowId, result.state);
-    this.rawEvents.set(escrowId, [signed]);
+    this.setHotRawEvents(escrowId, [signed]);
     this.callbacks.onStateUpdate?.(escrowId, result.state);
 
     // Subscribe to this escrow's events
@@ -1611,7 +1724,7 @@ export class EscrowClient {
           this.states.set(escrowId, result.state);
           const cached = this.rawEvents.get(escrowId) || [];
           cached.push(signed);
-          this.rawEvents.set(escrowId, cached);
+          this.setHotRawEvents(escrowId, cached);
           this.callbacks.onStateUpdate?.(escrowId, result.state);
         }
       }
@@ -1954,7 +2067,7 @@ export class EscrowClient {
     if (rawEvents.length === 0 && !this.rawEvents.has(escrowId)) {
       const durable = await getCachedEvents(escrowId);
       if (durable.length > 0) {
-        this.rawEvents.set(escrowId, durable);
+        this.setHotRawEvents(escrowId, durable);
         rawEvents = mergeRawEventsById(durable, fetchedRawEvents);
       }
     }
@@ -2069,14 +2182,14 @@ export class EscrowClient {
       // Carry forward what we just fetched so the retry replays the union.
       const merged = new Map((this.rawEvents.get(escrowId) ?? []).map(e => [e.id, e]));
       for (const e of rawEvents) merged.set(e.id, e);
-      this.rawEvents.set(escrowId, compactHotRawEvents([...merged.values()]));
+      this.setHotRawEvents(escrowId, compactHotRawEvents([...merged.values()]));
       return this.loadEscrowAttempt(escrowId, completenessAttempt + 1, diagnostic);
     }
 
     if (isPartialReplayDowngrade(current, result.state)) {
       const known = new Map((this.rawEvents.get(escrowId) ?? []).map(event => [event.id, event]));
       for (const event of rawEvents) known.set(event.id, event);
-      this.rawEvents.set(escrowId, compactHotRawEvents([...known.values()]));
+      this.setHotRawEvents(escrowId, compactHotRawEvents([...known.values()]));
       console.warn(
         `[escrow] loadEscrow ${escrowId}: ignoring partial relay downgrade ${current!.status} → ${result.state.status}`,
       );
@@ -2111,7 +2224,7 @@ export class EscrowClient {
     );
     stripParsedChatCiphertext(result.state);
     this.states.set(escrowId, result.state);
-    this.rawEvents.set(escrowId, compactHotRawEvents(rawEvents));
+    this.setHotRawEvents(escrowId, compactHotRawEvents(rawEvents));
 
     // Notify UI of the reconstructed state
     this.callbacks.onStateUpdate?.(escrowId, result.state);
@@ -2193,6 +2306,13 @@ export class EscrowClient {
     if (!dTag?.[1]) return;
     const escrowId = dTag[1];
 
+    // Redelivery short-circuit. A reconnect re-REQs every live subscription,
+    // so relays re-send history we already hold. Recognising it by id here —
+    // before any decrypt — keeps a storm from paying NIP-44 decrypt per frame
+    // (inline chat photos are megabytes) and, more importantly, stops stale
+    // frames from reaching the state machine and arming a chain reload each.
+    if (this.hasEventLocally(escrowId, event.id)) return;
+
     // Decrypt the event content into a cleartext escrow payload
     // string. Handles plaintext / per-recipient envelope / legacy raw
     // NIP-44 ciphertext via decryptEventContent. A null here means
@@ -2250,19 +2370,7 @@ export class EscrowClient {
     // full chain before surfacing a never-seen escrow so completed/cancelled
     // trades do not resurrect as stale OPEN tiles on login.
     if (parsed.kind === EscrowEventKind.CREATE && !currentState) {
-      if (!this._listingHydration.has(escrowId)) {
-        this._listingHydration.add(escrowId);
-        this.callbacks.onPublicListingHydration?.(this._listingHydration.size);
-        this.loadEscrow(escrowId)
-          .catch(e => console.debug(
-            `[escrow] Listing hydration failed for ${escrowId}:`,
-            (e as Error)?.message || e,
-          ))
-          .finally(() => {
-            this._listingHydration.delete(escrowId);
-            this.callbacks.onPublicListingHydration?.(this._listingHydration.size);
-          });
-      }
+      this.enqueueListingHydration(escrowId);
       return;
     }
 
@@ -2274,7 +2382,7 @@ export class EscrowClient {
 
       // Store raw event
       const existing = this.rawEvents.get(escrowId) || [];
-      this.rawEvents.set(escrowId, compactHotRawEvents([...existing, event]));
+      this.setHotRawEvents(escrowId, compactHotRawEvents([...existing, event]));
 
       this.callbacks.onStateUpdate?.(escrowId, result.state);
 
@@ -2300,24 +2408,134 @@ export class EscrowClient {
       // Out-of-order event — reload full state from relays
       // This is more reliable than buffering because it fetches ALL events,
       // sorts by chain order, and replays the complete sequence.
-      if (!this._reloading.has(escrowId)) {
-        this._reloading.add(escrowId);
-        console.debug(`[escrow] Out-of-order event ${event.id.slice(0, 8)} (${result.error.code}) — reloading ${escrowId} from relays`);
-        // Small delay to let more events arrive before reloading
-        setTimeout(async () => {
-          try {
-            await this.loadEscrow(escrowId);
-            console.debug(`[escrow] Reloaded ${escrowId} from relays — state is now ${this.states.get(escrowId)?.status}`);
-          } catch (e) {
-            console.warn(`[escrow] Reload failed for ${escrowId}:`, e);
-          } finally {
-            this._reloading.delete(escrowId);
-          }
-        }, 1500);
-      }
+      //
+      // NOT_PARTICIPANT stays a trigger on purpose: a stale local chain missing
+      // a JOIN reports a genuine participant's event this way, and the reload is
+      // exactly what heals it. The storm risk is handled by backoff, not by
+      // dropping the healing path.
+      this.scheduleOutOfOrderReload(escrowId, event.id, result.error.code);
     } else {
       // Permanent rejection (DUPLICATE_CREATE, ALREADY_VOTED, etc.) — just log
       console.debug(`[escrow] Rejected event ${event.id.slice(0, 8)}: ${result.error.code}`);
+    }
+  }
+
+  /**
+   * Arm a full chain reload for a trade whose incoming event didn't apply.
+   *
+   * `_reloading` alone only dedupes while a reload is in flight, so a burst of
+   * redelivered history re-armed a fresh multi-relay fetch the moment each one
+   * landed — the same trade re-fetched several times within seconds, forever.
+   * Reloads now back off per trade (see outOfOrderReloadCooldownMs) and the
+   * counter resets whenever the trade's chain actually grows, so a genuinely
+   * out-of-order trade still heals promptly while a storm goes quiet.
+   */
+  private scheduleOutOfOrderReload(escrowId: string, eventId: string, code: string): void {
+    if (this._reloading.has(escrowId)) return;
+
+    const history = this._reloadHistory.get(escrowId) ?? { attempts: 0, lastAt: 0 };
+    const cooldown = outOfOrderReloadCooldownMs(history.attempts);
+    const waited = Date.now() - history.lastAt;
+    if (history.attempts > 0 && waited < cooldown) {
+      console.debug(
+        `[escrow] Out-of-order event ${eventId.slice(0, 8)} (${code}) for ${escrowId} — ` +
+          `reload ${history.attempts} was ${Math.round(waited / 1000)}s ago, ` +
+          `holding for ${Math.round((cooldown - waited) / 1000)}s`,
+      );
+      return;
+    }
+
+    this._reloading.add(escrowId);
+    this._reloadHistory.set(escrowId, {
+      attempts: history.attempts + 1,
+      lastAt: Date.now(),
+    });
+    console.debug(`[escrow] Out-of-order event ${eventId.slice(0, 8)} (${code}) — reloading ${escrowId} from relays`);
+    // Small delay to let more events arrive before reloading
+    setTimeout(async () => {
+      const before = this.states.get(escrowId)?.eventChain.length ?? 0;
+      try {
+        await this.loadEscrow(escrowId);
+        console.debug(`[escrow] Reloaded ${escrowId} from relays — state is now ${this.states.get(escrowId)?.status}`);
+        // A reload that actually brought new chain events in was the right call
+        // — this trade was genuinely behind, not storming. Clear its backoff so
+        // the next real gap heals at full speed.
+        if ((this.states.get(escrowId)?.eventChain.length ?? 0) > before) {
+          this._reloadHistory.delete(escrowId);
+        }
+      } catch (e) {
+        console.warn(`[escrow] Reload failed for ${escrowId}:`, e);
+      } finally {
+        this._reloading.delete(escrowId);
+      }
+    }, OUT_OF_ORDER_RELOAD_DELAY_MS);
+  }
+
+  /**
+   * Queue a never-seen public listing for chain hydration.
+   *
+   * Browse discovery surfaces plaintext CREATEs, and a reconnect redelivers all
+   * of them at once. Hydrating each one immediately meant dozens of concurrent
+   * multi-relay chain fetches; the responses alone could pin the main thread.
+   * Slots are bounded, and a listing whose chain won't replay is held down
+   * instead of re-fetched on every redelivery.
+   */
+  private enqueueListingHydration(escrowId: string): void {
+    if (this._listingHydration.has(escrowId)) return;
+    if (this._listingHydrationQueue.includes(escrowId)) return;
+    const cooldownUntil = this._listingHydrationCooldown.get(escrowId) ?? 0;
+    if (Date.now() < cooldownUntil) return;
+
+    this._listingHydrationQueue.push(escrowId);
+    this.reportListingHydrationDepth();
+    this.pumpListingHydration();
+  }
+
+  /** Report outstanding hydration work (running + queued) to the UI. */
+  private reportListingHydrationDepth(): void {
+    this.callbacks.onPublicListingHydration?.(
+      this._listingHydration.size + this._listingHydrationQueue.length,
+    );
+  }
+
+  /** Start hydrations up to the concurrency cap. */
+  private pumpListingHydration(): void {
+    while (
+      this._listingHydration.size < LISTING_HYDRATION_CONCURRENCY &&
+      this._listingHydrationQueue.length > 0
+    ) {
+      const escrowId = this._listingHydrationQueue.shift()!;
+      if (this._listingHydration.has(escrowId)) continue;
+      this._listingHydration.add(escrowId);
+      this.reportListingHydrationDepth();
+
+      this.loadEscrow(escrowId)
+        .then((state) => {
+          // A null replay means the chain is unusable (invalid history, or aged
+          // off the relays) and will stay that way. Re-hydrating it on every
+          // redelivery is pure waste, so hold it down for a while.
+          if (!state) {
+            this._listingHydrationCooldown.set(
+              escrowId,
+              Date.now() + LISTING_HYDRATION_RETRY_COOLDOWN_MS,
+            );
+          }
+        })
+        .catch(e => {
+          this._listingHydrationCooldown.set(
+            escrowId,
+            Date.now() + LISTING_HYDRATION_RETRY_COOLDOWN_MS,
+          );
+          console.debug(
+            `[escrow] Listing hydration failed for ${escrowId}:`,
+            (e as Error)?.message || e,
+          );
+        })
+        .finally(() => {
+          this._listingHydration.delete(escrowId);
+          this.reportListingHydrationDepth();
+          this.pumpListingHydration();
+        });
     }
   }
 
@@ -2715,7 +2933,7 @@ export class EscrowClient {
 
     const existing = this.rawEvents.get(escrowId) || [];
     existing.push(signed);
-    this.rawEvents.set(escrowId, existing);
+    this.setHotRawEvents(escrowId, existing);
 
     this.callbacks.onStateUpdate?.(escrowId, result.state);
 

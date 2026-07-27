@@ -189,7 +189,7 @@ import {
   hasFediInternalGenerateEcash,
 } from "../fedimint/index.js";
 import { Capacitor } from "@capacitor/core";
-import type { LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
+import type { InvoiceGatewayInfo, LnReceiveStateKind, OnchainInfo } from "../fedimint/index.js";
 import { clearPendingRedemption } from "../fedimint/pending-redemptions.js";
 import { isNativeBridgeModeOn } from "../fedimint/native-bridge-adapter.js";
 // ── Arbiter bond (sealed v1: single-key timelock COMMITMENT) ──────────────────
@@ -869,6 +869,9 @@ export interface UseEscrowActions {
     description?: string,
     onReceiveState?: (kind: LnReceiveStateKind) => void,
     meta?: ChamaOperationMeta,
+    /** Reports which Lightning gateway minted the invoice, so the funding UI
+     *  can name the route the payer must use. */
+    onGateway?: (gateway: InvoiceGatewayInfo) => void,
   ) => Promise<string>;
   /**
    * v0.3.0 atomic funding: compose createFundingInvoice → balance-watcher
@@ -3375,6 +3378,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     description: string = "Chama wallet top-up",
     onReceiveState?: (kind: LnReceiveStateKind) => void,
     meta?: ChamaOperationMeta,
+    onGateway?: (gateway: InvoiceGatewayInfo) => void,
   ) => {
     const fedimint = fedimintRef.current;
     if (!fedimint || !fedimint.isInitialized() || !fedimint.isJoined()) {
@@ -3414,7 +3418,9 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
 
     try {
-      const invoice = await fedimint.createInvoice(amountMsats, description, onReceiveState, meta);
+      const invoice = await fedimint.createInvoice(
+        amountMsats, description, onReceiveState, meta, onGateway,
+      );
       const receiveOkAt = Date.now();
       healthRef.current = { ok: true, at: receiveOkAt };
       updateFedimint({ lastHealthOk: true, lastHealthAt: receiveOkAt });
@@ -3815,7 +3821,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         savedHandleId: opts.savedHandleId,
         selectedItems: opts.selectedItems,
         getBalance: () => fedimint.getBalance(),
-        createFundingInvoice: (amountMsats, description, onReceiveState) =>
+        createFundingInvoice: (amountMsats, description, onReceiveState, onGateway) =>
           createFundingInvoice(
             amountMsats,
             description,
@@ -3825,6 +3831,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
               escrowId,
               amountMsats,
             }),
+            onGateway,
           ),
         autoPayInvoice: opts.fundingMethod === "nwc"
           ? async (bolt11) => {

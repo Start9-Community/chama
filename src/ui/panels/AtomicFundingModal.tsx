@@ -31,6 +31,7 @@ import {
   MAX_LN_FUNDING_SATS,
   type FundAndLockPhase,
   type FundAndLockTerminal,
+  type FundingGatewayInfo,
 } from "../../payments/fund-and-lock.js";
 import {
   isChapsmartOnrampEnabled,
@@ -132,7 +133,13 @@ type ModalPhase =
     }
   | { kind: "requesting-fedi-ecash" }
   | { kind: "fedi-ecash-created" }
-  | { kind: "awaiting-payment"; bolt11: string; expiresAt: number }
+  | {
+      kind: "awaiting-payment";
+      bolt11: string;
+      expiresAt: number;
+      /** Gateway that minted this invoice, when the wallet can say. */
+      gateway?: FundingGatewayInfo;
+    }
   | { kind: "paying-with-nwc" }
   | { kind: "mint-confirming"; bolt11: string; expiresAt: number }
   | { kind: "mint-confirming-slow"; bolt11: string; expiresAt: number }
@@ -228,6 +235,7 @@ export function AtomicFundingModal({
 
     let lastBolt11: string | null = null;
     let lastExpiresAt: number | null = null;
+    let lastGateway: FundingGatewayInfo | undefined;
 
     const run = async () => {
       const terminal = await fundAndLock(escrowId, {
@@ -254,10 +262,12 @@ export function AtomicFundingModal({
           if (p.kind === "invoice-created") {
             lastBolt11 = p.bolt11;
             lastExpiresAt = p.expiresAt;
+            lastGateway = p.gateway;
             setPhase({
               kind: "awaiting-payment",
               bolt11: p.bolt11,
               expiresAt: p.expiresAt,
+              gateway: p.gateway,
             });
             return;
           }
@@ -308,6 +318,7 @@ export function AtomicFundingModal({
                 kind: "awaiting-payment",
                 bolt11: lastBolt11,
                 expiresAt: lastExpiresAt,
+                gateway: lastGateway,
               });
             }
             return;
@@ -534,6 +545,7 @@ export function AtomicFundingModal({
               expiresAt={phase.expiresAt}
               now={now}
               phaseKind={phase.kind}
+              gateway={phase.kind === "awaiting-payment" ? phase.gateway : undefined}
               onFundWithMpesa={
                 mpesaAvailable && phase.kind === "awaiting-payment"
                   ? () => setMpesaOpen(true)
@@ -1272,12 +1284,15 @@ function PayingWithNwc({ amountSats }: { amountSats: number }) {
 }
 
 function InvoiceDisplay({
-  bolt11, expiresAt, now, phaseKind, onFundWithMpesa,
+  bolt11, expiresAt, now, phaseKind, onFundWithMpesa, gateway,
 }: {
   bolt11: string;
   expiresAt: number;
   now: number;
   phaseKind: "awaiting-payment" | "mint-confirming";
+  /** Which Lightning gateway minted this invoice. Undefined when the wallet
+   *  can't say (browser SDK, mock, sim, or an older bridge). */
+  gateway?: FundingGatewayInfo;
   /** Present only when the ChapSmart M-Pesa on-ramp applies (TZ context,
    *  non-Exchange, enabled, not sim). Opens the pay-with-M-Pesa sub-flow. */
   onFundWithMpesa?: () => void;
@@ -1288,6 +1303,7 @@ function InvoiceDisplay({
   const secs = remainingSec % 60;
   const isMintConfirming = phaseKind === "mint-confirming";
   const qrPayload = makeLightningInvoiceQrPayload(bolt11);
+  const [routeOpen, setRouteOpen] = useState(false);
 
   return (
     <>
@@ -1364,6 +1380,40 @@ function InvoiceDisplay({
           cursor: "pointer",
         }}
       />
+      {gateway && !isMintConfirming && (
+        // Which Lightning gateway minted this invoice — the single route a payer
+        // may use. Almost nobody needs it, so it stays collapsed; it earns its
+        // place only when a payment isn't arriving, and then it's the first
+        // useful fact (a gateway can serve its API perfectly while being
+        // unroutable, which reads to the payer as "no route"). One tap away
+        // beats buried in Settings, which is far from the moment of need.
+        <div style={{ marginTop: 10 }}>
+          <button
+            onClick={() => setRouteOpen(open => !open)}
+            style={{
+              width: "100%", padding: "4px 0", background: "transparent",
+              border: "none", color: T.muted, fontFamily: T.mono,
+              fontSize: 8.5, letterSpacing: 0.8, cursor: "pointer",
+              textAlign: "center", opacity: 0.75,
+            }}
+            aria-expanded={routeOpen}
+          >
+            {routeOpen ? "▾" : "▸"} {t("fund.paymentRoute")}
+          </button>
+          {routeOpen && (
+            <div style={{
+              fontSize: 9, fontFamily: T.mono, letterSpacing: 0.5,
+              textAlign: "center", lineHeight: 1.6, paddingTop: 2,
+              color: gateway.provenPayable ? T.muted : T.amber,
+            }}>
+              {t("fund.viaGateway")} {gateway.alias || gateway.id.slice(0, 12)}
+              {!gateway.provenPayable && (
+                <><br />{t("fund.gatewayUnproven")}</>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {onFundWithMpesa && (
         <button
           onClick={onFundWithMpesa}

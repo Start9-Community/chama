@@ -162,6 +162,9 @@ export const fund: Record<string, string> = {
   "fund.requestingNwcPayment": "SOLICITANDO PAGO NWC…",
   "fund.save": "Guardar",
   "fund.scanOrCopyToPay": "ESCANEA O COPIA PARA PAGAR",
+  "fund.paymentRoute": "RUTA DE PAGO",
+  "fund.viaGateway": "VÍA",
+  "fund.gatewayUnproven": "RUTA AÚN NO COMPROBADA",
   "fund.sdkGatewayBody":
     "Esta es la ruta del SDK de Fedimint del navegador, no el puente Rust. El SDK no puede verificar aquí un gateway de recepción confiable, así que Chama no creó ninguna factura y no se solicitaron sats. Usa nativeFedimint con el puente local para BLF/GBF.",
   "fund.sdkGatewayShort":

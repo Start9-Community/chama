@@ -79,6 +79,22 @@ export interface OnchainWithdrawResult {
 }
 
 /**
+ * Which Lightning gateway minted a receive invoice.
+ *
+ * A federation can announce several gateways, and the one chosen decides the
+ * only route a payer may use. `provenPayable` is the load-bearing field: false
+ * means the gateway answers its API but nothing has ever settled through it,
+ * which is exactly the state that hands payers "no route" — worth telling the
+ * user before they wait on a QR code.
+ */
+export interface InvoiceGatewayInfo {
+  id: string;
+  alias?: string;
+  api?: string;
+  provenPayable: boolean;
+}
+
+/**
  * Fedimint wallet instance — mirrors @fedimint/core FedimintWallet API.
  * We define our own interface to decouple from the SDK version and
  * enable testing with mocks.
@@ -138,7 +154,7 @@ export interface IFedimintWallet {
       description: string,
       onReceiveState?: (kind: LnReceiveStateKind) => void,
       meta?: ChamaOperationMeta,
-    ): Promise<{ invoice: string; operationId: string }>;
+    ): Promise<{ invoice: string; operationId: string; gateway?: InvoiceGatewayInfo }>;
     /** Pay a Lightning invoice from federation balance */
     payInvoice(bolt11: string, meta?: ChamaOperationMeta): Promise<{ operationId: string }>;
     /** 3.5.1 double-pay guard: re-attach to a previously-submitted payout
@@ -962,6 +978,9 @@ export class FedimintClient {
     description: string,
     onReceiveState?: (kind: LnReceiveStateKind) => void,
     meta?: ChamaOperationMeta,
+    // Reported rather than returned so every existing caller keeps taking a
+    // plain BOLT11 string back.
+    onGateway?: (gateway: InvoiceGatewayInfo) => void,
   ): Promise<string> {
     const wallet = this.requireWallet();
     const result = await wallet.lightning.createInvoice(
@@ -970,6 +989,7 @@ export class FedimintClient {
       onReceiveState,
       meta,
     );
+    if (result.gateway) onGateway?.(result.gateway);
     return result.invoice;
   }
 

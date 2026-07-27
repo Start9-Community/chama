@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -275,13 +275,60 @@ struct Bridge {
     iroh_dns: Option<SafeUrl>,
     /// True when `iroh_dns` is the built-in n0 default rather than an override.
     iroh_dns_is_default: bool,
-    /// Last gateway that passed a receive-invoice reachability probe, cached so
-    /// funding doesn't re-probe every gateway on each `/invoice`. Shared across
-    /// `Bridge`/`AppState` clones via `Arc`; re-probed (and replaced on miss)
-    /// each time it's used, so a gateway that has since gone offline can't pin
-    /// funding to a dead endpoint.
+    /// Last gateway something actually SETTLED through — a paid invoice or a
+    /// completed payment — cached so funding doesn't re-probe every gateway on
+    /// each `/invoice`. Still re-probed each time it's used, so a gateway that
+    /// has since gone offline can't pin funding to a dead endpoint.
+    ///
+    /// Deliberately NOT set by a successful reachability probe. A gateway can
+    /// serve its HTTP API perfectly while its Lightning node has no announced,
+    /// funded channels — payers then get "no route" on every invoice it mints.
+    /// Caching on probe success promoted exactly such a gateway to first choice
+    /// and kept it there. Settlement is the only evidence that sats can move.
     last_good_gateway: Arc<Mutex<Option<LightningGateway>>>,
+    /// Per-gateway payability memory (see `GatewayHealth`), persisted under the
+    /// data dir so a restart doesn't re-learn which gateways can actually be
+    /// paid by minting unpayable invoices at users again.
+    ///
+    /// Shared across federations on purpose: gateway ids are globally unique
+    /// pubkeys, so one memory (and one file, at the base data dir) can serve
+    /// every federation this bridge switches between — an entry for a gateway
+    /// another federation announced simply never matches here.
+    gateway_health: Arc<Mutex<GatewayHealthStore>>,
+    /// Which gateway minted each outstanding receive, so a settlement can be
+    /// credited back to it. Entries are dropped as they settle.
+    receive_gateways: Arc<Mutex<HashMap<OperationId, PublicKey>>>,
 }
+
+/// What a gateway has actually done for us.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct GatewayHealth {
+    /// Receives/payments that reached a terminal success through this gateway.
+    #[serde(default)]
+    settled: u64,
+    /// Invoices minted through it since the last settlement. A gateway that
+    /// keeps minting invoices nobody can pay climbs here and sinks in the
+    /// preference order without ever being hard-blocked.
+    #[serde(default)]
+    mints_since_settle: u32,
+}
+
+/// In-memory view of the persisted health file, loaded once on first use.
+#[derive(Debug, Default)]
+struct GatewayHealthStore {
+    loaded: bool,
+    entries: HashMap<PublicKey, GatewayHealth>,
+}
+
+/// On-disk shape. Keys are gateway ids as hex; BTreeMap keeps the file stable
+/// across writes so it diffs cleanly when someone inspects it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct GatewayHealthFile {
+    #[serde(default)]
+    gateways: BTreeMap<String, GatewayHealth>,
+}
+
+const GATEWAY_HEALTH_FILE: &str = "gateway-health.json";
 
 #[derive(Debug, Serialize)]
 struct IrohConfigDiagnostics {
@@ -340,6 +387,18 @@ struct InfoOutput {
 struct InvoiceOutput {
     operation_id: OperationId,
     invoice: String,
+    /// Which gateway minted this invoice. Without it, the only way to learn
+    /// which Lightning route a payer is being asked to use was to decode the
+    /// BOLT11 by hand and match its route hint against the gateway list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_api: Option<String>,
+    /// True once something has actually settled through this gateway. False
+    /// means "reachable, never yet paid" — worth showing before a user waits.
+    gateway_proven_payable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -582,6 +641,8 @@ async fn main() -> Result<()> {
         iroh_dns,
         iroh_dns_is_default,
         last_good_gateway: Arc::new(Mutex::new(None)),
+        gateway_health: Arc::new(Mutex::new(GatewayHealthStore::default())),
+        receive_gateways: Arc::new(Mutex::new(HashMap::new())),
     };
 
     bridge.log_effective_config();
@@ -636,7 +697,8 @@ async fn main() -> Result<()> {
         }
         Command::AwaitInvoice { operation_id } => {
             let client = bridge.open().await?;
-            let value = bridge.await_invoice(&client, operation_id).await?;
+            // CLI owns its own socket — keep waiting until there's an outcome.
+            let value = bridge.await_invoice(&client, operation_id, 0).await?;
             print_json(&value)?;
         }
         Command::PayOutcome { operation_id } => {
@@ -775,7 +837,150 @@ impl Bridge {
             iroh_dns: self.iroh_dns.clone(),
             iroh_dns_is_default: self.iroh_dns_is_default,
             last_good_gateway: self.last_good_gateway.clone(),
+            gateway_health: self.gateway_health.clone(),
+            receive_gateways: self.receive_gateways.clone(),
         }
+    }
+
+    fn gateway_health_path(&self) -> PathBuf {
+        self.data_dir.join(GATEWAY_HEALTH_FILE)
+    }
+
+    /// Load the persisted health file once. Best-effort throughout: a missing,
+    /// unreadable, or malformed file just means starting from no knowledge —
+    /// gateway selection must never fail because of a diagnostics cache.
+    async fn ensure_gateway_health_loaded(&self) {
+        {
+            let store = self.gateway_health.lock().await;
+            if store.loaded {
+                return;
+            }
+        }
+        let path = self.gateway_health_path();
+        let parsed = match tokio::fs::read(&path).await {
+            Ok(bytes) => match serde_json::from_slice::<GatewayHealthFile>(&bytes) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    eprintln!("gateway-health: ignoring malformed {}: {error:#}", path.display());
+                    None
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                eprintln!("gateway-health: couldn't read {}: {error:#}", path.display());
+                None
+            }
+        };
+
+        let mut store = self.gateway_health.lock().await;
+        if store.loaded {
+            return; // another task won the race; theirs is as good as ours
+        }
+        if let Some(file) = parsed {
+            let mut restored = 0usize;
+            for (id, health) in file.gateways {
+                match id.parse::<PublicKey>() {
+                    Ok(gateway_id) => {
+                        store.entries.insert(gateway_id, health);
+                        restored += 1;
+                    }
+                    Err(error) => {
+                        eprintln!("gateway-health: skipping unparseable gateway id {id}: {error:#}")
+                    }
+                }
+            }
+            if restored > 0 {
+                eprintln!("gateway-health: restored {restored} gateway record(s) from disk");
+            }
+        }
+        store.loaded = true;
+    }
+
+    /// Write the health map out. Best-effort: a failed write only costs the
+    /// memory of which gateways pay, never a funding attempt.
+    async fn persist_gateway_health(&self) {
+        let file = {
+            let store = self.gateway_health.lock().await;
+            GatewayHealthFile {
+                gateways: store
+                    .entries
+                    .iter()
+                    .map(|(id, health)| (id.to_string(), health.clone()))
+                    .collect(),
+            }
+        };
+        let path = self.gateway_health_path();
+        match serde_json::to_vec_pretty(&file) {
+            Ok(bytes) => {
+                // Write-then-rename so a crash mid-write can't leave a truncated
+                // file that the next start would report as malformed.
+                let tmp = path.with_extension("json.tmp");
+                if let Err(error) = tokio::fs::write(&tmp, &bytes).await {
+                    eprintln!("gateway-health: couldn't write {}: {error:#}", tmp.display());
+                    return;
+                }
+                if let Err(error) = tokio::fs::rename(&tmp, &path).await {
+                    eprintln!("gateway-health: couldn't replace {}: {error:#}", path.display());
+                }
+            }
+            Err(error) => eprintln!("gateway-health: couldn't serialize: {error:#}"),
+        }
+    }
+
+    /// Record that a gateway minted an invoice we haven't been paid through yet.
+    async fn note_gateway_mint(&self, gateway_id: PublicKey, operation_id: OperationId) {
+        self.ensure_gateway_health_loaded().await;
+        self.receive_gateways
+            .lock()
+            .await
+            .insert(operation_id, gateway_id);
+        {
+            let mut store = self.gateway_health.lock().await;
+            store.entries.entry(gateway_id).or_default().mints_since_settle += 1;
+        }
+        self.persist_gateway_health().await;
+    }
+
+    /// Record that sats actually moved through a gateway. This — not a probe —
+    /// is what promotes it to first choice.
+    async fn note_gateway_settled(&self, gateway_id: PublicKey, selected: Option<&LightningGateway>) {
+        self.ensure_gateway_health_loaded().await;
+        {
+            let mut store = self.gateway_health.lock().await;
+            let entry = store.entries.entry(gateway_id).or_default();
+            entry.settled += 1;
+            entry.mints_since_settle = 0;
+        }
+        if let Some(selected) = selected {
+            *self.last_good_gateway.lock().await = Some(selected.clone());
+        }
+        self.persist_gateway_health().await;
+        eprintln!("gateway: {gateway_id} settled a payment — promoted to preferred");
+    }
+
+    /// Settlement arrived for a receive; credit whichever gateway minted it.
+    async fn note_receive_settled(&self, operation_id: OperationId) {
+        let gateway_id = self.receive_gateways.lock().await.remove(&operation_id);
+        if let Some(gateway_id) = gateway_id {
+            self.note_gateway_settled(gateway_id, None).await;
+        }
+    }
+
+    /// Preference rank for a gateway: proven payable first, then gateways that
+    /// haven't repeatedly minted unpayable invoices, then the static
+    /// scheme/vetted/fee ordering.
+    async fn gateway_health_rank(&self, gateway_id: &PublicKey) -> (u8, u32) {
+        self.ensure_gateway_health_loaded().await;
+        let stats = self
+            .gateway_health
+            .lock()
+            .await
+            .entries
+            .get(gateway_id)
+            .cloned()
+            .unwrap_or_default();
+        let proven = u8::from(stats.settled == 0);
+        (proven, stats.mints_since_settle.min(3))
     }
 
     fn iroh_config_diagnostics(&self) -> IrohConfigDiagnostics {
@@ -1028,6 +1233,7 @@ impl Bridge {
             .select_receive_gateway(&ln, gateway_id, force_internal)
             .await?;
         let description = Description::new(description).context("invalid invoice description")?;
+        let selected = gateway.clone();
         let (operation_id, invoice, _) = ln
             .create_bolt11_invoice(
                 Amount::from_msats(amount_msats),
@@ -1039,9 +1245,23 @@ impl Bridge {
             .await
             .context("failed to create BOLT11 invoice")?;
 
+        let mut proven_payable = false;
+        if let Some(selected) = selected.as_ref() {
+            self.note_gateway_mint(selected.gateway_id, operation_id).await;
+            proven_payable = self.gateway_health_rank(&selected.gateway_id).await.0 == 0;
+            eprintln!(
+                "invoice: minted {amount_msats}msat via gateway {} ({}) proven_payable={proven_payable}",
+                selected.gateway_id, selected.lightning_alias,
+            );
+        }
+
         Ok(InvoiceOutput {
             operation_id,
             invoice: invoice.to_string(),
+            gateway_id: selected.as_ref().map(|gw| gw.gateway_id.to_string()),
+            gateway_alias: selected.as_ref().map(|gw| gw.lightning_alias.clone()),
+            gateway_api: selected.as_ref().map(|gw| gw.api.to_string()),
+            gateway_proven_payable: proven_payable,
         })
     }
 
@@ -1144,14 +1364,29 @@ impl Bridge {
             .into_iter()
             .map(|ann| (ann.info, ann.vetted))
             .collect();
-        ordered.sort_by_key(|(gw, vetted)| {
+
+        // Payability outranks every static signal. A gateway that has settled a
+        // payment beats one that merely looks preferable on paper — including a
+        // clearnet gateway whose node no payer can route to.
+        let mut ranked: Vec<((u8, u32), LightningGateway, bool)> = Vec::with_capacity(ordered.len());
+        for (gw, vetted) in ordered.drain(..) {
+            let health = self.gateway_health_rank(&gw.gateway_id).await;
+            ranked.push((health, gw, vetted));
+        }
+        ranked.sort_by_key(|(health, gw, vetted)| {
             (
+                health.0,
+                health.1,
                 gateway_scheme_rank(gw),
                 u8::from(!*vetted),
                 u64::from(gw.fees.base_msat),
                 u64::from(gw.fees.proportional_millionths),
             )
         });
+        let mut ordered: Vec<(LightningGateway, bool)> = ranked
+            .into_iter()
+            .map(|(_, gw, vetted)| (gw, vetted))
+            .collect();
 
         // Try the last-known-good gateway first (still freshly probed below, so
         // a since-offline cached gateway can't pin funding to a dead endpoint).
@@ -1179,10 +1414,15 @@ impl Bridge {
             .await
             {
                 Ok(Ok(selected)) => {
+                    // Reachable, NOT proven payable. Promotion to
+                    // `last_good_gateway` happens only once something settles
+                    // through it (see note_gateway_settled).
+                    let (rank, misses) = self.gateway_health_rank(&gateway_id).await;
                     eprintln!(
-                        "gateway: selected reachable gateway {gateway_id} ({scheme}) to {action}"
+                        "gateway: selected reachable gateway {gateway_id} ({scheme}) to {action} \
+                         [proven_payable={} unpaid_mints={misses}]",
+                        rank == 0,
                     );
-                    *self.last_good_gateway.lock().await = Some(selected.clone());
                     return Ok(Some(selected));
                 }
                 Ok(Err(error)) => {
@@ -1250,10 +1490,24 @@ impl Bridge {
         gateway_result
     }
 
+    /// Watch an incoming invoice until it settles, is canceled, or `wait_secs`
+    /// elapses.
+    ///
+    /// The elapsed case returns `status: "pending"` rather than holding the
+    /// request open indefinitely. An unbounded hold only survives a direct
+    /// socket to the bridge: anything in front of it (StartOS runs nginx) has
+    /// its own read timeout and will hang up mid-wait, answering the caller
+    /// with an error page that says nothing about the invoice. Returning a real
+    /// answer the caller can act on — "not yet, ask again" — keeps the watch
+    /// correct regardless of what sits in the middle.
+    ///
+    /// `wait_secs == 0` restores the old unbounded behaviour for callers that
+    /// genuinely own the socket (the CLI).
     async fn await_invoice(
         &self,
         client: &ClientHandleArc,
         operation_id: OperationId,
+        wait_secs: u64,
     ) -> Result<serde_json::Value> {
         let ln = client.get_first_module::<LightningClientModule>()?;
         let mut updates = ln
@@ -1262,21 +1516,47 @@ impl Bridge {
             .context("failed to subscribe to incoming invoice")?
             .into_stream();
 
-        while let Some(update) = updates.next().await {
-            match update {
-                LnReceiveState::Claimed => {
+        let deadline = tokio::time::sleep(Duration::from_secs(if wait_secs == 0 {
+            u64::from(u32::MAX)
+        } else {
+            wait_secs
+        }));
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                // Bias the stream so a settlement that lands in the same tick as
+                // the deadline is reported as paid, never as pending.
+                biased;
+
+                update = updates.next() => match update {
+                    Some(LnReceiveState::Claimed) => {
+                        // Sats actually arrived — this is the evidence that
+                        // promotes the minting gateway (Leg 1).
+                        self.note_receive_settled(operation_id).await;
+                        return Ok(json!({
+                            "status": "paid",
+                            "operation_id": operation_id,
+                            "info": info_output(client).await?,
+                        }));
+                    }
+                    Some(LnReceiveState::Canceled { reason }) => {
+                        bail!("invoice canceled: {reason}")
+                    }
+                    Some(_) => {}
+                    None => bail!("invoice update stream ended before settlement"),
+                },
+
+                _ = &mut deadline, if wait_secs > 0 => {
+                    // Not an outcome — an interim answer. The invoice is still
+                    // live and the caller is expected to ask again.
                     return Ok(json!({
-                        "status": "paid",
+                        "status": "pending",
                         "operation_id": operation_id,
-                        "info": info_output(client).await?,
                     }));
                 }
-                LnReceiveState::Canceled { reason } => bail!("invoice canceled: {reason}"),
-                _ => {}
             }
         }
-
-        bail!("invoice update stream ended before settlement")
     }
 
     async fn pay(
@@ -1326,6 +1606,9 @@ impl Bridge {
         // accepted (gateway connect / funding rejected before any sats were
         // committed) ⇒ a pre-send failure that is safe to re-pay, so we let it
         // propagate as an HTTP error.
+        // Keep the chosen gateway so a confirmed settlement can credit it as
+        // proven payable (Leg 1); `pay_bolt11_invoice` consumes the original.
+        let paying_gateway = gateway.clone();
         let OutgoingLightningPayment {
             payment_type,
             contract_id: _,
@@ -1355,6 +1638,12 @@ impl Bridge {
         // `submitted` and reconciles. Only a confirmed preimage ⇒ settled, only a
         // confirmed refund/cancel ⇒ refunded.
         let terminal = watch_outgoing_pay(&ln, is_internal, operation_id).await;
+        let settled_gateway = paying_gateway
+            .as_ref()
+            .filter(|_| matches!(terminal, Some(PayTerminal::Settled { .. })));
+        if let Some(gateway) = settled_gateway {
+            self.note_gateway_settled(gateway.gateway_id, Some(gateway)).await;
+        }
         if terminal.is_none() {
             eprintln!(
                 "pay: outgoing payment {operation_id:?} reached no fund-safe terminal state within \
@@ -1893,6 +2182,10 @@ struct InvoiceRequest {
 #[serde(rename_all = "camelCase")]
 struct AwaitInvoiceRequest {
     operation_id: OperationId,
+    /// How long to hold the watch before answering `pending`. Omitted by older
+    /// clients, which expect the request to stay open — they keep the previous
+    /// unbounded behaviour.
+    wait_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2257,6 +2550,10 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "idempotent_join",
             "effective_iroh_config",
             "discovery_probe",
+            // `/await-invoice` honours `waitSecs` and can answer `pending`.
+            // Advertised, never required: older sidecars simply hold the
+            // request open and the client's transport re-arm covers them.
+            "bounded_await_invoice",
             "pay_outcome_by_escrow",
             "auth_token",
             "multi_federation_switch",
@@ -2353,7 +2650,7 @@ async fn api_await_invoice(
     Ok(Json(
         state
             .bridge
-            .await_invoice(&client, req.operation_id)
+            .await_invoice(&client, req.operation_id, req.wait_secs.unwrap_or(0))
             .await?,
     ))
 }

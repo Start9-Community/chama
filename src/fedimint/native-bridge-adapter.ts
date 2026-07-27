@@ -7,6 +7,7 @@
 
 import type {
   IFedimintWallet,
+  InvoiceGatewayInfo,
   LnReceiveStateKind,
   OnchainDepositAddress,
   OnchainDepositSettled,
@@ -84,6 +85,12 @@ interface NativeInvoiceResponse {
   operation_id?: string;
   operationId?: string;
   invoice: string;
+  /** Which gateway minted this invoice, and whether anything has ever actually
+   *  settled through it. Absent on bridges older than `bounded_await_invoice`. */
+  gateway_id?: string;
+  gateway_alias?: string;
+  gateway_api?: string;
+  gateway_proven_payable?: boolean;
 }
 
 interface NativeSpendNotesResponse {
@@ -196,6 +203,42 @@ function asErrorMessage(error: unknown): string {
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** Marks a failure as "the request never reached a verdict" — the socket died,
+ *  a proxy answered instead of the bridge, or the body wasn't the bridge's JSON
+ *  at all. Distinct from a bridge that answered and said no. Callers on a money
+ *  path must never read one as the other: a reverse proxy hanging up on a long
+ *  poll is not the federation rejecting a payment. */
+const BRIDGE_TRANSPORT_FAILURE = "chamaBridgeTransportFailure";
+
+function markBridgeTransportFailure<E extends Error>(error: E): E {
+  (error as E & { [BRIDGE_TRANSPORT_FAILURE]?: boolean })[BRIDGE_TRANSPORT_FAILURE] = true;
+  return error;
+}
+
+export function isBridgeTransportFailure(error: unknown): boolean {
+  return error instanceof Error &&
+    (error as Error & { [BRIDGE_TRANSPORT_FAILURE]?: boolean })[BRIDGE_TRANSPORT_FAILURE] === true;
+}
+
+/** Gateway-class HTTP statuses: something between us and the bridge answered.
+ *  The bridge's own refusals come back as 4xx/500 carrying its JSON error. */
+function isProxyGatewayStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
+/** Re-arm pacing for the `/await-invoice` long poll when the connection to the
+ *  bridge keeps dropping. The window comfortably outlives a BOLT11 invoice, so
+ *  the watch survives a whole realistic payment attempt. */
+const AWAIT_INVOICE_REARM_BASE_MS = 2_000;
+const AWAIT_INVOICE_REARM_MAX_MS = 15_000;
+const AWAIT_INVOICE_REARM_WINDOW_MS = 60 * 60_000;
+
+/** How long the bridge holds each watch before answering `pending`. Kept well
+ *  under any sane proxy read timeout so the bridge — not the proxy — is what
+ *  ends the request. Bridges that predate `bounded_await_invoice` ignore this
+ *  and hold the request open; the transport re-arm still covers them. */
+const AWAIT_INVOICE_WAIT_SECS = 45;
 
 function getImportEnv(key: string): string | null {
   const env = (import.meta as unknown as { env?: Record<string, unknown> }).env;
@@ -655,9 +698,9 @@ async function nativeBridgeFetch<T>(
     response = await fetch(`${baseUrl}${path}`, requestInit);
   } catch (error) {
     if (controller?.signal.aborted && timeoutMs !== undefined && timeoutMs > 0) {
-      throw nativeBridgeTimeoutError(baseUrl, path, timeoutMs);
+      throw markBridgeTransportFailure(nativeBridgeTimeoutError(baseUrl, path, timeoutMs));
     }
-    throw nativeBridgeUnavailableError(baseUrl, path, error);
+    throw markBridgeTransportFailure(nativeBridgeUnavailableError(baseUrl, path, error));
   } finally {
     if (timeoutId !== null) clearTimeout(timeoutId);
     removeCallerAbort?.();
@@ -668,9 +711,11 @@ async function nativeBridgeFetch<T>(
     try {
       json = JSON.parse(text);
     } catch {
-      throw new Error(
+      // Not the bridge's JSON — almost always a reverse proxy's own HTML error
+      // page (StartOS fronts the bridge with nginx). Transport, not a verdict.
+      throw markBridgeTransportFailure(new Error(
         `Native Fedimint bridge ${path} returned non-JSON response: ${text.slice(0, 160)}`,
-      );
+      ));
     }
   }
 
@@ -679,9 +724,12 @@ async function nativeBridgeFetch<T>(
       isRecord(json) && typeof json.error === "string"
         ? json.error
         : text || response.statusText;
-    throw new Error(
+    const failure = new Error(
       `Native Fedimint bridge ${path} failed (${response.status}): ${bridgeMessage}`,
     );
+    throw isProxyGatewayStatus(response.status)
+      ? markBridgeTransportFailure(failure)
+      : failure;
   }
 
   return json as T;
@@ -886,7 +934,7 @@ export class NativeBridgeWallet implements IFedimintWallet {
       description: string,
       onReceiveState?: (kind: LnReceiveStateKind) => void,
       _meta?: ChamaOperationMeta,
-    ): Promise<{ invoice: string; operationId: string }> => {
+    ): Promise<{ invoice: string; operationId: string; gateway?: InvoiceGatewayInfo }> => {
       onReceiveState?.("created");
       await this.ensureBridgeReady();
       const result = await this.request<NativeInvoiceResponse>("/invoice", {
@@ -897,11 +945,31 @@ export class NativeBridgeWallet implements IFedimintWallet {
         },
       });
       const operationId = readOperationId(result);
+      if (result.gateway_id) {
+        // Which Lightning route the payer is being asked to use. Before this,
+        // the only way to find out was to decode the BOLT11 and match its route
+        // hint against the gateway list by hand. `provenPayable=false` means the
+        // gateway answers its API but nothing has ever settled through it —
+        // exactly the state that produces "no route" for the payer.
+        console.info(
+          `[chama] funding invoice minted via gateway ${result.gateway_alias ?? "(unnamed)"} ` +
+            `(${result.gateway_id.slice(0, 16)}… ${result.gateway_api ?? "no api"}) ` +
+            `provenPayable=${result.gateway_proven_payable === true}`,
+        );
+      }
       onReceiveState?.("waiting_for_payment");
       void this.awaitInvoice(operationId, onReceiveState);
       return {
         invoice: result.invoice,
         operationId,
+        gateway: result.gateway_id
+          ? {
+              id: result.gateway_id,
+              alias: result.gateway_alias,
+              api: result.gateway_api,
+              provenPayable: result.gateway_proven_payable === true,
+            }
+          : undefined,
       };
     },
 
@@ -1283,18 +1351,85 @@ export class NativeBridgeWallet implements IFedimintWallet {
     operationId: string,
     onReceiveState?: (kind: LnReceiveStateKind) => void,
   ): Promise<void> {
-    try {
-      const result = await this.request<NativeAwaitInvoiceResponse>("/await-invoice", {
-        method: "POST",
-        body: { operationId },
-      });
-      if (result.info) this.applyInfo(result.info);
-      else await this.refreshBalance();
-      onReceiveState?.("claimed");
-    } catch (error) {
-      const reason = asErrorMessage(error);
-      onReceiveState?.({ canceled: { reason } });
-      console.warn(`[chama] native bridge invoice ${operationId} watcher failed:`, error);
+    // `/await-invoice` is a long poll: the bridge holds the request open until
+    // the invoice is claimed or canceled, however long the payer takes. Anything
+    // in front of the bridge that enforces its own read timeout (StartOS runs
+    // nginx there) will hang up mid-wait and answer with its own error page.
+    //
+    // That hangup says NOTHING about the invoice — it is still live and still
+    // payable. Reporting it as `canceled` made the funding orchestrator declare
+    // "Federation didn't accept the payment" and tell the user not to pay, for a
+    // payment the federation had never even been asked about. So a transport
+    // failure re-arms the watch instead; only a verdict from the bridge itself
+    // can cancel.
+    const startedAt = Date.now();
+    let backoffMs = AWAIT_INVOICE_REARM_BASE_MS;
+    // Watch for the wallet being closed *after* this started, rather than
+    // requiring it to look open now: the flag is set by open/join, and a watch
+    // must not silently give up just because it can't confirm that here.
+    const openedWhenWatchBegan = this.openState;
+
+    for (;;) {
+      try {
+        const result = await this.request<NativeAwaitInvoiceResponse>("/await-invoice", {
+          method: "POST",
+          body: { operationId, waitSecs: AWAIT_INVOICE_WAIT_SECS },
+        });
+
+        if (result.status === "pending") {
+          // The bridge ended its own watch window with no outcome. Not a
+          // failure and not a verdict — the invoice is still live, so ask
+          // again straight away. Only a bridge advertising
+          // `bounded_await_invoice` answers this way.
+          if (Date.now() - startedAt >= AWAIT_INVOICE_REARM_WINDOW_MS) {
+            console.warn(
+              `[chama] native bridge invoice ${operationId}: still unpaid after ` +
+                `${Math.round((Date.now() - startedAt) / 60_000)}m — stopping the watch; ` +
+                `invoice may still be payable, leaving detection to balance polling`,
+            );
+            return;
+          }
+          backoffMs = AWAIT_INVOICE_REARM_BASE_MS;
+          continue;
+        }
+
+        if (result.info) this.applyInfo(result.info);
+        else await this.refreshBalance();
+        onReceiveState?.("claimed");
+        return;
+      } catch (error) {
+        if (!isBridgeTransportFailure(error)) {
+          // The bridge answered and said no (canceled/expired invoice, unknown
+          // operation). That is a real verdict — surface it as before.
+          const reason = asErrorMessage(error);
+          onReceiveState?.({ canceled: { reason } });
+          console.warn(`[chama] native bridge invoice ${operationId} watcher failed:`, error);
+          return;
+        }
+
+        // Wallet closed underneath us — stop quietly, nothing to report.
+        if (openedWhenWatchBegan && !this.openState) return;
+
+        if (Date.now() - startedAt >= AWAIT_INVOICE_REARM_WINDOW_MS) {
+          // Give up watching, but still DON'T claim a cancellation we can't
+          // prove. Balance polling in the funding orchestrator remains the
+          // independent detector, so a payment that lands later is still seen.
+          console.warn(
+            `[chama] native bridge invoice ${operationId}: stopped re-arming the watch after ` +
+              `${Math.round((Date.now() - startedAt) / 60_000)}m of transport failures — ` +
+              `invoice may still be payable; leaving detection to balance polling`,
+            error,
+          );
+          return;
+        }
+
+        console.debug(
+          `[chama] native bridge invoice ${operationId}: watch connection dropped ` +
+            `(${asErrorMessage(error)}); re-arming in ${backoffMs}ms`,
+        );
+        await sleepMs(backoffMs);
+        backoffMs = Math.min(backoffMs * 2, AWAIT_INVOICE_REARM_MAX_MS);
+      }
     }
   }
 }

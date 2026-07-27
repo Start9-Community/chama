@@ -13,7 +13,6 @@ import { useT } from "../../i18n/index.js";
 import { ReputationReadout } from "../components/ReputationReadout.js";
 import type { AggregateRatings } from "../../reputation/ratings.js";
 import { workOffersForWorker } from "../work-resume.js";
-import { GuidedBuyPanel, type GuidedConfirmPayload } from "../components/GuidedBuyPanel.js";
 
 // v4.2.1: the arbiter / recruitment on-ramp is hidden for now — it pushes a
 // leader decision at brand-new users before the bond exists. ArbiterApplyForm
@@ -47,8 +46,7 @@ export function BrowseView({
   onOpenEscrow, onLoadById,
   fetchRatingSummary,
   onCreate, onApplyAsArbiter,
-  onGuidedConfirm,
-  guidedBusy = false,
+  onOpenGuided,
 }: {
   browseCategory: string;
   setBrowseCategory: (s: string) => void;
@@ -76,9 +74,7 @@ export function BrowseView({
    *  arbiter application form inline (no bounce to Me). */
   onCreate: () => void;
   onApplyAsArbiter: (community: string, statement: string) => Promise<void>;
-  /** Guided / Automated confirm → existing join (never auto-spend). */
-  onGuidedConfirm?: (payload: GuidedConfirmPayload) => void | Promise<void>;
-  guidedBusy?: boolean;
+  onOpenGuided: () => void;
 }) {
   const { t } = useT();
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
@@ -287,6 +283,18 @@ export function BrowseView({
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={onOpenGuided}
+            title={t("guided.assistant")}
+            aria-label={t("guided.assistant")}
+            style={{
+              width: 34, height: 34, borderRadius: 12,
+              background: T.accentDim, border: `1px solid ${T.accent}44`,
+              color: T.accent, cursor: "pointer", fontSize: 16,
+              display: "grid", placeItems: "center",
+            }}
+          >✦</button>
           {/* v3.1.1: the create + arbiter on-ramps moved out of the header into
               the floating action menu (FAB stack) rendered at the screen root. */}
           {homeCommunity && (
@@ -426,17 +434,6 @@ export function BrowseView({
           </button>
         )}
       </div>
-
-      {onGuidedConfirm && (
-        <GuidedBuyPanel
-          listings={[...matchingListings, ...nonMatchingListings]}
-          stockByListing={stockByListing}
-          browseCommunity={browseCommunity}
-          viewerPubkey={pubkey}
-          busy={guidedBusy}
-          onConfirm={onGuidedConfirm}
-        />
-      )}
 
       {search && totalListings > 0 && filteredTotal === 0 && (
         <div style={{

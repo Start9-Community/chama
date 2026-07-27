@@ -169,6 +169,9 @@ export const fund: Record<string, string> = {
   "fund.requestingNwcPayment": "REQUESTING NWC PAYMENT…",
   "fund.save": "Save",
   "fund.scanOrCopyToPay": "SCAN OR COPY TO PAY",
+  "fund.paymentRoute": "PAYMENT ROUTE",
+  "fund.viaGateway": "VIA",
+  "fund.gatewayUnproven": "ROUTE NOT YET PROVEN",
   "fund.sdkGatewayBody":
     "This is the browser Fedimint SDK route, not the Rust bridge. The SDK cannot verify a trusted receive gateway here, so Chama did not create an invoice and no sats were requested. Use nativeFedimint with the local bridge for BLF/GBF.",
   "fund.sdkGatewayShort":

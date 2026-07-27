@@ -9,6 +9,7 @@ import type {
   GuidedListingInput,
   GuidedMatchCandidate,
   GuidedMatchOptions,
+  GuidedRecommendations,
   GuidedMatchReason,
   GuidedMatchResult,
   GuidedMatchScore,
@@ -272,4 +273,41 @@ export function matchGuidedListings(
   );
 
   return { candidates: candidates.slice(0, limit), rejected };
+}
+
+/** Derive human-readable recommendation lanes without manufacturing weaker
+ * alternatives. Lowest price only compares like currencies; Most Trusted
+ * requires verified completed-trade ratings supplied by the caller. */
+export function recommendGuidedCandidates(
+  candidates: readonly GuidedMatchCandidate[],
+  fiatCurrency?: string,
+): GuidedRecommendations {
+  const bestOverall = candidates[0] ?? null;
+  const currency = fiatCurrency?.toUpperCase()
+    ?? bestOverall?.fiatQuote?.currency
+    ?? candidates.find(candidate => candidate.fiatQuote)?.fiatQuote?.currency;
+  const priced = currency
+    ? candidates.filter(candidate => candidate.fiatQuote?.currency === currency)
+    : [];
+  const lowestPrice = [...priced].sort((a, b) =>
+    a.fiatQuote!.amount - b.fiatQuote!.amount
+    || b.score.total - a.score.total
+    || a.listing.id.localeCompare(b.listing.id)
+  )[0] ?? null;
+  const trusted = candidates.filter(candidate =>
+    candidate.ratings
+    && candidate.ratings.count > 0
+    && candidate.ratings.positive + candidate.ratings.negative > 0
+  );
+  const mostTrusted = [...trusted].sort((a, b) => {
+    const aCount = Math.min(a.ratings!.count, a.ratings!.positive + a.ratings!.negative);
+    const bCount = Math.min(b.ratings!.count, b.ratings!.positive + b.ratings!.negative);
+    const aRatio = aCount > 0 ? a.ratings!.positive / aCount : 0;
+    const bRatio = bCount > 0 ? b.ratings!.positive / bCount : 0;
+    return bRatio - aRatio
+      || bCount - aCount
+      || b.score.total - a.score.total
+      || a.listing.id.localeCompare(b.listing.id);
+  })[0] ?? null;
+  return { bestOverall, lowestPrice, mostTrusted };
 }

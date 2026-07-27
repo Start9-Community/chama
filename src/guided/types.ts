@@ -143,3 +143,10 @@ export interface GuidedMatchResult {
   candidates: GuidedMatchCandidate[];
   rejected: GuidedRejectedListing[];
 }
+
+/** Named comparison lanes. The same candidate may honestly win more than one. */
+export interface GuidedRecommendations {
+  bestOverall: GuidedMatchCandidate | null;
+  lowestPrice: GuidedMatchCandidate | null;
+  mostTrusted: GuidedMatchCandidate | null;
+}

@@ -138,6 +138,7 @@ import { useBrowserBanner } from "./hooks/useBrowserBanner.js";
 import { useFederationCommands } from "./hooks/useFederationCommands.js";
 
 import { BrowseView } from "./screens/BrowseView.js";
+import { GuidedHome } from "./screens/GuidedHome.js";
 import { ConnectScreen } from "./screens/ConnectScreen.js";
 import { GlobeCountryPicker } from "./screens/GlobeCountryPicker.js";
 import { DashboardScreen } from "./screens/DashboardScreen.js";
@@ -204,6 +205,7 @@ const QRScanner = lazy(() => import("./QRScanner.js"));
 // View routing — flat enum; the bottom nav highlights based on which
 // "tab family" the current view belongs to (see TAB_FOR_VIEW below).
 type View =
+  | "guided"
   | "browse"
   | "detail"
   | "create"
@@ -235,6 +237,7 @@ type PendingDestroyConfirm = {
 const BOND_LIVENESS_BLOCKS_PER_DAY = 144;
 
 const TAB_FOR_VIEW: Record<View, Tab> = {
+  guided: "browse",
   browse: "browse",
   detail: "browse",
   // v4.2.1: the inline create view is legacy/dead (Create lives on the pencil
@@ -499,7 +502,7 @@ export default function App() {
     },
   });
 
-  const [view, setView] = useState<View>("browse");
+  const [view, setView] = useState<View>("guided");
   // v4.1 C1 coach-mark tour: shown once after the user's first sign-in, on the
   // Browse home screen (where the FABs are mounted). `coachReady` adds a short
   // settle delay so the bottom-nav + FAB layout has painted before we measure.
@@ -690,7 +693,6 @@ export default function App() {
   } | null>(null);
   // #37: true while the PendingLockCard's "Finish lock" call is in flight.
   const [pendingLockBusy, setPendingLockBusy] = useState(false);
-  const [guidedBusy, setGuidedBusy] = useState(false);
   // Stranded-payout recovery: escrows already swept by the once-per-session
   // background reattachPayout (the boot sweep effect below).
   const payoutReattachSweptRef = useRef<Set<string>>(new Set());
@@ -1802,7 +1804,7 @@ export default function App() {
   );
   // "N left" badge data for the cards — only for multi-unit parents (stock set).
   const stockByListing = new Map<string, number>();
-  for (const s of visibleListings) {
+  for (const s of allVisibleListings) {
     if (s.stock !== undefined) stockByListing.set(s.id, remainingStock(s, listingChildren(s), now));
   }
   // #7 seller overcommit refund: which child orders are OVERSOLD (locked beyond
@@ -3030,7 +3032,24 @@ export default function App() {
       )}
 
       {/* Content — routed by view */}
-      {view === "detail" && selected ? (
+      {view === "guided" ? (
+        <GuidedHome
+          listings={allVisibleListings}
+          stockByListing={stockByListing}
+          browseCommunity={routeCommunitySlug}
+          activeMintUrl={myActiveInvite}
+          viewerPubkey={pubkey!}
+          listingsLoading={publicListingsLoading}
+          attentionTrades={needsYouTrades}
+          fetchRatingSummary={actions.fetchRatingSummary}
+          onBrowse={(category) => {
+            setBrowseCategory(category);
+            setView("browse");
+          }}
+          onCreate={() => setCreateOverlayOpen(true)}
+          onOpenTrade={(id) => openEscrow(id, "guided")}
+        />
+      ) : view === "detail" && selected ? (
         <div style={{
           animation: "fadeIn 0.3s ease",
           // Fill the viewport so the trade screen is ONE window — fixed top,
@@ -3778,6 +3797,7 @@ export default function App() {
               onApplyAsArbiter={async (community, statement) => {
                 await actions.applyAsArbiter(community, statement);
               }}
+              onOpenGuided={() => setView("guided")}
               onOpenEscrow={openEscrow}
               onLoadById={async (id) => {
                 try {
@@ -3793,44 +3813,6 @@ export default function App() {
                   }
                 } catch (e: any) {
                   setToast({ message: e.message || t("app.loadFailed"), type: "error" });
-                }
-              }}
-              guidedBusy={guidedBusy}
-              onGuidedConfirm={async ({ listingId, amountMsats, selectedItems }) => {
-                setGuidedBusy(true);
-                try {
-                  setToast({ message: t("app.joiningAsRole", { role: "buyer" }), type: "info" });
-                  await actions.loadEscrow(listingId);
-                  await actions.joinEscrow(listingId, Role.BUYER, {
-                    amountMsats,
-                    ...(selectedItems?.length ? { selectedItems, orderFinalized: true } : {}),
-                  });
-                  setToast({ message: t("app.joinedAsRole", { role: "buyer" }), type: "success" });
-                  setDetailBackView("browse");
-                  setSelectedId(listingId);
-                  setView("detail");
-                } catch (e: any) {
-                  if (e?.code === "FED_MISMATCH") {
-                    const listing = escrows.get(listingId);
-                    if (listing?.community) {
-                      setPendingFedSwitch({
-                        community: listing.community,
-                        retry: async () => {
-                          await actions.joinEscrow(listingId, Role.BUYER, {
-                            amountMsats,
-                            ...(selectedItems?.length ? { selectedItems, orderFinalized: true } : {}),
-                          });
-                          setDetailBackView("browse");
-                          setSelectedId(listingId);
-                          setView("detail");
-                        },
-                      });
-                      return;
-                    }
-                  }
-                  setToast({ message: e.message || t("app.joinFailed"), type: "error" });
-                } finally {
-                  setGuidedBusy(false);
                 }
               }}
             />

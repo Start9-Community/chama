@@ -5,7 +5,7 @@ import {
   type MenuItem,
 } from "../escrow-engine/types.js";
 import { validateGuidedTradeIntent } from "./intent-validation.js";
-import { matchGuidedListings } from "./match-listings.js";
+import { matchGuidedListings, recommendGuidedCandidates } from "./match-listings.js";
 import type { GuidedTradeIntent } from "./types.js";
 
 let passed = 0;
@@ -253,6 +253,13 @@ console.log("\n── GUIDED DETERMINISTIC MATCHING ──");
           .reduce((sum, [, score]) => sum + score, 0)
       ),
     "returns human-explainable reasons and an auditable score breakdown",
+  );
+  const recommendations = recommendGuidedCandidates(ranked.candidates, "USD");
+  assert(
+    recommendations.bestOverall?.listing.id === "trusted"
+      && recommendations.lowestPrice?.listing.id === "cheap-new"
+      && recommendations.mostTrusted?.listing.id === "trusted",
+    "derives Best Overall, Lowest Price, and Most Trusted independently",
   );
 
   const sell = matchGuidedListings({ ...INTENT, direction: "sell_sats" }, [

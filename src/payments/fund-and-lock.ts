@@ -60,6 +60,18 @@ export const MAX_LN_FUNDING_SATS = 2_000_000;
 
 // ── Phase types ──────────────────────────────────────────────────────────
 
+/** The Lightning gateway a funding invoice was minted through. A federation
+ *  announces several; the chosen one is the only route a payer may use, so
+ *  when it can't be reached on the Lightning network the payer gets "no route"
+ *  no matter how healthy everything else is. `provenPayable` is false until
+ *  something has actually settled through it. */
+export interface FundingGatewayInfo {
+  id: string;
+  alias?: string;
+  api?: string;
+  provenPayable: boolean;
+}
+
 /** Phases emitted during the polling loop (a sub-set of the orchestrator's
  *  full phase set). pollForFunding emits these.
  *
@@ -111,7 +123,13 @@ export type FundAndLockPhase =
   | { kind: "requesting-fedi-ecash" }
   | { kind: "fedi-ecash-created" }
   | { kind: "receive-watch-ready" }
-  | { kind: "invoice-created"; bolt11: string; expiresAt: number }
+  | {
+      kind: "invoice-created";
+      bolt11: string;
+      expiresAt: number;
+      /** Which gateway minted it, when the wallet can say. */
+      gateway?: FundingGatewayInfo;
+    }
   | { kind: "paying-with-nwc" }
   | { kind: "receive-rejected"; reason: string }
   | FundingPhase
@@ -389,6 +407,9 @@ export interface RunFundAndLockDeps {
     amountMsats: number,
     description: string,
     onReceiveState?: (kind: LnReceiveWatchKind) => void,
+    /** Reports the Lightning gateway that minted the invoice. Optional so
+     *  wallets that can't say (browser SDK, mock, sim) simply never call it. */
+    onGateway?: (gateway: FundingGatewayInfo) => void,
   ) => Promise<string>;
   /** Optional auto-payer for generated funding invoices, e.g. NWC
    *  pay_invoice. When set, runFundAndLock still creates the Fedimint
@@ -558,6 +579,7 @@ export async function runFundAndLock(
     }
   };
   let bolt11: string;
+  let fundingGateway: FundingGatewayInfo | undefined;
   try {
     const slowWarnPromise = new Promise<void>((resolve) => {
       slowWarnTimer = setTimeout(() => {
@@ -577,7 +599,12 @@ export async function runFundAndLock(
       }, invoiceTimeoutMs);
     });
     bolt11 = await Promise.race([
-      opts.createFundingInvoice(opts.amountMsats, opts.description, onReceiveState),
+      opts.createFundingInvoice(
+        opts.amountMsats,
+        opts.description,
+        onReceiveState,
+        (gateway) => { fundingGateway = gateway; },
+      ),
       timeoutPromise,
     ]);
     if (watchOverride) return watchOverride;
@@ -609,7 +636,7 @@ export async function runFundAndLock(
   }
   const expiresAt = (opts.now ?? defaultNow)() +
     (opts.paymentDeadlineMs ?? DEFAULT_PAYMENT_DEADLINE_MS);
-  emit({ kind: "invoice-created", bolt11, expiresAt });
+  emit({ kind: "invoice-created", bolt11, expiresAt, gateway: fundingGateway });
 
   if (opts.autoPayInvoice) {
     emit({ kind: "paying-with-nwc" });

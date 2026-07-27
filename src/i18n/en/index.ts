@@ -11,6 +11,7 @@ import { common } from "./common.js";
 import { connect } from "./connect.js";
 import { create } from "./create.js";
 import { fund } from "./fund.js";
+import { guided } from "./guided.js";
 import { help } from "./help.js";
 import { labels } from "./labels.js";
 import { me } from "./me.js";
@@ -31,6 +32,7 @@ export const en: Record<string, string> = {
   ...connect,
   ...create,
   ...fund,
+  ...guided,
   ...help,
   ...labels,
   ...me,
