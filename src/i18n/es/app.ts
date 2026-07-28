@@ -9,8 +9,14 @@ export const app: Record<string, string> = {
     "El comprador y el vendedor están de acuerdo; el árbitro no necesita actuar",
   "app.arbiterWaitingBothVotes":
     "Esperando al comprador y al vendedor; el árbitro solo actúa en una disputa",
+  "app.archivedIncomplete":
+    "Falta parte del historial de este intercambio en los relays, así que todavía no se puede reconstruir — el resumen que ves aquí es lo que está guardado en este dispositivo. Puede volver si otro participante se conecta.",
   "app.archivedNotOnRelay":
     "El historial completo de este intercambio ya no está en tu relay de Chama — el resumen que ves aquí es lo que está guardado en este dispositivo.",
+  "app.archivedStillLoading":
+    "Todavía estamos trayendo el historial de este intercambio — espera un momento y vuelve a tocar.",
+  "app.archivedUnreadable":
+    "El historial de este intercambio no se puede leer con tu llave actual — el resumen que ves aquí es lo que está guardado en este dispositivo.",
   "app.askingNwcInvoice": "Pidiendo una factura a tu billetera NWC…",
   "app.backHomeIn": "De vuelta a casa en {name}.",
   "app.backupArbiterStepIn":

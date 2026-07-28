@@ -46,6 +46,7 @@ import {
 } from "../../communities/storage.js";
 import { defaultCurrencyForCommunity } from "../../communities/currency.js";
 import { getTrustedArbiterPool } from "../../arbiters/pool.js";
+import { ARBITER_FAULT_READS_ENABLED } from "../../arbiters/arbiter-fault.js";
 import { assignableBondedArbiters } from "../../arbiters/exposure.js";
 import { sellerIsBonded, resolveListingTenure } from "../../escrow-engine/listing-renewal.js";
 import type { VerifiedBond } from "../../bond-multisig/bond-announcement.js";
@@ -1045,6 +1046,7 @@ export function CreateForm({
   amountDisplayMode,
   communitySlug,
   fetchCommunityBonds,
+  fetchFaultExcludedArbiters,
   authorizeImageUpload,
 }: {
   onCreate: (params: any) => void;
@@ -1060,6 +1062,7 @@ export function CreateForm({
    *  its pool (alongside the always-present OG cabinet). Optional + fail-soft —
    *  absent/throwing just leaves the OG pool, never blocks publish. */
   fetchCommunityBonds?: (community: string) => Promise<VerifiedBond[]>;
+  fetchFaultExcludedArbiters?: (candidates: readonly string[]) => Promise<string[]>;
   /** NIP-98 authorization from the active Chama signer for the photo host. */
   authorizeImageUpload?: ListingImageUploadAuthorizer;
   /** v2.1.1: the community the shell is currently presenting as the
@@ -1265,10 +1268,26 @@ export function CreateForm({
           bondedPool = assignableBondedArbiters({ bonds, tradeMsats: amountMsats, allTrades: [] });
         } catch { /* leave bondedPool empty — OG pool carries it */ }
       }
+      // Fault-attested arbiters (kind 38136) lose the seat — but only as a
+      // PREFERENCE. getTrustedArbiterPool drops the soft exclusion entirely if
+      // honouring it would leave nobody assignable, so an attestation can
+      // never strand a trade. Fail-open: a fetch hiccup excludes nobody.
+      const poolBeforeFaults = getTrustedArbiterPool({
+        community: effectiveCommunity,
+        excludePubkeys: [userPubkey],
+        bondedPool,
+      });
+      let faultExcluded: string[] = [];
+      if (ARBITER_FAULT_READS_ENABLED && fetchFaultExcludedArbiters && poolBeforeFaults.length > 0) {
+        try {
+          faultExcluded = await fetchFaultExcludedArbiters(poolBeforeFaults);
+        } catch { /* leave empty — never invent an exclusion */ }
+      }
       const communityArbiters = getTrustedArbiterPool({
         community: effectiveCommunity,
         excludePubkeys: [userPubkey],
         bondedPool,
+        softExcludePubkeys: faultExcluded,
       });
       const params: any = {
         description,

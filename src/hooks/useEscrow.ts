@@ -126,6 +126,7 @@ import {
 } from "../storage/forgotten-trades.js";
 import {
   EscrowClient,
+  type LoadFailure,
   type EscrowClientConfig,
   type EscrowClientCallbacks,
   type Signer,
@@ -210,6 +211,16 @@ import {
   type ReclaimDestinationChoice,
 } from "../bond-multisig/commitment-bond.js";
 import { buildBondAnnouncementEvent, selectLatestAnnouncements, groupLatestAnnouncementsByCommunity, verifyBondAnnouncement, ARBITER_BOND_ANNOUNCEMENT_KIND, type VerifiedBond } from "../bond-multisig/bond-announcement.js";
+import {
+  ARBITER_FAULT_KIND,
+  excludedArbitersNow,
+  parseArbiterFaultEvent,
+  selectArbiterFaultPairs,
+} from "../arbiters/arbiter-fault.js";
+
+/** Bound on chain fetches triggered by one fault-attestation read, so a flood
+ *  of fabricated escrow ids can't turn a CREATE into a hundred loads. */
+const FAULT_VERIFY_TRADE_CAP = 12;
 import { readCachedCommunityBonds, writeCachedCommunityBonds } from "../arbiters/bonded-pool-cache.js";
 import { getCommitmentBond, upsertCommitmentBond, listCommitmentBonds, newBondId, reconstructBondRecord } from "../bond-multisig/commitment-store.js";
 import { MAINNET as BOND_NETWORK } from "../bond-multisig/multisig.js";
@@ -300,6 +311,7 @@ function readSubstitutionGraceOverride(): number | null {
 import { buildChamaOperationMeta, type ChamaOperationMeta } from "../payments/sats-trace.js";
 import {
   computeArbiterPremium,
+  hasOwnPremiumNote,
   selectPremiumProbeLoads,
   PREMIUM_SPEND_TRY_CANCEL_SECS,
 } from "../arbiters/arbiter-premium.js";
@@ -790,8 +802,17 @@ export interface UseEscrowActions {
   ) => Promise<void>;
   /** Cancel a trade (initiator only, pre-lock) */
   cancel: (escrowId: string, reason?: string) => Promise<EscrowState>;
-  /** Load an escrow from relays by ID */
-  loadEscrow: (escrowId: string) => Promise<EscrowState | null>;
+  /** Load an escrow from relays by ID. `repairFromCache` is for EXPLICIT opens
+   *  only (an archived-trade tap, a deep link): it lets a chain the relays
+   *  can't complete be rebuilt from this device's durable cache, at the cost
+   *  of an IndexedDB read + a second replay pass. Never pass it from boot
+   *  discovery or background sweeps. */
+  loadEscrow: (
+    escrowId: string,
+    opts?: { repairFromCache?: boolean },
+  ) => Promise<EscrowState | null>;
+  /** Why the last loadEscrow of this id returned null (null when it didn't). */
+  getLoadFailure: (escrowId: string) => LoadFailure | null;
   /** Heal a trade in BOTH directions: pull the latest chain in from relays
    *  (re-fetch + merge + replay, so a stale local state catches up to a
    *  counterparty's RESOLVE/COMPLETE), then re-broadcast our cached chain out
@@ -987,6 +1008,9 @@ export interface UseEscrowActions {
   /** Fetch every arbiter's current bond announcement for a community, chain-verified
    *  (the data source for the live-chama liveness score). */
   fetchCommunityBonds: (community: string) => Promise<VerifiedBond[]>;
+  /** Arbiters currently excluded by a verified dual-signed fault attestation.
+   *  Preference-only and fail-open — see the implementation. */
+  fetchFaultExcludedArbiters: (candidates: readonly string[]) => Promise<string[]>;
   /** #77: the signed-in npub's OWN chain-verified bond announcements (kind 38135,
    *  authored by this pubkey, across every community). Lets the Dashboard show a
    *  bond cross-device (a fresh install has no local commitment record). Fail-soft:
@@ -2390,7 +2414,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     return result;
   }, []);
 
-  const loadEscrow = useCallback(async (escrowId: string) => {
+  const loadEscrow = useCallback(async (
+    escrowId: string,
+    opts: { repairFromCache?: boolean } = {},
+  ) => {
     const client = requireClient();
     // Loading a trade by ID is a deliberate "bring it back" — clear any
     // forgotten-denylist entry so it can surface and persist again.
@@ -2398,7 +2425,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     forgottenIdsRef.current.delete(escrowId);
     setState(prev => ({ ...prev, loading: true }));
     try {
-      const result = await client.loadEscrow(escrowId);
+      const result = await client.loadEscrow(escrowId, opts);
       if (result) saveEscrowId(escrowId, stateRef.current?.pubkey ?? null);
       setState(prev => ({ ...prev, loading: false }));
       return result;
@@ -2412,6 +2439,17 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     }
   }, []);
 
+  /** Why the last loadEscrow for this id came back empty — so a caller can
+   *  tell "this history is gone" apart from "the relays returned a chain with
+   *  holes". Sync + fail-soft (no client ⇒ null). */
+  const getLoadFailure = useCallback((escrowId: string): LoadFailure | null => {
+    try {
+      return clientRef.current?.getLastLoadFailure(escrowId) ?? null;
+    } catch {
+      return null;
+    }
+  }, []);
+
   const rebroadcastEscrow = useCallback(async (escrowId: string) => {
     const client = requireClient();
     // Heal in BOTH directions. The old behavior only PUSHED the cached chain
@@ -2420,9 +2458,10 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     // missing tail IN, and the heal silently no-op'd. Pull first (loadEscrow
     // re-fetches from relays, merges with cache, replays to current), THEN push
     // our cache out so a counterparty missing OUR events heals too. Converges
-    // whichever side is behind.
+    // whichever side is behind. A heal is an explicit user action, so the pull
+    // may rebuild from the durable cache (unlike background discovery).
     try {
-      await client.loadEscrow(escrowId);
+      await client.loadEscrow(escrowId, { repairFromCache: true });
     } catch (e) {
       console.debug(`[chama] heal: pull for ${escrowId} failed; pushing cache anyway`, e);
     }
@@ -4165,6 +4204,20 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     if (!decision.payable) return;
     // Durable idempotence + the decline preference: any record blocks.
     if (hasPremiumOutboxRecord(escrowId)) return;
+    // CROSS-DEVICE idempotence. The outbox above is this device's
+    // localStorage; the premium is owed once per identity per trade. Another
+    // device (APK / another origin / a re-install) with an empty outbox would
+    // otherwise spend a second note on a trade already paid — field-confirmed
+    // as 6 duplicate notes across 4 trades. The trade's own chain carries
+    // every 38113, so a note authored by me is proof I already paid; backfill
+    // the local record so this device stops asking and the toggle reads
+    // "Insurance sent". (A genuine same-second race between two devices can
+    // still double-pay; the realistic case — devices opened hours or days
+    // apart — is fully covered.)
+    if (hasOwnPremiumNote(state, pubkey)) {
+      recordPremiumPaid(escrowId, decision.amountMsats);
+      return;
+    }
     recordPremiumSending(escrowId, decision.amountMsats);
     let spent: { oobNotes: string; operationId?: string };
     try {
@@ -4333,6 +4386,7 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
     sendChat,
     cancel: cancelAction,
     loadEscrow,
+    getLoadFailure,
     rebroadcastEscrow,
     refreshMyTrades,
     probeFetchById,
@@ -4877,6 +4931,54 @@ export function useEscrow(config?: UseEscrowConfig): [UseEscrowState, UseEscrowA
         return [];
       }
     },
+    /**
+     * Fault-attested arbiters (kind 38136) among the given candidates.
+     *
+     * Queried by `#p` so this only ever asks about arbiters we're actually
+     * considering. Verification needs each attested trade's chain — an
+     * attestation is only real if BOTH principals of a SETTLED disputed trade
+     * signed it — so referenced trades are loaded, bounded, preferring what is
+     * already in memory.
+     *
+     * FAIL-OPEN by design: any error, timeout, or unloadable trade yields an
+     * empty set. A relay hiccup must never invent an exclusion, and the caller
+     * treats the result as a preference that can never empty the pool.
+     */
+    fetchFaultExcludedArbiters: async (candidates: readonly string[]): Promise<string[]> => {
+      const client = clientRef.current;
+      if (!client || candidates.length === 0) return [];
+      try {
+        const events = await client.queryOnce(
+          { kinds: [ARBITER_FAULT_KIND], "#p": [...candidates] } as any, 6_000,
+        );
+        if (events.length === 0) return [];
+
+        // Load the referenced trades so each attestation can be verified
+        // against its own chain. Bounded — a flood of fabricated ids must not
+        // turn one CREATE into a hundred chain fetches.
+        const referenced: string[] = [];
+        for (const event of events as any[]) {
+          const record = parseArbiterFaultEvent(event);
+          if (record && !referenced.includes(record.payload.escrowId)) {
+            referenced.push(record.payload.escrowId);
+          }
+          if (referenced.length >= FAULT_VERIFY_TRADE_CAP) break;
+        }
+        const states = new Map<string, EscrowState | null>();
+        for (const id of referenced) {
+          const known = client.getState(id);
+          if (known) { states.set(id, known); continue; }
+          states.set(id, await client.loadEscrow(id).catch(() => null));
+        }
+
+        const pairs = selectArbiterFaultPairs(events as any, (id) => states.get(id) ?? null);
+        return excludedArbitersNow(pairs, Math.floor(Date.now() / 1000));
+      } catch (e) {
+        console.debug("[chama] fault-attestation fetch failed (fail-open):", (e as Error)?.message || e);
+        return [];
+      }
+    },
+
     fetchCommunityBonds: async (community: string) => {
       const client = clientRef.current;
       if (!client) throw new Error("Not connected");

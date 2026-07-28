@@ -2135,20 +2135,40 @@ export default function App() {
     // If loadEscrow finishes AFTER the cap, its result still lands in the live
     // list on the next render (harmless), so we never double-load.
     let state: EscrowState | null = null;
+    let timedOut = false;
     try {
       state = await Promise.race([
-        actions.loadEscrow(id),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 10_000)),
+        // An explicit tap is exactly where paying for a durable-cache rebuild
+        // is worth it: the relays may hold only part of this chain, and this
+        // device often still has the rest. Boot discovery deliberately does
+        // NOT ask for this (see EscrowClient.loadEscrow).
+        actions.loadEscrow(id, { repairFromCache: true }),
+        new Promise<null>((resolve) =>
+          setTimeout(() => {
+            timedOut = true;
+            resolve(null);
+          }, 10_000),
+        ),
       ]);
     } catch { /* handled below */ }
     if (state) {
       openEscrow(id, "me");
       return;
     }
-    setToast({
-      message: t("app.archivedNotOnRelay"),
-      type: "info",
-    });
+    // Be honest about WHICH failure this is. The old copy blamed relay
+    // eviction for every empty load, including chains that were merely
+    // incomplete (a COMPLETED trade whose VOTEs are missing can't replay) and
+    // loads that simply hadn't finished. Those tell the user different things
+    // about whether the history is coming back.
+    const failure = timedOut ? null : actions.getLoadFailure(id);
+    const message = timedOut
+      ? t("app.archivedStillLoading")
+      : failure?.reason === "chain-incomplete"
+        ? t("app.archivedIncomplete")
+        : failure?.reason === "undecryptable"
+          ? t("app.archivedUnreadable")
+          : t("app.archivedNotOnRelay");
+    setToast({ message, type: "info" });
   };
 
   useEffect(() => {
@@ -2161,7 +2181,9 @@ export default function App() {
     setDetailBackView("browse");
     setSelectedId(id);
     setView("detail");
-    actions.loadEscrow(id).then((state) => {
+    // Deep link = an explicit open, same as tapping an archived trade: worth a
+    // durable-cache rebuild if the relays only hold part of the chain.
+    actions.loadEscrow(id, { repairFromCache: true }).then((state) => {
       if (!state) {
         setToast({ message: t("app.tradeNotFoundYet", { id }), type: "error" });
       }
@@ -3550,6 +3572,7 @@ export default function App() {
               amountDisplayMode={amountDisplayMode}
               communitySlug={browseCommunity}
               fetchCommunityBonds={actions.fetchCommunityBonds}
+              fetchFaultExcludedArbiters={actions.fetchFaultExcludedArbiters}
               authorizeImageUpload={actions.authorizeImageUpload}
             />
           )}
@@ -3948,6 +3971,7 @@ export default function App() {
               amountDisplayMode={amountDisplayMode}
               communitySlug={browseCommunity}
               fetchCommunityBonds={actions.fetchCommunityBonds}
+              fetchFaultExcludedArbiters={actions.fetchFaultExcludedArbiters}
               authorizeImageUpload={actions.authorizeImageUpload}
             />
           </div>

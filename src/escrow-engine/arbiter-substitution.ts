@@ -248,3 +248,72 @@ export function isPerformanceContest(state: EscrowState): boolean {
   if (state.votes[Role.ARBITER] === Outcome.REFUND) return false; // arbiter adjudicated against the claim
   return true;
 }
+
+// ── Arbiter no-show (accountability #1) ───────────────────────────────────
+//
+// Substitution already rescues the trade when the assigned arbiter never
+// answers a dispute. What it doesn't do is REMEMBER. These helpers derive the
+// no-show purely from the committed chain, so every client agrees without a new
+// event kind, a new assignment era, or any reducer change.
+//
+// A no-show is deliberately narrow — it must never libel an arbiter who simply
+// wasn't needed:
+//   • a dispute actually started (disputeStartAt),
+//   • the backup window actually opened (substitutionEligibleAt ≤ now),
+//   • the ASSIGNED arbiter cast no vote at all, and
+//   • somebody else's arbiter vote is in the chain (a backup did the work).
+// The last clause is what makes it evidence rather than an accusation: a
+// dispute nobody has resolved yet is still live, and being slow is not the same
+// as being absent.
+
+/** Did the assigned arbiter vote on this trade? */
+function assignedArbiterVoted(state: EscrowState): boolean {
+  const assigned = state.participants[Role.ARBITER];
+  if (!assigned) return false;
+  return state.eventChain.some(ve =>
+    ve.kind === EscrowEventKind.VOTE &&
+    (ve.payload as VotePayload | undefined)?.role === Role.ARBITER &&
+    (ve as { raw?: { pubkey?: string } }).raw?.pubkey === assigned
+  );
+}
+
+/** A backup arbiter (anyone but the assigned one) cast the arbiter vote. */
+function backupArbiterVoted(state: EscrowState): boolean {
+  const assigned = state.participants[Role.ARBITER];
+  return state.eventChain.some(ve => {
+    if (ve.kind !== EscrowEventKind.VOTE) return false;
+    if ((ve.payload as VotePayload | undefined)?.role !== Role.ARBITER) return false;
+    const voter = (ve as { raw?: { pubkey?: string } }).raw?.pubkey;
+    return !!voter && voter !== assigned;
+  });
+}
+
+/** True when the assigned arbiter demonstrably left a live dispute to a backup.
+ *  `nowSec` is passed so this stays pure and testable. */
+export function isArbiterNoShow(state: EscrowState, nowSec: number): boolean {
+  if (!state.participants[Role.ARBITER]) return false;
+  const eligibleAt = substitutionEligibleAt(state);
+  if (eligibleAt === null || nowSec < eligibleAt) return false;
+  if (assignedArbiterVoted(state)) return false;
+  return backupArbiterVoted(state);
+}
+
+/** The npub that failed to show on this trade, or null. */
+export function arbiterNoShowNpub(state: EscrowState, nowSec: number): string | null {
+  return isArbiterNoShow(state, nowSec) ? state.participants[Role.ARBITER] ?? null : null;
+}
+
+/** How many of `states` a given arbiter no-showed on. Dedups by escrow id so a
+ *  trade loaded twice can never inflate the count. */
+export function countArbiterNoShows(
+  states: readonly EscrowState[],
+  npub: string,
+  nowSec: number,
+): number {
+  const seen = new Set<string>();
+  for (const state of states) {
+    if (seen.has(state.id)) continue;
+    if (arbiterNoShowNpub(state, nowSec) === npub) seen.add(state.id);
+  }
+  return seen.size;
+}

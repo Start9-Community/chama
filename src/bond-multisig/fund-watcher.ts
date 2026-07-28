@@ -141,6 +141,9 @@ export async function esploraOutspend(
 
 export interface BondFunding {
   utxo: BondUtxo;
+  /** Block the deposit confirmed in, when Esplora reported it. This is the
+   *  tenure clock: unforgeable, and instantly checkable by anyone. */
+  blockHeight?: number;
   /** The ACTUAL on-chain output script at (txid, vout), read off the funding tx —
    *  recompute-don't-trust reaches the deposit. */
   fundingScript: Uint8Array;
@@ -183,7 +186,11 @@ export async function findBondFundingUtxos(params: {
     const tx = await params.fetchJson(`/tx/${u.txid}`);
     const spkHex = tx?.vout?.[u.vout]?.scriptpubkey;
     if (typeof spkHex !== "string" || !/^[0-9a-fA-F]+$/.test(spkHex)) continue;
-    out.push({ utxo: { txid: u.txid, index: u.vout, amountSats: BigInt(u.value) }, fundingScript: hexToBytes(spkHex) });
+    out.push({
+      utxo: { txid: u.txid, index: u.vout, amountSats: BigInt(u.value) },
+      fundingScript: hexToBytes(spkHex),
+      blockHeight: typeof u.status?.block_height === "number" ? u.status.block_height : undefined,
+    });
   }
   return out;
 }

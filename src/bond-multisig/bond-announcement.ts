@@ -169,6 +169,12 @@ export interface VerifiedBond {
   funded: boolean;
   /** True ⇒ still locked (tip < lockUntil) — an active commitment. */
   active: boolean;
+  /** Block the EARLIEST deposit confirmed in — the start of this bond's tenure.
+   *  Undefined when Esplora didn't report a height (never inferred). */
+  fundedAtHeight?: number;
+  /** Funding outpoint txid, so a human can check the claim in a block explorer
+   *  instead of taking the app's word for it. */
+  fundingTxid?: string;
 }
 
 /** ⭐ Chain-verify a parsed announcement: REBUILD the address from (ownerXonly,
@@ -191,6 +197,13 @@ export async function verifyBondAnnouncement(
   });
   const actualSats = utxos.reduce((s, u) => s + u.utxo.amountSats, 0n);
   const tip = ctx.tipHeight;
+  // Tenure starts at the EARLIEST confirmed deposit: topping a bond up later
+  // must never look like starting over, and must never look older either.
+  const heights = utxos
+    .map((u) => u.blockHeight)
+    .filter((h): h is number => typeof h === "number");
+  const fundedAtHeight = heights.length > 0 ? Math.min(...heights) : undefined;
+  const earliest = utxos.find((u) => u.blockHeight === fundedAtHeight) ?? utxos[0];
   return {
     npub: parsed.npub,
     community: parsed.community,
@@ -200,6 +213,8 @@ export async function verifyBondAnnouncement(
     claimedSats: parsed.claimedSats,
     funded: actualSats > 0n,
     active: typeof tip === "number" ? tip < parsed.lockUntil : true,
+    fundedAtHeight,
+    fundingTxid: earliest?.utxo.txid,
   };
 }
 

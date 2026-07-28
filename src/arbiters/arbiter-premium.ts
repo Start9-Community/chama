@@ -132,10 +132,32 @@ export function funderPremiumMsats(
 }
 
 /**
+ * Whether MY premium note for this trade is ALREADY on the trade's own event
+ * chain. The payer outbox (`chama_premium_outbox_v1`) is per-device
+ * localStorage, but a premium is owed once per IDENTITY per trade — so a
+ * second device (APK, another browser origin, a re-installed instance) whose
+ * outbox is empty would sweep the same COMPLETED trade and spend a second
+ * note. Field-confirmed: one payer published 3 notes on one trade across
+ * devices, and the arbiter's earnings ledger counted all three.
+ *
+ * 38113 events are fetched by `#d` with every other escrow event and land in
+ * `state.premiumNotes`, so the chain itself is the cross-device idempotence
+ * gate — no new storage, no sync, authoritative for every device that can
+ * load the trade. Pure.
+ */
+export function hasOwnPremiumNote(
+  state: Pick<EscrowState, "premiumNotes">,
+  myPubkey: string | null,
+): boolean {
+  if (!myPubkey) return false;
+  return (state.premiumNotes ?? []).some((ev) => samePubkey(ev?.raw?.pubkey, myPubkey));
+}
+
+/**
  * Pick the COMPLETED trades on which `myPubkey` still owes a premium.
- * `hasOutboxRecord` is the durable idempotence gate (paid / declined /
- * sending records all block a re-pay). Pure — the App sweep feeds it the
- * live escrow map.
+ * `hasOutboxRecord` is the durable per-device idempotence gate (paid /
+ * declined / sending records all block a re-pay); `hasOwnPremiumNote` is the
+ * cross-device one. Pure — the App sweep feeds it the live escrow map.
  */
 export function selectPremiumPayTargets(opts: {
   escrows: Iterable<EscrowState>;
@@ -146,6 +168,7 @@ export function selectPremiumPayTargets(opts: {
   for (const state of opts.escrows) {
     if (state.status !== EscrowStatus.COMPLETED) continue;
     if (opts.hasOutboxRecord(state.id)) continue;
+    if (hasOwnPremiumNote(state, opts.myPubkey)) continue;
     if (!computeArbiterPremium(state, opts.myPubkey).payable) continue;
     out.push(state.id);
   }

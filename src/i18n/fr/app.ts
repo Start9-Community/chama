@@ -9,8 +9,14 @@ export const app: Record<string, string> = {
     "L'acheteur et le vendeur sont d'accord ; aucune action d'arbitre n'est nécessaire",
   "app.arbiterWaitingBothVotes":
     "En attente de l'acheteur et du vendeur ; l'arbitre n'agit qu'en cas de litige",
+  "app.archivedIncomplete":
+    "Une partie de l'historique de cet échange manque sur les relais : il ne peut pas encore être reconstitué — le résumé ici est ce qui est enregistré sur cet appareil. Il peut revenir si un autre participant se connecte.",
   "app.archivedNotOnRelay":
     "L'historique complet de cet échange n'est plus sur votre relais Chama — le résumé ici est ce qui est enregistré sur cet appareil.",
+  "app.archivedStillLoading":
+    "Récupération de l'historique de cet échange en cours — patientez un instant puis retouchez.",
+  "app.archivedUnreadable":
+    "L'historique de cet échange est illisible avec votre clé actuelle — le résumé ici est ce qui est enregistré sur cet appareil.",
   "app.askingNwcInvoice": "Demande d'une facture à votre portefeuille NWC…",
   "app.backHomeIn": "De retour chez vous sur {name}.",
   "app.backupArbiterStepIn":

@@ -160,6 +160,19 @@ const FETCH_QUORUM_POLL_MS = 200;
 const EOSE_GRACE_MS = 1_000;
 const HEAVY_CURSOR_EVENT_BYTES = 8 * 1024;
 
+// Preferred-relay durability queue. `publish` resolves on the FIRST accept
+// from ANY relay — good for latency, but it means an event published while
+// Chama's own relay was mid-reconnect (or briefly rejecting) lands ONLY on a
+// public relay, with nothing ever re-offering it. Public relays prune; the
+// Chama relay doesn't. That is the shape of the observed damage: chains on
+// relay.chama.community missing exactly one kind (both VOTEs, or the CREATE,
+// or the LOCK) while the rest of the chain is intact — the pieces published
+// during a gap. So: anything the preferred relay did not accept is queued and
+// re-offered the moment it reconnects.
+const PREFERRED_REPUBLISH_MAX = 200;
+const PREFERRED_REPUBLISH_TTL_MS = 24 * 60 * 60 * 1000;
+const PREFERRED_REPUBLISH_FAILURE_STREAK = 3;
+
 // ══════════════════════════════════════════════════════════════════════════
 // RELAY MANAGER
 // ══════════════════════════════════════════════════════════════════════════
@@ -225,6 +238,13 @@ export class RelayManager {
         // Resubscribe all active subscriptions
         for (const [subId, filter] of relay.subscriptions) {
           this.sendToRelay(relay, ["REQ", subId, filter]);
+        }
+
+        // Chama's relay is back: re-offer anything it missed while it was
+        // away (see PREFERRED_REPUBLISH_MAX). Fire-and-forget — a publish
+        // path must never gate on it.
+        if (url === PREFERRED_RELAY_URL) {
+          void this.flushPreferredRepublishQueue().catch(() => {});
         }
       };
 
@@ -603,6 +623,13 @@ export class RelayManager {
     // same error as before.
     const sends = connected.map(relay => ({ relay, promise: this.publishToSingleRelay(relay, event) }));
     const preferredConnected = connected.some((relay) => relay.url === PREFERRED_RELAY_URL);
+    // DURABILITY: the preferred relay isn't even connected, so this publish
+    // can only reach public relays (which prune). Queue it now; the flush on
+    // its next connect is what stops a vote/CREATE published during a
+    // reconnect window from being permanently absent there.
+    if (!preferredConnected && this.relays.has(PREFERRED_RELAY_URL)) {
+      this.queuePreferredRepublish(event);
+    }
 
     return await new Promise((resolve, reject) => {
       let settledCount = 0;
@@ -633,7 +660,13 @@ export class RelayManager {
             errors.push(result.message);
           }
 
-          if (relay.url === PREFERRED_RELAY_URL) preferredSettled = true;
+          if (relay.url === PREFERRED_RELAY_URL) {
+            preferredSettled = true;
+            // Rejected or timed out on Chama's own relay: keep it for the
+            // next connect rather than letting a public-relay accept stand
+            // in for durability.
+            if (!result.accepted) this.queuePreferredRepublish(event);
+          }
 
           if (!resolvedEarly && result.accepted) {
             fallbackAccept = { accepted, rejected, errors: [...errors] };
@@ -747,6 +780,83 @@ export class RelayManager {
 
   /** Pending OK handlers — keyed by "eventId:relayUrl" */
   private pendingOk: Map<string, { resolve: (v: { accepted: boolean; message: string }) => void; timeout: ReturnType<typeof setTimeout> }> = new Map();
+
+  /** Events the PREFERRED relay hasn't accepted yet (it was down, rejected,
+   *  or timed out). Re-offered on its next connect. Bounded by count + TTL. */
+  private preferredRepublishQueue: Map<string, { event: NostrEvent; queuedAt: number }> = new Map();
+  private preferredFlushInFlight = false;
+
+  /** Queue an event for the preferred relay. Idempotent per event id; drops
+   *  the oldest entry when full so a long offline stretch can't grow forever. */
+  private queuePreferredRepublish(event: NostrEvent): void {
+    if (!event?.id || this.preferredRepublishQueue.has(event.id)) return;
+    if (this.preferredRepublishQueue.size >= PREFERRED_REPUBLISH_MAX) {
+      const oldest = [...this.preferredRepublishQueue.entries()]
+        .sort((a, b) => a[1].queuedAt - b[1].queuedAt)[0];
+      if (oldest) this.preferredRepublishQueue.delete(oldest[0]);
+    }
+    this.preferredRepublishQueue.set(event.id, { event, queuedAt: Date.now() });
+  }
+
+  /** Re-offer every queued event to the preferred relay. Called on its
+   *  connect. Serial (one in-flight OK at a time) so a reconnect storm can't
+   *  fan out; an entry only leaves the queue when the relay ACCEPTS it or it
+   *  ages out, so a flush that fails is simply retried on the next connect. */
+  private async flushPreferredRepublishQueue(): Promise<void> {
+    if (this.preferredFlushInFlight || this.preferredRepublishQueue.size === 0) return;
+    const relay = this.relays.get(PREFERRED_RELAY_URL);
+    if (!relay || relay.status !== RelayStatus.CONNECTED) return;
+    this.preferredFlushInFlight = true;
+    try {
+      const cutoff = Date.now() - PREFERRED_REPUBLISH_TTL_MS;
+      let restored = 0;
+      let consecutiveFailures = 0;
+      for (const [id, entry] of [...this.preferredRepublishQueue]) {
+        if (entry.queuedAt < cutoff) {
+          this.preferredRepublishQueue.delete(id);
+          continue;
+        }
+        if (relay.status !== RelayStatus.CONNECTED) break;
+        const result = await this.publishToSingleRelay(relay, entry.event);
+        if (result.accepted) {
+          this.preferredRepublishQueue.delete(id);
+          restored++;
+          consecutiveFailures = 0;
+          continue;
+        }
+        // A relay that's rejecting or timing out won't start accepting three
+        // events later — stop the serial walk (each failure costs the full
+        // publish timeout) and leave the rest queued for the next connect.
+        if (++consecutiveFailures >= PREFERRED_REPUBLISH_FAILURE_STREAK) break;
+      }
+      if (restored > 0) {
+        console.debug(
+          `[relay] preferred-relay durability: re-delivered ${restored} event(s) to ${PREFERRED_RELAY_URL}` +
+            (this.preferredRepublishQueue.size > 0 ? `; ${this.preferredRepublishQueue.size} still queued` : ""),
+        );
+      }
+    } finally {
+      this.preferredFlushInFlight = false;
+    }
+  }
+
+  /**
+   * Hand a set of already-signed events back to the PREFERRED relay — history
+   * this client holds that the relay's own answer was missing (see
+   * relay-backfill.ts). No-op when that relay isn't connected; the events are
+   * queued and re-offered on its next connect. Never throws.
+   */
+  async republishToPreferredRelay(events: readonly NostrEvent[]): Promise<number> {
+    if (events.length === 0) return 0;
+    for (const event of events) this.queuePreferredRepublish(event);
+    const before = this.preferredRepublishQueue.size;
+    await this.flushPreferredRepublishQueue();
+    const delivered = before - this.preferredRepublishQueue.size;
+    if (delivered > 0) {
+      console.debug(`[relay] backfilled ${delivered} recovered event(s) to ${PREFERRED_RELAY_URL}`);
+    }
+    return delivered;
+  }
 
   private publishToSingleRelay(
     relay: RelayConnection,

@@ -132,3 +132,45 @@ export function formatLivenessReadout(l: ChamaLiveness, blocksPerDay = 144): str
   }
   return parts.join(" · ");
 }
+
+// ── Bond tenure (5.7 arbiter card) ───────────────────────────────────────
+//
+// The unforgeable half of an arbiter's standing. Sats can be borrowed for an
+// afternoon; TIME cannot. A fresh npub can post 30,000 sats in ten minutes and
+// can never post eight months of history — only waiting produces that, which
+// is the same asymmetry that makes proof-of-work honest: expensive to produce,
+// instant to verify (one block height, from a call the verifier already makes).
+//
+// Deliberately DESCRIPTIVE, never a virtue claim. "Bonded 6 months" is a fact
+// anyone can check in a block explorer; "trusted arbiter" would be Chama
+// vouching for a person, and the day one of them cheats that is Chama's
+// reputation, not theirs.
+
+/** Blocks a bond has been funded for, or null when the height is unknown. */
+export function bondTenureBlocks(
+  fundedAtHeight: number | null | undefined,
+  tipHeight: number | null | undefined,
+): number | null {
+  if (typeof fundedAtHeight !== "number" || typeof tipHeight !== "number") return null;
+  if (!Number.isFinite(fundedAtHeight) || !Number.isFinite(tipHeight)) return null;
+  return Math.max(0, tipHeight - fundedAtHeight);
+}
+
+/** Coarse tenure tiers. Few, widely spaced — a dozen badges mean nothing, and
+ *  the label is always the duration itself, never a judgement. */
+export type TenureTier = "new" | "month" | "half-year" | "year";
+
+export function tenureTier(blocks: number | null, blocksPerDay: number): TenureTier {
+  if (blocks === null || blocksPerDay <= 0) return "new";
+  const days = blocks / blocksPerDay;
+  if (days >= 365) return "year";
+  if (days >= 180) return "half-year";
+  if (days >= 30) return "month";
+  return "new";
+}
+
+/** Whole days a bond has stood, for display. Null when unknown — never guessed. */
+export function tenureDays(blocks: number | null, blocksPerDay: number): number | null {
+  if (blocks === null || blocksPerDay <= 0) return null;
+  return Math.floor(blocks / blocksPerDay);
+}

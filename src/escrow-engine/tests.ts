@@ -141,7 +141,10 @@ import {
 import {
   arbiterPriorityOrder,
   arbiterPriorityOrderFor,
+  arbiterNoShowNpub,
   arbiterVotePriority,
+  countArbiterNoShows,
+  isArbiterNoShow,
   disputeStartAt,
   substitutionEligibleAt,
   SUBSTITUTION_GRACE_MAX_SECONDS,
@@ -162,6 +165,20 @@ import {
   type Signer,
   type UnsignedEvent,
 } from "./escrow-client.js";
+import {
+  ARBITER_FAULT_KIND,
+  FAULT_EXCLUSION_FLOOR_SECS,
+  buildArbiterFaultEvent,
+  canAttestArbiterFault,
+  excludedArbitersNow,
+  isArbiterFaultExcluded,
+  selectArbiterFaultPairs,
+  selectArbiterRebuttal,
+  reclaimUnderCloud,
+  unansweredAttestations,
+} from "../arbiters/arbiter-fault.js";
+import { bondTenureBlocks, tenureDays, tenureTier } from "../arbiters/live-chama.js";
+import { arbiterRulingConcentration, concentrationWorthShowing } from "../arbiters/arbiter-pattern.js";
 import { RelayManager, RelayStatus } from "./relay-manager.js";
 import {
   buildNip99ListingEvent,
@@ -2530,6 +2547,48 @@ console.log("\n── ARBITER SUBSTITUTION (pooled share, grace window, priority
   assert(arbiterVotePriority(state, order[1]) === 1, "substitution: backup1 has priority 1");
   assert(arbiterVotePriority(state, BUYER_PK) === null, "substitution: buyer is not in the order");
 
+  // ── Accountability #1: the no-show is DERIVED, never asserted ──────────
+  // Narrow on purpose. Substitution already rescues the trade; this only
+  // remembers who left it to a backup, and must never libel an arbiter who
+  // was slow, or one nobody needed.
+  {
+    const ns = disputedPooledState();
+    const eligible = substitutionEligibleAt(ns.state)!;
+
+    assert(!isArbiterNoShow(ns.state, eligible - 1),
+      "no-show: nothing before the backup window opens (slow is not absent)");
+    assert(!isArbiterNoShow(ns.state, eligible + 1),
+      "no-show: an unresolved dispute is still live — no backup vote, no no-show");
+
+    // A BACKUP casts the arbiter vote → now it is evidence. The reducer gates
+    // a backup on the EVENT's created_at, so stamp it past the window.
+    const backupVote = voteEvent(Role.ARBITER, ARBITER2_PK, Outcome.REFUND, ns.prevId);
+    (backupVote.raw as any).created_at = eligible + 1;
+    const backupApplied = applyEvent(ns.state, backupVote) as any;
+    assert(backupApplied.ok, "no-show: a post-window backup arbiter vote is accepted by the reducer");
+    const afterBackup = backupApplied.state;
+    assert(isArbiterNoShow(afterBackup, eligible + 1),
+      "no-show: backup voted after the window → the assigned arbiter no-showed");
+    assert(arbiterNoShowNpub(afterBackup, eligible + 1) === ARBITER_PK,
+      "no-show: names the assigned arbiter, not the backup who rescued it");
+    assert(!isArbiterNoShow(afterBackup, eligible - 1),
+      "no-show: still nothing before the window, even once a backup has voted");
+
+    // The ASSIGNED arbiter voting clears it, whoever else also voted.
+    const assignedVote = voteEvent(Role.ARBITER, ARBITER_PK, Outcome.REFUND, ns.prevId);
+    const assignedApplied = applyEvent(ns.state, assignedVote) as any;
+    assert(assignedApplied.ok, "no-show: the assigned arbiter's vote is accepted with no wait");
+    const afterAssigned = assignedApplied.state;
+    assert(!isArbiterNoShow(afterAssigned, eligible + 10_000),
+      "no-show: an arbiter who actually voted is never a no-show");
+
+    // Counting dedups by escrow id and only counts the named npub.
+    assert(countArbiterNoShows([afterBackup, afterBackup], ARBITER_PK, eligible + 1) === 1,
+      "no-show: the same trade counted twice still counts once");
+    assert(countArbiterNoShows([afterBackup], ARBITER2_PK, eligible + 1) === 0,
+      "no-show: the rescuing backup accrues nothing");
+  }
+
   // Dispute clock + grace boundary (long trade → 4h cap applies).
   assert(disputeStartAt(state) === disputeAt, "substitution: dispute starts at the LATER disagreeing vote");
   const eligibleAt = substitutionEligibleAt(state)!;
@@ -3877,6 +3936,243 @@ console.log("\n── Locker released at RESOLVE ──");
   // Pre-resolution, both sides stay active (the boundary is RESOLVE, not own-vote).
   assert(hasActiveBuyerSellerCommitment({ escrows: [state], userPubkey: SELLER_PK }) === true,
     "locker-release: before RESOLVE the seller is still committed (dispute could still need them)");
+}
+
+
+// ── 5b-tenure. BOND TENURE (5.7 arbiter card) ────────────────────────────
+console.log("\n── BOND TENURE (unforgeable, descriptive) ──");
+{
+  const PER_DAY = 144; // mainnet
+
+  assert(bondTenureBlocks(963_000, 963_144) === 144, "tenure: measured in blocks since the funding height");
+  assert(bondTenureBlocks(null, 963_144) === null, "tenure: unknown funding height is never guessed");
+  assert(bondTenureBlocks(963_000, null) === null, "tenure: unknown tip is never guessed");
+  assert(bondTenureBlocks(963_200, 963_000) === 0,
+    "tenure: a tip behind the funding height floors at zero, never negative");
+
+  assert(tenureDays(144 * 45, PER_DAY) === 45, "tenure: whole days for display");
+  assert(tenureDays(null, PER_DAY) === null, "tenure: no days without a measurement");
+
+  assert(tenureTier(144 * 3, PER_DAY) === "new", "tenure: a three-day bond is new");
+  assert(tenureTier(144 * 30, PER_DAY) === "month", "tenure: one month reaches the first tier");
+  assert(tenureTier(144 * 179, PER_DAY) === "month", "tenure: tiers do not round up early");
+  assert(tenureTier(144 * 180, PER_DAY) === "half-year", "tenure: six months reaches the second tier");
+  assert(tenureTier(144 * 365, PER_DAY) === "year", "tenure: a year reaches the top tier");
+  assert(tenureTier(null, PER_DAY) === "new", "tenure: unmeasurable reads as new, never as earned");
+}
+
+
+// ── 5d. ARBITER RULING CONCENTRATION (the collusion instrument) ──────────
+console.log("\n── ARBITER RULING CONCENTRATION (pattern, not testimony) ──");
+{
+  const FRIEND = "f1".repeat(32);
+  const OTHER_BUYER = "0b".repeat(32);
+
+  /** A decided dispute: both principals voted and disagreed, arbiter ruled. */
+  const decided = (opts: {
+    id: string;
+    arbiter?: string;
+    outcome?: Outcome;
+    buyer?: string;
+    seller?: string;
+    category?: string;
+    contested?: boolean;
+    arbiterVoter?: string;
+  }): EscrowState => {
+    const arbiter = opts.arbiter ?? ARBITER_PK;
+    const outcome = opts.outcome ?? Outcome.RELEASE;
+    const contested = opts.contested ?? true;
+    return {
+      id: opts.id,
+      status: EscrowStatus.COMPLETED,
+      category: opts.category ?? "p2p-trade",
+      participants: {
+        [Role.BUYER]: opts.buyer ?? BUYER_PK,
+        [Role.SELLER]: opts.seller ?? SELLER_PK,
+        [Role.ARBITER]: arbiter,
+      },
+      votes: contested
+        ? { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND, [Role.ARBITER]: outcome }
+        : { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.RELEASE },
+      eventChain: [{
+        kind: EscrowEventKind.VOTE,
+        payload: { role: Role.ARBITER, outcome },
+        raw: { pubkey: opts.arbiterVoter ?? arbiter, created_at: 100 },
+      }],
+    } as unknown as EscrowState;
+  };
+
+  // Exchange: RELEASE favours the BUYER. The beneficiary is who the ARBITER's
+  // own vote favoured, not whoever the chain finally paid.
+  const one = arbiterRulingConcentration([decided({ id: "t1" })], ARBITER_PK);
+  assert(one.rulings === 1 && one.byBeneficiary[0].npub === BUYER_PK,
+    "concentration: beneficiary is who the arbiter's vote favoured");
+  assert(one.topShare === 1, "concentration: a single ruling is 1/1 by definition");
+
+  // Marketplace flips the direction — a RELEASE pays the seller there.
+  const mkt = arbiterRulingConcentration([decided({ id: "t2", category: "marketplace" })], ARBITER_PK);
+  assert(mkt.byBeneficiary[0].npub === SELLER_PK,
+    "concentration: direction follows the trade category, not a fixed role");
+
+  // An uncontested trade is not a ruling — the arbiter decided nothing.
+  assert(arbiterRulingConcentration([decided({ id: "t3", contested: false })], ARBITER_PK).rulings === 0,
+    "concentration: an agreed trade is never counted as a ruling");
+
+  // A backup's vote is not this arbiter's ruling.
+  assert(arbiterRulingConcentration([decided({ id: "t4", arbiterVoter: ARBITER2_PK })], ARBITER_PK).rulings === 0,
+    "concentration: only the arbiter's OWN vote counts as their ruling");
+
+  // The fingerprint: five rulings, all for the same counterparty.
+  const fingerprint = arbiterRulingConcentration([
+    decided({ id: "f1", buyer: FRIEND }),
+    decided({ id: "f2", buyer: FRIEND }),
+    decided({ id: "f3", buyer: FRIEND }),
+    decided({ id: "f4", buyer: FRIEND }),
+    decided({ id: "f5", buyer: FRIEND }),
+  ], ARBITER_PK);
+  assert(fingerprint.rulings === 5 && fingerprint.topShare === 1,
+    "concentration: five of five for one counterparty is a full-share fingerprint");
+
+  // Spread rulings look like ordinary arbitration.
+  const spread = arbiterRulingConcentration([
+    decided({ id: "s1", buyer: FRIEND }),
+    decided({ id: "s2", buyer: OTHER_BUYER }),
+    decided({ id: "s3", buyer: OTHER_BUYER }),
+    decided({ id: "s4", outcome: Outcome.REFUND }),
+  ], ARBITER_PK);
+  assert(spread.rulings === 4 && spread.topShare === 0.5,
+    "concentration: a spread of beneficiaries reports a low top share");
+  assert(spread.byBeneficiary[0].count >= spread.byBeneficiary[1].count,
+    "concentration: beneficiaries are sorted most-favoured first");
+
+  // Dedup — a trade loaded twice cannot inflate the count.
+  assert(arbiterRulingConcentration([decided({ id: "d1" }), decided({ id: "d1" })], ARBITER_PK).rulings === 1,
+    "concentration: the same trade counted twice still counts once");
+
+  // The denominator gate: too few rulings to mean anything.
+  assert(!concentrationWorthShowing(one),
+    "concentration: 1 of 1 is a first dispute, not a pattern — not shown");
+  assert(concentrationWorthShowing(fingerprint),
+    "concentration: five rulings clear the threshold and are worth showing");
+  assert(arbiterRulingConcentration([], ARBITER_PK).topShare === 0,
+    "concentration: no rulings is zero share, never a divide-by-zero");
+}
+
+// ── 5c. ARBITER FAULT ATTESTATION (kind 38136, accountability #2) ────────
+console.log("\n── ARBITER FAULT ATTESTATION (dual-signed, settled-only) ──");
+{
+  const OTHER_PK = "cd".repeat(32);
+  const FAULT_TRADE = "sm_fault_trade";
+
+  /** A settled trade where buyer and seller disagreed and the arbiter ruled. */
+  const settledDisputed = (status: EscrowStatus = EscrowStatus.COMPLETED): EscrowState => ({
+    id: FAULT_TRADE,
+    status,
+    participants: {
+      [Role.BUYER]: BUYER_PK,
+      [Role.SELLER]: SELLER_PK,
+      [Role.ARBITER]: ARBITER_PK,
+    },
+    votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.REFUND, [Role.ARBITER]: Outcome.REFUND },
+    eventChain: [
+      { kind: EscrowEventKind.VOTE, payload: { role: Role.ARBITER, outcome: Outcome.REFUND }, raw: { pubkey: ARBITER_PK, created_at: 100 } },
+    ],
+  } as unknown as EscrowState);
+
+  const faultEvent = (signer: string, createdAt: number, escrowId = FAULT_TRADE, arbiter = ARBITER_PK) => {
+    const built = buildArbiterFaultEvent({ escrowId, arbiter, reason: "ruled for their friend", createdAt });
+    return { ...built, id: `ev_${signer.slice(0, 4)}_${createdAt}`, pubkey: signer, sig: "sig" } as unknown as NostrEvent;
+  };
+
+  const settled = settledDisputed();
+  const tradeFor = (id: string) => (id === FAULT_TRADE ? settled : null);
+
+  // Eligibility — settled only, principals only.
+  assert(canAttestArbiterFault(settled, BUYER_PK), "fault: a principal of a settled disputed trade may attest");
+  assert(!canAttestArbiterFault(settled, OTHER_PK), "fault: a stranger may never attest");
+  assert(!canAttestArbiterFault(settled, ARBITER_PK), "fault: the arbiter cannot attest against themselves");
+  assert(!canAttestArbiterFault({ ...settled, status: EscrowStatus.LOCKED } as EscrowState, BUYER_PK),
+    "fault: NOT attestable mid-trade — it would become leverage over the ruling");
+  const agreed = { ...settled, votes: { [Role.BUYER]: Outcome.RELEASE, [Role.SELLER]: Outcome.RELEASE } } as unknown as EscrowState;
+  assert(!canAttestArbiterFault(agreed, BUYER_PK),
+    "fault: no disagreement means the arbiter had no say to abuse");
+
+  // Pool exclusion is a PREFERENCE — it must never strand a trade.
+  {
+    const A = "a1".repeat(32), B = "b2".repeat(32);
+    const both = getTrustedArbiterPool({ community: null, bondedPool: [A, B] });
+    assert(both.length === 2, "fault-pool: baseline has both arbiters");
+    const oneOut = getTrustedArbiterPool({ community: null, bondedPool: [A, B], softExcludePubkeys: [A] });
+    assert(oneOut.length === 1 && oneOut[0] === B,
+      "fault-pool: an attested arbiter loses the seat while another remains");
+    const allOut = getTrustedArbiterPool({ community: null, bondedPool: [A, B], softExcludePubkeys: [A, B] });
+    assert(allOut.length === 2,
+      "fault-pool: excluding EVERY arbiter is ignored — a trade is never stranded");
+    const hardStillHard = getTrustedArbiterPool({ community: null, bondedPool: [A, B], excludePubkeys: [A, B] });
+    assert(hardStillHard.length === 0,
+      "fault-pool: hard exclusion (parties) is unchanged and still absolute");
+  }
+
+  // One side alone is worthless — the entire doctrine.
+  assert(selectArbiterFaultPairs([faultEvent(BUYER_PK, 200)], tradeFor).length === 0,
+    "fault: a one-sided complaint is not an attestation");
+  assert(selectArbiterFaultPairs([faultEvent(BUYER_PK, 200), faultEvent(OTHER_PK, 201)], tradeFor).length === 0,
+    "fault: a stranger co-signing does not complete a pair");
+
+  // Both former opponents agreeing = the signal.
+  const pairs = selectArbiterFaultPairs([faultEvent(BUYER_PK, 200), faultEvent(SELLER_PK, 260)], tradeFor);
+  assert(pairs.length === 1 && pairs[0].arbiter === ARBITER_PK,
+    "fault: both principals agreeing forms one attestation naming the arbiter");
+  assert(pairs[0].attestedAt === 260,
+    "fault: the accusation completes at the LATER signature");
+
+  // Exclusion runs on an absolute clock, not on arbiter-chosen terms.
+  assert(isArbiterFaultExcluded(pairs, ARBITER_PK, 260 + 1),
+    "fault: excluded immediately once the pair completes");
+  assert(isArbiterFaultExcluded(pairs, ARBITER_PK, 260 + FAULT_EXCLUSION_FLOOR_SECS - 1),
+    "fault: still excluded just before the absolute floor expires");
+  assert(!isArbiterFaultExcluded(pairs, ARBITER_PK, 260 + FAULT_EXCLUSION_FLOOR_SECS + 1),
+    "fault: a short self-chosen bond term cannot shorten the floor");
+  const longTermEnd = 260 + FAULT_EXCLUSION_FLOOR_SECS * 3;
+  assert(isArbiterFaultExcluded(pairs, ARBITER_PK, longTermEnd - 1, longTermEnd),
+    "fault: a long term they cheated during cannot be escaped before it ends");
+  assert(!isArbiterFaultExcluded(pairs, SELLER_PK, 260 + 1),
+    "fault: exclusion names only the attested arbiter");
+  assert(excludedArbitersNow(pairs, 260 + 1).includes(ARBITER_PK),
+    "fault: the excluded set surfaces the attested arbiter");
+
+  // Right of reply — only the accused, only about themselves.
+  const rebuttal = (signer: string, createdAt: number) => {
+    const built = buildArbiterFaultEvent({ escrowId: FAULT_TRADE, arbiter: ARBITER_PK, reason: "both lied", createdAt, rebuttal: true });
+    return { ...built, id: `rb_${createdAt}`, pubkey: signer, sig: "sig" } as unknown as NostrEvent;
+  };
+  assert(selectArbiterRebuttal([rebuttal(ARBITER_PK, 300)], pairs[0])?.payload.reason === "both lied",
+    "fault: the accused arbiter's signed reply is attached");
+  assert(selectArbiterRebuttal([rebuttal(BUYER_PK, 300)], pairs[0]) === null,
+    "fault: nobody else can post a reply on the arbiter's behalf");
+  assert(selectArbiterRebuttal([], pairs[0]) === null,
+    "fault: silence is silence — no reply is fabricated");
+
+  // #3 — the exit is legible, never blocked.
+  {
+    const live = reclaimUnderCloud(pairs, ARBITER_PK, true);
+    assert(live?.reclaimed === false && live?.attestations === 1 && live?.unanswered === 1,
+      "cloud: a live bond with an unanswered attestation is a cloud, not an exit");
+    const exited = reclaimUnderCloud(pairs, ARBITER_PK, false);
+    assert(exited?.reclaimed === true,
+      "cloud: once the bond is no longer funded, the exit is recorded");
+    assert(reclaimUnderCloud(pairs, SELLER_PK, false) === null,
+      "cloud: an arbiter with no attestations has nothing to record");
+    const answered = reclaimUnderCloud(pairs, ARBITER_PK, false, [rebuttal(ARBITER_PK, 300)]);
+    assert(answered?.attestations === 1 && answered?.unanswered === 0,
+      "cloud: a signed reply is counted — answered is not the same as unanswered");
+    assert(unansweredAttestations(pairs, ARBITER_PK, []).length === 1,
+      "cloud: silence leaves the attestation unanswered");
+  }
+
+  // A rebuttal never clears the exclusion; it only lets the market judge.
+  assert(isArbiterFaultExcluded(pairs, ARBITER_PK, 300),
+    "fault: replying does not lift the exclusion");
 }
 
 // ── 6. CLAIM + COMPLETE ──────────────────────────────────────────────────
@@ -20354,6 +20650,106 @@ console.log("\n── ESCROW CLIENT — Browse listing hydration ──");
   );
   coalescedClient.disconnect();
 
+  // ── CHAIN REPAIR FROM THE DURABLE CACHE + RELAY BACKFILL ──
+  //
+  // Field case (arbiter's device, 2026-07): relay.chama.community held a
+  // COMPLETED trade's CREATE/JOIN/LOCK/RESOLVE/CLAIM/COMPLETE but NOT its two
+  // VOTEs — on any relay. RESOLVE then dies on THRESHOLD_NOT_MET, loadEscrow
+  // returns null, and every such trade read as "not on your relay anymore"
+  // even though this device's durable cache still held all 10 events. The
+  // cache was consulted ONLY when relays returned zero, so a partial answer
+  // (8 > 0) locked the user out of history they owned. 16 of that device's 77
+  // post-relay trades were in this state.
+  {
+    const cacheMod = await import("./escrow-event-cache.js");
+    await cacheMod.clearEventCache();
+    FakeWebSocket.instances = [];
+    const repairClient = new EscrowClient(
+      fakeSigner,
+      {
+        // The PREFERRED relay, so the backfill leg engages too.
+        relays: ["wss://relay.chama.community"],
+        wsImpl: FakeWebSocket as unknown as typeof WebSocket,
+        verifyEvent: () => true,
+      },
+    );
+    repairClient.connect();
+    const repairSocket = FakeWebSocket.instances[0]!;
+    repairSocket.onopen?.({} as Event);
+
+    // The relay's copy: everything EXCEPT the two votes.
+    const holed = [create, lock, resolve, claim, complete];
+    const answerFetch = async (events: typeof holed) => {
+      const before = repairSocket.sent.length;
+      await waitUntil(() => repairSocket.sent.slice(before - 1).some(raw => {
+        const msg = JSON.parse(raw);
+        return msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_");
+      }));
+      const sub = repairSocket.sent
+        .map(raw => JSON.parse(raw))
+        .filter(msg => msg[0] === "REQ" && String(msg[1]).startsWith("sm_fetch_"))
+        .at(-1)![1];
+      for (const event of events) repairSocket.emit(["EVENT", sub, rawFromParsed(event)]);
+      repairSocket.emit(["EOSE", sub]);
+    };
+
+    const holedLoad = repairClient.loadEscrow(ESCROW_ID);
+    await answerFetch(holed);
+    const holedState = await holedLoad;
+    const holedFailure = repairClient.getLastLoadFailure(ESCROW_ID);
+    assert(holedState === null,
+      "chain-repair: a relay chain missing its VOTEs can't replay (unchanged)");
+    assert(holedFailure?.reason === "chain-incomplete"
+      && holedFailure.code === "THRESHOLD_NOT_MET",
+      "chain-repair: the null load is reported as INCOMPLETE, not 'gone from the relay'",
+      JSON.stringify(holedFailure));
+
+    // Same relay answer — but now this device still holds the full chain.
+    await cacheMod.putCachedEvents(
+      ESCROW_ID,
+      [create, lock, voteBuyer, voteSeller, resolve, claim, complete].map(rawFromParsed),
+      EscrowStatus.COMPLETED,
+    );
+
+    // ⚠ LAUNCH-FREEZE GUARD. A background/boot-style load must NOT reach for
+    // the cache even now that it holds the answer: a device with a lot of
+    // holed history would otherwise do an IndexedDB read + a second
+    // decrypt/replay pass for every such trade during the discovery flood,
+    // which is the path that froze Tauri on launch. Repair is opt-in.
+    const backgroundLoad = repairClient.loadEscrow(ESCROW_ID);
+    await answerFetch(holed);
+    assert(await backgroundLoad === null,
+      "chain-repair: a background load never consults the durable cache (launch stays relay-only)");
+
+    const repairedLoad = repairClient.loadEscrow(ESCROW_ID, { repairFromCache: true });
+    await answerFetch(holed);
+    const repairedState = await repairedLoad;
+    assert(repairedState?.status === EscrowStatus.COMPLETED,
+      "chain-repair: the durable cache fills the relay's gap and the trade opens again");
+    assert(repairClient.getLastLoadFailure(ESCROW_ID) === null,
+      "chain-repair: a successful load clears the recorded failure");
+
+    // …and the recovered events are handed BACK to the Chama relay, so the
+    // repair reaches every other participant instead of one device.
+    const missingIds = new Set([voteBuyer.raw.id, voteSeller.raw.id]);
+    const offered = new Set<string>();
+    for (let i = 0; i < 60 && offered.size < missingIds.size; i++) {
+      for (const raw of repairSocket.sent) {
+        const msg = JSON.parse(raw);
+        if (msg[0] !== "EVENT" || !msg[1]?.id || offered.has(msg[1].id)) continue;
+        offered.add(msg[1].id);
+        repairSocket.emit(["OK", msg[1].id, true, ""]);
+      }
+      await new Promise(r => setTimeout(r, 5));
+    }
+    assert(offered.size === missingIds.size && [...offered].every(id => missingIds.has(id)),
+      "chain-repair: exactly the events the relay was missing are republished to it",
+      JSON.stringify([...offered]));
+
+    repairClient.disconnect();
+    await cacheMod.clearEventCache();
+  }
+
   FakeWebSocket.instances = [];
   const orderClient = new EscrowClient(
     fakeSigner,
@@ -21432,6 +21828,58 @@ console.log("\n── DURABLE ESCROW-EVENT CACHE ──");
     "event-cache: only after ALL terminals are gone does it evict the oldest live trade");
 }
 
+// ── RELAY BACKFILL (hand recovered history back to the relay) ────────────
+//
+// When the durable cache is what made a load succeed, this device holds
+// history the relays lost. Field survey: 16 of 77 post-relay trades had holes
+// on relay.chama.community (missing VOTEs / CREATE / LOCK) and the device
+// cache held more events than the relay for 50 of 124 trades. Escrow events
+// are signed, so republishing repairs the relay for every participant.
+console.log("\n── RELAY BACKFILL ──");
+{
+  const bf = await import("../escrow-engine/relay-backfill.js");
+  const ev = (id: string, created_at: number) =>
+    ({ id, kind: 38103, pubkey: "p", created_at, tags: [], content: "", sig: "sig" }) as any;
+
+  const local = [ev("create", 100), ev("vote-a", 300), ev("vote-b", 200), ev("resolve", 400)];
+  const fromRelay = [ev("create", 100), ev("resolve", 400)];
+  const missing = bf.selectBackfillEvents(local, fromRelay);
+  assert(missing.map((e: any) => e.id).join(",") === "vote-b,vote-a",
+    "backfill: only the events the relay didn't return, oldest-first (CREATE before LOCK order)");
+  assert(bf.selectBackfillEvents(local, local).length === 0,
+    "backfill: a complete relay answer produces nothing to send back");
+  assert(bf.selectBackfillEvents([], fromRelay).length === 0,
+    "backfill: nothing local → nothing to send");
+  assert(bf.selectBackfillEvents([ev("dupe", 1), ev("dupe", 1)], []).length === 1,
+    "backfill: deduped by event id");
+  assert(bf.selectBackfillEvents(
+    [{ id: "unsigned", created_at: 1 } as any, ev("ok", 2)], []).map((e: any) => e.id).join(",") === "ok",
+    "backfill: an unsigned/malformed local record is never republished");
+  const many = Array.from({ length: 80 }, (_, i) => ev(`e${i}`, i));
+  assert(bf.selectBackfillEvents(many, []).length === bf.MAX_BACKFILL_EVENTS,
+    "backfill: capped so one tap can never become a publish flood");
+  assert(bf.selectBackfillEvents(many, [], 3).length === 3,
+    "backfill: the cap is caller-overridable");
+
+  // Republished events are REDELIVERED by the relay to every subscribed
+  // client, so repair must never become a sweep: one shot per trade, a
+  // session ceiling, and a pacing floor for rapid taps through a list.
+  const base = { alreadyBackfilled: false, sessionCount: 0, lastBackfillAt: 0, now: 1_000_000 };
+  assert(bf.shouldBackfillNow(base) === true,
+    "backfill/bounds: a first repair may hand its events back");
+  assert(bf.shouldBackfillNow({ ...base, alreadyBackfilled: true }) === false,
+    "backfill/bounds: ONE-SHOT per trade — a re-tap never re-offers the same chain");
+  assert(bf.shouldBackfillNow({
+    ...base, sessionCount: bf.MAX_BACKFILL_TRADES_PER_SESSION }) === false,
+    "backfill/bounds: the session ceiling stops a 50-trade repair burst");
+  assert(bf.shouldBackfillNow({
+    ...base, lastBackfillAt: base.now - (bf.MIN_BACKFILL_INTERVAL_MS - 1) }) === false,
+    "backfill/bounds: batches are paced — tapping fast doesn't stack them");
+  assert(bf.shouldBackfillNow({
+    ...base, lastBackfillAt: base.now - bf.MIN_BACKFILL_INTERVAL_MS }) === true,
+    "backfill/bounds: past the pacing floor, repair resumes");
+}
+
 // ── ARBITER PREMIUM (task #53 E1: the 0.5% insurance, kind 38113) ────────
 //
 // Load-bearing invariants: 25bps-per-side math · note-size floor ·
@@ -21545,6 +21993,37 @@ console.log("\n── ARBITER PREMIUM (compute + kind 38113 + ledger) ──");
   });
   assert(targets.length === 1 && targets[0] === "pp-done",
     "premium: pay targets = COMPLETED + payable + no outbox record only");
+
+  // ── CROSS-DEVICE double-pay guard (field bug) ──
+  // The outbox is per-device localStorage; the premium is owed once per
+  // IDENTITY per trade. A second device with an empty outbox re-swept
+  // already-paid trades and spent duplicate notes (observed: one payer, 6
+  // duplicate notes across 4 trades, +119 sats to the arbiter's ledger). The
+  // trade's own chain carries every 38113, so a note authored by me is the
+  // cross-device proof that I already paid.
+  const ownNote = (pk: string) => ({ raw: { id: `ev-${pk.slice(0, 4)}`, pubkey: pk } }) as any;
+  assert(ap.hasOwnPremiumNote({ premiumNotes: [ownNote(BUYER_PK)] } as any, BUYER_PK) === true,
+    "premium/x-device: my own 38113 on the chain counts as already paid");
+  assert(ap.hasOwnPremiumNote({ premiumNotes: [ownNote(BUYER_PK)] } as any, BUYER_PK.toUpperCase()) === true,
+    "premium/x-device: the pubkey match is case-insensitive");
+  assert(ap.hasOwnPremiumNote({ premiumNotes: [ownNote(SELLER_PK)] } as any, BUYER_PK) === false,
+    "premium/x-device: the OTHER principal's note is not mine — I still owe");
+  assert(ap.hasOwnPremiumNote({ premiumNotes: [] } as any, BUYER_PK) === false
+    && ap.hasOwnPremiumNote({} as any, BUYER_PK) === false
+    && ap.hasOwnPremiumNote({ premiumNotes: [ownNote(BUYER_PK)] } as any, null) === false,
+    "premium/x-device: no notes / no premiumNotes / no pubkey → not paid");
+  const xDeviceTargets = ap.selectPremiumPayTargets({
+    escrows: [
+      // Empty outbox (fresh device) but MY note is already on the chain.
+      mkTrade("pp-other-device", EscrowStatus.COMPLETED, { premiumNotes: [ownNote(BUYER_PK)] }),
+      // Only the counterparty has paid — I still owe.
+      mkTrade("pp-counterparty-only", EscrowStatus.COMPLETED, { premiumNotes: [ownNote(SELLER_PK)] }),
+    ],
+    myPubkey: BUYER_PK,
+    hasOutboxRecord: () => false,
+  });
+  assert(xDeviceTargets.length === 1 && xDeviceTargets[0] === "pp-counterparty-only",
+    "premium/x-device: a trade I already paid from ANOTHER device is never re-swept");
 
   const noteEv = (id: string) => ({ raw: { id, pubkey: BUYER_PK } }) as any;
   const redeemTargets = ap.selectPremiumRedeemTargets({

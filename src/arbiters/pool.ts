@@ -40,6 +40,9 @@ export const BLF_OFFICIAL_ARBITER_NPUBS = [...BLF_CABINET_NPUBS];
 export interface TrustedArbiterPoolOptions {
   community?: string | null;
   excludePubkeys?: Array<string | null | undefined>;
+  /** Preference-only exclusion (fault-attested arbiters). Dropped entirely if
+   *  honouring it would leave no assignable arbiter — see getTrustedArbiterPool. */
+  softExcludePubkeys?: Array<string | null | undefined>;
   /** Bond Phase-1 capacity seam (DORMANT until exposure.BONDS_ENFORCED).
    *  When enforcement is live AND this is supplied, over-capacity arbiters for
    *  the trade are skipped — but the pool is NEVER emptied (a live trade must
@@ -238,12 +241,27 @@ export function getTrustedArbiterPool(options: TrustedArbiterPoolOptions = {}): 
   );
 
   const sources = getTrustedArbiterPoolSources(options);
-  const pool = unique([
+  const hardFiltered = unique([
     ...sources.rosterArbiters,
     ...sources.deviceTrusted,
     ...sources.bondedArbiters,
   ])
     .filter((pk) => !excluded.has(pk));
+
+  // Fault-attested arbiters (kind 38136) are a PREFERENCE, never a hard bar.
+  // Losing the seat is the punishment; stranding a trade because every
+  // available arbiter is under a cloud would punish the traders instead. So if
+  // honouring the soft exclusion would empty the pool, we seat them anyway —
+  // the same never-empty doctrine the OG fallback uses.
+  const softExcluded = new Set(
+    (options.softExcludePubkeys ?? [])
+      .map((pk) => pk?.toLowerCase())
+      .filter((pk): pk is string => !!pk)
+  );
+  const preferred = softExcluded.size > 0
+    ? hardFiltered.filter((pk) => !softExcluded.has(pk))
+    : hardFiltered;
+  const pool = preferred.length > 0 ? preferred : hardFiltered;
 
   // Bond Phase-1 capacity seam (DORMANT). While BONDS_ENFORCED is false the
   // capacity context is ignored entirely, so assignment is unchanged; Phase 2

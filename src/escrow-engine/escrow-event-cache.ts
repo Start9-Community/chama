@@ -140,12 +140,28 @@ function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+/** Session-scoped stand-in for the durable store when IndexedDB is off
+ *  (private mode, a stalled WKWebView open, Node). Without it those runtimes
+ *  get NO chain repair at all; with it they at least keep repairing within
+ *  the session. Same cap + eviction rule as the durable store. */
+const memoryFallback: Map<string, CacheRecord> = new Map();
+
+function evictMemoryFallback(): void {
+  const victims = selectEvictions(
+    [...memoryFallback.values()].map((r) => ({
+      escrowId: r.escrowId, terminal: r.terminal, updatedAt: r.updatedAt,
+    })),
+    EVENT_CACHE_MAX_ESCROWS,
+  );
+  for (const id of victims) memoryFallback.delete(id);
+}
+
 /** The persisted raw events for an escrow, or [] when absent/unavailable.
  *  Fully time-bounded (openDb + the read) so a stalled IndexedDB can never
- *  block `loadEscrow` — it just falls back to relay-only. */
+ *  block `loadEscrow` — it just falls back to the in-memory store. */
 export async function getCachedEvents(escrowId: string): Promise<NostrEvent[]> {
   const db = await openDb();
-  if (!db) return [];
+  if (!db) return memoryFallback.get(escrowId)?.events ?? [];
   return withTimeout((async () => {
     const tx = db.transaction(EVENT_CACHE_STORE, "readonly");
     const rec = await reqToPromise(tx.objectStore(EVENT_CACHE_STORE).get(escrowId));
@@ -160,14 +176,19 @@ export async function putCachedEvents(
   events: readonly NostrEvent[],
   status: EscrowStatus,
 ): Promise<void> {
+  if (events.length === 0) return;
   const db = await openDb();
-  if (!db || events.length === 0) return;
   const record: CacheRecord = {
     escrowId,
     events: dedupEventsById(events),
     terminal: isEvictableTerminal(status),
     updatedAt: Date.now(),
   };
+  if (!db) {
+    memoryFallback.set(escrowId, record);
+    evictMemoryFallback();
+    return;
+  }
   try {
     const tx = db.transaction(EVENT_CACHE_STORE, "readwrite");
     tx.objectStore(EVENT_CACHE_STORE).put(record);
@@ -214,6 +235,7 @@ async function maybeEvict(db: IDBDatabase): Promise<void> {
 
 /** Wipe the whole event cache. Called on a local-wallet reset. */
 export async function clearEventCache(): Promise<void> {
+  memoryFallback.clear();
   const db = await openDb();
   if (!db) return;
   try {

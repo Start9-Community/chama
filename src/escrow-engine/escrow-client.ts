@@ -64,6 +64,7 @@ import { EscrowNotifier } from "./notifier.js";
 import { ENCRYPTION_CONFIG } from "./encryption-config.js";
 import { parseEscrowEvent, sortEventChain } from "./event-parser.js";
 import { getCachedEvents, putCachedEvents } from "./escrow-event-cache.js";
+import { selectBackfillEvents, shouldBackfillNow } from "./relay-backfill.js";
 import { createEnvelope, decryptFromEnvelope } from "./envelope.js";
 import { RelayManager, RelayStatus, type NostrFilter } from "./relay-manager.js";
 import {
@@ -379,6 +380,34 @@ export interface EscrowClientConfig {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// LOAD FAILURES — why a chain didn't come back
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * `loadEscrow` returns null for three structurally different reasons, and the
+ * difference matters to the user:
+ *
+ *   no-events        nothing on any relay AND nothing in the durable cache —
+ *                    the honest "this history is gone" case.
+ *   undecryptable    events exist but none parse for this identity (wrong
+ *                    npub / legacy envelope).
+ *   chain-incomplete events exist but don't replay: pieces are missing from
+ *                    the relays (a COMPLETED trade whose VOTEs are gone dies
+ *                    on THRESHOLD_NOT_MET) or one is invalid. NOT "gone" —
+ *                    the missing part may come back, and other participants
+ *                    may still hold it.
+ */
+export type LoadFailureReason = "no-events" | "undecryptable" | "chain-incomplete";
+
+export interface LoadFailure {
+  reason: LoadFailureReason;
+  /** Replay error code for chain-incomplete (THRESHOLD_NOT_MET, MISSING_CREATE…). */
+  code?: string;
+  message?: string;
+  eventId?: string;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // ESCROW CLIENT
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -404,7 +433,20 @@ export class EscrowClient {
   private _loadEscrowInFlight: Map<string, {
     promise: Promise<EscrowState | null>;
     diagnostic: HydrationDiagnosticRun;
+    /** Whether this generation may fall back to the durable cache on a failed
+     *  replay. A background generation can't satisfy a repair-wanting caller. */
+    repairFromCache: boolean;
   }> = new Map();
+  /** Backfill bookkeeping: which trades already handed their recovered events
+   *  back this session, and when the last batch went out. Republishing is
+   *  redelivered to every subscribed client, so it stays one-shot and paced. */
+  private _backfilledEscrows: Set<string> = new Set();
+  private _lastBackfillAt = 0;
+  /** Why the last loadEscrow for an id came back null. A null load has three
+   *  very different causes and the UI was telling users only one of them
+   *  ("not on the relay anymore") regardless — including for chains this
+   *  device could see were merely INCOMPLETE. Cleared on a successful load. */
+  private _lastLoadFailures: Map<string, LoadFailure> = new Map();
   /** Initial public-listing EOSE accounting. Live subscription remains open
    *  after this reading settles. */
   private publicListingsSubId: string | null = null;
@@ -1997,18 +2039,58 @@ export class EscrowClient {
     }
   }
 
-  /** Fetch and reconstruct full escrow state from relays. Concurrent callers
-   *  for the same id share one generation instead of multiplying relay,
-   *  decrypt, and replay work. */
-  loadEscrow(escrowId: string): Promise<EscrowState | null> {
+  /** Why the most recent load of `escrowId` returned null, or null if the last
+   *  load succeeded / never ran. Lets a caller tell "this history is gone"
+   *  apart from "the relays gave us a chain with holes in it". */
+  getLastLoadFailure(escrowId: string): LoadFailure | null {
+    return this._lastLoadFailures.get(escrowId) ?? null;
+  }
+
+  private recordLoadFailure(escrowId: string, failure: LoadFailure): void {
+    this._lastLoadFailures.set(escrowId, failure);
+  }
+
+  private clearLoadFailure(escrowId: string): void {
+    this._lastLoadFailures.delete(escrowId);
+  }
+
+  /**
+   * Fetch and reconstruct full escrow state from relays. Concurrent callers
+   * for the same id share one generation instead of multiplying relay,
+   * decrypt, and replay work.
+   *
+   * ⚠ `repairFromCache` is OPT-IN ON PURPOSE — do not flip it on by default.
+   * It lets a failed replay retry against the durable IndexedDB cache, which
+   * costs an IndexedDB read plus a second decrypt/replay pass. On a device
+   * with a lot of holed history that is dozens of extra reads during the boot
+   * discovery flood — and a stalled WKWebView `indexedDB.open` on that path is
+   * exactly what froze Tauri on launch once already (bounded to 3s now, but
+   * the rule that a relay-answered load never touches IndexedDB is the actual
+   * protection, not the timeout). So: pass it for an EXPLICIT open (tapping an
+   * archived trade, a deep link, a manual heal), never for background
+   * discovery, listing hydration, or sweeps.
+   */
+  loadEscrow(
+    escrowId: string,
+    opts: { repairFromCache?: boolean } = {},
+  ): Promise<EscrowState | null> {
+    const repairFromCache = opts.repairFromCache === true;
     const existing = this._loadEscrowInFlight.get(escrowId);
     if (existing) {
       existing.diagnostic.coalesced();
+      // A background generation already running can't satisfy a caller who
+      // asked for repair: it will stop at the same holed chain. Join it (no
+      // duplicate fetch), then repair only if it actually came back empty.
+      if (repairFromCache && !existing.repairFromCache) {
+        return existing.promise.then((state) =>
+          state ?? this.loadEscrow(escrowId, { repairFromCache: true }),
+        );
+      }
       return existing.promise;
     }
 
     const diagnostic = beginHydrationDiagnostic(escrowId);
-    const promise = this.loadEscrowAttempt(escrowId, 0, diagnostic)
+    const promise = this.loadEscrowAttempt(escrowId, 0, diagnostic, repairFromCache)
       .then((state) => {
         diagnostic.finish(state ? `state:${state.status}` : "null");
         return state;
@@ -2022,7 +2104,7 @@ export class EscrowClient {
           this._loadEscrowInFlight.delete(escrowId);
         }
       });
-    this._loadEscrowInFlight.set(escrowId, { promise, diagnostic });
+    this._loadEscrowInFlight.set(escrowId, { promise, diagnostic, repairFromCache });
     return promise;
   }
 
@@ -2032,6 +2114,7 @@ export class EscrowClient {
     escrowId: string,
     completenessAttempt: number,
     diagnostic: HydrationDiagnosticRun,
+    repairFromCache = false,
   ): Promise<EscrowState | null> {
     const current = this.states.get(escrowId);
     const cachedRawEvents = mergeRawEventsById(
@@ -2058,13 +2141,16 @@ export class EscrowClient {
       (globalThis.performance?.now?.() ?? Date.now()) - fetchStarted,
     );
     let rawEvents = mergeRawEventsById(cachedRawEvents, fetchedRawEvents);
-    // Durable rebuild is a FALLBACK, not a hot-path seed: only reach for the
-    // persistent event cache when relays + memory produced NOTHING (an
-    // archived trade whose events aged off the relays). This keeps IndexedDB
-    // OFF the normal launch path — the discovery flood loads relay-present
-    // trades without ever touching it — so a stalled WKWebView IndexedDB can't
-    // freeze launch. Fully time-bounded even here (see escrow-event-cache).
+    // Durable rebuild is a FALLBACK, not a hot-path seed: reach for the
+    // persistent event cache only when the relay answer can't stand on its
+    // own — nothing came back at all, or (below) what came back doesn't
+    // replay. This keeps IndexedDB OFF the normal launch path — the discovery
+    // flood loads relay-present trades without ever touching it — so a
+    // stalled WKWebView IndexedDB can't freeze launch. Fully time-bounded
+    // even here (see escrow-event-cache).
+    let durableTried = false;
     if (rawEvents.length === 0 && !this.rawEvents.has(escrowId)) {
+      durableTried = true;
       const durable = await getCachedEvents(escrowId);
       if (durable.length > 0) {
         this.setHotRawEvents(escrowId, durable);
@@ -2076,83 +2162,186 @@ export class EscrowClient {
       `[escrow] loadEscrow ${escrowId}: fetched ${fetchedRawEvents.length} raw events from relays` +
         (cachedRawEvents.length > 0 ? `, replaying ${rawEvents.length} with local cache` : ""),
     );
-    if (rawEvents.length === 0) return null;
-
-    // Parse all events. decryptEventContent handles the three wire
-    // shapes (plaintext escrow payload, per-recipient envelope, legacy
-    // raw NIP-44) and returns null for "not for me / malformed / not
-    // recognised" cases. Skip those silently so a stale or wrong-
-    // recipient event in a relay's cache doesn't blow up the load.
-    const decryptStarted = globalThis.performance?.now?.() ?? Date.now();
-    const parsed: ParsedEscrowEvent[] = [];
-    let skippedEvents = 0;
-    for (const raw of rawEvents) {
-      const content = await this.decryptEventContent(raw);
-      if (content === null) {
-        skippedEvents++;
-        continue;
-      }
-      const result = parseEscrowEvent(raw, content, true);
-      if (result.ok) parsed.push(result.event);
-    }
-    diagnostic.step(
-      `decrypt:${completenessAttempt}`,
-      (globalThis.performance?.now?.() ?? Date.now()) - decryptStarted,
-    );
-
-    console.debug(`[escrow] loadEscrow ${escrowId}: parsed ${parsed.length}/${rawEvents.length} events`,
-      parsed.map(e => `kind:${e.kind}`).join(', '),
-      skippedEvents > 0 ? `(${skippedEvents} skipped)` : "");
-    if (parsed.length === 0) return null;
-
-    // Resolve only LOCK handle envelopes first, then preflight the
-    // state-changing chain before decrypting CHAT bodies. Old invalid
-    // escrow histories can contain image receipts; decrypting those before
-    // we know the chain is usable causes signer extensions to dump huge
-    // base64 payloads into the console.
-    const lockResolvedParsed: ParsedEscrowEvent[] = [];
-    for (const event of parsed) {
-      lockResolvedParsed.push(await this.resolveLockEnvelope(event));
-    }
-    const preflightSorted = sortEventChain(
-      lockResolvedParsed.filter((event) => event.kind !== EscrowEventKind.CHAT),
-    );
-    const preflight = replayEventChain(preflightSorted);
-    if (!preflight.ok) {
-      console.debug(`[escrow] loadEscrow ${escrowId}: replay skipped historical invalid chain — ${preflight.error.code}: ${preflight.error.message}`);
-      this.callbacks.onValidationError?.(escrowId, preflight.error.message, preflight.error.eventId);
-      console.debug(`[escrow] Kept failed escrow ${escrowId} in saved list for later recovery/rehydration`);
+    if (rawEvents.length === 0) {
+      this.recordLoadFailure(escrowId, { reason: "no-events" });
       return null;
     }
 
-    // Resolve CHAT body/receipt attachments only after the chain preflight
-    // succeeds. Sequential await keeps a slow signer from fanning out into
-    // many concurrent NIP-44 calls.
-    const readableParsed: ParsedEscrowEvent[] = [];
-    for (const event of lockResolvedParsed) {
-      const resolved = await this.resolveChatEnvelope(event);
-      if (resolved) readableParsed.push(resolved);
+    // Parse + preflight + replay, as ONE re-runnable pass over a given raw
+    // event set. Re-runnable because a relay chain that doesn't replay is
+    // repairable: the durable cache frequently holds the exact events the
+    // relays dropped (field: a COMPLETED trade whose two VOTEs were gone from
+    // every relay while this device still had them, so RESOLVE died on
+    // THRESHOLD_NOT_MET and the trade read as "not on the relay anymore").
+    const runReplay = async (
+      events: NostrEvent[],
+      pass: string,
+    ): Promise<
+      | { ok: true; state: EscrowState }
+      | { ok: false; failure: LoadFailure }
+    > => {
+      // decryptEventContent handles the three wire shapes (plaintext escrow
+      // payload, per-recipient envelope, legacy raw NIP-44) and returns null
+      // for "not for me / malformed / not recognised" cases. Skip those
+      // silently so a stale or wrong-recipient event in a relay's cache
+      // doesn't blow up the load.
+      const decryptStarted = globalThis.performance?.now?.() ?? Date.now();
+      const parsed: ParsedEscrowEvent[] = [];
+      let skippedEvents = 0;
+      for (const raw of events) {
+        const content = await this.decryptEventContent(raw);
+        if (content === null) {
+          skippedEvents++;
+          continue;
+        }
+        const result = parseEscrowEvent(raw, content, true);
+        if (result.ok) parsed.push(result.event);
+      }
+      diagnostic.step(
+        `decrypt:${pass}`,
+        (globalThis.performance?.now?.() ?? Date.now()) - decryptStarted,
+      );
+
+      console.debug(`[escrow] loadEscrow ${escrowId}: parsed ${parsed.length}/${events.length} events`,
+        parsed.map(e => `kind:${e.kind}`).join(', '),
+        skippedEvents > 0 ? `(${skippedEvents} skipped)` : "");
+      if (parsed.length === 0) return { ok: false, failure: { reason: "undecryptable" } };
+
+      // Resolve only LOCK handle envelopes first, then preflight the
+      // state-changing chain before decrypting CHAT bodies. Old invalid
+      // escrow histories can contain image receipts; decrypting those before
+      // we know the chain is usable causes signer extensions to dump huge
+      // base64 payloads into the console.
+      const lockResolvedParsed: ParsedEscrowEvent[] = [];
+      for (const event of parsed) {
+        lockResolvedParsed.push(await this.resolveLockEnvelope(event));
+      }
+      const preflightSorted = sortEventChain(
+        lockResolvedParsed.filter((event) => event.kind !== EscrowEventKind.CHAT),
+      );
+      const preflight = replayEventChain(preflightSorted);
+      if (!preflight.ok) {
+        console.debug(`[escrow] loadEscrow ${escrowId}: replay skipped historical invalid chain — ${preflight.error.code}: ${preflight.error.message}`);
+        return {
+          ok: false,
+          failure: {
+            reason: "chain-incomplete",
+            code: preflight.error.code,
+            message: preflight.error.message,
+            eventId: preflight.error.eventId,
+          },
+        };
+      }
+
+      // Resolve CHAT body/receipt attachments only after the chain preflight
+      // succeeds. Sequential await keeps a slow signer from fanning out into
+      // many concurrent NIP-44 calls.
+      const readableParsed: ParsedEscrowEvent[] = [];
+      for (const event of lockResolvedParsed) {
+        const resolved = await this.resolveChatEnvelope(event);
+        if (resolved) readableParsed.push(resolved);
+      }
+
+      // Sort by dependency chain and replay
+      const sorted = sortEventChain(readableParsed);
+      console.debug(`[escrow] loadEscrow ${escrowId}: sorted chain`,
+        sorted.map(e => `kind:${e.kind}(${e.raw.id.slice(0,6)})`).join(' → '));
+      const replayStarted = globalThis.performance?.now?.() ?? Date.now();
+      const replayed = replayEventChain(sorted);
+      diagnostic.step(
+        `replay:${pass}`,
+        (globalThis.performance?.now?.() ?? Date.now()) - replayStarted,
+      );
+      if (!replayed.ok) {
+        console.debug(`[escrow] loadEscrow ${escrowId}: replay FAILED — ${replayed.error.code}: ${replayed.error.message}`);
+        return {
+          ok: false,
+          failure: {
+            reason: "chain-incomplete",
+            code: replayed.error.code,
+            message: replayed.error.message,
+            eventId: replayed.error.eventId,
+          },
+        };
+      }
+      return { ok: true, state: replayed.state };
+    };
+
+    let outcome = await runReplay(rawEvents, `${completenessAttempt}`);
+
+    // REPAIR PASS. The relays answered, but not with a chain that replays.
+    // Before giving up, union in the durable cache — this device may still
+    // hold the events the network lost.
+    //
+    // ⚠ EXPLICIT OPENS ONLY (`repairFromCache`). A failed replay is common at
+    // boot (on the device this was diagnosed from, 61 of 124 remembered trades
+    // don't replay from relays), so doing this unconditionally would put an
+    // IndexedDB read AND a second decrypt/replay pass on every one of them
+    // during the discovery flood — re-creating the launch-freeze exposure the
+    // `rawEvents.length === 0` gate exists to prevent. Boot stays relay-only
+    // and fast; the repair happens when the user actually opens the trade.
+    let repairedFromCache = false;
+    if (!outcome.ok && repairFromCache && !durableTried) {
+      durableTried = true;
+      const durable = await getCachedEvents(escrowId);
+      const merged = mergeRawEventsById(rawEvents, durable);
+      if (merged.length > rawEvents.length) {
+        console.debug(
+          `[escrow] loadEscrow ${escrowId}: relay chain failed to replay ` +
+            `(${outcome.failure.code ?? outcome.failure.reason}) — retrying with ` +
+            `${merged.length - rawEvents.length} event(s) recovered from the durable cache`,
+        );
+        const repaired = await runReplay(merged, `${completenessAttempt}-cache`);
+        if (repaired.ok) {
+          rawEvents = merged;
+          repairedFromCache = true;
+          outcome = repaired;
+        }
+      }
     }
 
-    // Sort by dependency chain and replay
-    const sorted = sortEventChain(readableParsed);
-    console.debug(`[escrow] loadEscrow ${escrowId}: sorted chain`, 
-      sorted.map(e => `kind:${e.kind}(${e.raw.id.slice(0,6)})`).join(' → '));
-    const replayStarted = globalThis.performance?.now?.() ?? Date.now();
-    const result = replayEventChain(sorted);
-    diagnostic.step(
-      `replay:${completenessAttempt}`,
-      (globalThis.performance?.now?.() ?? Date.now()) - replayStarted,
-    );
-
-    if (!result.ok) {
-      console.debug(`[escrow] loadEscrow ${escrowId}: replay FAILED — ${result.error.code}: ${result.error.message}`);
-      this.callbacks.onValidationError?.(escrowId, result.error.message, result.error.eventId);
+    if (!outcome.ok) {
+      this.recordLoadFailure(escrowId, outcome.failure);
+      if (outcome.failure.reason === "chain-incomplete") {
+        this.callbacks.onValidationError?.(escrowId, outcome.failure.message ?? "", outcome.failure.eventId);
+      }
       // Money-path safety: a replay failure can be caused by partial relay
       // history, late events, or an invalid remote event. Keep the local
       // pointer so later rehydration or recovery surfaces can still find it.
       console.debug(`[escrow] Kept failed escrow ${escrowId} in saved list for later recovery/rehydration`);
       return null;
+    }
+    const result = { ok: true as const, state: outcome.state };
+    this.clearLoadFailure(escrowId);
+
+    // The relays are missing history this device still holds. Hand it back:
+    // escrow events are signed and self-authenticating, so re-publishing them
+    // repairs the relay for EVERY participant, not just this client.
+    //
+    // Deliberately NOT a sweep. A republished event is REDELIVERED by the
+    // relay to every client holding a matching live subscription, so this
+    // spends other people's bandwidth: it goes to the ONE preferred relay
+    // (never fanned across the public pool), one trade per explicit open,
+    // once per trade per session, ceilinged and paced (see relay-backfill).
+    // Only on a full (cursor-less) fetch, where "the relay didn't return it"
+    // actually means "the relay doesn't have it". Fire-and-forget.
+    if (
+      repairedFromCache &&
+      since === undefined &&
+      shouldBackfillNow({
+        alreadyBackfilled: this._backfilledEscrows.has(escrowId),
+        sessionCount: this._backfilledEscrows.size,
+        lastBackfillAt: this._lastBackfillAt,
+      })
+    ) {
+      const missing = selectBackfillEvents(rawEvents, fetchedRawEvents);
+      if (missing.length > 0) {
+        this._backfilledEscrows.add(escrowId);
+        this._lastBackfillAt = Date.now();
+        void this.relayManager
+          .republishToPreferredRelay(missing)
+          .catch((e) => console.debug(`[escrow] backfill ${escrowId}:`, e));
+      }
     }
     console.debug(`[escrow] loadEscrow ${escrowId}: replay OK — state is ${result.state.status}`);
 
@@ -2183,7 +2372,7 @@ export class EscrowClient {
       const merged = new Map((this.rawEvents.get(escrowId) ?? []).map(e => [e.id, e]));
       for (const e of rawEvents) merged.set(e.id, e);
       this.setHotRawEvents(escrowId, compactHotRawEvents([...merged.values()]));
-      return this.loadEscrowAttempt(escrowId, completenessAttempt + 1, diagnostic);
+      return this.loadEscrowAttempt(escrowId, completenessAttempt + 1, diagnostic, repairFromCache);
     }
 
     if (isPartialReplayDowngrade(current, result.state)) {

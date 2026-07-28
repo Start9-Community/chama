@@ -18,6 +18,7 @@ import { T } from "../theme.js";
 import { useT } from "../../i18n/index.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { LivenessSignal, useLiveness } from "../components/LivenessSignal.js";
+import { countArbiterNoShows } from "../../escrow-engine/arbiter-substitution.js";
 import type { ChamaLiveness } from "../../arbiters/live-chama.js";
 import { listCommitmentBonds } from "../../bond-multisig/commitment-store.js";
 import type { VerifiedBond } from "../../bond-multisig/bond-announcement.js";
@@ -75,6 +76,13 @@ export function DashboardScreen({
     }
     return { total: myTrades.length, completed, live, asArbiter };
   }, [myTrades, lower]);
+
+  // Disputes this npub was seated on, never voted in, and a backup had to rule.
+  // Derived from the committed chain — see isArbiterNoShow.
+  const noShowCount = useMemo(
+    () => countArbiterNoShows(myTrades, pubkey, Math.floor(Date.now() / 1000)),
+    [myTrades, pubkey],
+  );
 
   // Read on every Dashboard render. Bond funding/renewal mutates the scoped
   // local store outside React; memoizing forever left a freshly confirmed bond
@@ -176,6 +184,17 @@ export function DashboardScreen({
         ) : (
           <div style={{ fontSize: 14, color: T.text, fontFamily: T.sans, lineHeight: 1.55 }}>
             {t("bond.dashNewHereBefore")}<span style={{ color: T.muted }}>{t("bond.dashNewHereBody")}</span>
+          </div>
+        )}
+        {noShowCount > 0 && (
+          // Accountability #1: your own record, shown to you first. Ratings say
+          // how you ruled; this says whether you turned up at all — the one
+          // arbiter failure the chain can prove.
+          <div style={{
+            marginTop: 12, paddingTop: 12, borderTop: `1px solid ${T.border}`,
+            fontSize: 11, fontFamily: T.mono, color: T.amber, lineHeight: 1.5,
+          }}>
+            {t("bond.dashNoShows", { count: noShowCount })}
           </div>
         )}
       </div>

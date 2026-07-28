@@ -47,9 +47,11 @@ import {
   type ArbiterAssignment,
   type ArbiterProvenance,
 } from "../../arbiters/pool.js";
-import { isPerformanceContest } from "../../escrow-engine/arbiter-substitution.js";
+import { isArbiterNoShow, isPerformanceContest } from "../../escrow-engine/arbiter-substitution.js";
 import { bondedArbitersForCommunity } from "../../arbiters/live-chama.js";
 import type { VerifiedBond } from "../../bond-multisig/bond-announcement.js";
+import { defaultEsploraBase, esploraFetcher, esploraTipHeight } from "../../bond-multisig/fund-watcher.js";
+import { MAINNET as BOND_NETWORK } from "../../bond-multisig/multisig.js";
 import { counterpartyToRate, type RatingThumb, type AggregateRatings } from "../../reputation/ratings.js";
 import { RatingTap } from "../components/RatingTap.js";
 import { markChatRead, getLastReadChatAt, countUnreadChat, unreadChatForTrade } from "../../chat/unread.js";
@@ -66,6 +68,10 @@ import { ReputationReadout } from "../components/ReputationReadout.js";
 import { CountdownTimer } from "../components/CountdownTimer.js";
 import { SubscriptionTimeline } from "../components/SubscriptionTimeline.js";
 import { BitcoinAmount } from "../components/BitcoinAmount.js";
+import { bondTenureBlocks, tenureDays, tenureTier } from "../../arbiters/live-chama.js";
+
+/** Mainnet block cadence — the tenure clock's unit. */
+const BOND_BLOCKS_PER_DAY = 144;
 import { BitcoinPricePill } from "../components/BitcoinPricePill.js";
 import { SwipeImageGallery } from "../components/SwipeImageGallery.js";
 import { NwcStatusBanner } from "../components/NwcStatusBanner.js";
@@ -447,16 +453,35 @@ export function TradeDetail({
   // "unrecognized"). Fetch-once per community, fail-soft (empty ⇒ roster+device
   // trust only). Keyed on the slug; the fetcher reads the live client internally.
   const [bondedNpubs, setBondedNpubs] = useState<string[]>([]);
+  // The seated arbiter's own verified bond, kept for the arbiter card: tenure
+  // (funding block height) and the funding outpoint, so a counterparty can
+  // check the commitment in a block explorer instead of trusting this screen.
+  const [seatedBond, setSeatedBond] = useState<VerifiedBond | null>(null);
+  const [bondTipHeight, setBondTipHeight] = useState<number | null>(null);
   useEffect(() => {
     setBondedNpubs([]);
+    setSeatedBond(null);
     if (!fetchCommunityBonds || !state.community) return;
     let cancelled = false;
     fetchCommunityBonds(state.community)
-      .then((bonds) => { if (!cancelled) setBondedNpubs(bondedArbitersForCommunity(bonds)); })
+      .then((bonds) => {
+        if (cancelled) return;
+        setBondedNpubs(bondedArbitersForCommunity(bonds));
+        const seated = state.participants[Role.ARBITER];
+        const found = seated ? bonds.find((b) => b.npub === seated && b.funded) ?? null : null;
+        setSeatedBond(found);
+        // Tenure needs a tip to measure against. Only fetched when there is a
+        // bond to measure, and fail-soft — no tip just means no age line.
+        if (found) {
+          esploraTipHeight(esploraFetcher(defaultEsploraBase(BOND_NETWORK)))
+            .then((tip) => { if (!cancelled) setBondTipHeight(tip); })
+            .catch(() => { /* no tip → the card still shows the amount */ });
+        }
+      })
       .catch(() => { /* fail-soft — roster+device trust carries provenance */ });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.community]);
+  }, [state.community, state.participants[Role.ARBITER]]);
 
   // v3.5 pool integrity (C1+C7) — consent-layer assessment, shared by the
   // provenance banner and the performer's vote gate. All client-side: a wrong
@@ -3543,6 +3568,8 @@ export function TradeDetail({
           assignment={arbiterAssignment}
           selfRostered={selfRostered}
         />
+        <ArbiterSubstitutionNotice state={state} />
+        <ArbiterCommitmentCard bond={seatedBond} tipHeight={bondTipHeight} />
         {/* Match the vote tally's 3-column grid (below) exactly so the arbiter
             (middle) sits directly above the FINAL DECISION chip and the buyer /
             seller align over their vote columns. */}
@@ -4018,6 +4045,84 @@ export function TradeDetail({
           </div>
         )}
       </details>
+    </div>
+  );
+}
+
+// The arbiter's commitment, shown by default (5.7).
+//
+// The person who can decide where your money goes was the least-described
+// party on this screen: ratings only, and only if you thought to tap. This
+// states the two things that are chain-provable — how much is locked, and for
+// how long it has stood — plus the outpoint, so "verify it yourself" is an
+// actual invitation rather than a figure of speech.
+//
+// DESCRIPTIVE ONLY. The tint deepens with tenure and never turns green: green
+// reads as "approved by Chama", and Chama does not vouch for people. Time is
+// the one claim nobody can fake — sats can be borrowed for an afternoon.
+function ArbiterCommitmentCard({ bond, tipHeight }: {
+  bond: VerifiedBond | null;
+  tipHeight: number | null;
+}) {
+  const { t } = useT();
+  if (!bond || !bond.funded) return null;
+
+  const blocks = bondTenureBlocks(bond.fundedAtHeight, tipHeight);
+  const days = tenureDays(blocks, BOND_BLOCKS_PER_DAY);
+  const tier = tenureTier(blocks, BOND_BLOCKS_PER_DAY);
+  // Subtle, like Browse's stranger cue — noticed, never shouted.
+  const tint = tier === "year" ? 0.16 : tier === "half-year" ? 0.11 : tier === "month" ? 0.07 : 0.03;
+
+  return (
+    <div style={{
+      padding: "10px 12px", marginBottom: 12, borderRadius: T.rs,
+      background: `${T.accent}${Math.round(tint * 255).toString(16).padStart(2, "0")}`,
+      border: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 11,
+      color: T.text, lineHeight: 1.6,
+    }}>
+      <div style={{ fontSize: 9, color: T.muted, letterSpacing: 1, marginBottom: 4 }}>
+        {t("trade.arbiterCommitment")}
+      </div>
+      <div>
+        <BitcoinAmount sats={Number(bond.actualSats)} size={12} gap={3} glyphScale={1.1} />
+        {days !== null && <span style={{ color: T.muted }}> · {t("trade.bondedForDays", { count: days })}</span>}
+      </div>
+      {bond.fundingTxid && (
+        <a
+          href={`https://mempool.space/tx/${bond.fundingTxid}`}
+          target="_blank"
+          rel="noreferrer noopener"
+          style={{ color: T.muted, fontSize: 9.5, textDecoration: "underline", opacity: 0.8 }}
+        >
+          {t("trade.verifyOnChain")} ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
+// Accountability #1 — say out loud that a backup stepped in.
+//
+// Substitution has always worked silently: the assigned arbiter never answers,
+// the grace window opens, a backup rules, the trade settles. Nobody is told.
+// That silence is what made "an arbiter can influence a trade and walk away"
+// feel unanswerable — the rescue was invisible, so only the failure was.
+//
+// Purely derived from the committed chain (see isArbiterNoShow), so it needs no
+// event, no reducer change, and every client shows it identically.
+function ArbiterSubstitutionNotice({ state }: { state: EscrowState }) {
+  const { t } = useT();
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!isArbiterNoShow(state, nowSec)) return null;
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8, padding: "9px 12px",
+      marginBottom: 12, background: `${T.amber}12`,
+      border: `1px solid ${T.amber}44`, borderRadius: T.rs,
+      fontFamily: T.mono, fontSize: 11, color: T.amber, lineHeight: 1.5,
+    }}>
+      <span>↻</span>
+      <span>{t("trade.arbiterSubstituted")}</span>
     </div>
   );
 }

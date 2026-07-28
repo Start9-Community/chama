@@ -17,8 +17,14 @@ export const app: Record<string, string> = {
   "app.arbiterNoActionNeeded": "Buyer and seller agree; no arbiter action needed",
   "app.arbiterWaitingBothVotes":
     "Waiting for buyer and seller; arbiter only acts on a dispute",
+  "app.archivedIncomplete":
+    "Part of this trade's history is missing from the relays, so it can't be rebuilt yet — the summary here is what's saved on this device. It may come back if another participant is online.",
   "app.archivedNotOnRelay":
     "This trade's full history isn't on your Chama relay anymore — the summary here is what's saved on this device.",
+  "app.archivedStillLoading":
+    "Still fetching this trade's history — give it a moment and tap again.",
+  "app.archivedUnreadable":
+    "This trade's history can't be read with your current key — the summary here is what's saved on this device.",
   "app.askingNwcInvoice": "Asking your NWC wallet for an invoice…",
   "app.backHomeIn": "Back home in {name}.",
   "app.backupArbiterStepIn":

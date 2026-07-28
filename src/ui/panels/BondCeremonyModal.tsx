@@ -396,6 +396,17 @@ export function BondCeremonyModal({ createCommitmentBond, checkCommitmentFunding
             <div style={{ fontSize: 12, color: T.text, fontFamily: T.mono, lineHeight: 1.6, marginBottom: 16, background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, padding: "12px 14px" }}>
               {t("bond.introPart1")}<b>{t("bond.introBoldOwnSats")}</b>{t("bond.introPart2")}<b>{t("bond.introBoldOwnKey")}</b>{t("bond.introPart3")}<b>{t("bond.introBoldNoPull")}</b>{t("bond.introPart4")}<b style={{ color: T.accent }}>{t("bond.introBoldHowMuch")}</b>{t("bond.introPart5")}
             </div>
+            {/* Accountability #4 — name the tradeoff before a critic does.
+                PHILOSOPHY 2.11: the bond is a costly public signal, NOT a
+                seizure pool. Saying so here is what makes the honest version
+                credible; leaving it unsaid is what makes it look like a flaw. */}
+            <div style={{
+              fontSize: 11, color: T.muted, fontFamily: T.mono, lineHeight: 1.6,
+              background: T.surface, border: `1px solid ${T.border}`,
+              borderRadius: T.rs, padding: "10px 12px", marginBottom: 14,
+            }}>
+              {t("bond.introHonestTradeoff")}
+            </div>
             <label style={labelStyle}>{t("bond.amountLabel")}</label>
             <input value={amountStr} onChange={(e) => setAmountStr(e.target.value.replace(/[^0-9]/g, ""))} inputMode="numeric"
               style={{ width: "100%", boxSizing: "border-box", background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.rs, color: T.text, fontFamily: T.mono, fontSize: 15, padding: "10px 12px", marginBottom: 12 }} />
@@ -648,7 +659,19 @@ function BondList({ bonds, tip, onOpen, onPostNew }: {
 }) {
   const { t } = useT();
   const [showPast, setShowPast] = useState(false);
-  const expired = tip == null ? undefined : bonds.find((b) => b.phase === "locked" && tip >= b.bond.lockUntil);
+  // A renewal SPENDS the old bond's UTXO into the new one, but the predecessor
+  // record stays `locked` with a past lockUntil forever — so without this it
+  // kept being offered for renewal, pointing at an outpoint that no longer
+  // exists. Any bond some successor was renewed FROM is spent, full stop.
+  const renewedFromIds = new Set(
+    bonds.map((b) => b.renewedFromBondId).filter((id): id is string => !!id),
+  );
+  const expired = tip == null
+    ? undefined
+    : bonds.find((b) =>
+        b.phase === "locked" &&
+        tip >= b.bond.lockUntil &&
+        !renewedFromIds.has(b.bondId));
   const current = bonds.filter((b) => b.phase === "created" || (b.phase === "locked" && (tip == null || tip < b.bond.lockUntil)));
   const past = bonds.filter((b) => b.phase === "reclaimed" || (b.phase === "locked" && tip != null && tip >= b.bond.lockUntil));
   return (
@@ -660,7 +683,20 @@ function BondList({ bonds, tip, onOpen, onPostNew }: {
         </div>
       )}
       {current.map((b) => <BondRow key={b.bondId} rec={b} tip={tip} onOpen={onOpen} />)}
-      {expired && <button onClick={() => onOpen(expired)} style={{ ...primaryBtn(true), marginTop: 6 }}>{t("bond.renewPreferred")}</button>}
+      {/* Renewing a stale bond is only "recommended" when you have no live one.
+          With a bond already standing it is a legitimate but secondary action
+          (revive old capital), so it drops out of the primary slot. */}
+      {expired && (
+        <button
+          onClick={() => onOpen(expired)}
+          style={{
+            ...(current.length > 0 ? secondaryBtn : primaryBtn(true)),
+            marginTop: 6,
+          }}
+        >
+          {t(current.length > 0 ? "bond.renewExpiredOptional" : "bond.renewPreferred")}
+        </button>
+      )}
       <button onClick={onPostNew} style={{ ...secondaryBtn, marginTop: 6 }}>{t(expired ? "bond.postAdditionalBond" : "bond.postNewBond")}</button>
       {past.length > 0 && (
         <div style={{ marginTop: 14 }}>

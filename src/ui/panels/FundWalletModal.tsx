@@ -5,6 +5,21 @@ import { BitcoinAmount } from "../components/BitcoinAmount.js";
 import { CopyButton } from "../components/CopyButton.js";
 import { isSimModeOn, setSimMode } from "../../sim/simMode.js";
 import { makeLightningInvoiceQrPayload } from "../../payments/lightning-qr.js";
+import {
+  clearPendingRedemption,
+  listPendingRedemptions,
+  stashPendingRedemption,
+} from "../../fedimint/pending-redemptions.js";
+import { hashNotes } from "../../fedimint/fedimint-client.js";
+
+/** Stash slot for manual-fund ecash. Not an escrow — a fixed synthetic id so
+ *  there is exactly one uncollected manual bundle at a time, and the existing
+ *  stranded-notes machinery can see it like any other. */
+const MANUAL_FUND_STASH_ID = "manual-fund-ecash";
+
+function readManualFundStash() {
+  return listPendingRedemptions().find(r => r.escrowId === MANUAL_FUND_STASH_ID) ?? null;
+}
 
 const QRCode = lazy(() => import("../QRCode.js"));
 
@@ -33,6 +48,8 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
   const [bolt11Input, setBolt11Input] = useState("");
   const [ecashInput, setEcashInput] = useState("");
   const [ecashOutput, setEcashOutput] = useState<string | null>(null);
+  // An uncollected note bundle from a previous visit, if any.
+  const [stashed, setStashed] = useState(() => readManualFundStash());
 
   // Receive-confirmation tracking.
   const [balanceAtInvoice, setBalanceAtInvoice] = useState<number | null>(null);
@@ -110,10 +127,34 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
     } finally { setBusy(false); }
   };
 
+  // Manual-fund ecash is bearer money that exists ONLY as the string on screen.
+  // Close the modal without copying it and the UI has lost it — the mint will
+  // auto-refund it eventually, but the user has no way to know that and no way
+  // to get it back sooner. So stash it durably the instant it exists, exactly
+  // like the claim path does, and offer it back on return.
+  const stashSpentNotes = async (notes: string, amountMsats: number) => {
+    try {
+      stashPendingRedemption({
+        escrowId: MANUAL_FUND_STASH_ID,
+        oobNotes: notes,
+        notesHash: await hashNotes(notes),
+        amountMsats,
+      });
+      setStashed(readManualFundStash());
+    } catch (e) {
+      // Never block the spend on bookkeeping — the notes are already on screen.
+      console.warn("[chama] couldn't stash manual-fund ecash:", e);
+    }
+  };
+
   const handleSpendAll = async () => {
     if (balanceMsats <= 0) { setErr(t("fund.noBalanceToSend")); return; }
     setBusy(true); setErr(null);
-    try { setEcashOutput(await onSpendNotes(balanceMsats)); }
+    try {
+      const notes = await onSpendNotes(balanceMsats);
+      setEcashOutput(notes);
+      await stashSpentNotes(notes, balanceMsats);
+    }
     catch (e: any) { setErr(e.message || t("fund.failed")); }
     finally { setBusy(false); }
   };
@@ -122,9 +163,28 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
     const n = parseInt(amountSats, 10);
     if (!n || n <= 0) { setErr(t("fund.enterValidSats")); return; }
     setBusy(true); setErr(null);
-    try { setEcashOutput(await onSpendNotes(n * 1000)); }
+    try {
+      const notes = await onSpendNotes(n * 1000);
+      setEcashOutput(notes);
+      await stashSpentNotes(notes, n * 1000);
+    }
     catch (e: any) { setErr(e.message || t("fund.failed")); }
     finally { setBusy(false); }
+  };
+
+  /** Put an uncollected note bundle back into the wallet. */
+  const handleRestash = async () => {
+    if (!stashed) return;
+    setBusy(true); setErr(null);
+    try {
+      await onRedeemEcash(stashed.oobNotes);
+      clearPendingRedemption(MANUAL_FUND_STASH_ID);
+      setStashed(null);
+      setEcashOutput(null);
+      setSuccess(t("fund.ecashRestashed"));
+    } catch (e: any) {
+      setErr(e.message || t("fund.failed"));
+    } finally { setBusy(false); }
   };
 
   const diagnostics = err ? extractChamaDiagnostics(err) : null;
@@ -300,6 +360,45 @@ export function FundWalletModal({ onClose, onCreateInvoice, onPayInvoice, onSpen
         </>)}
 
         {/* SEND */}
+        {/* Uncollected ecash from a previous visit. Bearer notes that were
+            generated and never copied would otherwise be invisible until the
+            mint's auto-refund — this is the way back. */}
+        {tab === "send" && !ecashOutput && stashed && (
+          <div style={{
+            background: T.amberDim, border: `1px solid ${T.amber}66`,
+            borderRadius: T.rs, padding: 12, marginBottom: 12,
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.amber, fontFamily: T.mono, letterSpacing: 0.5, marginBottom: 6 }}>
+              {t("fund.uncollectedEcashTitle")}
+            </div>
+            <div style={{ fontSize: 11, color: T.text, fontFamily: T.mono, lineHeight: 1.55, marginBottom: 10 }}>
+              {t("fund.uncollectedEcashBody", { sats: Math.floor(stashed.amountMsats / 1000).toLocaleString() })}
+            </div>
+            <button
+              disabled={busy}
+              onClick={handleRestash}
+              style={{
+                width: "100%", padding: "10px 16px", borderRadius: T.rs,
+                background: busy ? T.surface : T.amber, border: `1px solid ${T.amber}`,
+                color: busy ? T.muted : "#1d1c24", fontFamily: T.mono, fontSize: 11,
+                fontWeight: 800, cursor: busy ? "not-allowed" : "pointer", marginBottom: 8,
+              }}
+            >
+              {busy ? t("fund.sending") : t("fund.putEcashBack")}
+            </button>
+            <CopyButton
+              value={stashed.oobNotes}
+              label={t("fund.copyEcashAgain")}
+              copiedLabel={t("common.copied")}
+              style={{
+                width: "100%", padding: "8px 16px", borderRadius: T.rs,
+                background: "transparent", border: `1px solid ${T.border}`,
+                color: T.muted, fontFamily: T.mono, fontSize: 10.5, cursor: "pointer",
+              }}
+            />
+          </div>
+        )}
+
         {tab === "send" && !ecashOutput && (<>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <button onClick={() => setSendType("lightning")} style={{ flex: 1, padding: "6px 0", borderRadius: T.rs, border: sendType === "lightning" ? `1px solid ${T.accent}` : `1px solid ${T.border}`, background: sendType === "lightning" ? T.accentDim : T.surface, color: sendType === "lightning" ? T.accent : T.muted, fontFamily: T.mono, fontSize: 10, cursor: "pointer" }}>Lightning</button>
