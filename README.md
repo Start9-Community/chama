@@ -1,77 +1,207 @@
-# Chama
+<p align="center">
+  <img src="icon.png" alt="Chama Logo" width="21%" />
+</p>
 
-[![CI](https://github.com/jesuspirate/chama/actions/workflows/ci.yml/badge.svg)](https://github.com/jesuspirate/chama/actions/workflows/ci.yml)
+# Chama on StartOS
 
-Chama is a Nostr-native peer-to-peer marketplace with non-custodial Fedimint ecash escrow. There is no central Chama account server or custody layer: clients coordinate encrypted trade events over Nostr and interact directly with a selected Fedimint federation.
+> **Upstream project and docs:** <https://github.com/jesuspirate/chama>
+>
+> Everything not listed in this document should behave the same as upstream
+> Chama. If a feature, setting, or behavior is not mentioned here, the upstream
+> documentation is accurate and fully applicable.
 
-## Run locally
+Chama is a Nostr-native peer-to-peer marketplace with non-custodial Fedimint
+ecash escrow. There is no Chama account server and no custody layer: clients
+coordinate encrypted trade events over Nostr and talk directly to a Fedimint
+federation the user picks. This package serves the Chama web client from your
+own server, so the code you load is the code you host.
 
-Requirements: Node.js 22+, npm, and a NIP-07 signer extension such as Alby or nos2x.
+This repository is both the upstream application source and the StartOS package
+that wraps it — the packaging layer is `startos/`, `Dockerfile`, `Makefile`,
+`icon.png`, `LICENSE`, `instructions.md`, and the `build` / `release` /
+`tagAndRelease` workflows.
 
-```bash
-npm install
-npm run dev
+---
+
+## Table of Contents
+
+- [Image and Container Runtime](#image-and-container-runtime)
+- [Volume and Data Layout](#volume-and-data-layout)
+- [Installation and First-Run Flow](#installation-and-first-run-flow)
+- [Configuration Management](#configuration-management)
+- [Network Access and Interfaces](#network-access-and-interfaces)
+- [Actions](#actions)
+- [Backups and Restore](#backups-and-restore)
+- [Health Checks](#health-checks)
+- [Dependencies](#dependencies)
+- [Limitations and Differences](#limitations-and-differences)
+- [What Is Unchanged from Upstream](#what-is-unchanged-from-upstream)
+- [Contributing](#contributing)
+- [Quick Reference for AI Consumers](#quick-reference-for-ai-consumers)
+
+---
+
+## Image and Container Runtime
+
+| What          | Detail                                                                    |
+| ------------- | ------------------------------------------------------------------------- |
+| Image source  | Built from this repository's own `Dockerfile` — there is no published tag |
+| Architectures | `x86_64`, `aarch64`                                                       |
+| Entrypoint    | Custom — `startos/entrypoint.sh`, installed as `chama-startos-entrypoint` |
+
+The build has three stages: a Rust stage compiles the `chama-fedimint-bridge`
+binary from `native/fedimint-bridge/`, a Node stage runs the app's own web build
+with the native bridge pinned on (`VITE_CHAMA_NATIVE_BRIDGE_REQUIRED`,
+`VITE_CHAMA_NATIVE_BRIDGE_URL=/bridge`), and an nginx stage assembles the two
+with `startos/nginx.conf`.
+
+The entrypoint starts one `chama-fedimint-bridge` per client on loopback, then
+nginx in the foreground, and supervises all four. If any child dies — or is left
+as an unreaped zombie — it exits non-zero so StartOS restarts the whole service
+rather than leaving a healthy-looking page whose wallet calls all fail.
+
+## Volume and Data Layout
+
+One volume, `main`, mounted at `/data`:
+
+| Path             | Contents                                      |
+| ---------------- | --------------------------------------------- |
+| `/data/client-1` | Fedimint client database for **Client One**   |
+| `/data/client-2` | Fedimint client database for **Client Two**   |
+| `/data/client-3` | Fedimint client database for **Client Three** |
+
+Each directory is created by the entrypoint on first start and is used
+exclusively by that client's bridge process. There is no shared database, no
+StartOS `store.json`, and no generated config file — the package writes nothing
+else to the volume.
+
+Everything else Chama holds — the Nostr identity, trade chains, drafts, and
+local caches — lives in **browser storage**, keyed to the origin the client was
+loaded from. It is not on this volume.
+
+## Installation and First-Run Flow
+
+There is no setup wizard, no generated credential, and no configuration step.
+After install each of the three interfaces serves an empty Chama client. A
+client becomes usable once the user, inside it, chooses or imports a Nostr
+identity and joins a Fedimint federation with an invite code. Both are in-app
+decisions the package neither makes nor stores.
+
+## Configuration Management
+
+| StartOS-Managed                                  | Upstream-Managed                                                     |
+| ------------------------------------------------ | -------------------------------------------------------------------- |
+| Which addresses each client interface answers on | Nostr identity, relays, federation, arbiter roster, every app option |
+
+The package sets no environment variables at runtime. The two `VITE_*` values
+above are build-time constants baked into the web bundle; they cannot be changed
+without rebuilding the image.
+
+## Network Access and Interfaces
+
+Three `ui` interfaces, one per client, each on its own host so the browser gives
+each its own origin — which is what keeps their identities, storage, and wallets
+separate:
+
+| Interface id   | Name         | Internal port | Protocol |
+| -------------- | ------------ | ------------- | -------- |
+| `client-one`   | Client One   | 8080          | HTTP     |
+| `client-two`   | Client Two   | 8081          | HTTP     |
+| `client-three` | Client Three | 8082          | HTTP     |
+
+Each client's nginx server block proxies `/bridge/` to that client's own
+`chama-fedimint-bridge` on loopback (8787, 8788, 8789 respectively). The bridges
+bind loopback only and are **not** exported as interfaces; they are reachable
+solely through their own client's `/bridge/` path. That location carries a
+one-hour proxy read timeout because `/await-invoice` is a long poll held open
+until a human actually pays.
+
+Where these interfaces are reachable from is the user's decision, made per
+address on the service's Interfaces tab.
+
+## Actions
+
+| Action                   | Id              | Visibility | Availability | Input | Output                                    |
+| ------------------------ | --------------- | ---------- | ------------ | ----- | ----------------------------------------- |
+| **Wallet Bridge Status** | `wallet-status` | Enabled    | Only running | None  | Per-client federation and discovery state |
+
+Queries each client's bridge and reports whether it answered, whether that
+client has joined a federation, and the state of its relay-discovery probe
+(reachable / degraded / still probing / not configured). Read-only.
+
+## Backups and Restore
+
+`Backups.ofVolumes('main')` — the three Fedimint client databases. StartOS stops
+the service before running the backup, so the databases are quiesced, and
+`restoreInit` puts them back on restore.
+
+**Not backed up:** all browser-side state — Nostr keys, trade chains, drafts —
+because it never leaves the browser profile that loaded the client. Anything the
+user needs to survive a lost browser has to be exported through Chama's own
+in-app recovery material.
+
+## Health Checks
+
+One daemon health check, displayed as **Web Clients**, with a 30-second grace
+period. For each client it requires both the web port and that client's wallet
+bridge port to be listening; a client whose page is up but whose bridge is not
+would serve the UI and then fail every `/bridge/` call, so it is not reported
+ready.
+
+## Dependencies
+
+None.
+
+## Limitations and Differences
+
+1. **Neither the clients nor the bridges authenticate anyone.** The bridge
+   refuses to serve a non-loopback bind without a token, but here it is reached
+   through nginx on the same origin as the page — so anyone who can load a
+   client interface can spend that client's ecash. Enable only addresses you
+   trust, and treat each interface URL as a credential.
+2. **The client count is fixed at three** and is not configurable. It is a
+   property of the image: three nginx server blocks, three bridge processes,
+   three data directories.
+3. **Browser state is not backed up and not portable.** Clearing site data,
+   switching browsers, or opening a client in a private window yields a fresh
+   local client and can lose access to browser-only state.
+4. **Web client only.** The desktop (Tauri) and Android (Capacitor) shells that
+   also live in this repository are not built or shipped by this package.
+5. **No `riscv64` build.** The Rust bridge and the base images have not been
+   confirmed to build there.
+
+## What Is Unchanged from Upstream
+
+The Chama application itself: the escrow state machine and its Nostr event
+kinds, encrypted trade coordination, relay discovery and replay, Fedimint ecash
+and Lightning operations, on-chain commitment bonds and their chain
+verification, arbiter rosters and selection, and the entire user interface. All
+of it behaves exactly as upstream documents — including that relay and
+federation selection remain in-app choices.
+
+## Contributing
+
+See [AGENTS.md](./AGENTS.md).
+
+---
+
+## Quick Reference for AI Consumers
+
+```yaml
+package_id: chama
+architectures: [x86_64, aarch64]
+volumes:
+  main: /data
+ports:
+  client-one: 8080
+  client-two: 8081
+  client-three: 8082
+internal_only_ports:
+  client-one-bridge: 8787
+  client-two-bridge: 8788
+  client-three-bridge: 8789
+dependencies: none
+startos_managed_env_vars: []
+actions:
+  - wallet-status
 ```
-
-The development server runs at `http://localhost:3000`.
-
-### StartOS package (lab — 3 clients)
-
-This package is a **local lab**: three co-located Chama UIs (ports 8080–8082), each with its own native Fedimint bridge under `/data/client-*`. It is **not** the friend-wallet / remote-bridge host.
-
-Requirements: Docker, `start-cli`, `jq`, Node 22+, and a packaging workspace (this repo’s `.startos` link). The npm `@start9labs/start-sdk@1.5.3` pin may not ship `s9pk.mk`; the Makefile falls back to `$HOME/start9-workspace/.../s9pk.mk` or accepts:
-
-```bash
-make START_SDK_MK=/path/to/start-sdk/s9pk.mk x86   # or: make arm
-npm run startos:check   # package TypeScript only
-make install            # sideload on a StartOS box matching the arch
-make publish            # personal registry
-```
-
-Package icon must be `icon.svg` or `icon.png` ≤ 40 KiB (StartOS marketplace limit).
-
-Before opening a pull request:
-
-```bash
-npm run predeploy
-npm run build
-```
-
-`predeploy` checks repository hygiene, TypeScript, and the escrow-engine test suite.
-
-## Architecture
-
-| Area | Responsibility |
-| --- | --- |
-| `src/escrow-engine/` | Deterministic escrow state machine, event validation, encrypted Nostr coordination, relay discovery, and replay |
-| `src/fedimint/` | Federation selection, ecash operations, recovery, and browser/native bridge adapters |
-| `src/bond-multisig/` | On-chain single-key CLTV commitment bonds and chain verification |
-| `src/arbiters/` | Arbiter rosters, bonded-arbiter selection, exposure, premiums, and earnings |
-| `src/ui/` | React application and platform-neutral product UI |
-| `native/fedimint-bridge/` | Rust Fedimint client used by native platforms |
-| `android/` | Capacitor Android application project and native bridge packaging |
-| `src-tauri/` | Tauri desktop shell and sidecar configuration |
-| `public/` | Production web assets copied into web, Android, and desktop builds |
-
-The core trade chain uses Nostr kinds `38100`–`38113` (with retired kinds reserved). Governance, roster, and chain-verifiable bond announcements use separate kinds. Sensitive trade content and ecash material are encrypted for participants.
-
-### Platform builds
-
-```bash
-npm run android:sync   # build web assets and sync the Android project
-npm run tauri:build    # build the desktop application
-```
-
-Android builds require the Android SDK/NDK; see [docs/ANDROID_BUILD.md](./docs/ANDROID_BUILD.md). Desktop builds require Rust and the platform dependencies expected by Tauri. The native bridge build scripts under `scripts/` are invoked by these platform builds.
-
-## Repository boundaries
-
-This repository contains product source, tests, platform projects, public assets, and reproducible build/release automation. Draft designs, generated media, migration records, private infrastructure notes, agent memory, and social-content logs do not belong here. Keep temporary work under the ignored `outputs/` or `tmp/` directories.
-
-The Zapstore screenshots are retained because they are referenced by `zapstore.yaml` and are part of the public Android store listing. GitHub workflows are retained because they run CI and build desktop release artifacts.
-
-For a visual technical introduction, see [chama-technical-overview.pdf](./chama-technical-overview.pdf). Relay operators can consult [docs/RELAY_OPERATIONS.md](./docs/RELAY_OPERATIONS.md).
-
-## License
-
-[MIT](./LICENSE)
