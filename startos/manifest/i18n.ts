@@ -1,14 +1,13 @@
 export const short = {
   en_US:
-    'A sovereign marketplace for trading anything, anywhere, with Nostr and private ecash escrow',
-  es_ES:
-    'Un mercado soberano para comerciar con cualquier cosa, en cualquier lugar, con Nostr y depósito en garantía de ecash privado',
+    'A sovereign Nostr marketplace for trading anything, anywhere, with ecash escrow',
+  es_ES: 'Mercado soberano en Nostr para comerciar con todo, con depósito ecash',
   de_DE:
-    'Ein souveräner Marktplatz, um überall alles zu handeln — mit Nostr und privater E-Cash-Treuhand',
+    'Ein souveräner Nostr-Marktplatz für alles und überall, mit E-Cash-Treuhand',
   pl_PL:
-    'Suwerenny rynek do handlu wszystkim i wszędzie, z Nostr i prywatnym depozytem ecash',
+    'Suwerenny rynek na Nostr do handlu wszystkim i wszędzie, z depozytem ecash',
   fr_FR:
-    'Une place de marché souveraine pour échanger tout, partout, avec Nostr et un séquestre en ecash privé',
+    'Place de marché souveraine sur Nostr pour tout échanger, avec séquestre en ecash',
 }
 
 export const long = {
