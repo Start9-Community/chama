@@ -1,25 +1,20 @@
 <p align="center">
-  <img src="icon.png" alt="Chama Logo" width="21%" />
+  <img src="icon.png" alt="Chama Logo" width="21%">
 </p>
 
 # Chama on StartOS
 
-> **Upstream project and docs:** <https://github.com/jesuspirate/chama>
->
 > Everything not listed in this document should behave the same as upstream
 > Chama. If a feature, setting, or behavior is not mentioned here, the upstream
-> documentation is accurate and fully applicable.
+> documentation is accurate and fully applicable — see the Documentation
+> section of `instructions.md` for links.
 
-Chama is a Nostr-native peer-to-peer marketplace with non-custodial Fedimint
-ecash escrow. There is no Chama account server and no custody layer: clients
-coordinate encrypted trade events over Nostr and talk directly to a Fedimint
-federation the user picks. This package serves the Chama web client from your
-own server, so the code you load is the code you host.
+[Chama](https://github.com/jesuspirate/chama) is a Nostr client with a built-in Fedimint ecash wallet. This package runs **three independent clients** from one service, each on its own address with its own identity, browser storage, and wallet — which is the whole point of it here, and the main thing that differs from installing Chama anywhere else.
 
-This repository is both the upstream application source and the StartOS package
-that wraps it — the packaging layer is `startos/`, `Dockerfile`, `Makefile`,
-`icon.png`, `LICENSE`, `instructions.md`, and the `build` / `release` /
-`tagAndRelease` workflows.
+This repository is a fork of the application's own; packaging changes land here.
+
+- **Upstream repo:** <https://github.com/jesuspirate/chama>
+- **Wrapper repo:** <https://github.com/Start9-Community/chama>
 
 ---
 
@@ -27,161 +22,139 @@ that wraps it — the packaging layer is `startos/`, `Dockerfile`, `Makefile`,
 
 - [Image and Container Runtime](#image-and-container-runtime)
 - [Volume and Data Layout](#volume-and-data-layout)
-- [Installation and First-Run Flow](#installation-and-first-run-flow)
-- [Configuration Management](#configuration-management)
-- [Network Access and Interfaces](#network-access-and-interfaces)
-- [Actions](#actions)
-- [Backups and Restore](#backups-and-restore)
-- [Health Checks](#health-checks)
+- [File Models](#file-models)
 - [Dependencies](#dependencies)
+- [Network Access and Interfaces](#network-access-and-interfaces)
+- [Installation and First-Run Flow](#installation-and-first-run-flow)
+- [Actions](#actions)
+- [Tasks](#tasks)
+- [Health Checks](#health-checks)
+- [Backups and Restore](#backups-and-restore)
 - [Limitations and Differences](#limitations-and-differences)
-- [What Is Unchanged from Upstream](#what-is-unchanged-from-upstream)
-- [Contributing](#contributing)
 - [Quick Reference for AI Consumers](#quick-reference-for-ai-consumers)
 
 ---
 
 ## Image and Container Runtime
 
-| What          | Detail                                                                    |
-| ------------- | ------------------------------------------------------------------------- |
-| Image source  | Built from this repository's own `Dockerfile` — there is no published tag |
-| Architectures | `x86_64`, `aarch64`                                                       |
-| Entrypoint    | Custom — `startos/entrypoint.sh`, installed as `chama-startos-entrypoint` |
+One image, built here from this repository, running seven processes in one container.
 
-The build has three stages: a Rust stage compiles the `chama-fedimint-bridge`
-binary from `native/fedimint-bridge/`, a Node stage runs the app's own web build
-with the native bridge pinned on (`VITE_CHAMA_NATIVE_BRIDGE_REQUIRED`,
-`VITE_CHAMA_NATIVE_BRIDGE_URL=/bridge`), and an nginx stage assembles the two
-with `startos/nginx.conf`.
+| Property      | Value                               |
+| ------------- | ----------------------------------- |
+| Image         | Built from this repo's `Dockerfile` |
+| Architectures | x86_64, aarch64                     |
+| Command       | The package's own entrypoint script |
 
-The entrypoint starts one `chama-fedimint-bridge` per client on loopback, then
-nginx in the foreground, and supervises all four. If any child dies — or is left
-as an unreaped zombie — it exits non-zero so StartOS restarts the whole service
-rather than leaving a healthy-looking page whose wallet calls all fail.
+| Subcontainer | Purpose                                  |
+| ------------ | ---------------------------------------- |
+| `chama-sub`  | The only daemon — the one to `attach` to |
+
+Inside it: **nginx**, serving three server blocks, and **three wallet bridge processes** on loopback, one per client, each with its own wallet directory.
+
+**The entrypoint exits if any child dies**, deliberately, so StartOS restarts the whole service. A UI that is up while its wallet bridge is dead is the failure worth avoiding — it serves a page that looks healthy and fails every wallet call. The watchdog also treats an unreaped zombie as dead, because a bridge that aborts natively would otherwise still satisfy a naive liveness check.
 
 ## Volume and Data Layout
 
-One volume, `main`, mounted at `/data`:
+One volume, carved into one directory per client.
 
-| Path             | Contents                                      |
-| ---------------- | --------------------------------------------- |
-| `/data/client-1` | Fedimint client database for **Client One**   |
-| `/data/client-2` | Fedimint client database for **Client Two**   |
-| `/data/client-3` | Fedimint client database for **Client Three** |
+| Volume | Mount Point | Purpose                         |
+| ------ | ----------- | ------------------------------- |
+| `main` | `/data`     | One wallet directory per client |
 
-Each directory is created by the entrypoint on first start and is used
-exclusively by that client's bridge process. There is no shared database, no
-StartOS `store.json`, and no generated config file — the package writes nothing
-else to the volume.
+| Path        | Holds                                    |
+| ----------- | ---------------------------------------- |
+| `client-1/` | The first client's Fedimint wallet state |
+| `client-2/` | The second client's                      |
+| `client-3/` | The third client's                       |
 
-Everything else Chama holds — the Nostr identity, trade chains, drafts, and
-local caches — lives in **browser storage**, keyed to the origin the client was
-loaded from. It is not on this volume.
+**The separation is the feature.** Each bridge is started with its own data directory, so the three wallets cannot see each other — and a backup captures all three together.
 
-## Installation and First-Run Flow
+Nostr identities and application settings are **not** here: they live in each origin's browser storage, on the device the user browses from. See [Backups and Restore](#backups-and-restore), because this is the thing most likely to surprise someone.
 
-There is no setup wizard, no generated credential, and no configuration step.
-After install each of the three interfaces serves an empty Chama client. A
-client becomes usable once the user, inside it, chooses or imports a Nostr
-identity and joins a Fedimint federation with an invite code. Both are in-app
-decisions the package neither makes nor stores.
+## File Models
 
-## Configuration Management
+None. The package writes no configuration file, seeds nothing, and models nothing.
 
-| StartOS-Managed                                  | Upstream-Managed                                                     |
-| ------------------------------------------------ | -------------------------------------------------------------------- |
-| Which addresses each client interface answers on | Nostr identity, relays, federation, arbiter roster, every app option |
-
-The package sets no environment variables at runtime. The two `VITE_*` values
-above are build-time constants baked into the web bundle; they cannot be changed
-without rebuilding the image.
-
-## Network Access and Interfaces
-
-Three `ui` interfaces, one per client, each on its own host so the browser gives
-each its own origin — which is what keeps their identities, storage, and wallets
-separate:
-
-| Interface id   | Name         | Internal port | Protocol |
-| -------------- | ------------ | ------------- | -------- |
-| `client-one`   | Client One   | 8080          | HTTP     |
-| `client-two`   | Client Two   | 8081          | HTTP     |
-| `client-three` | Client Three | 8082          | HTTP     |
-
-Each client's nginx server block proxies `/bridge/` to that client's own
-`chama-fedimint-bridge` on loopback (8787, 8788, 8789 respectively). The bridges
-bind loopback only and are **not** exported as interfaces; they are reachable
-solely through their own client's `/bridge/` path. That location carries a
-one-hour proxy read timeout because `/await-invoice` is a long poll held open
-until a human actually pays.
-
-Where these interfaces are reachable from is the user's decision, made per
-address on the service's Interfaces tab.
-
-## Actions
-
-| Action                   | Id              | Visibility | Availability | Input | Output                                    |
-| ------------------------ | --------------- | ---------- | ------------ | ----- | ----------------------------------------- |
-| **Wallet Bridge Status** | `wallet-status` | Enabled    | Only running | None  | Per-client federation and discovery state |
-
-Queries each client's bridge and reports whether it answered, whether that
-client has joined a federation, and the state of its relay-discovery probe
-(reachable / degraded / still probing / not configured). Read-only.
-
-## Backups and Restore
-
-`Backups.ofVolumes('main')` — the three Fedimint client databases. StartOS stops
-the service before running the backup, so the databases are quiesced, and
-`restoreInit` puts them back on restore.
-
-**Not backed up:** all browser-side state — Nostr keys, trade chains, drafts —
-because it never leaves the browser profile that loaded the client. Anything the
-user needs to survive a lost browser has to be exported through Chama's own
-in-app recovery material.
-
-## Health Checks
-
-One daemon health check, displayed as **Web Clients**, with a 30-second grace
-period. For each client it requires both the web port and that client's wallet
-bridge port to be listening; a client whose page is up but whose bridge is not
-would serve the UI and then fail every `/bridge/` call, so it is not reported
-ready.
+nginx's configuration and the entrypoint are baked into the image rather than generated, and everything else is either browser-side or inside a bridge's own wallet directory.
 
 ## Dependencies
 
-None.
+None. The Fedimint federation a client joins is chosen by the user inside Chama and is remote; nothing on this server is required.
+
+## Network Access and Interfaces
+
+Three interfaces — one per client, and the separation is deliberate.
+
+| Interface    | Id             | Type | Port | Description                   |
+| ------------ | -------------- | ---- | ---- | ----------------------------- |
+| Client One   | `client-one`   | ui   | 8080 | A self-contained Chama client |
+| Client Two   | `client-two`   | ui   | 8081 | A self-contained Chama client |
+| Client Three | `client-three` | ui   | 8082 | A self-contained Chama client |
+
+Each is bound on its **own** MultiHost over HTTP and is not masked.
+
+**Separate hosts are what make the clients independent.** A browser scopes identity, storage, and wallet state to an origin, so three clients sharing one address would share all three. Giving each its own host is what keeps them apart — it is not a convenience, it is the mechanism.
+
+The three wallet bridges listen on loopback inside the container and are never exported; nginx proxies each client's bridge path to its own.
+
+**One proxy timeout is set unusually long, on purpose.** The invoice-waiting path is a long poll held open until someone actually pays, so a read timeout there is a clock on the human rather than on the bridge. At nginx's default it hung up during an ordinary scan-the-QR pause and returned its own error page, which the client read as a _rejected payment_.
+
+## Installation and First-Run Flow
+
+There is no wizard, no credential, and no task. Start the service, open any of the three addresses, and Chama runs.
+
+**A client holds no ecash until you join a federation from inside it**, and that is done per client — joining on Client One does nothing for Client Two. The Wallet Bridge Status action is how to see where each one stands.
+
+The health check has a 30-second grace because seven processes have to come up before the service is genuinely usable.
+
+## Actions
+
+One action.
+
+### Wallet Bridge Status
+
+Reports each client's federation and relay-discovery state. Run it to see which clients have joined a federation, or when a client's wallet is misbehaving.
+
+- **When to run it:** only while the service is running — it queries each bridge directly.
+- **What it changes:** nothing. It is a read.
+- **Cost:** immediate; each bridge is given a short timeout.
+- **Repeat safety:** read-only.
+- **Outputs:** per client, whether it has joined a federation and what its relay discovery is doing. A bridge that does not answer is reported as such rather than failing the action, so one broken client still lets you see the other two.
+
+Relay discovery is reported as reachable, degraded, still probing, or not configured — and as unknown if a bridge reports something newer than the package understands.
+
+## Tasks
+
+None. This package raises no tasks, so the service is never held on a prompt and its ordinary controls are always available.
+
+## Health Checks
+
+One check, covering all six ports.
+
+| Check     | Displayed as  | Method                                             | Grace Period |
+| --------- | ------------- | -------------------------------------------------- | ------------ |
+| `primary` | "Web Clients" | Every client's UI **and** bridge port is listening | 30s          |
+
+**Both ports per client are required**, and that is the point: a client whose interface is up but whose bridge is not will serve its page and then fail every wallet call. The check names which client and which half is missing, so a failure message identifies the problem rather than just reporting "not ready".
+
+It is a single check, so any one of the six ports being down marks the whole service unhealthy — which matches the entrypoint's behavior of restarting everything when any child dies.
+
+## Backups and Restore
+
+The `main` volume is copied wholesale — `sdk.Backups.ofVolumes('main')`. That is all three clients' wallet directories.
+
+**What is _not_ in the backup is the part users assume is.** Nostr keys, contacts, and application settings live in the **browser's** storage for each origin, not on the server. A restore brings back the wallets and nothing else; a user who clears their browser data, or opens Chama from a different device, has a fresh client regardless of any backup taken here.
+
+Because each interface is a separate origin, that browser state is also per client and per address — reaching the same client at a different address gives the browser a different origin and therefore a different identity.
 
 ## Limitations and Differences
 
-1. **Neither the clients nor the bridges authenticate anyone.** The bridge
-   refuses to serve a non-loopback bind without a token, but here it is reached
-   through nginx on the same origin as the page — so anyone who can load a
-   client interface can spend that client's ecash. Enable only addresses you
-   trust, and treat each interface URL as a credential.
-2. **The client count is fixed at three** and is not configurable. It is a
-   property of the image: three nginx server blocks, three bridge processes,
-   three data directories.
-3. **Browser state is not backed up and not portable.** Clearing site data,
-   switching browsers, or opening a client in a private window yields a fresh
-   local client and can lose access to browser-only state.
-4. **Web client only.** The desktop (Tauri) and Android (Capacitor) shells that
-   also live in this repository are not built or shipped by this package.
-5. **No `riscv64` build.** The Rust bridge and the base images have not been
-   confirmed to build there.
-
-## What Is Unchanged from Upstream
-
-The Chama application itself: the escrow state machine and its Nostr event
-kinds, encrypted trade coordination, relay discovery and replay, Fedimint ecash
-and Lightning operations, on-chain commitment bonds and their chain
-verification, arbiter rosters and selection, and the entire user interface. All
-of it behaves exactly as upstream documents — including that relay and
-federation selection remain in-app choices.
-
-## Contributing
-
-See [AGENTS.md](./AGENTS.md).
+1. **Exactly three clients**, fixed. The count is compiled into the package — the interfaces, the nginx configuration, and the entrypoint all derive from the same list.
+2. **Nostr identity and settings are browser-side**, so they are outside StartOS backups entirely and do not follow a user between devices or addresses.
+3. **Each client's identity is scoped to the address it is opened at.** Reaching a client over LAN and over Tor gives the browser two different origins and two different clients.
+4. **Federations are joined per client**, inside the app; there is no package-level configuration for them.
+5. **Any single failure restarts everything.** One dead bridge takes the whole service down by design, rather than leaving a client silently broken.
+6. **No configuration surface at all** — no file models, no settings actions.
 
 ---
 
@@ -189,19 +162,24 @@ See [AGENTS.md](./AGENTS.md).
 
 ```yaml
 package_id: chama
-architectures: [x86_64, aarch64]
+image: built from ./Dockerfile
+architectures:
+  - x86_64
+  - aarch64
+subcontainers:
+  - chama-sub # nginx plus three wallet-bridge processes
 volumes:
-  main: /data
-ports:
-  client-one: 8080
-  client-two: 8081
-  client-three: 8082
-internal_only_ports:
-  client-one-bridge: 8787
-  client-two-bridge: 8788
-  client-three-bridge: 8789
-dependencies: none
+  main: /data # client-1/, client-2/, client-3/
+file_models: []
 startos_managed_env_vars: []
+dependencies: []
+interfaces: # one host each, so the browser keeps them separate
+  client-one: { type: ui, port: 8080 }
+  client-two: { type: ui, port: 8081 }
+  client-three: { type: ui, port: 8082 }
 actions:
   - wallet-status
+tasks: []
+health_checks:
+  - primary # displayed "Web Clients"; gates on all six internal ports
 ```
