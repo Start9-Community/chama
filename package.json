@@ -71,5 +71,11 @@
   "//security_overrides": "SECURITY: vite 5 ships esbuild <= 0.24.2 with GHSA-67mh-4wv8-2f99 (any website can request from the dev server and read responses) — exploitable on a dev box running `npm run dev` while browsing untrusted sites. The override below forces the patched esbuild even on vite 5. Vite 8 would also fix it, but vite-plugin-top-level-await@1.6 (latest) still requires rollup and pulls uuid@10.0.0 — it isn't compatible with vite 8's rolldown pipeline yet. Drop the override and bump vite to 8 once that plugin ships a rolldown-compatible release.",
   "overrides": {
     "esbuild": "^0.25.0"
+  },
+  "prettier": {
+    "trailingComma": "all",
+    "tabWidth": 2,
+    "semi": false,
+    "singleQuote": true
   }
 }

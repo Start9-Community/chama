@@ -1,7 +1,8 @@
 export const short = {
   en_US:
     'A sovereign Nostr marketplace for trading anything, anywhere, with ecash escrow',
-  es_ES: 'Mercado soberano en Nostr para comerciar con todo, con depósito ecash',
+  es_ES:
+    'Mercado soberano en Nostr para comerciar con todo, con depósito ecash',
   de_DE:
     'Ein souveräner Nostr-Marktplatz für alles und überall, mit E-Cash-Treuhand',
   pl_PL:
